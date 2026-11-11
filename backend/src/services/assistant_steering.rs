@@ -115,6 +115,13 @@ pub async fn reserve(
             let response = row.active_turn.as_ref().unwrap().running_response.as_ref().unwrap();
             let now = Utc::now();
             let message = AssistantMessage {
+            automation_work: None,
+                execution_task: None,
+                delegated_images: Default::default(),
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+        media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,

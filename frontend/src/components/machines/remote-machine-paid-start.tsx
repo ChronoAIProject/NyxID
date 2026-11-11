@@ -1,5 +1,6 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import {
   assertRemoteMachineAdmission,
   useRemoteMachineAdmission,
@@ -12,25 +13,28 @@ import { RemoteMachinePlatformReadiness } from "./remote-machine-platform-readin
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useAppForm, Form, FormControl, FormField } from "@/components/ui/form";
 import {
-  useAppForm,
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
-import {
-  Dialog,
-  DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  DialogFooter,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import {
+  GroupedDialog as Dialog,
+  GroupedDialogContent as DialogContent,
+} from "@/components/ui/grouped-dialog";
+import {
+  GroupedField as FormItem,
+  GroupedMessage as FormMessage,
+} from "@/components/ui/grouped-fields";
+import { FormLabel } from "@/components/ui/form";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
+import { Switch } from "@/components/ui/switch";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   useRemoteMachineQuote,
@@ -75,6 +79,7 @@ export function RemoteMachinePaidStart({
   machine,
   onAccepted,
 }: Props) {
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const enabled = useRemoteMachineAdmission();
   const [review, setReview] = useState({
@@ -109,7 +114,7 @@ function PaidStartContent({
   readonly machine: RemoteMachine;
   readonly onClose: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const scope = `${machine.node_id}:resume`;
   const quote = useRemoteMachineQuote();
@@ -138,6 +143,7 @@ function PaidStartContent({
   const [conflict, setConflict] = useState(false);
   const [now, setNow] = useState(Date.now);
   const form = useAppForm<z.infer<typeof acceptanceSchema>>({
+    mode: "onChange",
     resolver: zodResolver(acceptanceSchema),
     defaultValues: { accepted: Boolean(saved) },
   });
@@ -261,145 +267,159 @@ function PaidStartContent({
   return (
     <DialogContent className="md:max-w-2xl">
       <DialogHeader>
-        <DialogTitle>{t("Review paid resume")}</DialogTitle>
-        <DialogDescription>{t("Review a server-issued runtime quote before explicitly starting continuous account-balance charging.")}</DialogDescription>
+        <DialogTitle>{translateUi("Review paid resume")}</DialogTitle>
+        <DialogDescription>{translateUi("Review a server-issued runtime quote before explicitly starting continuous account-balance charging.")}</DialogDescription>
       </DialogHeader>
       <Form {...form}>
-        <form className="space-y-4" onSubmit={form.handleSubmit(submit)}>
-          <section
-            aria-label={t("Runtime quote")}
-            className="space-y-2 rounded-xl border border-border bg-card p-4 text-12"
+        <form className="space-y-6" onSubmit={form.handleSubmit(submit)}>
+          <GroupedList
+            title={translateUi("Runtime quote")}
+            footer={
+              <div className="space-y-2">
+                {saved ? (
+                  <>
+                    <p>{translateUi("A previously submitted request is saved for this account. Retrying recovers the same request, including after the original quote expires; it does not accept a replacement quote.")}</p>
+                    <p className="break-all">{translateUi("Original quote: ")}{saved.body.quote_id ?? translateUi("Unavailable")}
+                    </p>
+                    {saved.body.profile_version ? (
+                      <p>{translateUi("Original profile: ")}{saved.body.profile_version}</p>
+                    ) : null}
+                    <p>{translateUi("Original policies: ")}{saved.body.policy_version} /{" "}
+                      {saved.body.data_policy_version}
+                    </p>
+                  </>
+                ) : quote.isPending ? (
+                  <p role="status">{translateUi("Requesting a synchronized runtime quote…")}</p>
+                ) : quote.error ? (
+                  <ErrorBanner
+                    message={
+                      quote.error instanceof Error
+                        ? quote.error.message
+                        : translateUi("Paid runtime quoting is unavailable.")
+                    }
+                    onRetry={reviewAgain}
+                  />
+                ) : offer ? (
+                  <>
+                    <p>{translateUi("Offered rate:")}{" "}
+                      <strong>
+                        {offer.credits_per_second}{translateUi(" Credits per cumulative whole running second")}</strong>
+                      .
+                    </p>
+                    <p className="break-all">{translateUi("Rate version: ")}{offer.rate_version}</p>
+                    <p>{translateUi("Quote expires:")}{" "}
+                      {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}. Quotes are
+                      valid for 15 minutes.
+                    </p>
+                    {expired ? (
+                      <p role="alert" className="text-destructive">{translateUi("This quote has expired. Review a fresh quote before starting.")}</p>
+                    ) : null}
+                    <p>{translateUi("Profile: ")}{offer.profile.profile_version}. Fixed{" "}
+                      {offer.profile.cpu_millis / 1000}{translateUi(" vCPU,")}{" "}
+                      {offer.profile.memory_mib / 1024}{translateUi(" GiB memory,")}{" "}
+                      {offer.profile.workspace_gib}{translateUi(" GiB /workspace.")}</p>
+                    <p>{translateUi("Temporary storage is managed by the deployment environment. No fixed capacity commitment, selectable size or extra storage charge. Temporary data may be lost after pause or Pod recreation. Full disks can cause writes to fail, and disk pressure can evict the Pod. Review Machine details for recovery guidance.")}</p>
+                    <p>{translateUi("Policy: ")}{offer.policy.policy_version}. Data policy:{" "}
+                      {offer.policy.data_policy_version}.
+                    </p>
+                  </>
+                ) : (
+                  <p role="alert">{translateUi("A synchronized, priced runtime quote is unavailable. This server has not supplied an acceptable paid offer.")}</p>
+                )}
+                <RemoteMachinePlatformReadiness grouped
+                  platform={offer?.platform ?? entitlement.data?.platform}
+                />
+                <RemoteMachineQuota grouped
+                  quota={offer?.quota ?? entitlement.data?.quota}
+                />
+                <RemoteMachineBillingPreflight grouped
+                  preflight={
+                    offer?.billing_preflight ??
+                    (quote.error && !saved
+                      ? entitlement.data?.billing_preflight
+                      : undefined)
+                  }
+                  quoteProfile={
+                    offer?.profile.profile_version ??
+                    machine.profile.profile_version
+                  }
+                  quoteRate={offer?.rate_version}
+                  quotePrice={offer?.credits_per_second}
+                  now={now}
+                />
+                <p>{translateUi("Charging draws continuously from the shared account balance with no per-instance spending cap. Cumulative whole running seconds are charged at the accepted rate; a final fractional second is free. A ready machine continues billing while idle; there is no automatic idle pause. Paused workspace storage is free. Downstream service usage is charged separately.")}</p>
+                <p>{translateUi("Account wallet available:")}{" "}
+                  {available === null
+                    ? translateUi("Unavailable")
+                    : translateUi("{{value1}} Credits", { value1: formatExactCredits(available, 12) })}
+                  . The server checks current eligibility, subscription, provider
+                  readiness, and finite funding when you submit.
+                </p>
+                {machine ? (
+                  <p>{translateUi("Resume requires a new accepted quote and resolution of the previous run’s pending liability. Adding funds never resumes this Machine automatically.")}</p>
+                ) : null}
+                <p>{translateUi("All clients share the OS and workspace. File roots do not isolate shell commands. There are no inbound ports, public IP, persistent environment variables, snapshots, or restore. Job environment variables are temporary.")}</p>
+                <p>{translateUi("Job metadata is retained for 30 days and terminal operation history for 90 days. Output is live-only, retained at most one hour after termination, and may disappear sooner. Paused workspaces remain until owner deletion; fixed disks cannot expand.")}</p>
+              </div>
+            }
           >
-            {saved ? (
-              <>
-                <p>{t("A previously submitted request is saved for this account. Retrying recovers the same request, including after the original quote expires; it does not accept a replacement quote.")}</p>
-                <p className="break-all">{t("Original quote: ")}{saved.body.quote_id ?? t("Unavailable")}
-                </p>
-                {saved.body.profile_version ? (
-                  <p>{t("Original profile: ")}{saved.body.profile_version}</p>
-                ) : null}
-                <p>{t("Original policies: ")}{saved.body.policy_version} /{" "}
-                  {saved.body.data_policy_version}
-                </p>
-              </>
-            ) : quote.isPending ? (
-              <p role="status">{t("Requesting a synchronized runtime quote…")}</p>
-            ) : quote.error ? (
-              <ErrorBanner
-                message={
-                  quote.error instanceof Error
-                    ? quote.error.message
-                    : t("Paid runtime quoting is unavailable.")
-                }
-                onRetry={reviewAgain}
+            <GroupedRow title={translateUi("Review continuous account-balance charging")} />
+          </GroupedList>
+          <GroupedList title={translateUi("Acceptance")}>
+            {!saved ? (
+              <FormField
+                control={form.control}
+                name="accepted"
+                render={({ field }) => (
+                  <FormItem inline className="items-start">
+                    <FormControl>
+                      <Switch
+                        className="order-last shrink-0"
+                        checked={field.value}
+                        onCheckedChange={(value) =>
+                          field.onChange(value === true)
+                        }
+                        disabled={!acceptable || busy || quote.isPending}
+                      />
+                    </FormControl>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <FormLabel>{translateUi("I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions.")}</FormLabel>
+                      <FormMessage />
+                    </div>
+                  </FormItem>
+                )}
               />
-            ) : offer ? (
-              <>
-                <p>{t("Offered rate:")}{" "}
-                  <strong>
-                    {offer.credits_per_second}{t(" Credits per cumulative whole running second")}</strong>
-                  .
-                </p>
-                <p className="break-all">{t("Rate version: ")}{offer.rate_version}</p>
-                <p>{t("Quote expires: ")}{new Date(offer.valid_until).toLocaleString(getFormattingLocale())}{t(". Quotes are valid for 15 minutes.")}</p>
-                {expired ? (
-                  <p role="alert" className="text-destructive">{t("This quote has expired. Review a fresh quote before starting.")}</p>
-                ) : null}
-                <p>{t("Profile: ")}{offer.profile.profile_version}{t(". Fixed")}{" "}
-                  {offer.profile.cpu_millis / 1000}{t(" vCPU,")}{" "}
-                  {offer.profile.memory_mib / 1024}{t(" GiB memory,")}{" "}
-                  {offer.profile.workspace_gib}{t(" GiB /workspace.")}</p>
-                <p>{t("Temporary storage is managed by the deployment environment. No fixed capacity commitment, selectable size or extra storage charge. Temporary data may be lost after pause or Pod recreation. Full disks can cause writes to fail, and disk pressure can evict the Pod. Review Machine details for recovery guidance.")}</p>
-                <p>{t("Policy: ")}{offer.policy.policy_version}{t(". Data policy:")}{" "}
-                  {offer.policy.data_policy_version}.
-                </p>
-              </>
-            ) : (
-              <p role="alert">{t("A synchronized, priced runtime quote is unavailable. This server has not supplied an acceptable paid offer.")}</p>
-            )}
-            <RemoteMachinePlatformReadiness
-              platform={offer?.platform ?? entitlement.data?.platform}
-            />
-            <RemoteMachineQuota
-              quota={offer?.quota ?? entitlement.data?.quota}
-            />
-            <RemoteMachineBillingPreflight
-              preflight={
-                offer?.billing_preflight ??
-                (quote.error && !saved
-                  ? entitlement.data?.billing_preflight
-                  : undefined)
-              }
-              quoteProfile={
-                offer?.profile.profile_version ??
-                machine.profile.profile_version
-              }
-              quoteRate={offer?.rate_version}
-              quotePrice={offer?.credits_per_second}
-              now={now}
-            />
-            <p>{t("Charging draws continuously from the shared account balance with no per-instance spending cap. Cumulative whole running seconds are charged at the accepted rate; a final fractional second is free. A ready machine continues billing while idle; there is no automatic idle pause. Paused workspace storage is free. Downstream service usage is charged separately.")}</p>
-            <p>{t("Account wallet available:")}{" "}
-              {available === null
-                ? t("Unavailable")
-                : t("{{value}} Credits", { value: formatExactCredits(available, 12) })}{t(". The server checks current eligibility, subscription, provider readiness, and finite funding when you submit.")}</p>
-            {machine ? (
-              <p>{t("Resume requires a new accepted quote and resolution of the previous run’s pending liability. Adding funds never resumes this Machine automatically.")}</p>
             ) : null}
-            <p>{t("All clients share the OS and workspace. File roots do not isolate shell commands. There are no inbound ports, public IP, persistent environment variables, snapshots, or restore. Job environment variables are temporary.")}</p>
-            <p>{t("Job metadata is retained for 30 days and terminal operation history for 90 days. Output is live-only, retained at most one hour after termination, and may disappear sooner. Paused workspaces remain until owner deletion; fixed disks cannot expand.")}</p>
-          </section>
-          {!saved ? (
-            <FormField
-              control={form.control}
-              name="accepted"
-              render={({ field }) => (
-                <FormItem className="flex items-start gap-3">
-                  <FormControl>
-                    <Checkbox
-                      checked={field.value}
-                      onCheckedChange={(value) =>
-                        field.onChange(value === true)
-                      }
-                      disabled={!acceptable || busy || quote.isPending}
-                    />
-                  </FormControl>
-                  <div className="space-y-1">
-                    <FormLabel>{t("I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions.")}</FormLabel>
-                    <FormMessage />
-                  </div>
-                </FormItem>
-              )}
-            />
+            <GroupedFooter>
+              {unreadable ? (
+                <ErrorBanner message={translateUi("The saved request cannot be read. Review and reset it before continuing.")} />
+              ) : null}
+              {!permittedState && !saved ? (
+                <ErrorBanner message={translateUi("Paid resume is available only for a paused paid Machine. Reload its current details.")} />
+              ) : null}
+              {error ? <ErrorBanner message={error} /> : null}
+              {conflict ? (
+                <p role="alert" className="text-14 text-muted-foreground">{translateUi("The server rejected this request. Resolve the reported condition, review current Machine details and a fresh quote; continuing requires new acceptance. Adding funds does not start this request.")}</p>
+              ) : null}
+            </GroupedFooter>
+          </GroupedList>
+          {conflict || unreadable || (!saved && !quote.isPending) ? (
+            <GroupedList>
+              <GroupedRow asChild interactive>
+                <button type="button" disabled={busy} onClick={reviewAgain}>{translateUi("Review fresh quote")}</button>
+              </GroupedRow>
+            </GroupedList>
           ) : null}
-          {unreadable ? (
-            <ErrorBanner message={t("The saved request cannot be read. Review and reset it before continuing.")} />
-          ) : null}
-          {!permittedState && !saved ? (
-            <ErrorBanner message={t("Paid resume is available only for a paused paid Machine. Reload its current details.")} />
-          ) : null}
-          {error ? <ErrorBanner message={error} /> : null}
-          {conflict ? (
-            <p role="alert" className="text-12 text-muted-foreground">{t("The server rejected this request. Resolve the reported condition, review current Machine details and a fresh quote; continuing requires new acceptance. Adding funds does not start this request.")}</p>
-          ) : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>{t("Cancel")}</Button>
-            {conflict || unreadable || (!saved && !quote.isPending) ? (
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy}
-                onClick={reviewAgain}
-              >{t("Review fresh quote")}</Button>
-            ) : null}
-            <Button
-              type="submit"
-              isLoading={busy}
-              disabled={!canSubmit || !form.watch("accepted")}
-            >
-              {saved ? t("Retry saved paid request") : t("Accept quote and resume")}
-            </Button>
-          </DialogFooter>
+          <GroupedDialogActions
+            intent="create"
+            label={translateUi("paid resume acceptance")}
+            dirty={form.formState.isDirty}
+            pending={busy}
+            disabled={!form.formState.isValid || !canSubmit || !form.watch("accepted")}
+            save={form.handleSubmit(submit)}
+            discard={() => form.reset()}
+            saveLabel={saved ? translateUi("Retry saved paid request") : translateUi("Accept quote and resume")}
+          />
         </form>
       </Form>
     </DialogContent>

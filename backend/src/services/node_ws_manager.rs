@@ -1,3 +1,5 @@
+use crate::crypto::secret_json::SecretJson;
+use crate::models::default_request_header::SecretHeaders;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -96,7 +98,7 @@ pub struct NodeProxyRequest {
     pub method: String,
     pub path: String,
     pub query: Option<String>,
-    pub headers: Vec<(String, String)>,
+    pub headers: SecretHeaders,
     /// Raw bytes (serialized to base64 in WS message)
     #[serde(default, with = "optional_base64_bytes")]
     pub body: Option<Vec<u8>>,
@@ -112,7 +114,7 @@ pub struct NodeSshTunnelRequest {
 }
 
 /// Response received from a node via WebSocket (non-streaming).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct NodeProxyResponse {
     pub request_id: String,
     pub status: u16,
@@ -121,7 +123,6 @@ pub struct NodeProxyResponse {
 }
 
 /// A chunk in a streaming proxy response.
-#[derive(Debug)]
 pub enum StreamChunk {
     /// Beginning of stream: status code and headers
     Start {
@@ -270,7 +271,7 @@ pub struct NodeWsProxyRequest {
     pub base_url: String,
     pub path: String,
     pub query: Option<String>,
-    pub headers: Vec<(String, String)>,
+    pub headers: SecretHeaders,
     pub ws_frame_injections: Vec<WsFrameInjection>,
 }
 
@@ -296,7 +297,7 @@ pub struct NodeSshExecRequest {
     pub host: String,
     pub port: u16,
     pub principal: String,
-    pub private_key_pem: String,
+    pub private_key_pem: zeroize::Zeroizing<String>,
     pub certificate_openssh: String,
     pub command: String,
     pub timeout_secs: u32,
@@ -347,7 +348,7 @@ pub struct NodeWebTerminalRequest {
 #[serde(rename_all = "snake_case")]
 pub enum NodeWebTerminalAuthMode {
     Cert {
-        private_key_pem: String,
+        private_key_pem: zeroize::Zeroizing<String>,
         certificate_openssh: String,
     },
     NodeKey,
@@ -373,9 +374,9 @@ impl fmt::Debug for NodeRequestSignature {
 }
 
 /// Outbound command for a node connection writer task.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum NodeOutboundMessage {
-    Text(String),
+    Text(zeroize::Zeroizing<String>),
     Binary(Vec<u8>),
     Close { code: u16, reason: String },
 }
@@ -446,7 +447,9 @@ pub struct NodeCapabilitiesFlags {
     pub http_signature_v2: bool,
     pub proxy_upload_v1: bool,
     pub credential_ack_correlation: bool,
+    pub credential_target_update_v1: bool,
     pub remote_credential_crypto_v1: bool,
+    pub machine_execution_approval_v1: bool,
     pub proxy_max_body_size: Option<usize>,
 }
 
@@ -507,7 +510,7 @@ impl Drop for NodeConnectionReservation {
 }
 
 /// JSON message sent from NyxID to a node for a proxy request.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_id: Option<String>,
@@ -523,7 +526,7 @@ struct WsProxyRequest {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
-    headers: serde_json::Value,
+    headers: SecretJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
     /// HMAC signing fields
@@ -559,7 +562,7 @@ struct WsSshTunnelOpen {
     signature: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsSshTunnelData {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -575,7 +578,7 @@ struct WsSshTunnelClose {
 }
 
 /// JSON ws_proxy_open sent to node.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -585,7 +588,7 @@ struct WsProxyOpen {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
-    headers: serde_json::Value,
+    headers: SecretJson,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ws_frame_injections: Vec<WsFrameInjection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -597,7 +600,7 @@ struct WsProxyOpen {
 }
 
 /// JSON ws_proxy_text sent to node.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyTextMsg {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -606,7 +609,7 @@ struct WsProxyTextMsg {
 }
 
 /// JSON ws_proxy_binary sent to node (base64-encoded payload).
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyBinaryMsg {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -626,7 +629,7 @@ struct WsProxyCloseMsg {
     reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsSshExec {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -635,7 +638,7 @@ struct WsSshExec {
     port: u16,
     principal: String,
     auth_mode: &'static str,
-    private_key_pem: String,
+    private_key_pem: zeroize::Zeroizing<String>,
     certificate_openssh: String,
     command: String,
     timeout_secs: u32,
@@ -701,7 +704,10 @@ fn send_proxy_cancel(
     }
     let message =
         serde_json::json!({ "type": "proxy_cancel", "request_id": request_id }).to_string();
-    if tx.try_send(NodeOutboundMessage::Text(message)).is_err() {
+    if tx
+        .try_send(NodeOutboundMessage::Text((message).into()))
+        .is_err()
+    {
         let _ = close_tx.send(Some(NodeOutboundMessage::Close {
             code: 1011,
             reason: "HTTP cancellation channel unavailable".into(),
@@ -768,7 +774,7 @@ impl Drop for PendingSshExecGuard {
         self.requests.remove(&self.request_id);
         self.streams.remove(&self.request_id);
 
-        let Ok(message) = serde_json::to_string(&WsSshExecCancel {
+        let Ok(message) = crate::crypto::secret_json::to_secret_string(&WsSshExecCancel {
             msg_type: "ssh_exec_cancel",
             request_id: self.request_id.clone(),
         }) else {
@@ -793,7 +799,7 @@ impl Drop for PendingSshExecGuard {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsWebTerminalOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -805,7 +811,7 @@ struct WsWebTerminalOpen {
     port: u16,
     principal: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    private_key_pem: Option<String>,
+    private_key_pem: Option<zeroize::Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     certificate_openssh: Option<String>,
     cols: u32,
@@ -819,7 +825,7 @@ struct WsWebTerminalOpen {
     hmac: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsWebTerminalData {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -844,7 +850,7 @@ struct WsWebTerminalClose {
 }
 
 /// JSON proxy_response from node.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsProxyResponseMsg {
     pub request_id: String,
     pub status: u16,
@@ -871,7 +877,7 @@ pub struct WsProxyErrorMsg {
 }
 
 /// JSON proxy_response_start from node (streaming).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsProxyResponseStartMsg {
     pub request_id: String,
     pub status: u16,
@@ -880,7 +886,7 @@ pub struct WsProxyResponseStartMsg {
 }
 
 /// JSON proxy_response_chunk from node (streaming).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsProxyResponseChunkMsg {
     pub request_id: String,
     #[serde(default)]
@@ -900,7 +906,7 @@ pub struct WsSshTunnelOpenedMsg {
 }
 
 /// JSON ssh_tunnel_data from node.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WsSshTunnelDataMsg {
     pub session_id: String,
     #[serde(default)]
@@ -1063,6 +1069,8 @@ struct WsCredentialUpdate {
     param_value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_revision: Option<i64>,
 }
 
 /// JSON message instructing a node to drop its local credential for a
@@ -1130,7 +1138,11 @@ pub struct NodeCapabilitiesMsg {
     #[serde(default)]
     pub credential_ack_correlation: bool,
     #[serde(default)]
+    pub credential_target_update_v1: bool,
+    #[serde(default)]
     pub remote_credential_crypto_v1: bool,
+    #[serde(default)]
+    pub machine_execution_approval_v1: bool,
     /// Maximum raw HTTP request body that fits through this node's control WS.
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
@@ -1166,6 +1178,8 @@ pub struct CredentialUpdateParams {
     pub param_name: Option<String>,
     pub param_value: Option<String>,
     pub target_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<i64>,
 }
 
 /// Map a retryable proxy failure from a node into the appropriate
@@ -1954,167 +1968,185 @@ impl NodeWsManager {
         expected_connection_id: Option<&str>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
-        let request_body_len = request.body.as_ref().map_or(0, Vec::len);
-        if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
-            self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
-                .await;
-        }
-        let conn = self
-            .connection_for(node_id, expected_connection_id)
-            .map_err(NodeProxyFailure::before_dispatch)?;
-        if request.target_id.is_some() {
-            let capable = conn
-                .capabilities
-                .lock()
-                .is_ok_and(|caps| caps.http_signature_v2);
-            if !capable || prepared_signature.is_none() {
-                return Err(NodeProxyFailure::before_dispatch(
-                    AppError::NodeHttpSignatureUnsupported,
-                ));
+        let mut operation = crate::turn_trace::Operation::start(
+            crate::turn_trace::TurnContext::current(),
+            crate::turn_trace::Stage::NodeHeaders,
+        );
+        let result: Result<ProxyResponseType, NodeProxyFailure> = async {
+            let request_body_len = request.body.as_ref().map_or(0, Vec::len);
+            if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
+                self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
+                    .await;
             }
-            if super::destination_routing::normalize_origin(&request.base_url)
-                .as_ref()
-                .ok()
-                != Some(&request.base_url)
-            {
-                return Err(NodeProxyFailure::before_dispatch(
-                    AppError::ValidationError(
-                        "Target-selected node request requires an exact normalized origin".into(),
-                    ),
-                ));
-            }
-        }
-        let node_body_limit = conn
-            .capabilities
-            .lock()
-            .ok()
-            .and_then(|capabilities| capabilities.proxy_max_body_size)
-            .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
-        if request_body_len > node_body_limit {
-            return Err(NodeProxyFailure::before_dispatch(
-                AppError::RequestBodyTooLarge {
-                    max_bytes: node_body_limit,
-                    context: "Node proxy".to_string(),
-                },
-            ));
-        }
-        let request_id = request.request_id.clone();
-        let dispatch_gate = conn.proxy_dispatch_gate.clone();
-        let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
-            NodeProxyFailure::before_dispatch(AppError::Internal(
-                "Node proxy dispatch gate is unavailable".to_string(),
-            ))
-        })?;
-        if self.take_proxy_cancellation(node_id, &request_id) {
-            return Err(NodeProxyFailure::before_dispatch(
-                AppError::ClientDisconnected,
-            ));
-        }
-
-        // Create oneshot channel for response correlation. The response may be a
-        // complete payload or a live streaming receiver.
-        let (resp_tx, resp_rx) = oneshot::channel();
-        conn.pending
-            .insert(request_id.clone(), PendingRequest::Awaiting(resp_tx));
-
-        // Build headers as JSON object
-        let headers_map: serde_json::Map<String, serde_json::Value> = request
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-
-        let body_b64 = request.body.as_ref().map(|b| {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(b)
-        });
-
-        let (timestamp, nonce, signature) = prepared_signature
-            .map(|prepared| {
-                (
-                    Some(prepared.timestamp),
-                    Some(prepared.nonce),
-                    Some(prepared.signature),
-                )
-            })
-            .unwrap_or((None, None, None));
-
-        // Build WS message
-        let ws_msg = WsProxyRequest {
-            signature_version: request.target_id.as_ref().map(|_| 2),
-            target_id: request.target_id,
-            msg_type: "proxy_request",
-            request_id: request_id.clone(),
-            service_id: request.service_id,
-            service_slug: request.service_slug,
-            base_url: request.base_url,
-            method: request.method,
-            path: request.path,
-            query: request.query,
-            headers: serde_json::Value::Object(headers_map),
-            body: body_b64,
-            timestamp,
-            nonce,
-            signature,
-        };
-
-        let msg_json = serde_json::to_string(&ws_msg).map_err(|e| {
-            conn.pending.remove(&request_id);
-            NodeProxyFailure::before_dispatch(AppError::Internal(format!(
-                "Failed to serialize proxy request: {e}"
-            )))
-        })?;
-
-        // H4: Use try_send on bounded channel. If the channel is full, the node
-        // is not keeping up (slow or malicious) — treat as offline.
-        match conn.tx.try_send(NodeOutboundMessage::Text(msg_json)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                conn.pending.remove(&request_id);
-                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
-                    format!("Node {node_id} write buffer full"),
-                )));
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                conn.pending.remove(&request_id);
-                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
-                    format!("Node {node_id} connection closed"),
-                )));
-            }
-        }
-
-        let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
-        drop(_dispatch_guard);
-
-        // Drop the connection ref before awaiting
-        drop(conn);
-
-        // Wait for response with timeout
-        let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
-        match tokio::time::timeout(timeout, resp_rx).await {
-            Ok(Ok(NodeProxyOutcome::Response(response))) => {
-                cancellation_guard.armed = false;
-                Ok(response)
-            }
-            Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
-                let error = map_retryable_node_failure(message, reason.as_deref());
-                if matches!(error, AppError::NodeCredentialMissing(_)) {
-                    // The node resolves its local credential before building or
-                    // sending the downstream request, so this reason proves the
-                    // mutation never crossed the downstream dispatch boundary.
-                    Err(NodeProxyFailure::before_dispatch(error))
-                } else {
-                    Err(NodeProxyFailure::after_dispatch(error))
+            let conn = self
+                .connection_for(node_id, expected_connection_id)
+                .map_err(NodeProxyFailure::before_dispatch)?;
+            if request.target_id.is_some() {
+                let capable = conn
+                    .capabilities
+                    .lock()
+                    .is_ok_and(|caps| caps.http_signature_v2);
+                if !capable || prepared_signature.is_none() {
+                    return Err(NodeProxyFailure::before_dispatch(
+                        AppError::NodeHttpSignatureUnsupported,
+                    ));
+                }
+                if super::destination_routing::normalize_origin(&request.base_url)
+                    .as_ref()
+                    .ok()
+                    != Some(&request.base_url)
+                {
+                    return Err(NodeProxyFailure::before_dispatch(
+                        AppError::ValidationError(
+                            "Target-selected node request requires an exact normalized origin"
+                                .into(),
+                        ),
+                    ));
                 }
             }
-            Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
-                format!("Node {node_id} disconnected during request"),
-            ))),
-            Err(_) => {
-                // The guard removes pending and sends cancellation to the node.
-                Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
+            let node_body_limit = conn
+                .capabilities
+                .lock()
+                .ok()
+                .and_then(|capabilities| capabilities.proxy_max_body_size)
+                .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
+            if request_body_len > node_body_limit {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::RequestBodyTooLarge {
+                        max_bytes: node_body_limit,
+                        context: "Node proxy".to_string(),
+                    },
+                ));
+            }
+            let request_id = request.request_id.clone();
+            let dispatch_gate = conn.proxy_dispatch_gate.clone();
+            let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
+                NodeProxyFailure::before_dispatch(AppError::Internal(
+                    "Node proxy dispatch gate is unavailable".to_string(),
+                ))
+            })?;
+            if self.take_proxy_cancellation(node_id, &request_id) {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::ClientDisconnected,
+                ));
+            }
+
+            // Create oneshot channel for response correlation. The response may be a
+            // complete payload or a live streaming receiver.
+            let (resp_tx, resp_rx) = oneshot::channel();
+            conn.pending
+                .insert(request_id.clone(), PendingRequest::Awaiting(resp_tx));
+
+            // Build headers as JSON object
+            let headers_map: serde_json::Map<String, serde_json::Value> = request
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+
+            let body_b64 = request.body.as_ref().map(|b| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(b)
+            });
+
+            let (timestamp, nonce, signature) = prepared_signature
+                .map(|prepared| {
+                    (
+                        Some(prepared.timestamp),
+                        Some(prepared.nonce),
+                        Some(prepared.signature),
+                    )
+                })
+                .unwrap_or((None, None, None));
+
+            // Build WS message
+            let ws_msg = WsProxyRequest {
+                signature_version: request.target_id.as_ref().map(|_| 2),
+                target_id: request.target_id,
+                msg_type: "proxy_request",
+                request_id: request_id.clone(),
+                service_id: request.service_id,
+                service_slug: request.service_slug,
+                base_url: request.base_url,
+                method: request.method,
+                path: request.path,
+                query: request.query,
+                headers: SecretJson(serde_json::Value::Object(headers_map)),
+                body: body_b64,
+                timestamp,
+                nonce,
+                signature,
+            };
+
+            let msg_json = crate::crypto::secret_json::to_secret_string(&ws_msg).map_err(|e| {
+                conn.pending.remove(&request_id);
+                NodeProxyFailure::before_dispatch(AppError::Internal(format!(
+                    "Failed to serialize proxy request: {e}"
+                )))
+            })?;
+
+            // H4: Use try_send on bounded channel. If the channel is full, the node
+            // is not keeping up (slow or malicious) — treat as offline.
+            match conn.tx.try_send(NodeOutboundMessage::Text(msg_json)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    conn.pending.remove(&request_id);
+                    return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        format!("Node {node_id} write buffer full"),
+                    )));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.pending.remove(&request_id);
+                    return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        format!("Node {node_id} connection closed"),
+                    )));
+                }
+            }
+
+            let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
+            drop(_dispatch_guard);
+
+            // Drop the connection ref before awaiting
+            drop(conn);
+
+            // Wait for response with timeout
+            let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
+            match tokio::time::timeout(timeout, resp_rx).await {
+                Ok(Ok(NodeProxyOutcome::Response(response))) => {
+                    cancellation_guard.armed = false;
+                    Ok(response)
+                }
+                Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
+                    let error = map_retryable_node_failure(message, reason.as_deref());
+                    if matches!(error, AppError::NodeCredentialMissing(_)) {
+                        // The node resolves its local credential before building or
+                        // sending the downstream request, so this reason proves the
+                        // mutation never crossed the downstream dispatch boundary.
+                        Err(NodeProxyFailure::before_dispatch(error))
+                    } else {
+                        Err(NodeProxyFailure::after_dispatch(error))
+                    }
+                }
+                Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
+                    format!("Node {node_id} disconnected during request"),
+                ))),
+                Err(_) => {
+                    // The guard removes pending and sends cancellation to the node.
+                    Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
+                }
             }
         }
+        .await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
 
     /// Signed opening metadata followed by bounded binary upload frames. Unlike
@@ -2125,6 +2157,11 @@ impl NodeWsManager {
         body: axum::body::Body,
         expected_connection_id: Option<&str>,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        let mut operation = crate::turn_trace::Operation::start(
+            crate::turn_trace::TurnContext::current(),
+            crate::turn_trace::Stage::NodeHeaders,
+        );
+        let result: Result<ProxyResponseType, NodeProxyFailure> = async {
         use futures::StreamExt;
         let header_timeout = if request.operation == nyxid_machine::Operation::ProxyUpload
             && request.parameters["git"] == true
@@ -2173,7 +2210,7 @@ impl NodeWsManager {
             .insert(request_id.clone(), PendingRequest::Awaiting(response_tx));
         let sender = conn.tx.clone();
         if sender
-            .try_send(NodeOutboundMessage::Text(value.to_string()))
+            .try_send(NodeOutboundMessage::Text((value.to_string()).into()))
             .is_err()
         {
             conn.pending.remove(&request_id);
@@ -2259,6 +2296,18 @@ impl NodeWsManager {
             }
             _ => Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout)),
         }
+
+        }.await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
 
     /// Open an SSH tunnel on a connected node and await the open acknowledgement.
@@ -2299,7 +2348,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsSshTunnelOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshTunnelOpen {
             msg_type: "ssh_tunnel_open",
             session_id: request.session_id,
             service_id: request.service_id,
@@ -2364,7 +2413,7 @@ impl NodeWsManager {
             )));
         }
 
-        let msg = serde_json::to_string(&WsSshTunnelData {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshTunnelData {
             msg_type: "ssh_tunnel_data",
             session_id: session_id.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
@@ -2386,7 +2435,7 @@ impl NodeWsManager {
             .connections
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
-        let msg = serde_json::to_string(&WsSshTunnelClose {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshTunnelClose {
             msg_type: "ssh_tunnel_close",
             session_id: session_id.to_string(),
         })
@@ -2412,7 +2461,7 @@ impl NodeWsManager {
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
-        let msg = serde_json::to_string(&ping)
+        let msg = crate::crypto::secret_json::to_secret_string(&ping)
             .map_err(|e| AppError::Internal(format!("Failed to serialize heartbeat: {e}")))?;
 
         conn.tx
@@ -2451,6 +2500,16 @@ impl NodeWsManager {
     ) -> AppResult<()> {
         let conn = self.connection_for(node_id, expected_connection_id)?;
 
+        if params.injection_method == "target_url"
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|c| c.credential_target_update_v1 && c.credential_ack_correlation)
+        {
+            return Err(AppError::BadRequest(
+                "Node does not support metadata-only target updates; upgrade the node agent".into(),
+            ));
+        }
         let msg = WsCredentialUpdate {
             msg_type: "credential_update",
             request_id: None,
@@ -2461,9 +2520,10 @@ impl NodeWsManager {
             param_name: params.param_name.clone(),
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
+            target_revision: params.target_revision,
         };
 
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!("Failed to serialize credential_update: {e}"))
         })?;
 
@@ -2528,7 +2588,7 @@ impl NodeWsManager {
             request_id: None,
             service_slug: service_slug.to_string(),
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!("Failed to serialize credential_remove: {e}"))
         })?;
 
@@ -2588,7 +2648,7 @@ impl NodeWsManager {
         let msg = WsPendingCredentialsAvailable {
             msg_type: "pending_credentials_available",
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!(
                 "Failed to serialize pending_credentials_available: {e}"
             ))
@@ -2656,7 +2716,7 @@ impl NodeWsManager {
             nonce: params.nonce,
             ciphertext: params.ciphertext,
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             AppError::Internal(format!(
                 "Failed to serialize pending_credential_ciphertext: {e}"
             ))
@@ -2733,8 +2793,17 @@ impl NodeWsManager {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
         let conn = self.connection_for(node_id, expected_connection_id)?;
+        if params.injection_method == "target_url"
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|c| c.credential_target_update_v1 && c.credential_ack_correlation)
+        {
+            return Err(AppError::BadRequest(
+                "Node does not support metadata-only target updates; upgrade the node agent".into(),
+            ));
+        }
         conn.credential_acks.insert(request_id.clone(), tx_ack);
-
         let msg = WsCredentialUpdate {
             msg_type: "credential_update",
             request_id: Some(request_id.clone()),
@@ -2745,8 +2814,9 @@ impl NodeWsManager {
             param_name: params.param_name.clone(),
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
+            target_revision: params.target_revision,
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             conn.credential_acks.remove(&request_id);
             AppError::Internal(format!("Failed to serialize credential_update: {e}"))
         })?;
@@ -2865,7 +2935,7 @@ impl NodeWsManager {
             request_id: Some(request_id.clone()),
             service_slug: service_slug.to_string(),
         };
-        let json = serde_json::to_string(&msg).map_err(|e| {
+        let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             conn.credential_acks.remove(&request_id);
             AppError::Internal(format!("Failed to serialize credential_remove: {e}"))
         })?;
@@ -2946,7 +3016,9 @@ impl NodeWsManager {
             flags.proxy_upload_v1 = caps.proxy_upload_v1;
             flags.http_cancellation = caps.http_cancellation;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
+            flags.credential_target_update_v1 = caps.credential_target_update_v1;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
+            flags.machine_execution_approval_v1 = caps.machine_execution_approval_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
         }
     }
@@ -3355,10 +3427,11 @@ impl NodeWsManager {
                         capacity = SSH_TUNNEL_BUFFER_CAPACITY,
                         "Dropping SSH tunnel due to full receive buffer"
                     );
-                    let close_msg = serde_json::to_string(&WsSshTunnelClose {
-                        msg_type: "ssh_tunnel_close",
-                        session_id: session_id.to_string(),
-                    });
+                    let close_msg =
+                        crate::crypto::secret_json::to_secret_string(&WsSshTunnelClose {
+                            msg_type: "ssh_tunnel_close",
+                            session_id: session_id.to_string(),
+                        });
                     if let Ok(close_msg) = close_msg {
                         // TODO: This close signal is best-effort because the node write queue is
                         // also bounded. If try_send fails here, the node-side tunnel relies on
@@ -3424,7 +3497,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsSshExec {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshExec {
             msg_type: "ssh_exec",
             request_id: request.request_id,
             host: request.host,
@@ -3527,7 +3600,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsSshNodeExecOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsSshNodeExecOpen {
             msg_type: "ssh_node_exec_open",
             request_id: request.request_id,
             service_slug: request.service_slug,
@@ -3724,7 +3797,7 @@ impl NodeWsManager {
         }
         let _guard = Guard { pending, id };
         conn.tx
-            .try_send(NodeOutboundMessage::Text(message.to_string()))
+            .try_send(NodeOutboundMessage::Text((message.to_string()).into()))
             .map_err(|_| AppError::NodeOffline("Machine write buffer unavailable".into()))?;
         drop(conn);
         tokio::time::timeout(std::time::Duration::from_secs(timeout), rx)
@@ -3866,7 +3939,7 @@ impl NodeWsManager {
             })
             .unwrap_or((None, None, None));
 
-        let msg = serde_json::to_string(&WsWebTerminalOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalOpen {
             msg_type: "web_terminal_open",
             session_id: request.session_id,
             service_id: request.service_id,
@@ -3941,7 +4014,7 @@ impl NodeWsManager {
             )));
         }
 
-        let msg = serde_json::to_string(&WsWebTerminalData {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalData {
             msg_type: "web_terminal_data",
             session_id: session_id.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
@@ -3970,7 +4043,7 @@ impl NodeWsManager {
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
 
-        let msg = serde_json::to_string(&WsWebTerminalResize {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalResize {
             msg_type: "web_terminal_resize",
             session_id: session_id.to_string(),
             cols,
@@ -3993,7 +4066,7 @@ impl NodeWsManager {
             .connections
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
-        let msg = serde_json::to_string(&WsWebTerminalClose {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsWebTerminalClose {
             msg_type: "web_terminal_close",
             session_id: session_id.to_string(),
         })
@@ -4056,10 +4129,11 @@ impl NodeWsManager {
                         capacity = WEB_TERMINAL_BUFFER_CAPACITY,
                         "Dropping web terminal due to full receive buffer"
                     );
-                    let close_msg = serde_json::to_string(&WsWebTerminalClose {
-                        msg_type: "web_terminal_close",
-                        session_id: session_id.to_string(),
-                    });
+                    let close_msg =
+                        crate::crypto::secret_json::to_secret_string(&WsWebTerminalClose {
+                            msg_type: "web_terminal_close",
+                            session_id: session_id.to_string(),
+                        });
                     if let Ok(close_msg) = close_msg {
                         let _ = conn.tx.try_send(NodeOutboundMessage::Text(close_msg));
                     }
@@ -4134,14 +4208,14 @@ impl NodeWsManager {
             .collect::<serde_json::Map<_, _>>()
             .into();
 
-        let msg = serde_json::to_string(&WsProxyOpen {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyOpen {
             msg_type: "ws_proxy_open",
             session_id: request.session_id,
             service_slug: request.service_slug,
             base_url: request.base_url,
             path: request.path,
             query: request.query,
-            headers: headers_json,
+            headers: SecretJson(headers_json),
             ws_frame_injections: request.ws_frame_injections,
             timestamp,
             nonce,
@@ -4196,7 +4270,7 @@ impl NodeWsManager {
                 "WS proxy session {session_id} is not active"
             )));
         }
-        let msg = serde_json::to_string(&WsProxyTextMsg {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyTextMsg {
             msg_type: "ws_proxy_text",
             session_id: session_id.to_string(),
             data: data.to_string(),
@@ -4226,7 +4300,7 @@ impl NodeWsManager {
                 "WS proxy session {session_id} is not active"
             )));
         }
-        let msg = serde_json::to_string(&WsProxyBinaryMsg {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyBinaryMsg {
             msg_type: "ws_proxy_binary",
             session_id: session_id.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(data),
@@ -4252,7 +4326,7 @@ impl NodeWsManager {
             .connections
             .get(node_id)
             .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
-        let msg = serde_json::to_string(&WsProxyCloseMsg {
+        let msg = crate::crypto::secret_json::to_secret_string(&WsProxyCloseMsg {
             msg_type: "ws_proxy_close",
             session_id: session_id.to_string(),
             code,
@@ -4566,7 +4640,9 @@ mod tests {
             let conn = manager.connections.get("node").unwrap();
             let close = conn.close_tx.subscribe();
             conn.tx
-                .try_send(NodeOutboundMessage::Text("already queued".into()))
+                .try_send(NodeOutboundMessage::Text(
+                    "already queued".to_owned().into(),
+                ))
                 .unwrap();
             send_proxy_cancel(&conn.tx, &conn.close_tx, "request", &conn.capabilities);
             assert_eq!(close.borrow().is_some(), capable);
@@ -4591,7 +4667,7 @@ mod tests {
             method: "GET".into(),
             path: "/".into(),
             query: None,
-            headers: Vec::new(),
+            headers: Vec::new().into(),
             body: None,
         }
     }
@@ -4824,7 +4900,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/resource".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -4863,7 +4939,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/resource".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -4910,7 +4986,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/upload".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(vec![0; 5]),
                 },
                 None,
@@ -4948,7 +5024,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/upload".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(vec![0; LEGACY_NODE_PROXY_MAX_BODY_SIZE + 1]),
                 },
                 None,
@@ -5002,7 +5078,9 @@ mod tests {
         let (old_tx, _old_rx) = mpsc::channel(1);
         let retained_sender = old_tx.clone();
         old_tx
-            .try_send(NodeOutboundMessage::Text("queued request".to_string()))
+            .try_send(NodeOutboundMessage::Text(
+                ("queued request".to_string()).into(),
+            ))
             .unwrap();
         let (pending, mut close) =
             manager.register_connection_with_id("node-a", "old".to_string(), old_tx);
@@ -5119,7 +5197,7 @@ mod tests {
                         service_id: "service-1".to_string(),
                         service_slug: "ssh-service".to_string(),
                         auth_mode: NodeWebTerminalAuthMode::Cert {
-                            private_key_pem: "redacted-private-key".to_string(),
+                            private_key_pem: ("redacted-private-key".to_string()).into(),
                             certificate_openssh: "redacted-cert".to_string(),
                         },
                         host: "ssh.example".to_string(),
@@ -5411,7 +5489,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/stream".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5456,7 +5534,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/executions".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(b"{}".to_vec()),
                 },
                 None,
@@ -5487,7 +5565,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/executions".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: Some(b"{}".to_vec()),
                 },
                 None,
@@ -5542,7 +5620,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/stream".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5610,7 +5688,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/models".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5668,7 +5746,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/models".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -5889,7 +5967,7 @@ mod tests {
                         host: "ssh.internal".to_string(),
                         port: 22,
                         principal: "deploy".to_string(),
-                        private_key_pem: "private-key".to_string(),
+                        private_key_pem: ("private-key".to_string()).into(),
                         certificate_openssh: "certificate".to_string(),
                         command: "sleep 30".to_string(),
                         timeout_secs: 30,
@@ -6017,6 +6095,7 @@ mod tests {
     fn credential_update_fails_for_disconnected_node() {
         let mgr = NodeWsManager::new(30, 100);
         let params = CredentialUpdateParams {
+            target_revision: None,
             service_slug: "openai".to_string(),
             injection_method: "bearer".to_string(),
             header_name: Some("Authorization".to_string()),
@@ -6029,6 +6108,62 @@ mod tests {
             .send_credential_update("unknown-node", &params)
             .expect_err("should fail for disconnected node");
         assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_transport_gates_metadata_on_the_live_connection() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(4);
+        mgr.register_connection("node", tx);
+        let params = CredentialUpdateParams {
+            service_slug: "monitor".into(),
+            injection_method: "target_url".into(),
+            header_name: None,
+            header_value: None,
+            param_name: None,
+            param_value: None,
+            target_url: Some("http://new-monitor".into()),
+            target_revision: Some(1),
+        };
+        for (target, ack) in [(false, false), (false, true), (true, false)] {
+            mgr.record_capabilities(
+                "node",
+                &NodeCapabilitiesMsg {
+                    credential_target_update_v1: target,
+                    credential_ack_correlation: ack,
+                    ..Default::default()
+                },
+            );
+            assert!(mgr.send_credential_update("node", &params).is_err());
+            assert!(
+                mgr.send_credential_update_and_wait("node", &params, Duration::from_millis(5))
+                    .await
+                    .is_err()
+            );
+            assert!(rx.try_recv().is_err());
+            assert!(
+                mgr.connections
+                    .get("node")
+                    .unwrap()
+                    .credential_acks
+                    .is_empty()
+            );
+        }
+        mgr.record_capabilities(
+            "node",
+            &NodeCapabilitiesMsg {
+                credential_target_update_v1: true,
+                credential_ack_correlation: true,
+                ..Default::default()
+            },
+        );
+        mgr.send_credential_update("node", &params).unwrap();
+        let NodeOutboundMessage::Text(frame) = rx.recv().await.unwrap() else {
+            panic!("expected metadata frame")
+        };
+        let frame: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["target_revision"], 1);
+        assert!(frame.get("header_value").is_none());
     }
 
     #[test]
@@ -6056,7 +6191,9 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
+                credential_target_update_v1: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 proxy_max_body_size: None,
             },
         );
@@ -6085,6 +6222,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             },
         );
@@ -6206,5 +6344,263 @@ mod tests {
 
         let err3 = map_retryable_node_failure("other".to_string(), Some("other_reason"));
         assert!(matches!(err3, AppError::NodeOffline(_)));
+    }
+}
+
+impl std::fmt::Debug for WsSshExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsSshExec").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsWebTerminalOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsWebTerminalOpen").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyOpen").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsSshTunnelData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsSshTunnelData").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyTextMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyTextMsg").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsProxyBinaryMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsProxyBinaryMsg").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for WsWebTerminalData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsWebTerminalData").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for NodeProxyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeProxyResponse").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for StreamChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamChunk").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for NodeOutboundMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeOutboundMessage")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod secret_formatting_tests {
+    use super::*;
+    #[test]
+    fn proxy_ssh_and_stream_envelopes_never_debug_payloads() {
+        let secret = "distinctive-node-header-private-key-ciphertext-89c4";
+        let request = WsProxyRequest {
+            target_id: None,
+            signature_version: None,
+            msg_type: "proxy_request",
+            request_id: "request".into(),
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            base_url: format!("https://example.invalid/{secret}"),
+            method: "POST".into(),
+            path: secret.into(),
+            query: Some(secret.into()),
+            headers: SecretJson(serde_json::json!({"x-key":secret})),
+            body: Some(secret.into()),
+            timestamp: None,
+            nonce: None,
+            signature: Some(secret.into()),
+        };
+        assert!(!format!("{request:?}").contains(secret));
+        assert!(
+            crate::crypto::secret_json::to_secret_string(&request)
+                .unwrap()
+                .contains(secret)
+        );
+        let open = WsProxyOpen {
+            msg_type: "ws_proxy_open",
+            session_id: "session".into(),
+            service_slug: "service".into(),
+            base_url: "https://example.invalid".into(),
+            path: "/".into(),
+            query: Some(secret.into()),
+            headers: SecretJson(serde_json::json!({"x-key":secret})),
+            ws_frame_injections: vec![],
+            timestamp: None,
+            nonce: None,
+            signature: None,
+        };
+        assert!(!format!("{open:?}").contains(secret));
+        let ssh = WsSshExec {
+            msg_type: "ssh_exec",
+            request_id: "request".into(),
+            host: "host".into(),
+            port: 22,
+            principal: "user".into(),
+            auth_mode: "cert",
+            private_key_pem: secret.to_owned().into(),
+            certificate_openssh: secret.into(),
+            command: secret.into(),
+            timeout_secs: 10,
+            timestamp: None,
+            nonce: None,
+            hmac: None,
+        };
+        assert!(!format!("{ssh:?}").contains(secret));
+        let terminal = WsWebTerminalOpen {
+            msg_type: "web_terminal_open",
+            session_id: "session".into(),
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            auth_mode: "cert",
+            host: "host".into(),
+            port: 22,
+            principal: "user".into(),
+            private_key_pem: Some(secret.to_owned().into()),
+            certificate_openssh: None,
+            cols: 80,
+            rows: 24,
+            term: "xterm".into(),
+            timestamp: None,
+            nonce: None,
+            hmac: None,
+        };
+        assert!(!format!("{terminal:?}").contains(secret));
+        assert!(
+            !format!("{:?}", NodeOutboundMessage::Text(secret.to_owned().into())).contains(secret)
+        );
+        assert!(!format!("{:?}", StreamChunk::Data(secret.as_bytes().to_vec())).contains(secret));
+        assert!(
+            !format!(
+                "{:?}",
+                NodeProxyResponse {
+                    request_id: "request".into(),
+                    status: 200,
+                    headers: vec![("set-cookie".into(), secret.into())],
+                    body: secret.as_bytes().to_vec()
+                }
+            )
+            .contains(secret)
+        );
+    }
+}
+
+impl std::fmt::Debug for WsProxyResponseMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsProxyResponseMsg([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for WsProxyResponseStartMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsProxyResponseStartMsg([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for WsProxyResponseChunkMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsProxyResponseChunkMsg([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for WsSshTunnelDataMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsSshTunnelDataMsg([REDACTED])")
+    }
+}
+
+#[cfg(test)]
+mod response_debug_tests {
+    use super::*;
+    #[test]
+    fn arbitrary_response_headers_and_bodies_are_redacted() {
+        let secret = "distinctive-response-cookie-body-18bed";
+        let headers = serde_json::json!({"set-cookie": secret});
+        let response = WsProxyResponseMsg {
+            request_id: "request".into(),
+            status: 200,
+            headers: headers.clone(),
+            body: Some(secret.into()),
+        };
+        let start = WsProxyResponseStartMsg {
+            request_id: "request".into(),
+            status: 200,
+            headers,
+        };
+        let chunk = WsProxyResponseChunkMsg {
+            request_id: "request".into(),
+            data: Some(secret.into()),
+        };
+        for debug in [
+            format!("{response:?}"),
+            format!("{start:?}"),
+            format!("{chunk:?}"),
+        ] {
+            assert!(!debug.contains(secret));
+        }
+    }
+}
+
+#[cfg(test)]
+mod machine_approval_wire_tests {
+    use super::*;
+    // Exact main-era capability struct shape, frozen at c3c9445ee.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct MainCapabilities {
+        #[serde(default)]
+        machine: Option<nyxid_machine::MachineProfile>,
+        #[serde(default)]
+        http_cancellation: bool,
+        #[serde(default)]
+        http_signature_v2: bool,
+        #[serde(default)]
+        proxy_upload_v1: bool,
+        #[serde(default)]
+        credential_ack_correlation: bool,
+        #[serde(default)]
+        credential_target_update_v1: bool,
+        #[serde(default)]
+        remote_credential_crypto_v1: bool,
+        #[serde(default)]
+        proxy_max_body_size: Option<usize>,
+    }
+    #[test]
+    fn old_server_accepts_machine_approval_capability_and_new_reader_defaults_off() {
+        let value =
+            serde_json::json!({"http_signature_v2":true,"machine_execution_approval_v1":true});
+        let old: MainCapabilities = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.http_signature_v2);
+        let new: NodeCapabilitiesMsg = serde_json::from_value(value).unwrap();
+        assert!(new.machine_execution_approval_v1);
+        let absent: NodeCapabilitiesMsg =
+            serde_json::from_value(serde_json::json!({"http_signature_v2":true})).unwrap();
+        assert!(!absent.machine_execution_approval_v1);
     }
 }

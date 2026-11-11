@@ -92,9 +92,9 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 "scopes": scope_str,
             });
 
-            if let Some(days) = expires_in_days
-                && days > 0
-            {
+            if expires_in_days == Some(0) {
+                body["never_expires"] = Value::Bool(true);
+            } else if let Some(days) = expires_in_days {
                 let expires = chrono::Utc::now() + chrono::Duration::days(i64::from(days));
                 body["expires_at"] = Value::String(expires.to_rfc3339());
             }
@@ -136,7 +136,11 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     let name = result["name"].as_str().unwrap_or("-");
                     let key = result["full_key"].as_str().unwrap_or("-");
                     let scopes = result["scopes"].as_str().unwrap_or("-");
-                    let expires = result["expires_at"].as_str().unwrap_or("never");
+                    let expires = match result.get("expires_at") {
+                        Some(Value::Null) => "never",
+                        Some(Value::String(value)) => value.as_str(),
+                        _ => "not reported; refresh key details",
+                    };
 
                     eprintln!("API key created!");
                     eprintln!();
@@ -1096,6 +1100,46 @@ mod tests {
             })),
             "all"
         );
+    }
+
+    #[tokio::test]
+    async fn creation_omission_and_explicit_zero_have_distinct_wire_intent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "fixture", "full_key": "fixture", "expires_at": "2099-01-01T00:00:00Z"
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        for expires_in_days in [None, Some(0)] {
+            run(ApiKeyCommands::Create {
+                name: Some("lifetime".into()),
+                scopes: Some("read".into()),
+                expires_in_days,
+                allowed_services: None,
+                allowed_nodes: None,
+                allow_all_services: false,
+                allow_auto_connected_services: false,
+                allow_all_nodes: false,
+                platform: None,
+                callback_url: None,
+                org: None,
+                terminal: true,
+                no_wait: false,
+                auth: mock_auth(server.uri()),
+            })
+            .await
+            .unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        let omitted: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let explicit: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert!(omitted.get("never_expires").is_none());
+        assert!(omitted.get("expires_at").is_none());
+        assert_eq!(explicit["never_expires"], true);
+        assert!(explicit.get("expires_at").is_none());
     }
 
     #[tokio::test]

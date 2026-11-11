@@ -274,6 +274,9 @@ async fn group_recipients_dedupe_direct_members_and_exclude_orgs_and_inactive_pe
 
 fn grant_input(kind: BillingTargetKind) -> grants::IssueCreditGrantInput {
     grants::IssueCreditGrantInput {
+        amount: None,
+        service_limits: Vec::new(),
+        request_id: None,
         amount_credits: 2,
         target_kind: kind,
         target_user_ids: vec![],

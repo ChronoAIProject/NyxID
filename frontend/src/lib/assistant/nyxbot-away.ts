@@ -1,6 +1,7 @@
 import type { AssistantAgent, AssistantAgentRequest } from "@/schemas/assistant-nyxagent";
 
-const AWAY_ITEMS = 6;
+/** Rows the home shows before "Show more"; each press reveals this many more. */
+export const AWAY_PREVIEW = 6;
 
 function excerpt(text: string, length = 160): string {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -51,5 +52,5 @@ export function awayItems(agents: readonly AssistantAgent[]): AwayItem[] {
           : agent.last_reply.created_at,
     }))
     .sort((a, b) => b.at.localeCompare(a.at));
-  return [...requests, ...updates].slice(0, AWAY_ITEMS);
+  return [...requests, ...updates];
 }

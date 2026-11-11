@@ -637,7 +637,7 @@ mod tests {
             "credential_label": "Updated Key"
         });
         let req: UpdateCredentialRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.credential, "new-secret-key");
+        assert_eq!(req.credential.as_str(), "new-secret-key");
         assert_eq!(req.credential_label.as_deref(), Some("Updated Key"));
     }
 
@@ -647,7 +647,7 @@ mod tests {
             "credential": "another-key"
         });
         let req: UpdateCredentialRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.credential, "another-key");
+        assert_eq!(req.credential.as_str(), "another-key");
         assert!(req.credential_label.is_none());
     }
 }

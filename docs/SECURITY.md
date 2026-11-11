@@ -31,15 +31,15 @@ This document details NyxID's security architecture, threat mitigations, and ope
 
 ### Algorithm
 
-All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
+Server-held credential fields use **AES-256-GCM** (Galois/Counter Mode). Passwords and session tokens use hashes; account/profile metadata is not universally encrypted at the application layer:
 
-- **Key size:** 256 bits (32 bytes), provided via `ENCRYPTION_KEY` environment variable (64 hex characters)
+- **Key size:** 256 bits (32 bytes); the local KEK comes from `ENCRYPTION_KEY` (64 hex characters), while AWS/GCP KMS providers wrap DEKs through KMS
 - **Nonce:** Random 96-bit (12-byte) nonce generated per encryption operation via `OsRng`
 - **Authentication:** GCM provides authenticated encryption -- tampering is detected on decryption
 
 ### Ciphertext Formats
 
-NyxID supports three ciphertext formats. All new encryptions use v2 (envelope encryption). Decryption transparently handles all formats via a fallback chain.
+NyxID retains legacy v0/v1/v2 decoders and adds contextual v3 storage for converted field families. `CONTEXTUAL_RECORD_WRITES=false` preserves compatible legacy writes during reader rollout. After compatible readers and writers are deployed or drained, the explicit writer acknowledgement permits contextual writes. Binary adapters dispatch using stored field-version metadata: a current-format authentication failure is terminal, and a byte prefix alone cannot distinguish historical random nonces. Legacy reads remain gated by `ALLOW_LEGACY_RECORD_READS`. Conversion is still in progress; the registry and [field inventory](security/ENCRYPTED_FIELD_INVENTORY.md) identify unfinished adapters, so strict global cutover and key retirement are not yet approved.
 
 **v0 (legacy):**
 
@@ -60,13 +60,13 @@ nonce(12) || ciphertext || tag(16)
 **v2 (current -- envelope encryption):**
 
 ```
-0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(60) || data_nonce(12) || data_ciphertext || data_tag(16)
+0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(N) || data_nonce(12) || data_ciphertext || data_tag(16)
 ```
 
 - `0x02` -- version byte for envelope encryption
 - `kek_id` -- stable 1-byte identifier of the KEK that wrapped the DEK, derived from `SHA-256(kek)[0]`
-- `wrapped_dek_len` -- big-endian u16, length of the wrapped DEK blob (currently always 60)
-- `wrapped_dek` -- `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)` -- the per-record DEK encrypted with the KEK
+- `wrapped_dek_len` -- big-endian u16, length of the provider-defined wrapped DEK blob (60 bytes for the local provider; bounded at 1024 bytes)
+- `wrapped_dek` -- provider-defined wrapped key; the local provider uses `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)`
 - `data_nonce` -- random 12-byte nonce for data encryption (separate from the DEK-wrapping nonce)
 - `data_ciphertext || data_tag` -- the actual credential encrypted with the per-record DEK
 
@@ -76,7 +76,7 @@ Each v2 encryption generates a fresh random 32-byte DEK that is used once and im
 
 When decrypting, the system tries formats and keys in this order:
 
-1. If data looks like v2 (len >= 92 and byte 0 == `0x02`): unwrap DEK with current KEK, decrypt data with DEK
+1. If data looks like v2 (len >= 33 and byte 0 == `0x02`): unwrap DEK with current KEK, decrypt data with DEK
 2. If v2 and `kek_id` matches the previous KEK: unwrap DEK with previous KEK, decrypt data with DEK
 3. If data looks like v1 (len >= 30 and byte 0 == `0x01`) and `key_id` matches current key: try v1 payload with current key
 4. If v1 and `key_id` matches previous key: try v1 payload with previous key
@@ -93,10 +93,12 @@ The `rewrap()` method enables efficient KEK rotation for v2 ciphertexts without 
 
 1. Unwraps the per-record DEK with the previous KEK
 2. Re-wraps the DEK with the current KEK using a fresh random nonce
-3. Replaces only the header and wrapped DEK portion (first 64 bytes)
+3. Replaces the header and provider-defined wrapped DEK portion (64 bytes for the local provider)
 4. The data nonce, ciphertext, and authentication tag are byte-for-byte unchanged
 
 `rewrap()` is idempotent: if the ciphertext is already wrapped with the current KEK, it returns the input unchanged. It only operates on v2 envelopes; v0 and v1 data must be fully re-encrypted via `decrypt()` + `encrypt()`.
+
+The generic v2 parser minimum is 33 bytes; local-provider envelopes have 92 bytes of overhead. Wrapped-DEK sizes vary by provider. A bounded, operator-driven migration runner now ships for converted families, with durable leases/cursors, exact-source compare-and-swap (CAS) and findings. It does not provide universal lazy writeback or authorize key retirement. See [the migration procedure](#encrypted-record-migration).
 
 ### What Is Encrypted
 
@@ -109,7 +111,17 @@ The `rewrap()` method enables efficient KEK rotation for v2 ciphertexts without 
 | User provider OAuth tokens          | `user_provider_tokens`   | `access_token_encrypted`, `refresh_token_encrypted` |
 | User provider API keys              | `user_provider_tokens`   | `api_key_encrypted`                            |
 | User provider OAuth app credentials | `user_provider_credentials` | `client_id_encrypted`, `client_secret_encrypted` |
+| Unified user credentials and OAuth tokens | `user_api_keys` | `credential_encrypted`, `access_token_encrypted`, `refresh_token_encrypted`, `user_oauth_client_id_encrypted`, `user_oauth_client_secret_encrypted` |
+| Node request-signing secret | `nodes` | `signing_secret_encrypted` |
+| Assistant conversation Agent Key | `assistant_agent_credentials` | `key_ciphertext` |
+| Assistant attachments and uploads | `assistant_attachments` (both attachment and upload records) | `data_encrypted`, `text_encrypted` |
+| Saved-login credentials | `saved_logins` | `username_encrypted`, `password_encrypted`, `totp_secret_encrypted` |
+| Oracle login envelopes | `oracle_login_profiles`, `oracle_login_snapshots` | `encrypted_envelope` (existing context-bound format) |
+| Channel bot credentials | `channel_bots` | Bot tokens, webhook secrets, app secrets, registration PIN and Lark verification/encryption material |
+| OAuth broker refresh tokens | `oauth_broker_bindings` | `refresh_token_encrypted` (existing context-bound format) |
 | OAuth state secrets                 | `oauth_states`           | `code_verifier`, `device_code_encrypted`, `user_code_encrypted` |
+
+This table is a subsystem overview. The [encrypted-field inventory](security/ENCRYPTED_FIELD_INVENTORY.md) and `encrypted_record_migration::REGISTRY` include platform credentials, delivery payloads, transport credentials, trigger secrets, assistant learning fields and SSH material. Pending adapters remain implementation blockers. Configured catalog/instance default-header values use encrypted v4 adapter storage over contextual v3 envelopes; `sensitive` controls management masking. Header writes require contextual writer activation; legacy plaintext headers are accepted only by staged legacy readers until migrated. Masked edits preserve the live value, and changing a sensitive header to public requires an explicit replacement.
 
 ### Key Management
 
@@ -132,31 +144,43 @@ NyxID supports zero-downtime key rotation via the `ENCRYPTION_KEY_PREVIOUS` envi
    ```bash
    openssl rand -hex 32
    ```
-2. Set `ENCRYPTION_KEY_PREVIOUS` to the current value of `ENCRYPTION_KEY`
-3. Set `ENCRYPTION_KEY` to the newly generated key
-4. Restart all NyxID instances
+2. Prepare dual-key readers: keep `ENCRYPTION_KEY` on the old key and set `ENCRYPTION_KEY_PREVIOUS` to the new key. Deploy that configuration to every replica, without enabling new-key writes.
+3. Confirm every reader has both keys and that the selected provider supports both IDs. Alternatively drain all writers while deploying the complete reader set. Do not proceed with old-only readers.
+4. Activate new writes: set `ENCRYPTION_KEY` to the new key and `ENCRYPTION_KEY_PREVIOUS` to the old key, then roll that configuration across the prepared replicas. Both configurations can read both keys. A one-by-one new-active rollout against old-only readers is unsafe.
 5. Verify the service is healthy: `curl /health`
-6. All new encryptions now use the new key (v2 envelope format). Existing data decrypts via the fallback chain.
-7. For v2 ciphertexts: run a background job calling `rewrap()` on each record (re-wraps only the 60-byte DEK blob, data untouched). For v0/v1 ciphertexts: re-encrypt via `decrypt()` + `encrypt()`.
-8. Watch `/health` and wait until `decrypt_stats.v2_previous`, `decrypt_stats.v1_current`, `decrypt_stats.v1_previous`, `decrypt_stats.v0_current`, and `decrypt_stats.v0_previous` remain at zero for your normal workload window.
-9. Remove `ENCRYPTION_KEY_PREVIOUS` and restart once you have confirmed the old key is no longer needed.
+6. New writes use the new key and the configured compatible/contextual format. Existing data requires its explicit legacy or current-field decoder and retained provider/key. A failed contextual authentication never retries an unbound legacy decoder.
+7. Retain the previous key and follow [Encrypted Record Migration](#encrypted-record-migration). The runner migrates converted families explicitly; pending adapters block complete readiness.
+8. Review authenticated per-field findings and the complete encrypted-field inventory. Exact-source CAS protects concurrent replacements; unresolved findings require repair and another pass. Zero old-key traffic counters do not prove dormant records migrated.
+9. Remove the previous key only after all inventory/readiness blockers and retained-backup dependencies have an explicit disposition. The runner never destroys keys. Until then, do not start a second rotation.
 
 **Important:** Only one previous key is supported, so you must finish re-wrapping/re-encrypting old-key data before rotating again.
+
+### Encrypted Record Migration
+
+Prepare the [independent HMAC keyset](security/KEY_LIFECYCLE.md) before changing encryption/JWT sources. Contextual format activation is a separate reader-first cutover:
+
+1. Deploy compatible readers with `CONTEXTUAL_RECORD_WRITES=false` and `ALLOW_LEGACY_RECORD_READS=true`. Stop/drain all old readers and writers, including background producers and restartable old images.
+2. Set `CONTEXTUAL_RECORD_WRITERS_DRAINED=true` and `CONTEXTUAL_RECORD_WRITES=true` on the prepared fleet. The acknowledgement is an operator assertion; startup does not discover or stop other binaries. New contextual records cannot be read by older releases.
+3. Use `POST /api/v1/admin/encrypted-records` with `{"mode":"verify"}` or `{"mode":"migrate"}`. Both require contextual writes to be active. Save the returned generation; advance bounded batches with `POST /api/v1/admin/encrypted-records/{generation}/advance`. No migration runs automatically at startup.
+4. Inspect `GET /api/v1/admin/encrypted-records` and `/api/v1/admin/encrypted-records/findings`. Admins start/advance walks; admins/operators read status/findings. Admin-only `POST /api/v1/admin/encrypted-records/findings/{finding_id}/lookup` provides bounded record diagnostics and optional storage rewrap. Leases, cursors and exact-source CAS allow resume without overwriting a concurrent refresh, replacement or transfer. Resolve malformed, missing-key and binding failures rather than skipping them.
+5. Pending registry families prevent complete readiness. After every family has an authenticated disposition and old writers are drained, set `ALLOW_LEGACY_RECORD_READS=false`. Startup rejects strict readers with compatible writers. Retain old keys for backups and rollback readers; cloud-internal key versions require separate operator evidence even if the configured KMS resource still decrypts them.
+
+Readiness is observation evidence about the registered fields, not proof that every retained backup is independent of an old key. There is no automatic key-destruction action or universal lazy rewrap. See [ENV.md](ENV.md#contextual-encryption-writer-cutover) for the mode matrix and [the field inventory](security/ENCRYPTED_FIELD_INVENTORY.md) for coverage. Remaining field-family conversion and restriction of raw crypto entry points are tracked in #1933 and #1934.
 
 ### Key Rotation Rollback
 
 If a key rotation causes issues, you can roll back:
 
 1. Set `ENCRYPTION_KEY` back to the old key value
-2. Set `ENCRYPTION_KEY_PREVIOUS` to the new key (so any v1 data encrypted with the new key during the rotation window still decrypts)
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the new key (so v2 writes made during the rotation window still decrypt)
 3. Restart all NyxID instances
 4. Verify the service is healthy: `curl /health`
 
-Both old (v0 and v1) ciphertexts encrypted with the original key and new v1 ciphertexts encrypted during the rotation window will decrypt correctly, as long as the old key remains configured as `ENCRYPTION_KEY_PREVIOUS`.
+After rollback, the old key is active and the new key remains previous: both supported legacy records under the old key and v2 records written under the new key remain readable. Keep both across every replica and retained-backup dependency; rollback does not migrate either set.
 
 ### Memory Protection
 
-Decrypted secrets use the `zeroize` crate's `Zeroizing<Vec<u8>>` wrapper, which overwrites memory on drop. This prevents sensitive data from lingering in process memory after use.
+Key-provider DEKs and several caller buffers use `Zeroizing`, which overwrites their owned memory on drop. `EncryptionKeys::decrypt` currently returns an ordinary `Vec<u8>`; some callers copy plaintext into ordinary strings, including proxy credentials. End-to-end plaintext lifetime hardening is tracked in #1933. Zeroizing an owned buffer does not erase copies made by transport libraries or protect a live process from memory access.
 
 ---
 
@@ -187,7 +211,7 @@ NyxID enforces PKCE on two distinct OAuth flows:
 ### Token Exchange Security
 
 - **No-redirect HTTP client (SEC-H2):** Token exchange requests use a dedicated `reqwest::Client` configured with `redirect::Policy::none()`. This prevents SSRF attacks where a malicious provider could redirect the token exchange request to an internal service.
-- **Error body truncation (SEC-M5):** Error responses from providers are truncated to 200 characters before storing in the database, preventing log injection or storage exhaustion.
+- **Provider error handling:** Provider paths apply their own bounded/sanitized error handling. Proxy diagnostics exclude upstream body content. A historical 200-character truncation claim is not a general guarantee that provider text is safe to store or log.
 
 ---
 
@@ -198,10 +222,16 @@ NyxID enforces PKCE on two distinct OAuth flows:
 | Property         | Value                          |
 |------------------|--------------------------------|
 | Algorithm        | RS256 (RSA SHA-256)            |
-| Key size         | 4096-bit RSA                   |
+| Key size         | Generated RSA: 4096 bits; imported signing pairs and retained verifiers: at least 3072 bits, with matching signing pair enforced |
 | Default TTL      | 15 minutes                     |
 | Storage          | Client-side only (not in DB)   |
-| Revocation       | Short TTL; no explicit revoke  |
+| Revocation       | Live active-user/session and token-class checks; ordinary OAuth tokens require the original protected consent revision and an active client |
+
+### Signing and HMAC Key Lifecycle
+
+One active RSA pair signs tokens; `JWT_RETAINED_PUBLIC_KEY_PATHS` supplies up to sixteen verification-only public PEMs. Verification requires RS256 and a known `kid`; unknown/missing identifiers do not trigger key probing. JWKS publishes the active and retained public keys. Imported pairs must match and all imported/retained RSA keys must be at least 3072 bits; generated keys are 4096 bits.
+
+Before changing JWT or AES source material, export and adopt the unchanged independent HMAC keyset with `HMAC_KEYSET_PATH`. It preserves six existing domain keys and pins commitments durably; malformed, unreadable or mismatching configured files fail closed. This does not rotate HMAC keys or re-sign history. Follow [the key lifecycle runbook](security/KEY_LIFECYCLE.md), including weak-key cutover and backup recovery requirements. Do not replace audit/billing keys with new random overrides against existing chains.
 
 ### Refresh Tokens (NyxID-issued JWTs)
 
@@ -220,7 +250,7 @@ NyxID enforces PKCE on two distinct OAuth flows:
 | Storage            | AES-256-GCM encrypted in `user_provider_tokens` |
 | Refresh strategy   | Lazy refresh with 5-minute buffer before expiry |
 | Refresh failure    | Status set to `refresh_failed` with error msg |
-| Memory protection  | `Zeroizing` wrapper on decrypted tokens       |
+| Memory protection  | Guarded converted reads; ordinary copies remain (see Memory Protection) |
 | Disconnect cleanup | Status set to `revoked`, encrypted fields nulled |
 
 ### Session Tokens
@@ -236,10 +266,12 @@ NyxID enforces PKCE on two distinct OAuth flows:
 
 | Property         | Value                          |
 |------------------|--------------------------------|
-| Generation       | Random with `nyx_k_` prefix    |
+| Generation       | Random with `nyx_` (general) or `nyxid_ag_` (agent) prefix    |
 | Storage          | SHA-256 hash in DB             |
 | Full key         | Shown only at creation         |
 | Revocation       | Soft deactivation              |
+
+API-key scopes are enforced by authentication middleware: REST proxy access requires the applicable proxy scope, and management operations require their mapped scopes. Scope checks supplement owner/service restrictions.
 
 ---
 
@@ -296,16 +328,17 @@ Proxy paths containing `..` or `//` are rejected to prevent path traversal attac
 ### Header Allowlists
 
 **Request headers forwarded to downstream:**
-`content-type`, `accept`, `accept-language`, `accept-encoding`, `content-length`, `user-agent`, `x-request-id`, `x-correlation-id`
+`git-protocol`, `content-type`, `accept`, `accept-language`, `accept-encoding`, `user-agent`, `x-request-id`, `x-correlation-id`, `idempotency-key`, `traceparent`, `tracestate`, `last-event-id`, `prefer`, `x-trace-id`, `range`, `accept-profile`, `content-profile`, `range-unit`, `if-range`, `if-none-match`, `if-modified-since`, `http-referer`, `x-title`, `linkedin-version`, `x-restli-protocol-version`; plus `x-openclaw-*`, `x-amz-*`, `x-goog-*`, `x-openrouter-*`. Trace headers are validated. Caller `content-length` is dropped so transport can recalculate it after transforms.
 
-All other headers (including `Authorization`, `Cookie`) are stripped.
+Caller `Authorization` and `Cookie` are stripped; credential injection builds downstream authentication separately. See `ALLOWED_FORWARD_HEADERS` and `ALLOWED_FORWARD_HEADER_PREFIXES` in `proxy_service.rs` for the authoritative request list and signer-managed exclusions.
 
 **Response headers returned to client:**
-`content-type`, `content-length`, `content-encoding`, `content-language`, `content-disposition`, `cache-control`, `etag`, `last-modified`, `x-request-id`, `x-correlation-id`, `vary`, `access-control-*`
+`ALLOWED_RESPONSE_HEADERS` and `forwardable_response_header` in `backend/src/services/proxy_http_response.rs` define response filtering. The list includes `content-type`, `content-length`, `content-encoding`, `content-language`, `content-disposition`, `cache-control`, `etag`, `last-modified`, `x-request-id`, `x-correlation-id`, `accept-ranges`, `content-range`, `content-profile`, `range-unit`, `retry-after`, `preference-applied`, `location`, `operation-location`, and `content-location`. Location values have additional async/URL handling. Downstream CORS headers are not forwarded; NyxID owns CORS. See the implementation for transport-specific filtering.
+
 
 ### Body Size Limit
 
-Proxy requests are limited to 10 MB request body. The global body size limit for other endpoints is 1 MB.
+Authenticated proxy and MCP raw bodies default to 100 MiB (`PROXY_MAX_BODY_SIZE=104857600`), LLM routes to 10 MiB, and public proxy/public MCP to 1 MiB. Other routes have their own bounded limits; these are not one global proxy limit.
 
 ### Slug-Based Proxy
 
@@ -369,19 +402,19 @@ When an admin disables a user (`is_active = false`), the following are immediate
 
 Additionally, the `AuthUser` middleware extractor checks `is_active` on every request for session-based and API-key-based authentication. This means disabled users are locked out on their next request.
 
-### Known Limitation: JWT Access Token Survival
+### Online JWT Authority and Offline Limits
 
-JWT access tokens are stateless and not checked against the database. A disabled user's existing JWT access token remains valid until it expires (default: 15 minutes). This is a deliberate trade-off between performance (no DB lookup per request for JWT auth) and immediate revocation. For time-sensitive lockouts, admins should also revoke all sessions via the session revocation endpoint.
+Access JWT authentication checks the live active user. First-party access tokens require a live session; ordinary OAuth client tokens require the original protected consent revision, matching scope/service authority and an active OAuth client. Consent revocation or replacement invalidates the old revision; revoke then regrant cannot resurrect it. Machine, relay, delegated and service-account tokens retain their additional live checks. NyxID online verification and an external relying party verifying a signature offline have different revocation visibility: offline verifiers retain an expiry/cache window.
+
+Legacy ordinary OAuth access tokens without protected authority fail closed. Eligible legacy refresh records can upgrade once under the [OAuth authority rollout](security/OAUTH_AUTHORITY_ROLLOUT.md) compatibility rules. Temporary authority-store failures return retryable HTTP 503 responses; they do not require reauthorization. Delegation/callback tokens still require a coordinated drain; JWT key overlap alone does not bridge that boundary.
 
 ### Cascade User Deletion
 
-When deleting a user, a two-phase approach ensures consistency:
+Personal deletion uses a durable accepted intent and account fence, followed by a bounded, leased worker with domain progress. Preparation may reject or defer acceptance while the account remains usable. Accepted requests prevent further authority creation and remove personally owned data through the implemented domain inventory; organization-owned resources remain separate.
 
-1. **Phase 1:** Mark user as `is_active = false` (prevents authentication during cleanup)
-2. **Phase 2:** Delete related documents from 8 collections: `sessions`, `refresh_tokens`, `api_keys`, `user_service_connections`, `user_provider_tokens`, `mfa_factors`, `authorization_codes`, `oauth_states`
-3. **Phase 3:** Delete the user document itself
+Acceptance is not completion. The global token-copy admission subsystem is removed; per-owner planning and durable provider-revocation obligations replace it. Provider effects can remain pending or require operator reconciliation, and complete collection coverage, exhaustive interruption/race tests and a retained-evidence status list remain unfinished under #1930. Do not infer complete erasure from source-account absence. The [personal-erasure inventory](security/PERSONAL_ERASURE_INVENTORY.md) describes the lifecycle; the [implementation limits](SECURITY_REMEDIATION_W1_W4.md#limits) identify remaining work.
 
-Audit log entries referencing the deleted user are preserved with an orphaned `user_id` reference for traceability.
+Audit/billing evidence and required Machine lifecycle/fencing records are retained unmodified. No automatic audit purge ships today; deleting or re-signing chain rows is not part of personal erasure.
 
 ### Admin Action Audit Logging
 
@@ -451,7 +484,7 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 ### Revocation Limitations
 
 - **Refresh tokens:** Revoked immediately in the database (`revoked = true`)
-- **Access tokens:** Cannot be explicitly revoked (stateless JWTs). They expire naturally within the configured TTL (default: 15 minutes). This is a deliberate trade-off consistent with the existing session revocation model.
+- **Access tokens:** NyxID online admission checks first-party sessions or the applicable live OAuth consent revision/client, plus stronger Machine/relay/delegated fences. External relying parties validating JWTs offline cannot observe immediate database revocation. A refresh-token-only revocation and consent revocation are distinct operations.
 
 ---
 
@@ -619,7 +652,7 @@ Consent endpoints use the authenticated user's ID from the `AuthUser` middleware
 ### Consent Lifecycle
 
 - Consents are created or updated (upserted) during the OAuth authorization flow
-- Revoking a consent does not invalidate existing tokens; it only prevents automatic re-authorization on the next OAuth flow
+- Revoking consent removes its live authority and revokes refresh records. NyxID online admission rejects ordinary OAuth tokens bound to that revision; later regrant cannot resurrect them. Offline signature verification retains its expiry/cache limitation
 - Consent records include the granted scopes and optional expiration for audit purposes
 
 ---
@@ -631,7 +664,60 @@ Consent endpoints use the authenticated user's ID from the `AuthUser` middleware
 - **Algorithm:** Argon2id (recommended by OWASP)
 - **Parameters:** m=64MiB, t=3 iterations, p=4 parallelism
 - **Salt:** Random per-hash via `SaltString::generate(OsRng)`
-- **Max length:** 128 characters (prevents Argon2 DoS)
+- **Max length:** 128 UTF-8 bytes (prevents Argon2 DoS)
+
+### MFA enforcement and recovery
+
+Login MFA accepts a six-digit TOTP, a current 32-hex recovery code, or a legacy eight-character recovery code through the shared login-factor verifier. Recovery hashes use bounded Argon2 verification on a blocking pool, and redemption atomically removes the exact matching hash from the live verified factor. Only one concurrent redemption succeeds. Challenge expiry, attempt limits, owner/factor checks and account fences still apply. Enrollment verification remains TOTP-only. Recovery use emits metadata-only audit and an owner notification; codes are never included. Web, login-approval and mobile inputs support both login factors.
+
+MFA enrollment and management are independent of `EMAIL_AUTH_ENABLED` and require first-party human authority. Disable requires a live TOTP or recovery code and, for password accounts, the current password. Password proof, factor redemption and the existing `mfa_state_version` generation fence commit together. Recovery is consumed once. Enable/disable/cancellation and rejected explicit unverified authority produce metadata-only audits; disable sends an owner notification through the existing recovery notification delivery mechanism.
+
+Google, GitHub and Apple web callbacks always require NyxID MFA after the provider first factor. Mobile redirects (including Apple form_post) and native social id_token exchange resolve the code-declared `auth:mobile-mfa` flag for the signing-in person, including live org overrides. The flag defaults **off**: an MFA account receives a session explicitly marked `mfa_assured: false, mfa_exemption: "mobile_rollout"`. While off, anyone holding the account's social first factor can sign in through mobile without a code. Turning it on restores the mobile fragment challenge / OAuth `mfa_required` response; existing exempt sessions expire normally. Email/password mobile login always requires MFA. Flag resolution occurs only at sign-in, never per authenticated request. Skipped mobile MFA writes metadata-only `mfa: skipped_mobile_rollout` audit metadata: `social_login` for redirect sign-in and `social_token_exchange` for native exchange. Both paths also emit the typed `auth.mobile_mfa_exempted` telemetry event through the existing consent gates.
+
+Social challenge creation retains the live active-person/MFA account fence and dedicated five-minute challenge in one transaction. Web challenges travel only in an HttpOnly, Secure (production), SameSite=Lax cookie scoped to `/api/v1/auth/mfa`; mobile uses the callback URI fragment. Verify clears terminal cookies, retains live challenges on a wrong code, and cancellation deletes the proof. Challenge values never enter logs, audit, telemetry or web query parameters.
+
+Completed sessions distinguish verified, explicit unverified, legacy (absent/null assurance), and mobile-exempt authority through shared session policy. Cookie/bearer auth, first-party refresh and MCP fallback accept legacy and mobile-exempt devices until expiry/revocation. Only explicit `mfa_assured: false` without an exemption is rejected for an MFA account; rejection atomically revokes that session, refreshes and MCP fallback and audits once. Every new session serializes explicit assurance. Legacy sessions retain their fixed 30-day expiry. Sid-less first-party JWTs were issued only by legacy code and remain usable for their token lifetime. On first refresh of a sid-less nil-client token, a transaction binds the active token to one explicitly classified `legacy_migration` session with a fixed 30-day lifetime; rotation and retries reuse it. This ends the rolling grandfathered chain and brings revocation/sign-out-others under ordinary session controls. Parent-less legacy MCP fallback for MFA accounts expires at `created_at + SESSION_TTL_SECS` (30 days), even when its idle expiry has renewed; rejection removes the row, slots and notifications with one audit. Non-MFA MCP fallback retains its historical lifetime.
+
+Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account unless the scoped app-approved sign-in exception below is on.
+
+Existing-device exemptions by themselves never authorize a new device for MFA accounts. The app-approved sign-in preference below can permit explicit QR/manual-code approvals and their bound deliveries. Ordinary login-code minting, account code redemption and CLI token derivation still require verified authority. Authentication carries the already-loaded live account MFA policy and exact session assurance into a shared pure derivation guard, preserving the user-read count (including MCP). Current approvers receive HTTP 403 / `2003 mfa_step_up_required`, preserving their session. `POST /api/v1/auth/mfa/step-up` accepts `{ "code": "..." }` from a first-party human cookie or bearer with `sid`; API keys, service accounts, delegated/relay and OAuth-client tokens receive the standard denial. The login verifier supplies its shared per-account 10-attempt/300-second rate budget, TOTP replay protection, recovery consumption and account-generation fence. Session upgrade, exemption removal and metadata-only `mfa_step_up` audit commit in that transaction. Wrong/replayed codes return 400; accounts without MFA return 400. Web prompts retry the original action after success. Mobile shows that prompt only when `/users/me` capabilities include the flag; otherwise it directs the user to the NyxID website to verify and approve or create a login code. Request/account changes discard pending retries. No prompt auto-approves a sign-in.
+
+Rollout requires no environment variables or startup cutoff. The flag defaults off in production and tests. Existing devices keep working until normal expiry; enrollment still verifies the current identified session and transactionally signs out every other session/refresh/MCP fallback. #1970 is unreleased and is not part of v0.73.0. Production replicas at v0.73.0 or earlier never enforced session assurance, so no production replica rejects legacy sessions during this upgrade. Sessions issued by v0.73.0 replicas during a mixed rollout, including MFA-less web social sign-ins, lack assurance and upgraded replicas treat them as existing devices. Rolling back to v0.73.0 removes social MFA enforcement. Only environments that ran unreleased #1970 builds have rejecting replicas to drain. Deploy all replicas before enabling mobile MFA or deploying the step-up web UI. In-flight device codes, login codes and login approvals written by old replicas without assurance continue to fail closed; retry those sign-ins. Device delivery and browser handoff creation revalidate the persisted approval proof independently of whether its prepared session is legacy. This rollout does not backfill assurance or upgrade a legacy record into verified authority.
+
+### App-approved sign-in MFA preference
+
+The per-person **Skip MFA for NyxID app sign-ins** setting defaults on, including
+accounts without a stored preference. Only an explicit off disables it. Turning
+it back on with MFA enrolled requires a verified, identified first-party session;
+without MFA either value may be saved. A
+signed-in human can then explicitly approve QR or typed sign-in requests without
+additional TOTP from a legacy/mobile-exempt parent. Review only codes shown on
+your own screen: possession of that phone/browser session is sufficient to
+approve another login while the setting is on. API keys, service accounts,
+delegated clients and sid-less bearers cannot invoke the exception.
+
+The exception is scoped to device/Agent Key sign-in approval and app identity
+verification. Ordinary password/social MFA and standalone login-code issuance
+remain strict. Sessions preserve real MFA evidence: policy-exempt sessions have
+`mfa_assured: false` and an explicit `approved_sign_in_policy` exemption. Every
+exempt grant/proof binds the policy revision and approval/final delivery write
+fences commit with claims. Disabling blocks pending exempt grants even after
+re-enabling; completed sessions keep their fixed expiry and can be revoked.
+MFA disable preserves the choice and rotates the revision to invalidate pending
+proofs. Changes, policy cleanup and default-driven bypass use are audited.
+
+With default-off `auth:mobile-mfa`, a social first factor can establish a
+mobile-exempt session and then approve a web QR sign-in without NyxID TOTP by
+default. Turning this setting off closes that derivation path; password/social
+web login and unrelated credential issuance retain their MFA checks.
+
+Use a coordinated traffic cutover to a fully upgraded backend fleet. Default-on
+approvals write this exemption immediately; old replicas cannot deserialize it
+and may return 500 during a mixed-fleet rollout. Before
+rolling back to an older backend, revoke sessions with
+`mfa_exemption: "approved_sign_in_policy"` and drain pending exempt grants/proofs.
+See [device login](DEVICE_LOGIN_PROTOCOL.md#mfa-skip-for-app-approved-sign-ins).
+
 
 ### Cookie Security
 
@@ -652,7 +738,27 @@ Requests are authenticated in this order:
 2. `nyx_session` cookie (hashed, looked up in DB)
 3. `X-API-Key` header (hashed, looked up in DB)
 
-All methods verify the user is active before granting access.
+All methods verify the user is active before granting access. The shared session
+authority predicate accepts only authenticated-purpose rows or completed legacy
+rows. Dedicated MFA challenges, explicit pending purposes and legacy
+`user_agent = "mfa_pending"` proofs cannot authenticate as `nyx_session` cookies;
+only the dedicated MFA completion flow can redeem a live challenge.
+
+### Password changes
+
+`POST /api/v1/auth/password/change` requires verified first-party human authority
+and the current stored password. It accepts new passwords of 8–128 UTF-8 bytes,
+including the current password, and cannot create a passwordless credential.
+A transaction compares the verified hash and live active-person/not-deleting
+state, replaces the credential, clears reset tokens, and cancels pending MFA
+challenges and login approval proofs through the shared session-authority helper.
+Password-proof creation and completion fence the same user document, so a stale
+first factor cannot acquire authority after the change. Completed sessions and
+refresh authority remain valid. Reset completion instead checks the live token
+and expiry against MongoDB server time and revokes all session authority in its
+transaction. See [API.md](API.md#post-apiv1authpasswordchange)
+for errors and the [account security guide](site/web/guides/account-security.md)
+for session revocation.
 
 ### Browser CSRF Protection
 
@@ -660,13 +766,13 @@ Unsafe private API requests that look browser-originated, or that carry browser 
 
 ### API Key Scope Population
 
-When authenticating via API key, the key's configured scopes are populated into the `AuthUser.scope` field. This makes scopes available for downstream enforcement (e.g., future per-service scope requirements). Currently, no handler enforces API key scopes -- any valid API key can access all API-key-permitted endpoints. Scope enforcement is planned as a future enhancement.
+When authenticating via API key, configured scopes populate `AuthUser.scope` and are enforced by middleware and management helpers such as `ensure_management_write_scope`, together with service/node restrictions. Scope presence alone does not grant every endpoint: actor class, delegated-read restrictions, ownership and live execution authority remain applicable.
 
 ---
 
 ## HTTP Security Headers
 
-Every response includes:
+Backend security-header middleware sets the following headers on its responses. The separately served SPA and deployment edge need their own configuration; this table does not establish their headers:
 
 | Header                       | Value                                              | Purpose                    |
 |------------------------------|----------------------------------------------------|----------------------------|
@@ -693,7 +799,13 @@ Dual-layer rate limiting protects against abuse:
 | Global sustained rate    | 10/sec  | `RATE_LIMIT_PER_SECOND`      |
 | Global burst capacity    | 30      | `RATE_LIMIT_BURST`           |
 
-Rate limit state is per-instance (in-memory). For distributed deployments, consider rate limiting at the reverse proxy level.
+Password changes use
+dedicated `password_change_ip` and `password_change_user` namespaces with limits
+of 20 attempts/IP/minute and 5 attempts/account/minute. The IP comes from the
+trusted-proxy resolver. Successful changes consume attempts and do not reset
+counters; both limits run before password verification.
+
+Production global, per-IP and per-agent enforcement includes MongoDB-backed shared state. Some local guards and in-memory mechanisms remain; inspect each limiter rather than assuming all state is per-instance. Reverse-proxy limits can add another layer.
 
 ---
 
@@ -705,7 +817,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 |--------------------------------|-------------|--------------------------------------|
 | User passwords                 | Critical    | Argon2id hashing (never stored plain)|
 | Provider OAuth client secrets  | Critical    | AES-256-GCM encryption              |
-| User provider tokens           | Critical    | AES-256-GCM encryption + zeroize    |
+| User provider tokens           | Critical    | AES-256-GCM encryption; partial plaintext zeroization    |
 | Service master credentials     | Critical    | AES-256-GCM encryption              |
 | Per-user service credentials   | Critical    | AES-256-GCM encryption              |
 | MFA secrets                    | Critical    | AES-256-GCM encryption              |
@@ -733,15 +845,15 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Injection key manipulation      | Blocked injection keys list for sensitive headers    |
 | Token replay (identity JWT)     | 60-second TTL, per-service audience, unique JTI      |
 | Token replay (refresh token)    | Single-use rotation with `replaced_by` chain         |
-| Credential leakage in memory    | `zeroize` crate for secure memory cleanup            |
-| Credential leakage in logs      | Custom `Debug` impls redact secrets                  |
+| Credential leakage in memory | Owned key buffers use zeroization; ordinary plaintext copies remain (see Memory Protection) |
+| Credential leakage in logs | Identified secret-bearing types have redacted Debug; this is not a repository-wide logging guarantee |
 | Error message info leakage      | Internal errors never expose details in responses    |
-| Provider error leakage          | OAuth error bodies truncated to 200 chars            |
+| Provider error leakage | Provider paths use sanitization/metadata rules; proxy diagnostics exclude upstream bodies. Inspect each path; there is no universal 200-character guarantee |
 | Timing attacks on auth          | Constant-time comparison for token verification      |
 | Admin privilege escalation      | Self-protection checks on role/status/delete         |
 | Admin lockout                   | Cannot disable/delete own account                    |
-| Orphaned data after user delete | Cascade delete across 8 collections; audit preserved |
-| Disabled user continued access  | Session + refresh token + API key revocation on disable; JWT expires within 15 min |
+| Orphaned data after user delete | Durable accepted intent, account fence and resumable domain worker; complete inventory and remote-obligation semantics remain unfinished under #1930. Audit/billing and required Machine evidence retained |
+| Disabled user continued access | Live active-user/session checks; ordinary OAuth tokens also check their original consent revision and active client |
 | RBAC system role tampering      | System roles protected from deletion/rename; `is_system` not modifiable via API |
 | Unauthorized RBAC modification  | All RBAC endpoints require `is_admin = true` (database check, not JWT claim) |
 | Token introspection info leak   | Returns `{"active": false}` for unauthenticated callers |
@@ -759,21 +871,18 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 
 ### If ENCRYPTION_KEY Is Compromised
 
-1. Generate a new key: `openssl rand -hex 32`
-2. Set `ENCRYPTION_KEY_PREVIOUS` to the compromised key value
-3. Set `ENCRYPTION_KEY` to the new key
-4. Restart all NyxID instances (zero-downtime rotation -- existing data decrypts via the fallback chain)
-5. Run a re-encryption job to migrate all data to the new key (removes dependency on the compromised key)
-6. Once all data is re-encrypted, remove `ENCRYPTION_KEY_PREVIOUS` and restart
-7. Audit all access logs for the compromise window
+1. Contain the compromise and revoke/replace exposed upstream credentials. Rewrapping cannot protect a database copy already held by an attacker.
+2. Follow the ordered [key rotation procedure](#key-rotation), staging dual-key readers on every replica before activating new-key writes, or draining writers during reader preparation.
+3. Retain required old-key access and use the explicit [encrypted-record migration procedure](#encrypted-record-migration). The runner provides durable progress and exact-source CAS for converted families; unfinished adapters and unresolved findings block complete readiness.
+4. Retire old keys only after every required encrypted field and retained backup has an explicit disposition. Decrypt traffic counters alone are insufficient.
+5. Audit access during the compromise window and verify the recovery on the actual deployment.
 
 ### If RSA Private Key Is Compromised
 
-1. Generate a new key pair
-2. Replace key files at the configured paths
-3. Restart all NyxID instances
-4. All existing JWTs are immediately invalidated
-5. Users must re-authenticate
+1. Contain signing access and prepare independent HMAC material before changing any source from which it was derived. Preserve the matching keyset and database evidence.
+2. Generate a valid replacement pair and coordinate every verifier. For a compromise, deliberately retire the compromised public key instead of retaining normal overlap; any token signed by a retained verifier remains cryptographically valid subject to its live authority checks.
+3. Replace the active pair, remove the compromised verifier from `JWT_RETAINED_PUBLIC_KEY_PATHS`, and restart the fleet. External relying parties may retain cached JWKS until their own refresh.
+4. Revoke affected sessions/grants as appropriate and require reauthentication/reauthorization. Follow [key lifecycle preparation](security/KEY_LIFECYCLE.md) for normal overlap; an emergency retirement has different availability consequences.
 
 ### If a Provider Token Is Compromised
 
@@ -802,8 +911,8 @@ Summary of security controls by identifier (from the architecture plan):
 |--------|--------------------------------------------|---------------------------------------------|
 | SEC-H2 | No-redirect HTTP client for token exchange | `reqwest::Client` with `redirect::Policy::none()` |
 | SEC-M1 | CRLF injection prevention                 | `sanitize_header_value()` in identity_service |
-| SEC-M3 | Zeroize decrypted credentials              | `Zeroizing<Vec<u8>>` wrapper in proxy_service |
-| SEC-M5 | Error body truncation                      | 200-char limit on provider error messages   |
+| SEC-M3 | Partial plaintext zeroization | Some proxy buffers use Zeroizing; later ordinary copies remain and are tracked in #1933 |
+| SEC-M5 | Provider error containment | Path-specific sanitization; proxy diagnostics use metadata only |
 | CR-4/5/6 | N+1 query prevention                    | Batch `$in` queries for provider lookups    |
 | CR-15  | Required provider enforcement              | 400 error for missing required provider tokens |
 | DA-1   | Delegated token endpoint restriction       | Verified `AuthUser` policy plus fail-fast `reject_delegated_tokens` middleware |

@@ -497,7 +497,7 @@ revoke 选择器按 `principal / child / grant / node-runtime` 区分，覆盖�
 | provisioning/resuming → ready | 正确 Pod/Node 代在线；能力、撤权、权益/资金窗口同步；无旧 writer | 综合就绪证据后开放工作与运行计量，不能只读 Sandbox Ready |
 | ready → stopping → paused | 拒绝新工作、取消/drain 所有 writer、撤旧代凭据；设 Suspended | 当前原生停止观测后关闭可证实计费区间；Sandbox/PVC 暂定一直保留且不收暂停存储费，免费槽继续占用 |
 | paused → resuming | owner 明确恢复，重新检查资格/钱包/有效报价并预留资金；新期限与 Running；重新 bootstrap | 同 node_id、同工作盘、新 Pod/运行代；旧进程不恢复，充值不自动触发此转换 |
-| any → deleting → deleted | fence 执行，引导撤销，先停机，再按已接受数据政策删除 Sandbox/卷 | 原生 runtime、credential、PVC/PV 清理观测齐备后推进资源终态；账务分别保留，必要责任未结不能丢弃记录；资源仍存在/不明不释放槽 |
+| any → deleting → deleted | fence 执行，引导撤销，先停机，再按已接受数据政策 Foreground 删除原 Sandbox | 按[删除证据 v2](REMOTE_MACHINE_DELETE_RECOVERY.md)验证停止、原 Sandbox/已知命名空间 Pod/PVC 缺席及创建责任与账务终态；不查询 PV/attachment 或证明底层存储释放；已知对象仍存在/身份不明不释放槽 |
 | 创建/恢复失败 → failed | 记录安全错误并补偿已分配资源；未分配也需明确证据 | failed 不证明清理；ready 前失败无计算费，资源未知仍占槽 |
 | 丢响应/分区/停止未知 → reconciling | 原 operation 有界重试、读回、扫描孤儿；禁止新增 writer | 不确定费用 pending，保留相应锁；显示最近错误、操作进度和重试指引；复杂责任方/升级展示可选 |
 
@@ -595,12 +595,12 @@ P2 内部按依赖推进：先定义 `ExternalPrincipalRef`、grant/索引和授
 | J4 | 暂停→确认停止→恢复→Pod 替换 | node_id 不变、新运行代；workspace checksum 相同；HOME/临时数据与旧 job 不伪恢复；暂停仍占槽 |
 | J5 | 额外付费实例→现有账户资金结算 | 接受报价和余额付费规则，不要求 cap；按 0.000040 Credits/秒结算，运行区间进入 Billing/既有账本；资金优先级、付款记录与凭证保持原链路，无第二套钱包 |
 | J6 | 可用资金不足→停机→充值→手动恢复 | 无法预留下个窗口时拒绝新工作/续租并请求原生暂停、等待原生确认；不透支或重复消费已锁定资金，残余平台成本不追扣；充值不会自动恢复，owner 接受新报价后恢复 |
-| J7 | 删除并等待清理 | runtime/credential/Sandbox/PVC/PV 原生清理观测完整，按 CSI 实际语义处理；Node tombstone、资源与账务独立进度，存在/未知/Retain 遗留不释放相关配额 |
+| J7 | 删除并等待清理 | runtime/credential、原 Sandbox/已知命名空间 Pod/PVC 级联观测及创建责任和账务终态完整；Node tombstone、资源与账务独立进度；已知对象存在/身份未知不释放相关配额；PV/attachment/Retain 底层存储不在 Manager v2 观测范围 |
 | F1 | 并发免费创建、重复 request/CAS 冲突 | 至多一个免费占用；同键同意图单一资源，不同输入冲突，无静默付费 |
 | F2 | CR create 响应丢失、bootstrap 丢响应/私钥丢失 | 原 operation 回读同资源；独立 managed bootstrap v1 接收方密封交付或受控 rekey，无第二有效身份、明文重放或泄漏；不得引入后端 RCI 依赖。覆盖完整 Binding 篡改、错误接收方、旧 pending key 保留并拒绝、重放事务和 Python/Rust 互通。协议变更须后端与镜像协调升级，不自动替换已激活交付。 |
 | F3 | 旧 Pod 延迟回连、非计划 Pod 重建、节点分区 | 旧 epoch/runtime 拒绝；旧运行原生状态不确定则不放行新 writer；force-delete+NotFound、节点失联和归属冲突保持 pending；新 Pod 必须受控 bootstrap |
 | F4 | controller/API/Manager/Node 断联、stop 响应丢失 | 现有 lease/原生 shutdownTime 生效范围如实记录，不承诺分区独立停止；未知进 reconciling/pending，有界重试与运维升级；客户仅承担已锁定且有运行证据的费用，不收两代重叠费，不从后续充值补扣平台残余成本 |
-| F5 | PVC finalizer/CSI/PV reclaim 异常 | 观察 Sandbox/Pod/PVC/PV 及所有权/回收策略；存在/finalizer/Retain 遗留/未知不提前释放槽；不声称云盘物理擦除 |
+| F5 | PVC finalizer/CSI/PV reclaim 异常 | Manager 观察原 Sandbox/命名空间 Pod/PVC 及所有权；已知对象存在/finalizer/身份未知不提前释放槽；CSI/PV/Retain 由独立运维监控，不作为 Manager v2 完成证据，不声称云盘物理擦除 |
 | F6 | token 过期、执行撤销与 cleanup 并发 | 原清理/取消仍能完成，不能延长资源或恢复执行；A 撤权不影响 B；用户读取仍需 live ACL |
 | F7 | Node/admin/update/rotate/transfer 与 K8s 旁路 | 托管守卫、RBAC/admission 生效；拒绝转移/任意模板/管理 SA；自带 Node 不回归 |
 | F8 | guest、无 Machine grant 的 OAuth/key、假 clientInfo、跨 owner/主体、受限 purpose | 均不能获得 Machine 执行或输出；同父 Key 的有效 child 按共享 grant 访问；grant ID/confirmation URL 不是 bearer；旧签名版本拒绝 external |
@@ -672,7 +672,7 @@ P2 内部按依赖推进：先定义 `ExternalPrincipalRef`、grant/索引和授
 | A5 | 任务列表、历史与输出保留 | 保留已有 `machine_job` 单任务查询；省略 `job_id` 时新增按 Machine/状态/时间的分页列表，主体从认证推导。安全元数据包含开始/结束时间、运行代、退出码、取消者及输出保留状态，不默认保存命令或完整输出。此项是任务管理增强，外部身份所需的 JobBinding 另见 A16。 | 丢失 ID 后仍能找回获准任务；不同主体互不可见，同父 Key child 按共享 grant 访问；旧代只保留授权历史元数据，丢失的输出不误报可恢复；取消和重连不重复执行。 |
 | A6 | 工作盘用量与满盘处理 | 增加可靠工作盘容量/用量、文件写入大小限制和接近上限提示；全 Pod 临时盘指标来自可选现有监控，缺失显示未知。明确满盘时哪些操作被拒绝、是否允许删除文件、是否仍可读取和查询 job；固定盘不可扩容时必须说明恢复路径。 | 写入超过单文件限制或总容量时返回可行动的错误；满盘不会导致服务端静默覆盖、无限重试或继续产生无法解释的计费。 |
 | A7 | 余额不足后的恢复 | 展示账户可用资金、实例与服务分项费用、已结算/已预留（其中 pending）、估算可运行时间和停止原因。资金不足暂停后，owner 充值或取得适用额度，再接受新报价并明确 resume；无必填 cap/扩大预算入口。 | 充值不自动开机；恢复先检查旧责任和新窗口预留，沿用同一 Machine/工作盘且建立新运行代；客户端不能自行接受变价或重启付费资源。 |
-| A8 | 删除前确认与数据清理进度 | 删除页面必须显示不可逆警告、workspace 数据处理方式、工作盘/PV 保留或删除、job 输出和操作记录的保留期限、预计进入 `reconciling` 的条件，并要求 owner-only confirmation。删除后继续显示不含秘密的 tombstone 和清理进度，直到 runtime、credential、PVC/PV 和账务终态完成。 | 删除请求丢响应、重复确认或页面刷新不会重复删除；免费槽只有最终清理完成才释放；MVP 不提供恢复时，界面必须明确“无快照、无恢复”。 |
+| A8 | 删除前确认与数据清理进度 | 删除页面必须显示不可逆警告、workspace 数据处理方式、工作盘/PV 保留或删除、job 输出和操作记录的保留期限、预计进入 `reconciling` 的条件，并要求 owner-only confirmation。删除后继续显示不含秘密的 tombstone 和清理进度，直到适用停止、credential、原 Sandbox/已知 Pod/PVC、创建责任和账务终态完成；底层盘按回收策略处理，Manager 不证明其释放。 | 删除请求丢响应、重复确认或页面刷新不会重复删除；免费槽只有最终清理完成才释放；MVP 不提供恢复时，界面必须明确“无快照、无恢复”。 |
 | A9 | 基础并发与资源保护 | 按第 14.3、14.8 节落实固定资源、命令超时、输入/输出和缓存限额；并发按 Machine 聚合所有主体及 child，不按产品 label/session 分桶。MVP 沿用无持久队列的容量拒绝方式，超限返回可重试状态；集群容量由受控 namespace quota/准入限制。增加整机输出总量上限与到期读取检查，不增加自动扩容或升级。 | 同机工作不突破 profile，换 child/session 不能绕过限额；容量拒绝不生成已排队成功的假象；资金不足、撤权与暂停阻止新工作。无队列时不承诺排队次序或公平调度。 |
 | A10 | 网络与临时环境边界 | 在网页、MCP 工具说明和报价页明确 MVP 只有 Node 主动 WSS 和现有 gateway 能力，不提供入站 Service、公网 IP、端口映射或任意 Kubernetes 网络权限。`exec` 的 `env` 只表示单 job 临时变量，不提供持久环境变量或平台秘密注入；敏感值不能回显到 job 输出。 | 用户不会因为看到 Machine 就误以为可以公开部署端口；无入站端口或持久环境配置的请求得到明确错误，而不是创建一个隐含的公开入口。 |
 | A11 | 异步操作时间线与通知 | 对 create/resume/pause/delete、余额不足停机和清理对账提供当前状态、最近错误、操作进度与重试指引；完整时间线/责任人/升级展示可选。网页至少自动刷新；对长时间 `reconciling`、失败、余额不足停止和最终清理完成提供站内通知，通知正文不得包含命令、凭据或文件内容。 | 用户不需要反复猜测 operation 是否仍在运行；所有通知都能回到原 operation，重复通知不会产生重复动作。 |
@@ -823,7 +823,7 @@ profile 使用固定版本和受控 image digest。最终 runtime 的 PID/文件
 
 | 数据类别 | 已确认保留/清理规则 | 实施边界 |
 |---|---|---|
-| 工作盘、临时层与相关运行资源 | 明确删除后目标 24 小时内清理 Pod、Sandbox、PVC/PV/底层盘及托管凭据；暂停没有此倒计时 | 以底层清理/撤权证据完成，不仅看 CR NotFound；MVP 不提供删除恢复或快照；免费槽在完整清理/封账后释放 |
+| 工作盘、临时层与相关运行资源 | 明确删除后目标 24 小时内级联回收原 Sandbox/Pod/PVC 及撤销托管凭据；底层存储按回收策略处理，暂停没有此倒计时 | 以 v2 对象级清理、适用停止、创建责任及撤权/账务证据完成，不仅看 CR NotFound；Manager 不查询 PV/attachment 或证明磁盘擦除；MVP 不提供删除恢复或快照；免费槽在这些终态提交后释放 |
 | 任务安全元数据 | 任务确认进入终态后 30 天；保留 ID、归属、Machine/运行代、时间、状态、退出码、停止原因和输出可用状态 | 不默认保存完整命令、输入、环境变量或输出；历史可见性仍依赖当前授权。删除 Machine 不代表这些安全历史立即消失，删除页须说明 |
 | stdout/stderr 原始输出 | 仅保存在 Node 运行时内存；终态后最多 1 小时。容量淘汰、重启、暂停或 Pod 销毁可更早丢失；删除请求后立即禁止读取 | 同时执行单任务及整机缓存上限；返回可用 offset/截断/已过期原因，不宣称一小时最低保证；持久成果由用户写入 `/workspace` |
 | 用户操作时间线 | 每次 operation 终态后 90 天，仅含安全的进度、结果、重试、通知和责任引用 | 非终态操作不开始此倒计时。到期可清理用户时间线投影，但不能连带删除尚需使用的幂等、撤权、清理或结算证据 |

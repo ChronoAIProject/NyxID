@@ -7,19 +7,19 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import { nyxBotQueryKeys } from "./use-nyxbot-agents";
 
-const path = (id: string) =>
-  `/assistant/nyxagent/agents/${encodeURIComponent(id)}/operations`;
-export function useAgentOperations(id: string, enabled = true) {
+const path = (id: string, guests = false) =>
+  `/assistant/nyxagent/agents/${encodeURIComponent(id)}/${guests ? "guest-operations" : "operations"}`;
+export function useAgentOperations(id: string, enabled = true, guests = false) {
   const userId = useAuthStore((state) => state.user?.id);
   return useQuery({
-    queryKey: [...nyxBotQueryKeys.agents(userId), id, "operations"],
+    queryKey: [...nyxBotQueryKeys.agents(userId), id, guests ? "guest-operations" : "operations"],
     queryFn: async () =>
-      agentServiceOperationsSchema.array().parse(await assistantJson(path(id))),
+      agentServiceOperationsSchema.array().parse(await assistantJson(path(id, guests))),
     enabled: enabled && Boolean(userId),
     retry: false,
   });
 }
-export function useSetAgentOperations(id: string) {
+export function useSetAgentOperations(id: string, guests = false) {
   const client = useQueryClient();
   const userId = useAuthStore((state) => state.user?.id);
   return useMutation({
@@ -30,7 +30,7 @@ export function useSetAgentOperations(id: string) {
       serviceId: string;
       selection: OperationSelection;
     }) =>
-      assistantJson(`${path(id)}/${encodeURIComponent(serviceId)}`, {
+      assistantJson(`${path(id, guests)}/${encodeURIComponent(serviceId)}`, {
         method: "PUT",
         body: selection,
       }),

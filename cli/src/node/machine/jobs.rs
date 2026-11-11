@@ -438,6 +438,26 @@ impl Jobs {
         Ok(())
     }
 
+    /// Admit owner cancellation and signal under one lock. A delayed lookup
+    /// cannot start an effect after the verified management deadline.
+    pub async fn cancel_owner(&self, id: &str, owner_id: &str, deadline: Instant) -> Result<()> {
+        let jobs = self.jobs.lock().await;
+        let job = jobs.get(id).context(super::MachineError::JobNotFound)?;
+        anyhow::ensure!(
+            job.external.as_ref().is_none_or(|a| a.owner_id == owner_id),
+            super::MachineError::JobNotFound
+        );
+        anyhow::ensure!(
+            deadline > Instant::now(),
+            super::MachineError::AuthorityStale
+        );
+        if job.running.load(Ordering::Acquire) {
+            signal_group(job.pid, libc::SIGKILL);
+        }
+        job.cancel.send_replace(true);
+        Ok(())
+    }
+
     pub async fn authorize_owner(&self, id: &str, owner_id: &str) -> Result<()> {
         let jobs = self.jobs.lock().await;
         let job = jobs.get(id).context(super::MachineError::JobNotFound)?;

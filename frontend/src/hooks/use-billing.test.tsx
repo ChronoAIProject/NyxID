@@ -4,6 +4,8 @@ import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   billingUsagePath,
+  billingOwnerPath,
+  useTopUpHistory,
   useBillingUsage,
   useBillingWallet,
   useProvisionBillingWallet,
@@ -38,6 +40,8 @@ describe("billingUsagePath", () => {
   it("targets only the read-only billing usage endpoint", () => {
     expect(billingUsagePath()).toBe("/billing/usage");
     expect(billingUsagePath("7d")).toBe("/billing/usage?period=7d");
+    expect(billingUsagePath("7d", "day", "org")).toBe("/billing/usage?period=7d&bucket=day&owner_id=org");
+    expect(billingOwnerPath("/billing/bill", "org")).toBe("/billing/bill?owner_id=org");
   });
 });
 
@@ -128,6 +132,42 @@ describe("billing wallet hooks", () => {
     created: false,
   };
 
+  it("separates personal and org wallet caches, including null before explicit setup", async () => {
+    mockGet.mockImplementation((path: string) => Promise.resolve(path.includes("owner_id=") ? null : wallet));
+    mockPost.mockResolvedValue({ ...wallet, owner_id: "org", created: true });
+    const { result } = renderHook(() => ({
+      personal: useBillingWallet(), org: useBillingWallet("org"), provision: useProvisionBillingWallet(),
+    }), { wrapper: wrapperFactory() });
+    await waitFor(() => expect(result.current.org.isSuccess && result.current.personal.isSuccess).toBe(true));
+    expect(result.current.org.data).toBeNull();
+    expect(result.current.personal.data?.owner_id).toBe("owner-1");
+    result.current.provision.mutate({ owner_id: "org" });
+    await waitFor(() => expect(result.current.org.data?.owner_id).toBe("org"));
+    expect(result.current.personal.data?.owner_id).toBe("owner-1");
+    expect(mockGet).toHaveBeenCalledWith("/billing/wallet?owner_id=org");
+    expect(mockPost).toHaveBeenCalledWith("/billing/wallet", { owner_id: "org" });
+  });
+
+  it("refuses a legacy server's personal wallet response on an org query", async () => {
+    mockGet.mockResolvedValue(wallet);
+    const { result } = renderHook(() => useBillingWallet("org"), { wrapper: wrapperFactory() });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
+
+  it("never displays the previous owner's top-up history while switching owners", async () => {
+    mockGet.mockImplementation((path: string) => path.includes("owner_id=org-b")
+      ? new Promise(() => {})
+      : Promise.resolve({ owner_id: "org-a", topups: [], total: 7 }));
+    const { result, rerender } = renderHook(({ owner }) => useTopUpHistory(1, 10, "all", owner), {
+      initialProps: { owner: "org-a" }, wrapper: wrapperFactory(),
+    });
+    await waitFor(() => expect(result.current.data?.total).toBe(7));
+    rerender({ owner: "org-b" });
+    expect(result.current.data).toBeUndefined();
+    expect(mockGet).toHaveBeenCalledWith("/billing/topups?page=1&per_page=10&period=all&owner_id=org-b");
+  });
+
   it("fetches and validates the billing wallet", async () => {
     mockGet.mockResolvedValue(wallet);
 
@@ -180,5 +220,44 @@ describe("billing wallet hooks", () => {
       idempotency_key: "topup-12345678",
     });
     expect(result.current.data?.checkout_url).toBe("https://checkout.example.com/session");
+  });
+});
+
+describe("bill queries", () => {
+  it("fetches the personal bill and paginated subscription invoices", async () => {
+    const { useCurrentBill, useBillingInvoices } =
+      await import("./use-billing");
+    const { currentBill, usageInvoices } =
+      await import("@/test/billing-bill-fixture");
+    mockGet.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.startsWith("/billing/invoices") ? usageInvoices : currentBill,
+      ),
+    );
+    const { result } = renderHook(
+      () => ({ bill: useCurrentBill(), invoices: useBillingInvoices(2) }),
+      { wrapper: wrapperFactory() },
+    );
+    await waitFor(() =>
+      expect(
+        result.current.bill.isSuccess && result.current.invoices.isSuccess,
+      ).toBe(true),
+    );
+    expect(mockGet).toHaveBeenCalledWith("/billing/bill");
+    expect(mockGet).toHaveBeenCalledWith(
+      "/billing/invoices?page=2&per_page=10",
+    );
+  });
+  it("respects the rollout gate", async () => {
+    const { useCurrentBill, useBillingInvoices } =
+      await import("./use-billing");
+    renderHook(
+      () => ({
+        bill: useCurrentBill(false),
+        invoices: useBillingInvoices(1, false),
+      }),
+      { wrapper: wrapperFactory() },
+    );
+    expect(mockGet).not.toHaveBeenCalled();
   });
 });

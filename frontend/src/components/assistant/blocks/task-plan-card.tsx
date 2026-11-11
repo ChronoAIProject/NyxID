@@ -1,5 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import {
   Check,
   Circle,
@@ -53,6 +55,7 @@ function words(value: string): string {
 }
 
 function StepIcon({ status }: { readonly status: ChatTaskStepStatus }) {
+  useUiTranslation();
   const className = `h-3.5 w-3.5 shrink-0 ${STATUS_STYLE[status]}`;
   switch (status) {
     case "running":
@@ -90,7 +93,7 @@ function effectStyle(effect: ChatExternalEffect): string {
 }
 
 function StepDetails({ step }: { readonly step: ChatActorStep }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const sourceDetail =
     step.source.kind === "tool" && step.source.serviceSlug
       ? `${step.source.label} / ${step.source.serviceSlug}`
@@ -112,35 +115,35 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
   return (
     <div className="min-w-0 flex-1">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 break-words text-12 font-medium text-foreground">
+        <span className="min-w-0 break-words type-row-title text-foreground">
           {step.description}
         </span>
         <span
-          className={`text-10 font-medium ${STATUS_STYLE[step.status]}`}
+          className={`type-group-label ${STATUS_STYLE[step.status]}`}
         >
           {words(step.status)}
         </span>
         <span
-          className={`rounded border px-1.5 py-0.5 text-9 font-medium ${effectStyle(step.externalEffect)}`}
+          className={`rounded border px-1.5 py-0.5 type-group-label ${effectStyle(step.externalEffect)}`}
         >
           {words(step.externalEffect)}
         </span>
       </div>
-      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-10 text-text-tertiary">
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-12 text-text-tertiary">
         <span>{sourceDetail}</span>
         {step.estimate ? <span>~{step.estimate.seconds}s</span> : null}
         {step.addedInPlanRevision ? (
-          <span>{t("revision ")}{step.addedInPlanRevision}</span>
+          <span>{translateUi("revision ")}{step.addedInPlanRevision}</span>
         ) : null}
       </div>
       {operationDetail ? (
-        <div className="mt-1.5 break-words rounded bg-overlay px-2 py-1 font-mono text-9 text-muted-foreground">
+        <div className="mt-1.5 break-words rounded bg-overlay px-2 py-1 font-mono text-12 text-muted-foreground">
           {operationDetail}
         </div>
       ) : null}
       {step.source.kind === "condition" ? (
-        <div className="mt-1.5 text-10 text-muted-foreground">
-          {step.source.condition.observedValue}{t(" gte")}{" "}
+        <div className="mt-1.5 text-12 text-muted-foreground">
+          {step.source.condition.observedValue}{translateUi(" gte")}{" "}
           {step.source.condition.effectiveThreshold}
           {" / "}
           {step.source.condition.thresholdOrigin}
@@ -149,7 +152,7 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
         </div>
       ) : null}
       {step.guard ? (
-        <div className="mt-1 text-10 text-muted-foreground">{t("Guard ")}{step.guard.conditionStepId}: {step.guard.requiredOutcome}
+        <div className="mt-1 text-12 text-muted-foreground">{translateUi("Guard ")}{step.guard.conditionStepId}: {step.guard.requiredOutcome}
         </div>
       ) : null}
       {step.substeps.length > 0 ? (
@@ -157,7 +160,7 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
           {step.substeps.map((substep) => (
             <li
               key={substep.substepId}
-              className="flex min-w-0 items-center gap-1.5 text-10 text-muted-foreground"
+              className="flex min-w-0 items-center gap-1.5 text-12 text-muted-foreground"
             >
               {substep.status === "done" ? (
                 <Check className="h-3 w-3 shrink-0 text-success" />
@@ -172,14 +175,14 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
         </ul>
       ) : null}
       {step.approvalObservation ? (
-        <div className="mt-1.5 flex items-center gap-1.5 text-10 text-muted-foreground">
+        <div className="mt-1.5 flex items-center gap-1.5 text-12 text-muted-foreground">
           <ShieldCheck className="h-3 w-3 shrink-0" />
           {step.approvalObservation.decisionMode} /{" "}
           {words(step.approvalObservation.receiptStatus)}
         </div>
       ) : null}
       {step.safeMessage ? (
-        <p className="mt-1.5 break-words text-10 text-destructive">
+        <p className="mt-1.5 break-words text-12 text-destructive">
           {step.safeMessage}
         </p>
       ) : null}
@@ -202,7 +205,7 @@ export function TaskPlanCard({
   readonly onSkip: (stepId: string) => Promise<void>;
   readonly onResolve: (confirmed: boolean) => Promise<void>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [pending, setPending] = useState<TaskControl | null>(null);
   const plan = block.plan;
   const canStop = plan.steps.some((step) => step.availableActions.stop);
@@ -221,30 +224,31 @@ export function TaskPlanCard({
 
   return (
     <section
-      aria-label={t("Task plan")}
-      className="overflow-hidden rounded-lg border border-border bg-card shadow-sm"
+      aria-label={translateUi("Task plan")}
+      className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-lg border border-border bg-card shadow-sm`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border bg-overlay/50 px-3 py-2.5">
         <div className="min-w-0 flex-1">
-          <h3 className="break-words text-12 font-semibold text-foreground">
+          <h3 className="break-words type-body-strong text-foreground">
             {plan.title}
           </h3>
-          <p className="mt-0.5 text-10 text-text-tertiary">{t("Revision ")}{plan.planRevision}{t(" / state ")}{block.state_version}{t(" / sequence ")}{block.progress_sequence}
+          <p className="mt-0.5 text-12 text-text-tertiary">{translateUi("Revision ")}{plan.planRevision} / state {block.state_version} /
+            sequence {block.progress_sequence}
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          <span className="rounded border border-border bg-background px-1.5 py-0.5 text-9 font-medium text-muted-foreground">
+          <span className="rounded border border-border bg-background px-1.5 py-0.5 type-group-label text-muted-foreground">
             {words(plan.status)}
           </span>
           {plan.gate ? (
-            <span className="rounded border border-warning/25 bg-warning/[0.07] px-1.5 py-0.5 text-9 font-medium text-warning">
-              {plan.gate.mode} / {plan.gate.status ?? t("ready")}
+            <span className="rounded border border-warning/25 bg-warning/[0.07] px-1.5 py-0.5 type-group-label text-warning">
+              {plan.gate.mode} / {plan.gate.status ?? translateUi("ready")}
             </span>
           ) : null}
         </div>
       </div>
       {plan.gate?.reason ? (
-        <p className="border-b border-border px-3 py-2 text-10 leading-relaxed text-muted-foreground">
+        <p className="border-b border-border px-3 py-2 text-12 text-muted-foreground">
           {plan.gate.reason}
         </p>
       ) : null}
@@ -263,7 +267,7 @@ export function TaskPlanCard({
               <Loader2 className="animate-spin" />
             ) : (
               <Check />
-            )}{t("Confirm plan")}</Button>
+            )}{translateUi("Confirm plan")}</Button>
           <Button
             type="button"
             size="sm"
@@ -275,7 +279,7 @@ export function TaskPlanCard({
               <Loader2 className="animate-spin" />
             ) : (
               <X />
-            )}{t("Reject plan")}</Button>
+            )}{translateUi("Reject plan")}</Button>
         </div>
       ) : null}
       <ol className="divide-y divide-border">
@@ -286,7 +290,7 @@ export function TaskPlanCard({
           >
             <div className="flex flex-col items-center gap-1 pt-0.5">
               <StepIcon status={step.status} />
-              <span className="font-mono text-9 text-text-tertiary">
+              <span className="font-mono text-12 text-text-tertiary">
                 {step.order}
               </span>
             </div>
@@ -300,7 +304,7 @@ export function TaskPlanCard({
                       size="sm"
                       variant="outline"
                       disabled={disabled || pending !== null}
-                      aria-label={t("Retry {{description}}", { description: step.description })}
+                      aria-label={translateUi("Retry {{value1}}", { value1: step.description })}
                       onClick={() =>
                         void run(`retry:${step.stepId}`, () =>
                           onRetry(step.stepId),
@@ -311,7 +315,7 @@ export function TaskPlanCard({
                         <Loader2 className="animate-spin" />
                       ) : (
                         <Redo2 />
-                      )}{t("Retry")}</Button>
+                      )}{translateUi("Retry")}</Button>
                   ) : null}
                   {step.availableActions.skip ? (
                     <Button
@@ -319,7 +323,7 @@ export function TaskPlanCard({
                       size="sm"
                       variant="outline"
                       disabled={disabled || pending !== null}
-                      aria-label={t("Skip {{description}}", { description: step.description })}
+                      aria-label={translateUi("Skip {{value1}}", { value1: step.description })}
                       onClick={() =>
                         void run(`skip:${step.stepId}`, () =>
                           onSkip(step.stepId),
@@ -330,7 +334,7 @@ export function TaskPlanCard({
                         <Loader2 className="animate-spin" />
                       ) : (
                         <Minus />
-                      )}{t("Skip")}</Button>
+                      )}{translateUi("Skip")}</Button>
                   ) : null}
                 </div>
               ) : null}
@@ -351,7 +355,7 @@ export function TaskPlanCard({
               <Loader2 className="animate-spin" />
             ) : (
               <Square className="fill-current" />
-            )}{t("Stop task")}</Button>
+            )}{translateUi("Stop task")}</Button>
         </div>
       ) : null}
     </section>

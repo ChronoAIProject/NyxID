@@ -377,7 +377,7 @@ export function LoginPermissionPicker({
             <Button
               variant="link"
               size="sm"
-              className="h-auto px-0 py-1 text-11"
+              className="h-auto px-0 py-1 text-11 unthemed:text-11"
               disabled={disabled}
               onClick={() => onChange(linkFilters)}
             >{t("Reset to link filters")}</Button>
@@ -389,7 +389,7 @@ export function LoginPermissionPicker({
               variant="link"
               size="sm"
               disabled={disabled}
-              className="h-auto px-0 py-1 text-11"
+              className="h-auto px-0 py-1 text-11 unthemed:text-11"
               onClick={() =>
                 onChange({
                   permissions: [],

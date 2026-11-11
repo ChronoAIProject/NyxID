@@ -197,6 +197,9 @@ async fn oracle_enrollment_revalidates_membership_rejoin_rotation_disable_and_fo
         .await
         .unwrap();
     assert!(authenticate(&db, &rejoined).await.is_err());
+    let pool = crate::services::oracle_pool_service::get_pool(&db, &pool.id)
+        .await
+        .unwrap();
     assert!(matches!(
         enroll(&db, &actor, &pool, &instance, None, &rejoined).await,
         Err(AppError::OracleWorkerCredentialRenewalRequired)
@@ -407,16 +410,35 @@ async fn oracle_enrollment_isolated_from_saved_login_material_and_legacy_fanout(
         Err(AppError::OracleWorkerCapabilityUnsupported(_))
     ));
     let state = crate::test_utils::test_app_state(db.clone());
+    let input = crate::services::oracle_login_snapshot_service::CreateLoginSnapshotInput {
+        format_version: 1,
+        worker_token_sha256: zeroize::Zeroizing::new(pool.worker_token_hash.clone()),
+        sealed_envelope: zeroize::Zeroizing::new(b"opaque-test-login-envelope".to_vec()),
+    };
+    assert!(matches!(
+        crate::services::oracle_login_snapshot_service::create_and_fanout(
+            &db,
+            &state.encryption_keys,
+            &pool,
+            &actor,
+            input.clone()
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert_eq!(
+        db.collection::<Document>(crate::models::oracle_login_snapshot::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     let fanout = crate::services::oracle_login_snapshot_service::create_and_fanout(
         &db,
         &state.encryption_keys,
         &pool,
-        &actor,
-        crate::services::oracle_login_snapshot_service::CreateLoginSnapshotInput {
-            format_version: 1,
-            worker_token_sha256: zeroize::Zeroizing::new(pool.worker_token_hash.clone()),
-            sealed_envelope: zeroize::Zeroizing::new(b"opaque-test-login-envelope".to_vec()),
-        },
+        &pool.user_id,
+        input,
     )
     .await
     .unwrap();

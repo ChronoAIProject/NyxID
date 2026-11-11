@@ -164,6 +164,7 @@ function conversation(id: string, title: string, model: string, now: string): Ny
 
 function emptyHistory(id: string, title: string, model: string, now: string): NyxAgentHistory {
   return {
+    cma_operations: [],
     conversation: conversation(id, title, model, now),
     messages: [],
     acknowledgements: [],
@@ -527,6 +528,16 @@ export class NyxAgentHttpFixtures {
       return;
     }
     const acknowledgements = row.history.acknowledgements;
+    if (["Review formatting and receipt", "Review **literal** formatting and receipt"].includes(text)) {
+      acknowledgements.push(acknowledgement({
+        kind: "skills", status: "allowed", decided_by: "access_mode",
+        summary: "Formatting proposal approved",
+        creation_turn_id: row.history.conversation.active_turn!.turn_id,
+        decided_at: new Date().toISOString(),
+      }));
+      row.reply = "**Formatting reviewed**\n\n`  inline  code  ` and keep  repeated spaces.\n\n```ts\nconst answer = 42;\n```\n<function_calls><invoke name=\"private_tool\">hidden arguments</invoke></function_calls>";
+      return;
+    }
     if (text === "Show the lobby camera") {
       // The camera tool returns an image during the turn; the server attaches it.
       row.history.conversation.active_turn!.attachments = [
@@ -599,11 +610,11 @@ export class NyxAgentHttpFixtures {
       return;
     }
     const previous = acknowledgements.at(-1);
-    const confirmed = /^Confirmed: .*\(acknowledgement_id ([0-9a-f-]{36})\)\. Retry it now\.$/m.exec(
+    const confirmed = /^Confirmed: .*\(acknowledgement_id ([0-9a-f-]{36})\)\. Retry it now\./m.exec(
       text,
     );
     if (text === "Delete agent key ci-bot") {
-      if (this.settings.skip_destructive_confirmation) {
+      if ((this.settings.access_mode ?? (this.settings.skip_destructive_confirmation ? "autopilot" : "nyxmode")) === "autopilot") {
         row.reply = "Deleted agent key ci-bot.";
         return;
       }
@@ -831,6 +842,16 @@ export class NyxAgentHttpFixtures {
       this.save();
       return json({ disconnected: row.id, platform: row.platform, gateway_released: true });
     }
+    if (method === "PATCH" && typeof body().private_chat_posts === "boolean") {
+      row.private_chat_posts = body().private_chat_posts as boolean;
+      if (body().apply_to_existing === true) {
+        for (const chat of this.chats) {
+          if (chat.channel_agent_id === row.id && chat.kind === "private" && !chat.parent_chat_id) chat.allow_posts = row.private_chat_posts;
+        }
+      }
+      this.save();
+      return json({ channel_agent_id: row.id, private_chat_posts: row.private_chat_posts });
+    }
     if (method === "PATCH" && body().private_chats !== undefined) {
       const access = body().private_chats;
       if (access !== "owner" && access !== "everyone") {
@@ -925,6 +946,7 @@ export class NyxAgentHttpFixtures {
         agent_id: null,
         org_id: null,
         private_chats: "owner",
+        private_chat_posts: false,
         delivery_status: null,
         delivery_error: null,
         delivery_reason: null,
@@ -1519,6 +1541,7 @@ export class NyxAgentHttpFixtures {
         attachment_ids?: string[];
         text: string;
         model?: string;
+        acknowledgement_id?: string;
       };
       if (request.conversation_id && request.agent_id) {
         return failure(400, "agent_id only applies to new threads");
@@ -1559,6 +1582,9 @@ export class NyxAgentHttpFixtures {
       };
       this.push(row, "user", request.text, turn);
       const userMessage = row.history.messages.at(-1)!;
+      if (request.acknowledgement_id && globalThis.__nyxidAssistantHttpFaults?.markContinuations) {
+        userMessage.continuation_of = request.acknowledgement_id;
+      }
       userMessage.attachments = (request.attachment_ids ?? []).flatMap((attachmentId) => {
         const upload = this.uploads.get(`conversations/${id}/${attachmentId}`);
         return upload ? [upload.item] : [];
@@ -1587,7 +1613,10 @@ export class NyxAgentHttpFixtures {
           if (current.notice) {
             emit("turn.notice", { code: "context_reset", message: "Context reset" });
           }
-          emit("block.delta", { block_id: block, text: "Your connected services" });
+          emit("block.delta", {
+            block_id: block,
+            text: globalThis.__nyxidAssistantHttpFaults?.partialText ?? "Your connected services",
+          });
           timer = setInterval(() => {
             if (current.settleAt && current.settleAt <= Date.now()) this.settle(current);
             if (current.history.conversation.active_turn?.turn_id === turn) return;

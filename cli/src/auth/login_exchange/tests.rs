@@ -53,6 +53,7 @@ fn destination_normalization_and_error_contract() {
         LoginError::Unsupported,
         LoginError::Storage,
         LoginError::InputUnavailable,
+        LoginError::MfaStepUpRequired,
     ];
     let codes: std::collections::HashSet<_> = errors.iter().map(|e| e.exit_code()).collect();
     let names: std::collections::HashSet<_> = errors.iter().map(|e| e.code()).collect();
@@ -77,39 +78,42 @@ fn request_lock_serializes_processes_and_releases_on_drop() {
 
 #[test]
 fn pending_file_is_protected_and_terminal_states_erase_poll_secret() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("request.json");
-    let mut pending = PendingLogin {
-        version: 1,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        next_poll_at: None,
-        base_url: "https://example.com".into(),
-        profile: Some("agent".into()),
-        flow: "device".into(),
-        device_code: "private-poll-secret".into(),
-        expires_at: Utc::now() + Duration::minutes(10),
-        interval: 5,
-        state: "pending".into(),
-    };
-    save_pending(&path, &pending).unwrap();
-    assert_eq!(
-        load_pending(&path).unwrap().device_code,
-        "private-poll-secret"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+    for kind in [LoginError::Denied, LoginError::MfaStepUpRequired] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("request.json");
+        let mut pending = PendingLogin {
+            version: 1,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            next_poll_at: None,
+            base_url: "https://example.com".into(),
+            profile: Some("agent".into()),
+            flow: "device".into(),
+            device_code: "private-poll-secret".into(),
+            expires_at: Utc::now() + Duration::minutes(10),
+            interval: 5,
+            state: "pending".into(),
+        };
+        save_pending(&path, &pending).unwrap();
         assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
+            load_pending(&path).unwrap().device_code,
+            "private-poll-secret"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(finish_error(&path, &mut pending, kind).is_err());
+        assert_eq!(state_error(&load_pending(&path).unwrap().state), kind);
+        assert!(
+            !fs::read_to_string(path)
+                .unwrap()
+                .contains("private-poll-secret")
         );
     }
-    assert!(finish_error(&path, &mut pending, LoginError::Denied).is_err());
-    assert!(
-        !fs::read_to_string(path)
-            .unwrap()
-            .contains("private-poll-secret")
-    );
 }
 
 #[test]
@@ -183,6 +187,7 @@ async fn non_json_rate_limit_response_preserves_rate_limited_code() {
 async fn normal_login_outcomes_keep_legacy_json_without_diagnostics() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
     for (code, kind) in [
+        (2003, LoginError::MfaStepUpRequired),
         (11202, LoginError::Pending),
         (11903, LoginError::Pending),
         (11204, LoginError::Denied),
@@ -212,6 +217,9 @@ async fn normal_login_outcomes_keep_legacy_json_without_diagnostics() {
         assert_eq!(error.kind, kind);
         assert!(error.diagnostic.is_none());
         let legacy = match kind {
+            LoginError::MfaStepUpRequired => {
+                r#"{"error":{"code":"mfa_step_up_required","message":"Verify the approving session with your authenticator, then start a new login or generate a fresh login code."}}"#
+            }
             LoginError::Pending => {
                 r#"{"error":{"code":"login_pending","message":"Login is awaiting approval; resume this request later."}}"#
             }

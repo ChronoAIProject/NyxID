@@ -1,5 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useWizardTranslation } from "@/i18n/wizard";
 // Upstream OAuth scope picker (NyxID#917 follow-up).
 //
 // Renders a provider's curated `scope_catalog` as selectable pills with the
@@ -145,7 +145,7 @@ export function UpstreamScopePicker({
   providerName,
   platformAllowlist,
 }: UpstreamScopePickerProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [customInput, setCustomInput] = useState("");
   const selection = includeRequiredScopes(value, catalog);
   const required = new Set(
@@ -197,7 +197,7 @@ export function UpstreamScopePicker({
       const blocked = parsed.filter((s) => !allowset.has(s));
       if (blocked.length > 0) {
         setCustomError(
-          t("{{scopes}} — not available on NyxID's shared app. Use your own OAuth app to request these permissions.", { scopes: blocked.join(", ") }),
+          `${blocked.join(", ")} — not available on NyxID's shared app. Use your own OAuth app to request ${blocked.length > 1 ? "these" : "it"}.`,
         );
         return;
       }
@@ -213,9 +213,9 @@ export function UpstreamScopePicker({
 
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-xs">{t("Scopes")}</Label>
+      <Label>{translateUi("Scopes")}</Label>
       {pills.length > 0 ? (
-        <div role="group" aria-label={t("Scopes")} className="flex flex-wrap gap-1.5">
+        <div role="group" aria-label={translateUi("Scopes")} className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
             const isRequired = required.has(p.scope);
             const gated = isGated(p.scope, p.locked);
@@ -228,18 +228,18 @@ export function UpstreamScopePicker({
                 disabled={p.locked || isRequired || gated}
                 title={
                   gated
-                    ? t("{{scope}} — available only with your own OAuth app", { scope: p.description ?? p.scope })
+                    ? translateUi("{{value1}} — available only with your own OAuth app", { value1: p.description ?? p.scope })
                     : isRequired
-                      ? t("{{scope}} — required for this service", { scope: p.description ?? p.scope })
+                      ? translateUi("{{value1}} — required for this service", { value1: p.description ?? p.scope })
                       : p.locked
-                        ? t("{{scope}} — already granted; can't be removed here", { scope: p.description ?? p.scope })
+                        ? translateUi("{{value1}} — already granted; can't be removed here", { value1: p.description ?? p.scope })
                         : (p.description ?? p.scope)
                 }
                 onClick={() => {
                   toggle(p.scope);
                 }}
                 className={
-                  "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-12 transition-colors " +
+                  "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-14 transition-colors " +
                   (gated
                     ? "cursor-not-allowed border-dashed border-border/60 bg-transparent text-muted-foreground/50"
                     : p.locked || isRequired
@@ -259,18 +259,18 @@ export function UpstreamScopePicker({
                       aria-hidden="true"
                       className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
                     />
-                    <span className="sr-only">{t("(write or admin access) ")}</span>
+                    <span className="sr-only">{translateUi("(write or admin access) ")}</span>
                   </>
                 ) : null}
                 <span className="truncate">{p.label}</span>
                 {gated ? (
-                  <span className="shrink-0 text-11 italic text-text-tertiary">{t("own app")}</span>
+                  <span className="shrink-0 text-13 italic text-text-tertiary">{translateUi("own app")}</span>
                 ) : isRequired ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">{t("required")}</span>
+                  <span className="shrink-0 text-13 text-muted-foreground">{translateUi("required")}</span>
                 ) : p.locked ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">{t("granted")}</span>
+                  <span className="shrink-0 text-13 text-muted-foreground">{translateUi("granted")}</span>
                 ) : p.isDefault ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">{t("default")}</span>
+                  <span className="shrink-0 text-13 text-muted-foreground">{translateUi("default")}</span>
                 ) : null}
                 {isOn && !p.locked && !isRequired ? (
                   <X className="h-3 w-3 shrink-0 opacity-50 group-hover:opacity-100" />
@@ -282,16 +282,16 @@ export function UpstreamScopePicker({
       ) : null}
 
       {pills.some((p) => p.sensitive) ? (
-        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
           <span
             aria-hidden="true"
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
-          />{t("Dot marks a write or admin-level scope.")}</p>
+          />{translateUi("Dot marks a write or admin-level scope.")}</p>
       ) : null}
 
       {allowset !== null && pills.some((p) => isGated(p.scope, p.locked)) ? (
-        <p className="text-11 text-muted-foreground">{t("Scopes marked “own app” aren’t offered on NyxID’s shared")}{" "}
-          {providerName ?? t("provider")}{t(" app. Connect with your own OAuth app to request them.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Scopes marked “own app” aren’t offered on NyxID’s shared")}{" "}
+          {providerName ?? translateUi("provider")}{translateUi(" app. Connect with your own OAuth app to request them.")}</p>
       ) : null}
 
       <div className="flex items-center gap-1.5">
@@ -310,7 +310,7 @@ export function UpstreamScopePicker({
           placeholder={customPlaceholder}
           autoComplete="off"
           spellCheck={false}
-          className="h-9 text-12"
+          className="h-9 text-14"
         />
         <Button
           type="button"
@@ -319,41 +319,41 @@ export function UpstreamScopePicker({
           disabled={customInput.trim().length === 0}
           className="h-9 shrink-0 px-3"
         >
-          <Plus className="h-3.5 w-3.5" />{t("Add")}</Button>
+          <Plus className="h-3.5 w-3.5" />{translateUi("Add")}</Button>
       </div>
       {customError ? (
-        <p className="text-11 text-destructive">{translateUi(customError)}</p>
+        <p className="text-13 text-destructive">{translateUi(customError)}</p>
       ) : null}
       {grantedSet && hasChanges ? (
-        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-12">
-          <span className="text-11 font-medium uppercase tracking-wide text-muted-foreground">{t("Changes")}</span>
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-14">
+          <span className="type-secondary-emphasis uppercase tracking-wide text-muted-foreground">{translateUi("Changes")}</span>
           {added.length > 0 ? (
             <p className="text-foreground">
-              <span className="text-success">{t("+ Adding:")}</span>{" "}
+              <span className="text-success">{translateUi("+ Adding:")}</span>{" "}
               {added.map(labelFor).join(", ")}
             </p>
           ) : null}
           {removed.length > 0 ? (
             <>
               <p className="text-foreground">
-                <span className="text-destructive">{t("− Removing:")}</span>{" "}
+                <span className="text-destructive">{translateUi("− Removing:")}</span>{" "}
                 {removed.map(labelFor).join(", ")}
               </p>
-              <p className="text-11 text-warning">{t("Removing a permission re-authorizes this connection and will stop any app that relies on it. NyxID will use only the remaining permissions; the old access at")}{" "}
-                {providerName ?? t("the provider")}{t(" stays until you revoke it there.")}</p>
+              <p className="text-13 text-warning">{translateUi("Removing a permission re-authorizes this connection and will stop any app that relies on it. NyxID will use only the remaining permissions; the old access at")}{" "}
+                {providerName ?? translateUi("the provider")}{translateUi(" stays until you revoke it there.")}</p>
             </>
           ) : null}
         </div>
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {locked.size > 0
-          ? t("Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above.")
+          ? translateUi("Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above.")
           : grantedSet
-            ? t("Tick to add a permission, untick to remove one, then update. Changes re-authorize this connection at the provider.")
+            ? translateUi("Tick to add a permission, untick to remove one, then update. Changes re-authorize this connection at the provider.")
             : pills.length > 0
-              ? t("Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them.")
-              : t("Comma- or space-separated. The upstream provider decides whether to grant them.")}
+              ? translateUi("Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them.")
+              : translateUi("Comma- or space-separated. The upstream provider decides whether to grant them.")}
       </p>
     </div>
   );

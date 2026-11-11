@@ -11,7 +11,7 @@ pub const COLLECTION_NAME: &str = "org_invites";
 /// Distinct from [`crate::models::invite_code::InviteCode`] which gates
 /// new-user signup. Org invites are scoped to an existing org, single-use,
 /// and have a TTL enforced via a MongoDB TTL index on `expires_at`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrgInvite {
     #[serde(rename = "_id")]
     pub id: String,
@@ -43,6 +43,20 @@ pub struct OrgInvite {
     pub redeemed_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OrgInvite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrgInvite")
+            .field("id", &self.id)
+            .field("org_user_id", &self.org_user_id)
+            .field("nonce", &"[REDACTED]")
+            .field("role", &self.role)
+            .field("created_by", &self.created_by)
+            .field("expires_at", &self.expires_at)
+            .field("redeemed_by", &self.redeemed_by)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OrgInvite {
@@ -79,6 +93,25 @@ mod tests {
     #[test]
     fn collection_name() {
         assert_eq!(COLLECTION_NAME, "org_invites");
+    }
+
+    #[test]
+    fn debug_redacts_raw_invite_capability_but_preserves_metadata_and_wire_storage() {
+        let mut invite = make_invite();
+        invite.nonce = "distinctive-one-time-invite-capability".into();
+        for output in [format!("{invite:?}"), format!("{invite:#?}")] {
+            assert!(!output.contains(&invite.nonce));
+            assert!(output.contains(&invite.org_user_id));
+        }
+        assert_eq!(
+            bson::to_document(&invite).unwrap().get_str("nonce"),
+            Ok(invite.nonce.as_str())
+        );
+        assert!(
+            serde_json::to_string(&invite)
+                .unwrap()
+                .contains(&invite.nonce)
+        );
     }
 
     #[test]

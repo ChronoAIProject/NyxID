@@ -9,6 +9,7 @@ import { AddKeyDialog } from "./add-key-dialog";
 
 const {
   catalog,
+  nodes,
   createKeyMutate,
   createKeyMutateAsync,
   updateKeyMutateAsync,
@@ -31,6 +32,9 @@ const {
     entries: [] as unknown[],
     allEntries: null as unknown[] | null,
     requests: [] as boolean[],
+  },
+  nodes: {
+    entries: [] as { id: string; name: string; status: string }[],
   },
   // Status the OAuth step's placeholder-key poll observes. `null` = still
   // `pending_auth` (the user hasn't finished at the provider yet).
@@ -146,11 +150,10 @@ vi.mock("@/lib/navigation", () => ({
   hardRedirect: mockHardRedirect,
 }));
 
-// RoutingStep reads online nodes; OwnerPicker reads admin orgs. Empty
-// arrays keep the node picker empty and hide the owner picker entirely
-// (it renders null without an admin org), so neither pulls in extra deps.
+// RoutingStep reads online nodes; tests opt into a node inventory as needed.
+// An empty org array hides OwnerPicker without pulling in extra dependencies.
 vi.mock("@/hooks/use-nodes", () => ({
-  useNodes: () => ({ data: [], isLoading: false }),
+  useNodes: () => ({ data: nodes.entries, isLoading: false }),
 }));
 vi.mock("@/hooks/use-orgs", () => ({
   useOrgs: () => ({ data: [] }),
@@ -269,6 +272,7 @@ beforeEach(() => {
   catalog.entries = [OPENAI_ENTRY];
   catalog.allEntries = null;
   catalog.requests = [];
+  nodes.entries = [];
   pendingKeyStatus.value = null;
   pendingLastAuthorizedAt.value = null;
   popupReceiverOptions.current = null;
@@ -1886,6 +1890,52 @@ function minCatalogEntry(slug: string, name = slug): CatalogEntry {
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  it("scopes the quick-connect key to the node selected for the service", async () => {
+    nodes.entries = [
+      { id: "selected-node", name: "Selected Node", status: "online" },
+      { id: "other-node", name: "Other Node", status: "online" },
+    ];
+    createKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({ id: "node-service", slug: "llm-openai" });
+    });
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /OpenAI/i }));
+    await user.click(screen.getByRole("button", { name: /Via Node/i }));
+    await user.click(screen.getByRole("combobox", { name: "Select Node" }));
+    await user.click(screen.getByRole("option", { name: "Selected Node" }));
+    await user.click(screen.getByRole("button", { name: "Next: Node Setup" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    expect(createKeyMutate).toHaveBeenCalledWith(
+      {
+        label: "OpenAI",
+        service_slug: "openai",
+        node_id: "selected-node",
+        service_type: "http",
+      },
+      expect.anything(),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Create Agent Key" }),
+    );
+    expect(createApiKeyMutate).toHaveBeenCalledExactlyOnceWith(
+      {
+        name: "Key for OpenAI",
+        scopes: ["proxy"],
+        allow_all_services: false,
+        allowed_service_ids: ["node-service"],
+        allow_all_nodes: false,
+        allowed_node_ids: ["selected-node"],
+      },
+      expect.objectContaining({
+        onSuccess: expect.any(Function),
+        onError: expect.any(Function),
+      }),
+    );
+  });
+
   it.each(["api-ifttt", "api-ifttt-2"])(
     "connects IFTTT with a raw key and never probes %s",
     async (createdSlug) => {
@@ -2050,6 +2100,21 @@ describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", (
       ).toBeInTheDocument(),
     );
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+
+    expect(createApiKeyMutate).toHaveBeenCalledExactlyOnceWith(
+      {
+        name: "Key for OpenAI",
+        scopes: ["proxy"],
+        allow_all_services: false,
+        allowed_service_ids: ["new-key-1"],
+        allow_all_nodes: false,
+        allowed_node_ids: [],
+      },
+      expect.objectContaining({
+        onSuccess: expect.any(Function),
+        onError: expect.any(Function),
+      }),
+    );
 
     // Panel appears with the minted secret; Test button available.
     await waitFor(() =>

@@ -146,6 +146,70 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("voice media boundaries", () => {
+  it.each([true, false])(
+    "reports readiness only after both signals (provider first: %s)",
+    async (providerFirst) => {
+      const status = vi.fn();
+      const measure = vi.spyOn(performance, "measure");
+      const client = new AssistantVoiceClient(
+        "thread",
+        vi.fn(),
+        vi.fn(),
+        vi.fn(),
+        vi.fn(),
+        undefined,
+        status,
+      );
+      await client.start(preferences);
+      expect(status.mock.calls.map(([value]) => value)).toEqual([
+        "microphone",
+        "audio",
+        "server",
+        "connecting",
+      ]);
+      expect(measure).not.toHaveBeenCalledWith(
+        "nyxid.voice.startup.total",
+        expect.anything(),
+      );
+      const providerReady = () =>
+        Peer.current.channel.onmessage?.({
+          data: JSON.stringify({ type: "session.started" }),
+        });
+      if (providerFirst) providerReady();
+      else Socket.current.snapshot();
+      expect(status).toHaveBeenLastCalledWith("connecting");
+      expect(track.enabled).toBe(false);
+      await vi.advanceTimersByTimeAsync(250);
+      if (providerFirst) Socket.current.snapshot();
+      else providerReady();
+      expect(status).toHaveBeenLastCalledWith("ready");
+      expect(track.enabled).toBe(true);
+      expect(measure).toHaveBeenCalledWith("nyxid.voice.startup.total", {
+        start: 0,
+        end: 250,
+      });
+      Socket.current.snapshot();
+      expect(
+        status.mock.calls.filter(([value]) => value === "ready"),
+      ).toHaveLength(1);
+      await client.end();
+    },
+  );
+
+  it("ignores a hold started before readiness until the person presses again", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start({ ...preferences, input_mode: "push_to_talk" });
+    client.hold(true);
+    Socket.current.snapshot();
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
+    expect(track.enabled).toBe(false);
+    client.hold(true);
+    expect(track.enabled).toBe(true);
+    await client.end();
+  });
+
   it("waits for both authorities, keeps speaker mute local, and never sends provider commands", async () => {
     const closed = vi.fn();
     const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn(), closed);
@@ -214,14 +278,31 @@ describe("voice media boundaries", () => {
   });
   it("reconnects the control stream without ending the call and adopts a new generation", async () => {
     const snapshots = vi.fn();
-    const client = new AssistantVoiceClient("thread", snapshots, vi.fn());
+    const status = vi.fn();
+    const client = new AssistantVoiceClient(
+      "thread",
+      snapshots,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      status,
+    );
     await client.start(preferences);
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
     const first = Socket.current;
     first.snapshot();
+    expect(track.enabled).toBe(true);
     first.onclose?.();
+    expect(track.enabled).toBe(false);
+    expect(status).toHaveBeenLastCalledWith("reconnecting");
     expect(client.isClosed).toBe(false);
     await vi.advanceTimersByTimeAsync(1000);
     expect(Socket.current).not.toBe(first);
+    first.snapshot();
+    expect(track.enabled).toBe(false);
     const recovered = { ...session, generation: 2 };
     Socket.current.onmessage?.({
       data: JSON.stringify({
@@ -232,11 +313,176 @@ describe("voice media boundaries", () => {
       }),
     });
     expect(snapshots).toHaveBeenLastCalledWith(
-      expect.objectContaining({ session: expect.objectContaining({ generation: 2 }) }),
+      expect.objectContaining({
+        session: expect.objectContaining({ generation: 2 }),
+      }),
     );
+    expect(client.isClosed).toBe(false);
+    expect(track.enabled).toBe(true);
+    expect(status).toHaveBeenLastCalledWith("ready");
+    await client.end();
+  });
+
+  it("keeps media live when a newer server sends incompatible presentation rows", async () => {
+    const error = vi.fn();
+    const snapshots = vi.fn();
+    const client = new AssistantVoiceClient("thread", snapshots, error);
+    await client.start(preferences);
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
+    const first = Socket.current;
+    first.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        session,
+        captions: [
+          {
+            id: "valid",
+            speaker: "assistant",
+            text: "Working",
+            sealed: true,
+            complete: true,
+          },
+          { speaker: "new-role" },
+        ],
+        // A newer server may add a task state before this client is updated.
+        tasks: [{ id: crypto.randomUUID(), state: "running" }],
+      }),
+    });
+    expect(first.close).not.toHaveBeenCalled();
+    expect(track.enabled).toBe(true);
+    expect(snapshots).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        captions: [expect.objectContaining({ id: "valid", text: "Working" })],
+        tasks: [],
+      }),
+    );
+    expect(error).not.toHaveBeenCalled();
+    expect(client.isClosed).toBe(false);
+    expect(mocks.post).not.toHaveBeenCalledWith(
+      expect.stringContaining(session.id),
+      expect.objectContaining({ action: "end" }),
+    );
+    await client.end();
+  });
+
+  it("reconnects an invalid session snapshot without sending End", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start(preferences);
+    const first = Socket.current;
+    first.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        session: {},
+        captions: [],
+        tasks: [],
+      }),
+    });
+    expect(first.close).toHaveBeenCalled();
+    expect(client.isClosed).toBe(false);
+    expect(mocks.post).not.toHaveBeenCalled();
+    first.onclose?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    Socket.current.snapshot();
     expect(client.isClosed).toBe(false);
     await client.end();
   });
+
+  it.each(["{", "null"])(
+    "recovers from invalid control JSON: %s",
+    async (data) => {
+      const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+      await client.start(preferences);
+      const first = Socket.current;
+      first.onmessage?.({ data });
+      expect(first.close).toHaveBeenCalled();
+      expect(client.isClosed).toBe(false);
+      expect(mocks.post).not.toHaveBeenCalled();
+      first.onclose?.();
+      await vi.advanceTimersByTimeAsync(1000);
+      Socket.current.snapshot();
+      await client.end();
+    },
+  );
+
+  it("ignores new control event types without interrupting media", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start(preferences);
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
+    Socket.current.snapshot();
+    Socket.current.onmessage?.({
+      data: JSON.stringify({ type: "future_event" }),
+    });
+    expect(track.enabled).toBe(true);
+    expect(Socket.current.close).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+    await client.end();
+  });
+
+  it("discards an incomplete Grok audio pair before control recovery", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start(
+      { ...preferences, input_mode: "push_to_talk" },
+      "xai_realtime",
+    );
+    const first = Socket.current;
+    first.snapshot();
+    first.onmessage?.({
+      data: JSON.stringify({ type: "audio", generation: 1, end_ms: 120 }),
+    });
+    first.onmessage?.({ data: new ArrayBuffer(3) });
+    expect(first.close).toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+    first.onclose?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    Socket.current.snapshot();
+    Socket.current.onmessage?.({
+      data: JSON.stringify({ type: "audio", generation: 1, end_ms: 160 }),
+    });
+    const pcm = new ArrayBuffer(2);
+    Socket.current.onmessage?.({ data: pcm });
+    expect(mocks.enqueue).toHaveBeenLastCalledWith(pcm, 160);
+    expect(client.isClosed).toBe(false);
+    await client.end();
+  });
+
+  it("releases local media after retry exhaustion without sending a user End", async () => {
+    const closed = vi.fn();
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn(), closed);
+    await client.start(preferences);
+    Socket.current.snapshot();
+    for (const delay of [1000, 2000, 4000, 8000, 15000, 30000]) {
+      Socket.current.onclose?.();
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    Socket.current.onclose?.();
+    expect(client.isClosed).toBe(true);
+    expect(closed).toHaveBeenCalled();
+    expect(track.stop).toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it.each(["closed", "failed"])(
+    "obeys an explicit server %s state without sending End",
+    async (state) => {
+      const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+      await client.start(preferences);
+      Socket.current.onmessage?.({
+        data: JSON.stringify({
+          type: "snapshot",
+          session: { ...session, state },
+          captions: null,
+          tasks: {},
+        }),
+      });
+      expect(client.isClosed).toBe(true);
+      expect(track.stop).toHaveBeenCalled();
+      expect(mocks.post).not.toHaveBeenCalled();
+    },
+  );
 });
 
 it("Grok relays only held PCM, pairs bounded output, and commits before mic mute", async () => {
@@ -284,8 +530,14 @@ it("Grok refuses automatic mode before creating a provider session", async () =>
 });
 
 it.each([
-  ["NotAllowedError", "Microphone permission was denied"],
-  ["NotFoundError", "No microphone found"],
+  [
+    "NotAllowedError",
+    "Microphone access was denied. Allow it in your browser settings, then try again.",
+  ],
+  [
+    "NotFoundError",
+    "No microphone was found. Connect a microphone and try again.",
+  ],
 ])("explains %s before contacting the server", async (name, message) => {
   microphone.mockRejectedValue(
     new DOMException("private device information", name),
@@ -414,4 +666,111 @@ it("bounds ICE gathering and cancels without creating a session", async () => {
   expect(error).toHaveBeenCalledWith("WebRTC negotiation failed");
   expect(mocks.create).not.toHaveBeenCalled();
   expect(track.stop).toHaveBeenCalled();
+});
+
+it("acquires microphone before saving preferences and identifies settings failure without contacting provider", async () => {
+  const error = vi.fn();
+  const save = vi.fn(async () => {
+    expect(microphone).toHaveBeenCalledOnce();
+    throw new Error("private detail");
+  });
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  const started = client.start(preferences, "openai_live", save);
+  expect(microphone).toHaveBeenCalledOnce();
+  await started;
+  expect(error).toHaveBeenCalledWith(
+    "Voice preferences could not be saved. Please try again.",
+  );
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(track.stop).toHaveBeenCalledOnce();
+});
+
+it.each(["openai_live", "xai_realtime"] as const)(
+  "uses the gesture-prepared selected microphone for %s without recapture, then releases that owner on end",
+  async (protocol) => {
+    const { PreparedMicrophone } = await import("./microphone-capture");
+    const prepared = new PreparedMicrophone("usb");
+    expect(microphone).toHaveBeenCalledOnce();
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    try {
+      await client.start(
+        {
+          ...preferences,
+          input_mode:
+            protocol === "xai_realtime" ? "push_to_talk" : "automatic",
+        },
+        protocol,
+        undefined,
+        prepared,
+        "different-current-selection",
+      );
+      expect(microphone).toHaveBeenCalledOnce();
+      expect(microphone).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audio: expect.objectContaining({ deviceId: { exact: "usb" } }),
+        }),
+      );
+      if (protocol === "openai_live")
+        expect(Peer.current.addTrack).toHaveBeenCalled();
+      expect(track.enabled).toBe(false);
+      Socket.current.snapshot();
+      expect(track.enabled).toBe(false); // Backend admission alone is insufficient.
+      if (protocol === "xai_realtime") client.hold(true);
+      else
+        Peer.current.channel.onmessage?.({
+          data: JSON.stringify({ type: "session.started" }),
+        });
+      expect(track.enabled).toBe(true);
+    } finally {
+      await client.end();
+      prepared.close();
+    }
+    expect(prepared.isClosed).toBe(true);
+    expect(track.stop).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(["openai_live", "xai_realtime"] as const)(
+  "opens the selected microphone synchronously on a direct %s start",
+  async (protocol) => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    const starting = client.start(
+      {
+        ...preferences,
+        input_mode: protocol === "xai_realtime" ? "push_to_talk" : "automatic",
+      },
+      protocol,
+      undefined,
+      undefined,
+      "selected-usb",
+    );
+    try {
+      expect(microphone).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          audio: expect.objectContaining({
+            deviceId: { exact: "selected-usb" },
+          }),
+        }),
+      );
+      await starting;
+      expect(mocks.create).toHaveBeenCalledOnce();
+    } finally {
+      await client.end();
+      await starting;
+    }
+    expect(track.stop).toHaveBeenCalledOnce();
+  },
+);
+
+it("cancelled gesture preparation cannot create a metered voice session", async () => {
+  const { PreparedMicrophone } = await import("./microphone-capture");
+  const prepared = new PreparedMicrophone();
+  await prepared.ready;
+  prepared.close();
+  const error = vi.fn();
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  await client.start(preferences, "openai_live", undefined, prepared);
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+  expect(client.isClosed).toBe(true);
 });

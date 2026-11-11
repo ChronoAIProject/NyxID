@@ -1,19 +1,26 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import { Search } from "lucide-react";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedSelectTrigger,
+  GroupedDisclosure,
+} from "@/components/ui/grouped-list";
 import { useState, type ReactNode } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
-  SelectTrigger,
   SelectValue,
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
-import { ErrorBanner } from "@/components/shared/error-banner";
+import { GroupedDetail } from "@/components/ui/grouped-detail";
 import {
   useAgentSkills,
   useSetAgentSkills,
@@ -32,9 +39,11 @@ import type {
 import { ProposalDraftEditor } from "./learning-draft-editor";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
+import { SkillPreloadSettings } from "./skill-preload-settings";
 
 const HISTORY_LABELS: Record<string, string> = {
   get assistant_skills_updated() { return translateUi("Attached skills changed"); },
+  assistant_skill_preload_updated: "Skill preload settings changed",
   get assistant_learning_proposal_edited() { return translateUi("Skill draft edited"); },
   get assistant_learning_proposal_rejected() { return translateUi("Skill draft rejected"); },
   get assistant_learning_proposal_reprepared() { return translateUi("Skill draft package rebuilt"); },
@@ -43,33 +52,47 @@ const HISTORY_LABELS: Record<string, string> = {
   get assistant_learning_skill_pinned() { return translateUi("Published skill attached"); },
 };
 
-function SkillHistory({ items }: { readonly items: readonly AgentSkillHistoryItem[] }) {
-  const { t } = useUiTranslation();
+function SkillHistory({
+  items,
+}: {
+  readonly items: readonly AgentSkillHistoryItem[];
+}) {
+  useUiTranslation();
   return (
-    <div className="space-y-1">
-      <p className="text-12 font-medium">{t("Skill history")}</p>
-      <ol aria-label={t("Skill history")} className="space-y-1">
-        {items.map((item) => (
-          <li key={item.id} className="text-11 text-muted-foreground">
-            <span className="font-medium text-foreground">
-              {HISTORY_LABELS[item.event_type] ?? t("Skill activity")}
-            </span>{" "}
-            · {new Date(item.created_at).toLocaleString(getFormattingLocale())}
-            {item.revision !== null ? t(" · Revision {{revision}}", { revision: item.revision }) : ""}
-            {item.skills.length > 0 ? (
-              <span className="block">
-                {item.skills
-                  .map(
-                    (pin) =>
-                      `${pin.name} ${pin.version}${pin.disabled ? " (disabled)" : ""}`,
-                  )
-                  .join(", ")}
-              </span>
-            ) : null}
-          </li>
-        ))}
+    <GroupedList title={translateUi("Activity")}>
+      <ol aria-label={translateUi("Skill history")}>
+        {[...items]
+          .sort(
+            (a, b) =>
+              (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0),
+          )
+          .map((item) => (
+            <GroupedRow data-drawer-search-target={`skill-history-${item.id}`} key={item.id} asChild>
+              <li>
+                <div className="min-w-0 flex-1">
+                  <p>{HISTORY_LABELS[item.event_type] ?? translateUi("Skill activity")}</p>
+                  <p className="type-secondary text-text-tertiary">
+                    {new Date(item.created_at).toLocaleString(getFormattingLocale())}
+                    {item.revision !== null
+                      ? translateUi(" · Revision {{value1}}", { value1: item.revision })
+                      : ""}
+                  </p>
+                  {item.skills.length ? (
+                    <p className="type-secondary text-text-tertiary">
+                      {item.skills
+                        .map(
+                          (pin) =>
+                            `${pin.name} ${pin.version}${pin.disabled ? " (disabled)" : ""}`,
+                        )
+                        .join(", ")}
+                    </p>
+                  ) : null}
+                </div>
+              </li>
+            </GroupedRow>
+          ))}
       </ol>
-    </div>
+    </GroupedList>
   );
 }
 
@@ -79,15 +102,15 @@ function TestResult({
 }: {
   readonly result: UseQueryResult<AttachedSkillPreview>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (result.isFetching) {
     return (
-      <p role="status" className="text-11 text-muted-foreground">{t("Testing…")}</p>
+      <p role="status" className="text-13 text-text-tertiary">{translateUi("Testing…")}</p>
     );
   }
   if (result.error) {
     return (
-      <p role="alert" className="text-11 text-destructive">{t("Test failed: ")}{translateUi(result.error.message ?? "")}
+      <p role="alert" className="text-13 text-destructive">{translateUi("Test failed: ")}{result.error.message}
       </p>
     );
   }
@@ -95,18 +118,18 @@ function TestResult({
   if (!data) return null;
   if (!data.readable) {
     return (
-      <p role="status" className="text-11 text-warning">
-        {data.name} {data.version}{t(" is disabled, so the agent does not read it. Enable it to use it again.")}</p>
+      <p role="status" className="text-13 text-warning">
+        {data.name} {data.version}{translateUi(" is disabled, so the agent does not read it. Enable it to use it again.")}</p>
     );
   }
   return (
     <div role="status" className="space-y-1">
-      <p className="text-11 text-success">{t("Test passed: the agent reads ")}{data.name} {data.version} (
-        {data.size_bytes.toLocaleString(getFormattingLocale())}{t(" bytes).")}</p>
+      <p className="text-13 text-foreground">{translateUi("Test passed: the agent reads ")}{data.name} {data.version} (
+        {data.size_bytes.toLocaleString(getFormattingLocale())}{translateUi(" bytes).")}</p>
       {data.excerpt ? (
         <pre
           aria-label={`${data.name} SKILL.md excerpt`}
-          className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-2 text-11"
+          className="max-h-60 overflow-auto whitespace-pre-wrap break-words py-2 text-14"
         >
           {data.excerpt}
         </pre>
@@ -129,6 +152,9 @@ function AttachedSkill({
   testResult,
   edit,
   children,
+  error,
+  open,
+  onOpenChange,
 }: {
   readonly skill: AgentSkill;
   readonly description?: string;
@@ -145,65 +171,108 @@ function AttachedSkill({
   readonly testResult?: UseQueryResult<AttachedSkillPreview>;
   readonly edit: () => void;
   readonly children?: ReactNode;
+  readonly error?: string;
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
+  const searchId = `skill-${skill.skill_id}`;
+  useDrawerSearchEntries([{ id: searchId, title: skill.name, breadcrumb: `Skills › ${skill.name}`,
+    keywords: `${description ?? ""} ${skill.version} ${skill.disabled ? "Disabled" : "Enabled"} preload`,
+    pages: [searchId], reveal: () => onOpenChange(true),
+  }]);
   return (
-    <div className="space-y-2 rounded-lg border border-border/50 p-3">
-      <p className="text-12 font-medium">
-        {skill.name}{" "}
-        <span className="font-mono text-text-tertiary">{skill.version}</span>
-      </p>
-      <p className="text-12 text-muted-foreground">{description}</p>
-      {size !== undefined && (
-        <p className="text-11 text-text-tertiary">
-          {size.toLocaleString(getFormattingLocale())}{t(" bytes")}</p>
-      )}
-      {versions.error && (
-        <p className="text-11 text-text-tertiary">{t("Could not check for updates. Your pinned version is unchanged.")}</p>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" disabled={disabled} onClick={review}>
-          {latest && latest !== skill.version
-            ? t("Newer version available: {{latest}}", { latest: latest })
-            : t("Choose version")}
-        </Button>
-        <Button size="sm" disabled={disabled} onClick={remove}>{t("Remove ")}{skill.name}
-        </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          aria-label={t("Test {{name}}", { name: skill.name })}
-          disabled={testResult?.isFetching}
-          onClick={test}
-        >{t("Test")}</Button>
-        {canEdit ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            aria-label={t("Edit {{name}}", { name: skill.name })}
-            disabled={disabled}
-            onClick={edit}
-          >{t("Edit")}</Button>
-        ) : null}
-        {canDisable ? (
-          <label className="flex items-center gap-2 text-11">
-            <Switch
-              checked={!skill.disabled}
-              disabled={disabled}
-              aria-label={t("Use {{name}}", { name: skill.name })}
-              onCheckedChange={toggle}
+    <>
+      <GroupedDisclosure
+        data-drawer-page-trigger={searchId}
+        onClick={() => onOpenChange(true)}
+        accessory={
+          <span className="font-mono font-normal text-text-tertiary">
+            {skill.version}
+          </span>
+        }
+      >
+        <span className="min-w-0 flex-1">
+          <span className="block">{skill.name}</span>
+          <span className="block truncate type-secondary text-text-tertiary" title={description}>
+            {skill.disabled ? translateUi("Disabled") : description}
+          </span>
+        </span>
+      </GroupedDisclosure>
+      <GroupedDetail
+        searchPage={searchId}
+        open={open}
+        title={skill.name}
+        info="Review this attached skill, its pinned version and preloaded files. The attached version stays active until you change it."
+        onReveal={() => onOpenChange(true)}
+        backLabel={translateUi("Back to Skills")}
+        onBack={() => onOpenChange(false)}
+      >
+        <GroupedList
+          title={translateUi("Pinned skill")}
+          footer={
+            <>
+              {description ? <p>{description}</p> : null}
+              {open && error ? (
+                <p role="alert" className="text-destructive">
+                  {error}
+                </p>
+              ) : null}
+              {size !== undefined ? <p>{size.toLocaleString(getFormattingLocale())}{translateUi(" bytes")}</p> : null}
+              {versions.error ? (
+                <p>{translateUi("Could not check for updates. Your pinned version is unchanged.")}</p>
+              ) : null}
+              {testResult ? <TestResult result={testResult} /> : null}
+            </>
+          }
+        >
+          <GroupedRow data-drawer-search-target={searchId} title={translateUi("Version")} accessory={skill.version} />
+          <GroupedDisclosure disabled={disabled} onClick={review}>
+            {latest && latest !== skill.version
+              ? translateUi("Newer version available: {{value1}}", { value1: latest })
+              : translateUi("Choose version")}
+          </GroupedDisclosure>
+          <GroupedRow asChild interactive>
+            <button
+              type="button"
+              aria-label={translateUi("Test {{value1}}", { value1: skill.name })}
+              disabled={testResult?.isFetching}
+              onClick={test}
+            >{translateUi("Test skill")}</button>
+          </GroupedRow>
+          {canEdit ? (
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                aria-label={translateUi("Edit {{value1}}", { value1: skill.name })}
+                disabled={disabled}
+                onClick={edit}
+              >{translateUi("Edit skill")}</button>
+            </GroupedRow>
+          ) : null}
+          {canDisable ? (
+            <GroupedRow
+              title={translateUi("Enabled")}
+              accessory={
+                <Switch
+                  checked={!skill.disabled}
+                  disabled={disabled}
+                  aria-label={translateUi("Use {{value1}}", { value1: skill.name })}
+                  onCheckedChange={toggle}
+                />
+              }
             />
-            {skill.disabled ? t("Disabled") : t("Enabled")}
-          </label>
-        ) : skill.disabled ? (
-          <span className="text-11 text-text-tertiary">{t("Disabled")}</span>
-        ) : null}
-      </div>
-      {testResult ? <TestResult result={testResult} /> : null}
-      {children}
-    </div>
+          ) : null}
+          <GroupedRow asChild interactive className="text-destructive">
+            <button type="button" disabled={disabled} onClick={remove}>{translateUi("Remove ")}{skill.name}
+            </button>
+          </GroupedRow>
+        </GroupedList>
+        {children}
+      </GroupedDetail>
+    </>
   );
 }
 
@@ -216,7 +285,7 @@ export function AgentSkills({
   readonly readOnly?: boolean;
   readonly id?: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const current = useAgentSkills(agentId);
   const canDisable = useAuthStore((s) =>
     userHasFeature(s.user, FEATURE_FLAG.SKILL_PIN_DISABLE),
@@ -278,208 +347,346 @@ export function AgentSkills({
         setImproving({ skillId, proposalId: result.proposal_id }),
     });
   };
+  const [activeSkill, setActiveSkill] = useState<string>();
+  const [historyOpen, setHistoryOpen] = useState(false);
+  useDrawerSearchEntries([
+    { id: "skill-history", title: "History", breadcrumb: "Skills › History", keywords: "Skill activity", pages: ["skill-history"], reveal: () => setHistoryOpen(true) },
+    ...(!readOnly ? (search.data?.items ?? []).map((item) => ({ id: `catalog-skill-${item.id}`, title: item.name, breadcrumb: "Skills › Find skills", keywords: item.description ?? "",
+      pages: ["skill-version"], reveal: () => { setActiveSkill(undefined); choose(item.id, item.name); },
+    })) : []),
+    ...(history.data?.items ?? []).map((item) => ({ id: `skill-history-${item.id}`, title: HISTORY_LABELS[item.event_type] ?? "Skill activity",
+      breadcrumb: "Skills › History", keywords: `${item.skills.map((pin) => `${pin.name} ${pin.version}`).join(" ")} ${item.created_at} Revision ${item.revision ?? ""}`,
+      pages: ["skill-history"], reveal: () => setHistoryOpen(true) })),
+  ]);
+  const errors = [
+    current.error,
+    write.error,
+    improve.error,
+    search.error,
+    versions.error,
+    preview.error,
+  ].filter(Boolean);
   return (
     <section
       id={id}
       tabIndex={id ? -1 : undefined}
-      aria-label={t("Skills")}
-      className="space-y-3 outline-none"
+      aria-label={translateUi("Skills")}
+      className="space-y-6 outline-none"
     >
-      <div className="space-y-1">
-        <h3 className="text-13 font-semibold">{t("Skills")}</h3>
-        <p className="text-12 text-muted-foreground">{t("Teach this agent with pinned Ornn skills. Skills never grant permissions. Up to 16 skills.")}</p>
-      </div>
-      {current.data && (
-        <p className="text-11 text-text-tertiary">
-          {current.data.skills.length}/16 skills · Revision{" "}
-          {current.data.revision}
-        </p>
-      )}
-      {current.isPending && (
-        <p className="text-12 text-muted-foreground">{t("Loading skills...")}</p>
-      )}
-      {[
-        current.error,
-        write.error,
-        improve.error,
-        search.error,
-        versions.error,
-        preview.error,
-      ]
-        .filter(Boolean)
-        .map((e, i) => (
-          <ErrorBanner key={i} message={e!.message} />
-        ))}
-      {current.data?.skills.length === 0 && (
-        <p className="text-12 text-muted-foreground">{t("No skills attached.")}</p>
-      )}
-      {current.data?.skills.map((skill) => (
-        <AttachedSkill
-          key={skill.skill_id}
-          skill={skill}
-          description={current.data.metadata[skill.skill_id]?.description}
-          size={current.data.metadata[skill.skill_id]?.size_bytes}
-          disabled={disabled || improve.isPending}
-          canDisable={canDisable}
-          canEdit={canEdit && !readOnly}
-          test={() => test(skill.skill_id)}
-          testResult={testing === skill.skill_id ? tested : undefined}
-          edit={() => edit(skill.skill_id)}
-          review={() => choose(skill.skill_id, skill.name)}
-          toggle={(enabled) => save(current.data!.skills.map((item) => item.skill_id === skill.skill_id ? { ...item, disabled: !enabled } : item))}
-          remove={() =>
-            save(
-              current.data.skills.filter((s) => s.skill_id !== skill.skill_id),
-            )
-          }
-        >
-          {improving?.skillId === skill.skill_id ? (
-            <div className="space-y-2 border-t border-border/50 pt-2">
-              <p className="text-11 text-muted-foreground">{t("Editing a copy of ")}{skill.name} {skill.version}{t(". Saving changes only the draft; the attached version stays in use until you publish the draft from its confirmation card in NyxBot's home thread.")}</p>
-              <ProposalDraftEditor
-                agentId={agentId}
-                proposalId={improving.proposalId}
-              />
-            </div>
-          ) : null}
-        </AttachedSkill>
-      ))}
-      {history.data?.items.length ? (
-        <SkillHistory items={history.data.items} />
-      ) : null}
-      {history.error ? (
-        <p role="alert" className="text-11 text-destructive">{t("Skill history is unavailable: ")}{translateUi(history.error.message ?? "")}
-        </p>
-      ) : null}
-      {!readOnly && (
-        <>
-          <form
-            className="flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              setQuery(input.trim());
-              setPage(1);
-            }}
+      <GroupedList
+        title={translateUi("Attached skills")}
+        footer={
+          <>
+            <p>{translateUi("Teach this agent with pinned Ornn skills. Skills never grant permissions. Up to 16 skills.")}</p>
+            {current.data ? (
+              <p>
+                {current.data.skills.length}/16 skills · Revision{" "}
+                {current.data.revision}
+              </p>
+            ) : null}
+            {!activeSkill &&
+              !selected &&
+              errors.map((error, index) => (
+                <p key={index} role="alert" className="text-destructive">
+                  {error!.message}
+                </p>
+              ))}
+          </>
+        }
+      >
+        {current.isPending ? <GroupedRow title={translateUi("Loading skills...")} /> : null}
+        {current.data?.skills.length === 0 ? (
+          <GroupedRow title={translateUi("No skills attached.")} />
+        ) : null}
+        {current.data?.skills.map((skill) => (
+          <AttachedSkill
+            key={skill.skill_id}
+            skill={skill}
+            open={activeSkill === skill.skill_id}
+            onOpenChange={(open) =>
+              setActiveSkill(open ? skill.skill_id : undefined)
+            }
+            error={
+              selected
+                ? undefined
+                : errors.map((error) => error!.message).join(" ")
+            }
+            description={current.data.metadata[skill.skill_id]?.description}
+            size={current.data.metadata[skill.skill_id]?.size_bytes}
+            disabled={disabled || improve.isPending}
+            canDisable={canDisable}
+            canEdit={canEdit && !readOnly}
+            test={() => test(skill.skill_id)}
+            testResult={testing === skill.skill_id ? tested : undefined}
+            edit={() => edit(skill.skill_id)}
+            review={() => choose(skill.skill_id, skill.name)}
+            toggle={(enabled) =>
+              save(
+                current.data!.skills.map((item) =>
+                  item.skill_id === skill.skill_id
+                    ? { ...item, disabled: !enabled }
+                    : item,
+                ),
+              )
+            }
+            remove={() =>
+              save(
+                current.data.skills.filter(
+                  (s) => s.skill_id !== skill.skill_id,
+                ),
+              )
+            }
           >
-            <Input
-              aria-label={t("Search Ornn skills")}
-              placeholder={t("Search Ornn skills")}
-              value={input}
-              maxLength={200}
-              onChange={(e) => setInput(e.target.value)}
+            <SkillPreloadSettings
+              agentId={agentId}
+              skillId={skill.skill_id}
+              name={skill.name}
+              revision={current.data.revision}
+              paths={current.data.metadata[skill.skill_id]?.preload_paths ?? []}
+              bytes={current.data.metadata[skill.skill_id]?.preload_bytes ?? 0}
+              disabled={
+                disabled || improve.isPending || Boolean(skill.disabled)
+              }
             />
-            <Button
-              type="submit"
-              disabled={disabled}
-              isLoading={search.isFetching}
-            >{t("Search")}</Button>
-          </form>
-          {search.data?.items.map((item) => (
-            <div
-              key={item.id}
-              className="space-y-1 rounded-lg border border-border/50 p-3"
-            >
-              <Button
-                variant="ghost"
+            {improving?.skillId === skill.skill_id ? (
+              <>
+                <GroupedList
+                  title={translateUi("Draft")}
+                  footer={translateUi("Editing a copy of {{value1}} {{value2}}. Saving changes only the draft; the attached version stays in use until you publish the draft from its confirmation card in NyxBot's home thread.", { value1: skill.name, value2: skill.version })}
+                >
+                  <GroupedRow title={translateUi("Skill draft")} />
+                </GroupedList>
+                <ProposalDraftEditor
+                  agentId={agentId}
+                  proposalId={improving.proposalId}
+                />
+              </>
+            ) : null}
+          </AttachedSkill>
+        ))}
+      </GroupedList>
+      <GroupedList
+        footer={
+          history.error ? (
+            <p role="alert" className="text-destructive">{translateUi("Skill history is unavailable: ")}{history.error.message}
+            </p>
+          ) : undefined
+        }
+      >
+        <GroupedDisclosure data-drawer-page-trigger="skill-history" onClick={() => setHistoryOpen(true)}>{translateUi("History")}</GroupedDisclosure>
+      </GroupedList>
+      <GroupedDetail
+        searchPage="skill-history"
+        open={historyOpen}
+        title={translateUi("Skill history")}
+        onReveal={() => setHistoryOpen(true)}
+        backLabel={translateUi("Back to Skills")}
+        onBack={() => setHistoryOpen(false)}
+      >
+        {history.data?.items.length ? (
+          <div data-drawer-search-target="skill-history"><SkillHistory items={history.data.items} /></div>
+        ) : (
+          <GroupedList
+            data-drawer-search-target="skill-history"
+            footer={
+              history.error ? (
+                <p role="alert" className="text-destructive">{translateUi("Skill history is unavailable: ")}{history.error.message}
+                </p>
+              ) : undefined
+            }
+          >
+            <GroupedRow
+              title={
+                history.isPending
+                  ? translateUi("Loading history…")
+                  : history.error
+                    ? translateUi("Could not load skill history.")
+                    : translateUi("No skill activity yet.")
+              }
+            />
+          </GroupedList>
+        )}
+      </GroupedDetail>
+      {!readOnly ? (
+        <>
+          <GroupedList
+            title={translateUi("Find skills")}
+            search={{ id: "find-skills", title: "Find skills", breadcrumb: "Skills", keywords: "Search Ornn catalog" }}
+            footer={
+              search.data?.items.length === 0
+                ? translateUi("No visible skills found.")
+                : undefined
+            }
+          >
+            <GroupedRow>
+              <form
+                className="flex w-full items-center gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  setQuery(input.trim());
+                  setPage(1);
+                }}
+              >
+                <GroupedInput
+                  className="min-w-0 flex-1"
+                  aria-label={translateUi("Search Ornn skills")}
+                  placeholder={translateUi("Search Ornn skills")}
+                  value={input}
+                  maxLength={200}
+                  onChange={(event) => setInput(event.target.value)}
+                />
+                <Button
+                  type="submit"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={translateUi("Search")}
+                  disabled={disabled || search.isFetching}
+                >
+                  <Search aria-hidden />
+                </Button>
+              </form>
+            </GroupedRow>
+            {search.data?.items.map((item) => (
+              <GroupedDisclosure
+                key={item.id}
                 disabled={disabled}
                 onClick={() => choose(item.id, item.name)}
               >
-                {item.name}
-              </Button>
-              <p className="text-12 text-muted-foreground">
-                {item.description}
-              </p>
-            </div>
-          ))}
-          {search.data?.items.length === 0 && (
-            <p className="text-12 text-muted-foreground">{t("No visible skills found.")}</p>
-          )}
-          {search.data && search.data.total_pages > 1 && (
-            <div className="flex items-center gap-2">
-              <Button disabled={page <= 1} onClick={() => setPage(page - 1)}>{t("Previous")}</Button>
-              <span className="text-11">{t("Page ")}{page}</span>
-              <Button
-                disabled={page >= search.data.total_pages}
-                onClick={() => setPage(page + 1)}
-              >{t("Next")}</Button>
-            </div>
-          )}
-          {selected && (
-            <div className="space-y-3 rounded-lg border border-border/50 p-3">
-              <p className="text-12 font-medium">{selected.name}</p>
-              <Select value={version} onValueChange={setVersion}>
-                <SelectTrigger aria-label={t("Skill version")}>
-                  <SelectValue placeholder={t("Choose an exact version")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {versions.data?.items.map((v) => (
-                    <SelectItem key={v.version} value={v.version}>
-                      {v.version}
-                      {v.deprecated ? t(" (Deprecated)") : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {versions.data && versions.data.total_pages > 1 && (
-                <div className="flex items-center gap-2">
-                  <Button
-                    disabled={versionPage <= 1}
-                    onClick={() => {
-                      setVersionPage(versionPage - 1);
-                      setVersion("");
-                    }}
-                  >{t("Newer versions")}</Button>
-                  <span className="text-11">{t("Version page ")}{versionPage}
-                  </span>
-                  <Button
-                    disabled={versionPage >= versions.data.total_pages}
-                    onClick={() => {
-                      setVersionPage(versionPage + 1);
-                      setVersion("");
-                    }}
-                  >{t("Older versions")}</Button>
-                </div>
-              )}
-              {preview.isFetching && (
-                <p className="text-12 text-muted-foreground">{t("Verifying package...")}</p>
-              )}
-              {preview.data && (
-                <>
-                  <p className="text-12 text-muted-foreground">
-                    {preview.data.description}
-                  </p>
-                  <p className="text-11 text-text-tertiary">
-                    {preview.data.size_bytes.toLocaleString(getFormattingLocale())}{t(" bytes ·")}{" "}
-                    {preview.data.reference.dependencies.length}{t(" pinned dependencies")}</p>
-                </>
-              )}
-              <p className="text-11 text-text-tertiary">{t("Attaching external guidance changes how this agent works.")}</p>
-              <Button
-                variant="primary"
-                isLoading={write.isPending}
-                disabled={
-                  disabled ||
-                  !preview.data ||
-                  preview.isFetching ||
-                  Boolean(unchanged) ||
-                  (!replacement && (current.data?.skills.length ?? 16) >= 16)
+                <span className="block">{item.name}</span>
+                <span className="block type-secondary text-text-tertiary">
+                  {item.description}
+                </span>
+              </GroupedDisclosure>
+            ))}
+            {search.data && search.data.total_pages > 1 ? (
+              <GroupedRow
+                title={translateUi("Page {{value1}}", { value1: page })}
+                accessory={
+                  <>
+                    <Button
+                      variant="ghost"
+                      disabled={page <= 1}
+                      onClick={() => setPage(page - 1)}
+                    >{translateUi("Previous")}</Button>
+                    <Button
+                      variant="ghost"
+                      disabled={page >= search.data.total_pages}
+                      onClick={() => setPage(page + 1)}
+                    >{translateUi("Next")}</Button>
+                  </>
                 }
-                onClick={() => {
-                  if (preview.data && current.data)
-                    save([
-                      ...current.data.skills.filter(
-                        (s) => s.skill_id !== selected.id,
-                      ),
-                      preview.data.reference,
-                    ]);
-                }}
-              >
-                {replacement ? t("Re-pin skill") : t("Attach skill")}
-              </Button>
-            </div>
-          )}
+              />
+            ) : null}
+          </GroupedList>
+          <GroupedDetail
+            searchPage="skill-version"
+            open={Boolean(selected)}
+            level={activeSkill ? 2 : 1}
+            title={selected?.name ?? translateUi("Choose version")}
+            info="Review a published skill version before attaching it to this agent."
+            onReveal={() => { if (selected) choose(selected.id, selected.name); }}
+            backLabel={activeSkill ? translateUi("Back to skill") : translateUi("Back to Skills")}
+            onBack={() => {
+              setSelected(undefined);
+              setVersion("");
+            }}
+          >
+            <GroupedList
+              title={translateUi("Choose version")}
+              data-drawer-search-target={selected ? `catalog-skill-${selected.id}` : undefined}
+              footer={
+                <>
+                  {preview.isFetching ? (
+                    <p role="status">{translateUi("Verifying package...")}</p>
+                  ) : null}
+                  {preview.data ? (
+                    <>
+                      <p>{preview.data.description}</p>
+                      <p>
+                        {preview.data.size_bytes.toLocaleString(getFormattingLocale())}{translateUi(" bytes ·")}{" "}
+                        {preview.data.reference.dependencies.length}{translateUi(" pinned dependencies")}</p>
+                    </>
+                  ) : null}
+                  <p>{translateUi("Attaching external guidance changes how this agent works.")}</p>
+                  {selected &&
+                    errors.map((error, index) => (
+                      <p key={index} role="alert" className="text-destructive">
+                        {error!.message}
+                      </p>
+                    ))}
+                </>
+              }
+            >
+              <GroupedRow
+                title={translateUi("Version")}
+                accessory={
+                  <Select value={version} onValueChange={setVersion}>
+                    <GroupedSelectTrigger aria-label={translateUi("Skill version")}>
+                      <SelectValue placeholder={translateUi("Choose an exact version")} />
+                    </GroupedSelectTrigger>
+                    <SelectContent>
+                      {versions.data?.items.map((v) => (
+                        <SelectItem key={v.version} value={v.version}>
+                          {v.version}
+                          {v.deprecated ? translateUi(" (Deprecated)") : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                }
+              />
+              {versions.data && versions.data.total_pages > 1 ? (
+                <GroupedRow
+                  title={translateUi("Version page {{value1}}", { value1: versionPage })}
+                  accessory={
+                    <>
+                      <Button
+                        variant="ghost"
+                        disabled={versionPage <= 1}
+                        onClick={() => {
+                          setVersionPage(versionPage - 1);
+                          setVersion("");
+                        }}
+                      >{translateUi("Newer versions")}</Button>
+                      <Button
+                        variant="ghost"
+                        disabled={versionPage >= versions.data.total_pages}
+                        onClick={() => {
+                          setVersionPage(versionPage + 1);
+                          setVersion("");
+                        }}
+                      >{translateUi("Older versions")}</Button>
+                    </>
+                  }
+                />
+              ) : null}
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  disabled={
+                    disabled ||
+                    !preview.data ||
+                    preview.isFetching ||
+                    Boolean(unchanged) ||
+                    (!replacement && (current.data?.skills.length ?? 16) >= 16)
+                  }
+                  onClick={() => {
+                    if (preview.data && current.data && selected)
+                      save([
+                        ...current.data.skills.filter(
+                          (s) => s.skill_id !== selected.id,
+                        ),
+                        preview.data.reference,
+                      ]);
+                  }}
+                >
+                  {replacement ? translateUi("Re-pin skill") : translateUi("Attach skill")}
+                </button>
+              </GroupedRow>
+            </GroupedList>
+          </GroupedDetail>
         </>
-      )}
+      ) : null}
     </section>
   );
 }

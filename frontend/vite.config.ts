@@ -10,6 +10,7 @@ import { routingPreview } from "./dev/routing-preview"
 import { multilingualPreview } from "./dev/multilingual-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 import { buildVersion } from "./scripts/build-version"
+import { buildLegalMarkdown, buildRobots, buildSitemap } from "./scripts/public-origin.mjs"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
@@ -19,7 +20,8 @@ function telegramClaimReferrer(): Plugin {
     name: "telegram-claim-referrer",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (new URL(req.url ?? "/", "http://localhost").searchParams.has("claim"))
+        const url = new URL(req.url ?? "/", "http://localhost")
+        if (url.searchParams.has("claim") || url.pathname === "/onboarding/link")
           res.setHeader("Referrer-Policy", "no-referrer")
         next()
       })
@@ -58,6 +60,7 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
+  ws: true,
   // Vite's proxy sets agent=false, so an environment proxy needs an explicit agent.
   agent: process.env.NODE_USE_ENV_PROXY === "1" && backendUrl.startsWith("https:")
     ? new https.Agent({ proxyEnv: process.env })
@@ -66,6 +69,9 @@ const proxyTarget = {
   configure: (proxy: any) => {
     // Proxy agents can send headers before proxyReq; rewrite before request creation.
     proxy.on("start", originRewrite)
+    proxy.on("proxyReqWs", (request: import("http").ClientRequest, incoming: import("http").IncomingMessage) => {
+      if (incoming.headers.origin) request.setHeader("Origin", expectedOrigin)
+    })
     proxy.on("proxyRes", cookieRewrite)
   },
 }
@@ -103,8 +109,6 @@ interface DocFile {
   raw: string
 }
 
-// Canonical origin for sitemap <loc> entries (matches public/robots.txt).
-const SITEMAP_BASE = "https://nyx.chrono-ai.fun"
 // Public, indexable routes outside the docs tree.
 const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms"]
 
@@ -113,6 +117,7 @@ function docsSync(): Plugin {
   const outDir = path.resolve(__dirname, "public/docs")
   const sitemapPath = path.resolve(__dirname, "public/sitemap.xml")
   let isBuild = false
+  let outputDir = ""
 
   const parseMeta = (raw: string) => {
     const front = raw.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? ""
@@ -130,13 +135,9 @@ function docsSync(): Plugin {
       ...STATIC_SITEMAP_ROUTES,
       ...allDocPages().map((p) => `/docs/${p.slug}`),
     ]
-    const body = urls
-      .map((u) => `  <url><loc>${SITEMAP_BASE}${u}</loc></url>`)
-      .join("\n")
     fs.writeFileSync(
       sitemapPath,
-      `<?xml version="1.0" encoding="UTF-8"?>\n` +
-        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</urlset>\n`,
+      buildSitemap(urls, process.env),
     )
   }
 
@@ -214,6 +215,24 @@ function docsSync(): Plugin {
     name: "nyxid-docs-sync",
     configResolved(config) {
       isBuild = config.command === "build"
+      outputDir = path.resolve(config.root, config.build.outDir)
+    },
+    writeBundle() {
+      if (!isBuild) return
+      const robotsPath = path.join(outputDir, "robots.txt")
+      if (fs.existsSync(robotsPath)) {
+        fs.writeFileSync(
+          robotsPath,
+          buildRobots(fs.readFileSync(robotsPath, "utf8"), process.env),
+        )
+      }
+      const termsPath = path.join(outputDir, "legal/terms.md")
+      if (fs.existsSync(termsPath)) {
+        fs.writeFileSync(
+          termsPath,
+          buildLegalMarkdown(fs.readFileSync(termsPath, "utf8"), process.env),
+        )
+      }
     },
     buildStart() {
       const errors = lint(sync())
@@ -256,9 +275,10 @@ export default defineConfig({
     "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: /^zod$/, replacement: path.resolve(__dirname, "./src/lib/zod-csp.ts") },
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+    ],
   },
   build: {
     rollupOptions: {

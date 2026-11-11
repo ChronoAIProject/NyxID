@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import {
   useSaProviders,
@@ -41,7 +41,7 @@ interface SaConnectedProvidersProps {
 }
 
 export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: saProviders, isLoading: providersLoading } =
     useSaProviders(saId);
   const { data: allProviders } = useProviders();
@@ -73,13 +73,13 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
         apiKey,
         label,
       });
-      toast.success(translateUi("Connected {{name}}", { name: connectDialogProvider.name }));
+      toast.success(translateUi(`Connected ${connectDialogProvider.name}`));
       setConnectDialogProvider(null);
     } catch (err) {
       if (err instanceof ApiError) {
         toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error(translateUi("Failed to connect provider"));
+        toast.error(translateErrorMessage("Failed to connect provider"));
       }
     }
   }
@@ -105,7 +105,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
       if (err instanceof ApiError) {
         toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error(translateUi("Failed to initiate OAuth connection"));
+        toast.error(translateErrorMessage("Failed to initiate OAuth connection"));
       }
     }
   }
@@ -118,14 +118,14 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
       if (err instanceof ApiError) {
         toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error(translateUi("Failed to disconnect provider"));
+        toast.error(translateErrorMessage("Failed to disconnect provider"));
       }
     }
   }
 
   return (
     <>
-      <DetailSection title={t("Connected Providers")}>
+      <DetailSection title={translateUi("Connected Providers")}>
         <div className="p-4">
         {providersLoading ? (
           <Skeleton className="h-24 w-full" />
@@ -134,18 +134,18 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Provider")}</TableHead>
-                  <TableHead>{t("Type")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{t("Label")}</TableHead>
-                  <TableHead>{t("Connected")}</TableHead>
-                  <TableHead>{t("Actions")}</TableHead>
+                  <TableHead>{translateUi("Provider")}</TableHead>
+                  <TableHead>{translateUi("Type")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Label")}</TableHead>
+                  <TableHead>{translateUi("Connected")}</TableHead>
+                  <TableHead>{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {saProviders.map((token) => (
                   <TableRow key={token.provider_id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       {token.provider_name}
                     </TableCell>
                     <TableCell>
@@ -176,7 +176,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                         }
                         disabled={disconnectMutation.isPending}
                       >
-                        <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{t("Disconnect")}</Button>
+                        <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{translateUi("Disconnect")}</Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -184,7 +184,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-12 text-muted-foreground">{t("No providers connected to this service account.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("No providers connected to this service account.")}</p>
         )}
 
         {availableProviders.length > 0 && (
@@ -219,6 +219,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
 }
 
 function ProviderTypeIcon({ type }: { readonly type: string }) {
+  useUiTranslation();
   if (type === "api_key") return <KeyRound className="mr-2 h-4 w-4" />;
   if (type === "oauth2") return <Globe className="mr-2 h-4 w-4" />;
   if (type === "telegram_widget") return <MessageCircle className="mr-2 h-4 w-4" />;
@@ -239,19 +240,19 @@ function ConnectProviderDropdown({
   readonly providers: readonly ProviderConfig[];
   readonly onSelect: (provider: ProviderConfig) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground">
-          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>{t("Connect Provider")}</Button>
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>{translateUi("Connect Provider")}</Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {providers.map((p) => (
           <DropdownMenuItem key={p.id} onClick={() => onSelect(p)}>
             <ProviderTypeIcon type={p.provider_type} />
             <span>{p.name}</span>
-            <Badge variant="secondary" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-12">
               {providerTypeLabel(p.provider_type)}
             </Badge>
           </DropdownMenuItem>

@@ -142,7 +142,7 @@ describe.each([
           target_org_ids: ["org"],
           target_group_ids: [],
         }),
-        expect.anything(),
+        ...(benefit === "schedule" ? [] : [expect.anything()]),
       ),
     );
     onSubmit.mockClear();
@@ -158,7 +158,7 @@ describe.each([
           target_org_ids: [],
           target_group_ids: ["group"],
         }),
-        expect.anything(),
+        ...(benefit === "schedule" ? [] : [expect.anything()]),
       ),
     );
     onSubmit.mockClear();
@@ -166,6 +166,11 @@ describe.each([
     await user.click(
       screen.getByRole("option", { name: "All billing owners" }),
     );
+    if (benefit === "schedule") {
+      expect(screen.getByRole("button", { name: submitLabel })).toBeDisabled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      return;
+    }
     await user.click(screen.getByRole("button", { name: submitLabel }));
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith(

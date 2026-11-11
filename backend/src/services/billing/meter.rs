@@ -42,6 +42,21 @@ pub(crate) async fn has_complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<bool> {
+    complete_meter(db, ctx, false).await
+}
+
+pub(crate) async fn has_complete_funded_meter(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<bool> {
+    complete_meter(db, ctx, true).await
+}
+
+async fn complete_meter(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    require_funding: bool,
+) -> AppResult<bool> {
     let mut transaction_ids = Vec::with_capacity(2);
     if ctx.platform_metered() {
         for (_, code) in ctx.platform_specs() {
@@ -66,6 +81,120 @@ pub(crate) async fn has_complete_meter(
         .await?;
     if rows.is_empty() {
         return Ok(false);
+    }
+    if rows.iter().any(|row| {
+        row.org_channel_guest != ctx.org_channel_guest.as_ref().map(|g| g.usage())
+            || row.billing_owner_id != ctx.billing_owner_id
+            || row.actor_user_id != ctx.actor_user_id
+            || row.api_key_id != ctx.api_key_id
+            || row.service_id.as_deref()
+                != ctx
+                    .catalog_service_id
+                    .as_deref()
+                    .or(ctx.user_service_id.as_deref())
+            || row.service_slug != ctx.service_slug
+            || row
+                .pool_attempt
+                .as_ref()
+                .map(|a| (&a.pool_id, &a.member_id, a.attempt))
+                != ctx
+                    .pool_attempt
+                    .as_ref()
+                    .map(|a| (&a.pool_id, &a.member_id, a.attempt))
+    }) {
+        return Err(AppError::Conflict(
+            "Billing request identity changed".into(),
+        ));
+    }
+    if ctx
+        .public_admission
+        .as_ref()
+        .is_some_and(|a| a.expires_at <= Utc::now())
+        || ctx
+            .managed_admission
+            .as_ref()
+            .is_some_and(|a| a.expires_at <= Utc::now())
+    {
+        return Err(AppError::Conflict(
+            "Billing execution authority expired".into(),
+        ));
+    }
+    if let Some(admission) = &ctx.managed_admission
+        && db.collection::<bson::Document>(crate::models::managed_execution::COLLECTION_NAME)
+            .find_one(doc! { "_id": &admission.execution_id, "billing_request_id": &ctx.billing_request_id,
+                "billing_owner_id": &ctx.billing_owner_id, "actor_user_id": &ctx.actor_user_id,
+                "route_digest": &admission.route_digest, "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) } }).await?.is_none() {
+        return Err(AppError::Conflict("Managed billing request authority changed".into()));
+    }
+    let authority_rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
+        .find(doc! { "transaction_id": { "$in": &transaction_ids } })
+        .projection(doc! { "managed_execution_id": 1, "public_call_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    for row in authority_rows {
+        if row.get_str("managed_execution_id").ok()
+            != ctx
+                .managed_admission
+                .as_ref()
+                .map(|a| a.execution_id.as_str())
+        {
+            return Err(AppError::Conflict(
+                "Managed billing request authority changed".into(),
+            ));
+        }
+        let public = row.get_str("public_call_id").ok();
+        if public != ctx.public_admission.as_ref().map(|a| a.call_id.as_str()) {
+            // Main-era public rows predate this additive identity. Their durable
+            // authority still binds the complete route; never infer permission
+            // from a matching request UUID alone.
+            if public.is_some() || ctx.public_admission.is_none() {
+                return Err(AppError::Conflict(
+                    "Public billing request authority changed".into(),
+                ));
+            }
+        }
+    }
+    if let Some(admission) = &ctx.public_admission {
+        let digest = crate::services::platform_public_budget_service::route_digest(ctx)?;
+        let authority_collection = if ctx.public_probe {
+            crate::models::platform_public_contract::PROBES
+        } else {
+            crate::models::platform_public_budget::CALLS
+        };
+        let mut authority_filter = if ctx.public_probe {
+            doc! { "_id": &admission.call_id, "route_digest": &digest }
+        } else {
+            doc! { "_id": &admission.call_id, "billing_request_id": &ctx.billing_request_id,
+            "sponsor_owner_user_id": &ctx.billing_owner_id, "credential_api_key_id": &ctx.api_key_id,
+            "route_digest": &digest, "model_id": &admission.model_id }
+        };
+        authority_filter.insert(
+            "expires_at",
+            doc! { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+        );
+        if db
+            .collection::<bson::Document>(authority_collection)
+            .find_one(authority_filter)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::Conflict(
+                "Public billing request authority changed".into(),
+            ));
+        }
+    }
+    for row in &rows {
+        let expected = ctx.model_tariff.as_ref().map(|t| t.tariff().id.as_str());
+        if row.model_tariff.as_ref().map(|t| t.tariff_id.as_str()) != expected {
+            return Err(AppError::Conflict("Billing model tariff changed".into()));
+        }
+    }
+    if require_funding && rows.iter().any(|row| row.funding.is_none()) {
+        return Err(AppError::Conflict(
+            "Incomplete funding record; retry with a fresh billing request id".into(),
+        ));
     }
     let active_count = rows
         .iter()
@@ -92,6 +221,15 @@ pub async fn open(
 ) -> AppResult<MeteredProxyContext> {
     if !ctx.is_metered() {
         return Ok(MeteredProxyContext::disabled());
+    }
+
+    if reservation.is_none()
+        && let Some(tariff) = &ctx.model_tariff
+    {
+        if tariff.paid() {
+            return Err(super::model_tariffs::unavailable("funding_required"));
+        }
+        return Box::pin(open_free_model(db, ctx)).await;
     }
 
     let mut inserted_row_ids = Vec::with_capacity(2);
@@ -145,9 +283,10 @@ pub async fn open(
     }
     .await;
     if let Err(error) = result {
-        // The caller releases this attempt's reservation. Delete only rows
-        // inserted by this attempt: a broad request-id cleanup could erase an
-        // earlier idempotent attempt and release its funding twice.
+        // Transactional funded admission bypasses this constructor. Standalone
+        // callers own any manually created hold. Delete only rows inserted by
+        // this attempt: broad request-id cleanup could erase an earlier attempt
+        // and release its funding twice.
         if !inserted_row_ids.is_empty()
             && let Err(cleanup_error) = db
                 .collection::<UsageMeterRow>(USAGE_METER)
@@ -168,6 +307,48 @@ pub async fn open(
         return Err(error);
     }
 
+    Ok(MeteredProxyContext::from_route(ctx))
+}
+
+// Free tariffs still need a live binding fence and atomic component rows.
+// They use the ordinary meter representation without wallet/benefit funding.
+async fn open_free_model(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<MeteredProxyContext> {
+    if complete_meter(db, ctx, false).await? {
+        return Ok(MeteredProxyContext::from_route(ctx));
+    }
+    let rows: Vec<_> = ctx
+        .platform_specs()
+        .map(|(metric, code)| {
+            reserved_row(ctx, BillingLayer::Platform, metric, code.into(), None, None)
+        })
+        .collect();
+    let context = (db.clone(), ctx.clone(), rows);
+    let result = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, ctx, rows)| {
+            Box::pin(async move {
+                let tariff = ctx
+                    .model_tariff
+                    .as_ref()
+                    .ok_or_else(|| super::model_tariffs::unavailable("missing_tariff"))?;
+                super::model_tariffs::fence_admission(db, session, tariff).await?;
+                db.collection::<UsageMeterRow>(USAGE_METER)
+                    .insert_many(rows)
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    if result.is_err() && complete_meter(db, ctx, false).await? {
+        return Ok(MeteredProxyContext::from_route(ctx));
+    }
+    result?;
     Ok(MeteredProxyContext::from_route(ctx))
 }
 
@@ -219,16 +400,42 @@ pub(super) async fn persist_settlement_intent(
         return Ok(Vec::new());
     };
 
-    if ctx.platform_metered() && !ctx.platform_components.is_empty() {
-        let collection = db.collection::<UsageMeterRow>(USAGE_METER);
-        collection.update_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None), "status": "forwarded", "pending_platform_usage": Bson::Null },
-            doc! { "$set": {
-                "pending_platform_usage": bson::to_bson(&platform).map_err(|e| AppError::Internal(e.to_string()))?,
-                "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some()).map(|r| r.quantity.max(0)),
-                "model": &model,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            } }).await?;
-        if let Some(coordinator) = collection.find_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None) }).await? {
+    if let Some(selected) = &ctx.model_tariff {
+        let vector = platform
+            .model_charges
+            .as_ref()
+            .ok_or_else(|| super::model_tariffs::unavailable("missing_usage_evidence"))?;
+        if selected.usage(&vector.native_usage)?.model_charges.as_ref() != Some(vector) {
+            return Err(super::model_tariffs::unavailable(
+                "invalid_normalized_usage",
+            ));
+        }
+        if vector.tariff_id != selected.tariff().id
+            || vector.public_model != selected.tariff().public_model
+            || vector.quantities.len() != selected.tariff().components.len()
+            || selected.tariff().components.iter().any(|c| {
+                vector
+                    .quantities
+                    .get(&c.lago_metric_code)
+                    .is_none_or(|n| *n < 0 || *n > c.max_quantity)
+            })
+            || platform.reported_model.is_some()
+        {
+            return Err(super::model_tariffs::unavailable("invalid_usage_evidence"));
+        }
+    } else if platform.model_charges.is_some() {
+        return Err(super::model_tariffs::unavailable("unexpected_model_usage"));
+    }
+    let model = ctx
+        .model_tariff
+        .as_ref()
+        .map(|s| s.tariff().public_model.clone())
+        .or(model);
+    if ctx.platform_metered() && (!ctx.platform_components.is_empty() || ctx.model_tariff.is_some())
+    {
+        if let Some(coordinator) =
+            save_component_intent(db, ctx, &platform, resale, model.as_deref()).await?
+        {
             return materialize_component_intent(db, &coordinator).await;
         }
         return Ok(Vec::new());
@@ -251,6 +458,7 @@ pub(super) async fn persist_settlement_intent(
             platform_quantity,
             model.clone(),
             Some(&platform),
+            platform.reported_model.as_deref(),
             Some(resale_quantity),
             finalized_at,
         )
@@ -286,6 +494,7 @@ pub(super) async fn persist_settlement_intent(
             platform_quantity,
             model.clone(),
             Some(&platform),
+            platform.reported_model.as_deref(),
             None,
             finalized_at,
         )
@@ -302,6 +511,7 @@ pub(super) async fn persist_settlement_intent(
             resale_quantity,
             model,
             None,
+            platform.reported_model.as_deref(),
             None,
             finalized_at,
         )
@@ -311,6 +521,68 @@ pub(super) async fn persist_settlement_intent(
     }
 
     Ok(finalized_rows)
+}
+
+/// Persist the validated evidence and complete recovery intent together, before
+/// touching component rows. A crash after this write needs no caller retry.
+pub(super) async fn save_component_intent(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    platform: &PlatformUsage,
+    resale: Option<ResaleUsage>,
+    model: Option<&str>,
+) -> AppResult<Option<UsageMeterRow>> {
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let identity = transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None);
+    let mut filter = doc! {
+        "transaction_id": &identity,
+        "status": "forwarded",
+        "pending_platform_usage": Bson::Null,
+    };
+    let mut fields = doc! {
+        "pending_platform_usage": bson::to_bson(platform)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some())
+            .map(|r| r.quantity.max(0)),
+        "model": model,
+        "updated_at": bson::DateTime::now(),
+    };
+    let digest = if let Some(vector) = &platform.model_charges {
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(vector).map_err(|e| AppError::Internal(e.to_string()))?,
+        ));
+        filter.insert(
+            "model_tariff.evidence_digest",
+            doc! {"$in": [Bson::Null, Bson::String(digest.clone())]},
+        );
+        fields.insert("model_tariff.evidence_digest", &digest);
+        fields.insert(
+            "model_tariff.evidence",
+            bson::to_bson(vector).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+        Some(digest)
+    } else {
+        None
+    };
+    collection.update_one(filter, doc! {"$set": fields}).await?;
+    let saved = collection
+        .find_one(doc! {"transaction_id": &identity})
+        .await?;
+    if let Some(digest) = digest {
+        let saved = saved
+            .as_ref()
+            .ok_or_else(|| super::model_tariffs::unavailable("missing_meter"))?;
+        if saved
+            .model_tariff
+            .as_ref()
+            .and_then(|t| t.evidence_digest.as_deref())
+            != Some(digest.as_str())
+        {
+            return Err(AppError::Conflict("Model usage evidence changed".into()));
+        }
+    }
+    Ok(saved)
 }
 
 pub(super) async fn materialize_component_intent(
@@ -337,11 +609,35 @@ async fn materialize_component_rows(
 ) -> AppResult<Vec<UsageMeterRow>> {
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let mut materialized = Vec::new();
+    if let Some(vector) = &usage.model_charges {
+        if rows.len() != vector.quantities.len()
+            || rows.iter().any(|row| {
+                row.model_tariff.as_ref().is_none_or(|t| {
+                    t.tariff_id != vector.tariff_id
+                        || t.public_model != vector.public_model
+                        || vector
+                            .quantities
+                            .get(&row.lago_metric_code)
+                            .is_none_or(|n| *n < 0 || *n > t.max_quantity)
+                })
+            })
+        {
+            return Err(super::model_tariffs::unavailable(
+                "durable_usage_identity_mismatch",
+            ));
+        }
+    } else if rows.iter().any(|row| row.model_tariff.is_some()) {
+        return Err(super::model_tariffs::unavailable("missing_durable_usage"));
+    }
     for row in rows {
         if let Some(finalized) = finalize_matching(
             db,
             doc! { "_id": &row.id, "status": "forwarded" },
-            platform_quantity(row.metric, usage),
+            usage
+                .model_charges
+                .as_ref()
+                .map(|v| v.quantities[&row.lago_metric_code])
+                .unwrap_or_else(|| platform_quantity(row.metric, usage)),
             coordinator.model.clone(),
             // Classes describe the request, not each independently priced row.
             (row.transaction_id
@@ -351,6 +647,7 @@ async fn materialize_component_rows(
                     row.flush_seq,
                 ))
             .then_some(usage),
+            usage.reported_model.as_deref(),
             None,
             coordinator.finalized_at.unwrap_or(coordinator.updated_at),
         )
@@ -396,6 +693,27 @@ pub(super) async fn settle_voice_window(
     seconds: i64,
     initial_window: bool,
 ) -> AppResult<()> {
+    settle_voice_checkpoint(
+        db,
+        request_id,
+        PlatformUsage {
+            voice_seconds: seconds,
+            requests: i64::from(initial_window && seconds > 0),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+/// A durable voice checkpoint supplies observed units; the existing meter owns
+/// pricing, funding, finalization and idempotent settlement for every component.
+pub(crate) async fn settle_voice_checkpoint(
+    db: &mongodb::Database,
+    request_id: &str,
+    usage: PlatformUsage,
+    model: Option<String>,
+) -> AppResult<()> {
     reservation::release_unforwarded_rows(
         db,
         request_id,
@@ -409,22 +727,15 @@ pub(super) async fn settle_voice_window(
         .await?
         .try_collect()
         .await?;
-    let usage = PlatformUsage {
-        voice_seconds: seconds,
-        ..Default::default()
-    };
     let mut finalized = Vec::new();
     for row in rows {
         if let Some(saved) = finalize_matching(
             db,
             doc! {"_id":&row.id,"status":"forwarded"},
-            if row.metric == BillingMetric::Requests {
-                i64::from(initial_window && seconds > 0)
-            } else {
-                platform_quantity(row.metric, &usage)
-            },
-            None,
-            None,
+            platform_quantity(row.metric, &usage),
+            model.clone(),
+            Some(&usage),
+            usage.reported_model.as_deref(),
             None,
             Utc::now(),
         )
@@ -499,6 +810,25 @@ pub(super) async fn settle_persisted(
     Ok(())
 }
 
+pub(super) async fn reject_before_send(
+    db: &mongodb::Database,
+    metered: &MeteredProxyContext,
+    reason: &str,
+) -> AppResult<()> {
+    let Some(ctx) = &metered.route else {
+        return Ok(());
+    };
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .update_many(
+            doc! {"billing_request_id": &ctx.billing_request_id, "status": "forwarded",
+            "released": false, "quantity": bson::Bson::Null},
+            doc! {"$set": {"status": "reserved", "forwarded": false,
+            "updated_at": bson::DateTime::from_chrono(Utc::now())}},
+        )
+        .await?;
+    fail(db, metered, reason).await
+}
+
 pub async fn fail(
     db: &mongodb::Database,
     metered: &MeteredProxyContext,
@@ -544,6 +874,24 @@ pub(super) fn reserved_row(
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
+            wallet_only: ctx.model_tariff.is_some()
+                && super::amounts::rate_pico(
+                    item.credits_per_unit_pico,
+                    item.credits_per_unit_micros,
+                ) == 0,
+            settlement_rate: ctx
+                .model_tariff
+                .as_ref()
+                .map(|_| {
+                    crate::models::credits::Credits::from_pico(super::amounts::rate_pico(
+                        item.credits_per_unit_pico,
+                        item.credits_per_unit_micros,
+                    ))
+                })
+                .transpose()
+                .expect("validated tariff rate"),
+            tax_accounting: true,
+            applied_tax: item.applied_tax.clone(),
             credits_per_unit_pico: item.credits_per_unit_pico,
             credits_per_unit_micros: layer
                 .map(|item| item.credits_per_unit_micros)
@@ -563,6 +911,22 @@ pub(super) fn reserved_row(
         .then(|| ctx.operation.clone())
         .flatten();
     UsageMeterRow {
+        model_tariff: ctx.model_tariff.as_ref().and_then(|s| {
+            s.tariff()
+                .components
+                .iter()
+                .find(|c| c.lago_metric_code == lago_metric_code)
+                .map(|c| {
+                    Box::new(crate::models::platform_model_tariff::ModelMeterBinding {
+                        evidence: None,
+                        evidence_digest: None,
+                        tariff_id: s.tariff().id.clone(),
+                        public_model: s.tariff().public_model.clone(),
+                        max_quantity: c.max_quantity,
+                    })
+                })
+        }),
+        org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -573,6 +937,7 @@ pub(super) fn reserved_row(
         wallet_id,
         actor_user_id: ctx.actor_user_id.clone(),
         api_key_id: ctx.api_key_id.clone(),
+        assistant_source: ctx.assistant_source.clone(),
         user_service_id: ctx.user_service_id.clone(),
         service_id: ctx
             .catalog_service_id
@@ -583,7 +948,11 @@ pub(super) fn reserved_row(
         lago_metric_code,
         operation,
         credential_class: ctx.credential_class,
-        model: None,
+        model: ctx
+            .model_tariff
+            .as_ref()
+            .map(|s| s.tariff().public_model.clone()),
+        reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
         image_tokens: None,
@@ -643,12 +1012,14 @@ async fn finalize_layer(
     quantity: i64,
     model: Option<String>,
     request_usage: Option<&PlatformUsage>,
+    reported_model: Option<&str>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
-    finalize_matching(db, doc! { "transaction_id": transaction_id(billing_request_id, layer, None), "status": "forwarded" }, quantity, model, request_usage, pending_resale_quantity, finalized_at).await
+    finalize_matching(db, doc! { "transaction_id": transaction_id(billing_request_id, layer, None), "status": "forwarded" }, quantity, model, request_usage, reported_model, pending_resale_quantity, finalized_at).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_matching(
     db: &mongodb::Database,
     filter: bson::Document,
@@ -656,6 +1027,9 @@ async fn finalize_matching(
     model: Option<String>,
     // Request-level observability classes, recorded on the primary row only.
     request_usage: Option<&PlatformUsage>,
+    // Provider-reported model, recorded on every row of the request so each
+    // priced row reports under the same model. Never selects a rate.
+    reported_model: Option<&str>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
@@ -682,6 +1056,9 @@ async fn finalize_matching(
         && let Ok(images) = bson::to_bson(images)
     {
         set.insert("image_tokens", images);
+    }
+    if let Some(model) = reported_model {
+        set.insert("reported_model", model);
     }
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
@@ -733,6 +1110,7 @@ pub(super) async fn materialize_pending_resale_intent(
         resale_quantity,
         coordinator.model.clone(),
         None,
+        coordinator.reported_model.as_deref(),
         None,
         finalized_at,
     )
@@ -828,9 +1206,17 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::OutputTokens => "platform_output_tokens",
         BillingMetric::CacheReadTokens => "platform_cache_read_tokens",
         BillingMetric::CacheWriteTokens => "platform_cache_write_tokens",
+        BillingMetric::ReasoningTokens => "platform_reasoning_tokens",
+        BillingMetric::ImageInputTokens => "platform_image_input_tokens",
+        BillingMetric::ImageOutputTokens => "platform_image_output_tokens",
+        BillingMetric::AudioInputTokens => "platform_audio_input_tokens",
+        BillingMetric::AudioOutputTokens => "platform_audio_output_tokens",
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
         BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
+        BillingMetric::SandboxCpuMillisSeconds => "cma_sandbox_cpu_millis_seconds",
+        BillingMetric::SandboxMemoryMibSeconds => "cma_sandbox_memory_mib_seconds",
+        BillingMetric::SandboxDiskGibSeconds => "cma_sandbox_disk_gib_seconds",
     }
 }
 
@@ -846,7 +1232,15 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Images => usage.images.max(0),
         BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
         // Machine runtime is measured by its evidence-bound interval path.
-        BillingMetric::MachineRunningSeconds => 0,
+        BillingMetric::ReasoningTokens
+        | BillingMetric::ImageInputTokens
+        | BillingMetric::ImageOutputTokens
+        | BillingMetric::AudioInputTokens
+        | BillingMetric::AudioOutputTokens
+        | BillingMetric::MachineRunningSeconds
+        | BillingMetric::SandboxCpuMillisSeconds
+        | BillingMetric::SandboxMemoryMibSeconds
+        | BillingMetric::SandboxDiskGibSeconds => 0,
     }
 }
 
@@ -855,6 +1249,41 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
         .to_string()
         .to_ascii_lowercase()
         .contains("duplicate key")
+}
+
+/// Settle admitted carrier usage from persisted rates/funding after credentials,
+/// ACLs or catalog prices change. This never opens another reservation.
+pub(crate) async fn settle_channel_admission(
+    db: &mongodb::Database,
+    request_id: &str,
+    actor: &str,
+    usage: PlatformUsage,
+) -> AppResult<()> {
+    let rows:Vec<UsageMeterRow>=db.collection::<UsageMeterRow>(USAGE_METER).find(doc!{"billing_request_id":request_id,"actor_user_id":actor,"layer":"platform","forwarded":true}).await?.try_collect().await?;
+    let mut finalized = Vec::new();
+    for row in rows {
+        if let Some(saved) = finalize_matching(
+            db,
+            doc! {"_id":&row.id,"status":"forwarded"},
+            platform_quantity(row.metric, &usage),
+            None,
+            Some(&usage),
+            usage.reported_model.as_deref(),
+            None,
+            Utc::now(),
+        )
+        .await?
+        {
+            finalized.push(saved);
+        } else if let Some(saved) = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {"_id":&row.id,"quantity":{"$ne":bson::Bson::Null}})
+            .await?
+        {
+            finalized.push(saved);
+        }
+    }
+    settle_persisted(db, finalized).await
 }
 
 #[cfg(test)]
@@ -943,6 +1372,8 @@ mod tests {
                             reserved_credits: crate::models::credits::Credits::from_whole(5),
                             allowance_reservations: Vec::new(),
                             grant_reservations: Vec::new(),
+                            tax_cache_ttl_secs: 900,
+                            applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
                         }],
                     })
                 } else {
@@ -1186,6 +1617,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1270,6 +1703,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -1373,6 +1808,7 @@ mod tests {
             42,
             Some("model-before-detach".to_string()),
             None,
+            Some("reported-before-detach"),
             Some(17),
             finalized_at,
         )
@@ -1420,6 +1856,7 @@ mod tests {
             row.layer == BillingLayer::Resale
                 && row.quantity == Some(17)
                 && row.model.as_deref() == Some("model-before-detach")
+                && row.reported_model.as_deref() == Some("reported-before-detach")
         }));
     }
 
@@ -1448,6 +1885,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1566,6 +2005,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(4),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1648,6 +2089,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1806,6 +2249,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -1934,6 +2379,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -2052,6 +2499,8 @@ mod tests {
                         reserved_credits: crate::models::credits::Credits::from_whole(1),
                         allowance_reservations: Vec::new(),
                         grant_reservations: Vec::new(),
+                        tax_cache_ttl_secs: 900,
+                        applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
                     },
                 )
                 .collect(),
@@ -2091,6 +2540,7 @@ mod tests {
             &db,
             doc! { "_id": &output.id, "status": "forwarded" },
             3,
+            None,
             None,
             None,
             None,
@@ -2210,6 +2660,7 @@ mod tests {
             })
             .await
             .expect("insert wallet");
+        crate::services::billing::taxes::seed_test_profiles(db).await;
     }
 
     /// The provider-reported token breakdown persists onto the finalized
@@ -2293,6 +2744,7 @@ mod tests {
             input_tokens: 120,
             output_tokens: 40,
             token_breakdown: Some(breakdown),
+            reported_model: Some("gpt-5.5".into()),
             ..Default::default()
         };
         settle(&db, &request, usage.clone(), None, None)
@@ -2309,6 +2761,12 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 2);
         for row in rows {
+            // The reported model describes the whole request; it is never a
+            // pricing model.
+            assert_eq!(
+                (row.model.as_deref(), row.reported_model.as_deref()),
+                (None, Some("gpt-5.5"))
+            );
             if row.transaction_id == "component-classes:platform" {
                 assert_eq!(row.token_breakdown, Some(breakdown));
                 assert_eq!(row.quantity, Some(120));

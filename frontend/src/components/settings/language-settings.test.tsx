@@ -58,7 +58,7 @@ it("switches Studio settings and NyxBot together and preserves the chat draft", 
     await screen.findByRole("radiogroup", { name: "主题" }),
   ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "发送消息" })).toBeInTheDocument();
-  expect(screen.getByPlaceholderText("给 NyxID 助手发消息...")).toBe(editor);
+  expect(screen.getByPlaceholderText("给 NyxID 助手发送消息...")).toBe(editor);
   expect(editor).toHaveValue("Keep this draft 保留草稿");
   expect(localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
 

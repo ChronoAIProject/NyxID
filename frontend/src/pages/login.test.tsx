@@ -19,6 +19,10 @@ vi.mock("@/components/auth/mfa-verify-form", () => ({
   ),
 }));
 
+vi.mock("@/components/auth/web-device-login", () => ({
+  WebDeviceLogin: () => <div>Continue with the NyxID app</div>,
+}));
+
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (selector: (s: { mfaRequired: boolean }) => unknown) =>
     selector({ mfaRequired: storeState.mfaRequired }),
@@ -35,6 +39,20 @@ afterEach(() => {
 });
 
 describe("LoginPage", () => {
+  it("uses cookie MFA after a social callback even when password MFA state is stale", () => {
+    storeState.mfaRequired = true;
+    window.history.pushState({}, "", "/login?mfa=required&return_to=%2Fdashboard");
+    render(<LoginPage />);
+    expect(JSON.parse(screen.getByTestId("mfa-verify-form").dataset.props ?? "{}")).toEqual({ returnTo: "/dashboard", cookieChallenge: true });
+    expect(screen.queryByTestId("auth-flow")).not.toBeInTheDocument();
+  });
+
+  it("explains an expired social challenge before showing sign-in", () => {
+    window.history.pushState({}, "", "/login?mfa=expired");
+    render(<LoginPage />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Your verification expired. Please sign in again.");
+    expect(screen.getByTestId("auth-flow")).toBeInTheDocument();
+  });
   it("renders the login AuthFlow (initialPanel=0) and forwards return_to, social error, and invite code", () => {
     window.history.pushState(
       {},
@@ -84,6 +102,7 @@ describe("LoginPage", () => {
     const form = screen.getByTestId("mfa-verify-form");
     expect(JSON.parse(form.dataset.props ?? "{}")).toEqual({
       returnTo: "/dashboard",
+      cookieChallenge: false,
     });
   });
 });

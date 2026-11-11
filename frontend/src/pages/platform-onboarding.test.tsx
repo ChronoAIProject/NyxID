@@ -1,3 +1,4 @@
+import { clearOnboardingLink } from "@/lib/platform-onboarding-handoff";
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import {
@@ -22,8 +23,10 @@ vi.mock("@/stores/auth-store", () => ({
 }));
 vi.mock("@tanstack/react-router", () => ({
   useRouterState: (input: {
-    select: (s: { location: { search: typeof search } }) => unknown;
-  }) => input.select({ location: { search } }),
+    select: (s: {
+      location: { search: typeof search; href: string };
+    }) => unknown;
+  }) => input.select({ location: { search, href: window.location.href } }),
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
 }));
 vi.mock("@/hooks/use-platform-onboarding", () => ({
@@ -33,7 +36,7 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
       manager_bot_id: "100",
       requesting_sender_id: "123",
       state: "pending",
-      expires_at: "2026-10-15T00:00:00Z",
+      expires_at: new Date(Date.now() + 600000).toISOString(),
       scope: "Onboarding only",
     },
   }),
@@ -51,31 +54,29 @@ beforeEach(() => {
   search.code = "ABCD1234";
   mutate.mockReset();
   sessionStorage.clear();
+  clearOnboardingLink();
+  window.history.replaceState(null, "", "/onboarding/link#code=ABCD1234");
 });
 it("resets consent when the signed-in account changes", () => {
   const view = render(<PlatformBindingReviewPage />);
-  fireEvent.change(screen.getByRole("textbox"), {
-    target: { value: "ABCD1234" },
-  });
   fireEvent.click(screen.getByRole("checkbox"));
   state.user = { id: "actor-b", email: "b@example.test" };
   view.rerender(<PlatformBindingReviewPage />);
-  expect(screen.getByRole("textbox")).toHaveValue("");
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   expect(screen.getByRole("checkbox")).not.toBeChecked();
   expect(
     screen.getByRole("button", { name: "Approve account linking" }),
-  ).toBeDisabled();
+  ).toBeEnabled();
   expect(mutate).not.toHaveBeenCalled();
+  expect(window.location.href).not.toContain("ABCD1234");
 });
 it("resets consent when the request code changes", () => {
   const view = render(<PlatformBindingReviewPage />);
-  fireEvent.change(screen.getByRole("textbox"), {
-    target: { value: "ABCD1234" },
-  });
   fireEvent.click(screen.getByRole("checkbox"));
   search.code = "EFGH5678";
+  window.history.replaceState(null, "", "/onboarding/link#code=EFGH5678");
   view.rerender(<PlatformBindingReviewPage />);
-  expect(screen.getByRole("textbox")).toHaveValue("");
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   expect(screen.getByRole("checkbox")).not.toBeChecked();
 });
 it("discards another account's local draft facts", () => {

@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -24,7 +25,7 @@ import {
  * auth-store user, which makes the layout swap back to the real dashboard.
  */
 export function OnboardingTakeover() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const userName = user?.display_name ?? "there";
   const [addServiceOpen, setAddServiceOpen] = useState(false);
@@ -41,7 +42,7 @@ export function OnboardingTakeover() {
       await completeOnboarding.mutateAsync({ key: "ai_services" });
       await useAuthStore.getState().checkAuth();
     } catch {
-      toast.error(translateUi("Couldn't save your progress. Please try again."));
+      toast.error(translateErrorMessage("Couldn't save your progress. Please try again."));
     }
   }
 
@@ -71,24 +72,24 @@ export function OnboardingTakeover() {
               <button
                 type="button"
                 className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
-                aria-label={t("User menu")}
+                aria-label={translateUi("User menu")}
               >
                 <User className="h-[14px] w-[14px]" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 p-2">
               <div className="px-2 py-1.5">
-                <p className="text-12 font-medium text-foreground">{user?.display_name ?? t("User")}</p>
-                <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
+                <p className="type-row-title text-foreground">{user?.display_name ?? translateUi("User")}</p>
+                <p className="text-13 text-text-tertiary">{user?.email ?? ""}</p>
               </div>
               <DropdownMenuItem
                 onClick={() => void navigate({ to: "/settings" as string })}
-                className="rounded-md text-12"
-              >{t("Settings")}</DropdownMenuItem>
+                className="rounded-md text-14"
+              >{translateUi("Settings")}</DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => void handleLogout()}
-                className="rounded-md text-12 text-destructive focus:text-destructive"
-              >{t("Log out")}</DropdownMenuItem>
+                className="rounded-md text-14 text-destructive focus:text-destructive"
+              >{translateUi("Log out")}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <a
@@ -96,7 +97,7 @@ export function OnboardingTakeover() {
             target="_blank"
             rel="noopener noreferrer"
             className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
-            aria-label={t("GitHub")}
+            aria-label={translateUi("GitHub")}
           >
             <Github className="h-[14px] w-[14px]" />
           </a>
@@ -113,11 +114,11 @@ export function OnboardingTakeover() {
         {/* Copy */}
         <div className="space-y-3">
           <h1
-            className="text-28 font-bold leading-[1.1] text-foreground"
+            className="type-page-title text-foreground"
             style={{ letterSpacing: "-0.03em" }}
-          >{t("Welcome, ")}{userName}
+          >{translateUi("Welcome, ")}{userName}
           </h1>
-          <p className="text-14 leading-relaxed text-muted-foreground">{t("Connect your first AI service to get started with NyxID. Your agents will proxy requests through NyxID so credentials never leave your control.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("Connect your first AI service to get started with NyxID. Your agents will proxy requests through NyxID so credentials never leave your control.")}</p>
         </div>
 
         {/* CTA */}
@@ -129,22 +130,22 @@ export function OnboardingTakeover() {
         >
           <ButtonIcon variant="primary">
             <ArrowRight className="h-4 w-4" />
-          </ButtonIcon>{t("Connect a Service")}</Button>
+          </ButtonIcon>{translateUi("Connect a Service")}</Button>
 
         {/* Skip */}
         <button
           type="button"
           onClick={() => void markComplete()}
           disabled={completeOnboarding.isPending}
-          className="text-12 text-text-tertiary transition-colors duration-200 hover:text-foreground disabled:opacity-50"
-        >{t("Skip for now")}</button>
+          className="text-14 text-text-tertiary transition-colors duration-200 hover:text-foreground disabled:opacity-50"
+        >{translateUi("Skip for now")}</button>
 
         {/* Trust signals */}
-        <div className="flex items-center gap-6 text-11 text-text-tertiary">
+        <div className="flex items-center gap-6 text-13 text-text-tertiary">
           <span className="flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" />{t("End-to-end encrypted")}</span>
+            <ShieldCheck className="h-3.5 w-3.5" />{translateUi("End-to-end encrypted")}</span>
           <span className="flex items-center gap-1.5">
-            <KeyRound className="h-3.5 w-3.5" />{t("Zero credential exposure")}</span>
+            <KeyRound className="h-3.5 w-3.5" />{translateUi("Zero credential exposure")}</span>
         </div>
       </div>
 

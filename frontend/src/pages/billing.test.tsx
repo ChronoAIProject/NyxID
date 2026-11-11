@@ -1,4 +1,5 @@
 import "@/i18n";
+import { consumeBillingCheckoutReturn } from "@/lib/billing-checkout-return";
 import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -24,6 +25,7 @@ import {
 import { BillingPage } from "./billing";
 
 const mocks = vi.hoisted(() => ({
+  orgs: vi.fn(),
   wallet: vi.fn(),
   usage: vi.fn(),
   history: vi.fn(),
@@ -34,15 +36,37 @@ const mocks = vi.hoisted(() => ({
   provision: vi.fn(),
   topup: vi.fn(),
   receipt: vi.fn(),
+  benefits: vi.fn(),
   openExternal: vi.fn(),
 }));
+const ACTOR = "11111111-1111-4111-8111-111111111111";
+const ORG = "22222222-2222-4222-8222-222222222222";
+const MEMBER_ORG = "33333333-3333-4333-8333-333333333333";
+vi.mock("@/hooks/use-orgs", () => ({ useOrgs: mocks.orgs }));
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: Object.assign(
+    (select: (state: { user: { id: string } }) => unknown) =>
+      select({ user: { id: ACTOR } }),
+    { getState: () => ({ user: { id: ACTOR } }) },
+  ),
+}));
 vi.mock("@/hooks/use-billing", () => ({
+  BILLING_INVOICES_PAGE_SIZE: 10,
+  useCurrentBill: () => ({ isLoading: false, isError: false, data: undefined }),
+  useBillingInvoices: () => ({
+    isLoading: false,
+    isError: false,
+    data: { invoices: [], total: 0 },
+  }),
   useBillingWallet: mocks.wallet,
   useBillingUsage: mocks.usage,
   useTopUpHistory: mocks.history,
   useProvisionBillingWallet: () => ({ mutateAsync: mocks.provision }),
   useTopUpBilling: () => ({ mutateAsync: mocks.topup }),
   openInvoiceReceipt: mocks.receipt,
+}));
+vi.mock("@/hooks/use-billing-benefits", () => ({
+  useBillingBenefits: mocks.benefits,
 }));
 vi.mock("@/hooks/use-billing-credits", () => ({
   useActiveCreditGrants: mocks.grants,
@@ -60,23 +84,38 @@ const query = (data: unknown, error: unknown = null) => ({
   isError: Boolean(error),
   refetch: vi.fn(),
 });
+let user: ReturnType<typeof userEvent.setup>;
 const PAGE_ROUTES = ["/billing", "/assistant"] as const;
 let pageRoute: (typeof PAGE_ROUTES)[number] = "/billing";
 async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   if (pageRoute === "/assistant") {
     const old = new URL(url, "https://nyxid.test");
-    const params = new URLSearchParams({ panel: "billing", c: "chat", mock: "1" });
-    for (const [key, value] of old.searchParams) params.set(`panel${key.charAt(0).toUpperCase()}${key.slice(1)}`, value);
+    const params = new URLSearchParams({
+      panel: "billing",
+      c: "chat",
+      mock: "1",
+    });
+    for (const [key, value] of old.searchParams)
+      params.set(`panel${key.charAt(0).toUpperCase()}${key.slice(1)}`, value);
     url = `/assistant?${params}`;
   }
   const root = createRootRoute();
   const route = createRoute({
     getParentRoute: () => root,
     path: pageRoute,
-    validateSearch: pageRoute === "/billing" ? billingSearchSchema.parse : withAccountPanelSearch((search) => ({ c: search.c, mock: search.mock })),
-    component: () => pageRoute === "/billing"
-      ? <BillingPage />
-      : <BillingPage presentation="panel" />,
+    validateSearch:
+      pageRoute === "/billing"
+        ? billingSearchSchema.parse
+        : withAccountPanelSearch((search) => ({
+            c: search.c,
+            mock: search.mock,
+          })),
+    component: () =>
+      pageRoute === "/billing" ? (
+        <BillingPage />
+      ) : (
+        <BillingPage presentation="panel" />
+      ),
   });
   const history = createMemoryHistory({ initialEntries: [url] });
   const router = createRouter({
@@ -89,18 +128,19 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
     </TooltipProvider>,
   );
   await act(() => router.load());
-  await screen.findByRole("tab", { name: "Billing", hidden: true });
-  if (pageRoute === "/assistant") expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
+  await screen.findByText("Billing owner");
+  if (pageRoute === "/assistant")
+    expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
   expect(history.location.pathname).toBe(pageRoute);
   if (exploreGroups) {
     const disclosure = screen.queryByText("Explore by service, model or agent");
-    if (disclosure) await userEvent.click(disclosure);
+    if (disclosure) await user.click(disclosure);
   }
   return { history, router };
 }
 async function select(label: string, option: string) {
-  await userEvent.click(screen.getByRole("combobox", { name: label }));
-  await userEvent.click(screen.getByRole("option", { name: option }));
+  await user.click(screen.getByRole("combobox", { name: label }));
+  await user.click(screen.getByRole("option", { name: option }));
 }
 function serviceFilter() {
   return screen.getByRole("button", { name: "Filter services" });
@@ -114,11 +154,13 @@ const servicesChip = (name?: string) =>
     name: name ? `Edit service filter: ${name}` : /^Edit service filter:/,
   })[0] ?? null;
 async function selectServices(names: string[]) {
-  for (const name of names) await userEvent.click(option(name));
-  await userEvent.click(picker().getByRole("button", { name: "Done" }));
+  for (const name of names) await user.click(option(name));
+  await user.click(picker().getByRole("button", { name: "Done" }));
 }
 function servicesParam(history: { location: { search: string } }) {
-  const raw = new URLSearchParams(history.location.search).get(pageRoute === "/assistant" ? "panelServices" : "services");
+  const raw = new URLSearchParams(history.location.search).get(
+    pageRoute === "/assistant" ? "panelServices" : "services",
+  );
   return raw === null ? undefined : (JSON.parse(raw) as string[]);
 }
 function twoServiceRows() {
@@ -135,8 +177,45 @@ function twoServiceRows() {
   ];
 }
 beforeEach(() => {
+  user = userEvent.setup({ delay: null });
   vi.resetAllMocks();
-  mocks.wallet.mockReturnValue(query(billingWallet()));
+  mocks.benefits.mockReturnValue(
+    query({
+      summary: {
+        unreserved: "0",
+        held: "0",
+        pending_activation: "0",
+        pending_reclaim: "0",
+        expired_awaiting_cleanup: "0",
+        restricted: "0",
+        generated_at: "2026-10-01T00:00:00Z",
+      },
+      grants: [],
+      allowances: [],
+      total_grants: 0,
+      page: 1,
+      per_page: 50,
+    }),
+  );
+  sessionStorage.clear();
+  mocks.orgs.mockReturnValue(
+    query([
+      { id: ORG, display_name: "Merchant organization", your_role: "admin" },
+      {
+        id: MEMBER_ORG,
+        display_name: "Member organization",
+        your_role: "member",
+      },
+      {
+        id: "44444444-4444-4444-8444-444444444444",
+        display_name: "Viewer organization",
+        your_role: "viewer",
+      },
+    ]),
+  );
+  mocks.wallet.mockReturnValue(
+    query({ ...billingWallet(), lago_subscription_id: "subscription" }),
+  );
   mocks.usage.mockReturnValue(query(usage()));
   mocks.history.mockReturnValue(query({ topups: [], total: 0 }));
   mocks.grants.mockReturnValue(query({ grants: [] }));
@@ -145,7 +224,136 @@ beforeEach(() => {
   mocks.activity.mockReturnValue(query([]));
 });
 describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
-  beforeEach(() => { pageRoute = route; });
+  beforeEach(() => {
+    pageRoute = route;
+  });
+  it("selects only administered owners and scopes every view with URL history", async () => {
+    const { history } = await renderPage("/billing");
+    await user.click(screen.getByRole("combobox", { name: "Billing owner" }));
+    expect(
+      screen.queryByRole("option", { name: "Member organization" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Viewer organization" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("option", { name: "Merchant organization" }),
+    );
+    await waitFor(() => expect(mocks.wallet).toHaveBeenLastCalledWith(ORG));
+    expect(mocks.usage).toHaveBeenLastCalledWith("30d", undefined, ORG);
+    expect(mocks.history).toHaveBeenLastCalledWith(1, 10, "30d", ORG);
+    expect(mocks.benefits).toHaveBeenLastCalledWith(1, ORG);
+    const key = route === "/assistant" ? "panelOwnerId" : "ownerId";
+    expect(new URLSearchParams(history.location.search).get(key)).toContain(
+      ORG,
+    );
+    await act(() => history.back());
+    await waitFor(() =>
+      expect(mocks.wallet).toHaveBeenLastCalledWith(undefined),
+    );
+    await act(() => history.forward());
+    await waitFor(() => expect(mocks.wallet).toHaveBeenLastCalledWith(ORG));
+  });
+  it("refuses unauthorized org selection without falling back to a personal wallet", async () => {
+    await renderPage(`/billing?ownerId=${MEMBER_ORG}`);
+    expect(screen.getByRole("alert")).toHaveTextContent("only to its admins");
+    expect(mocks.wallet).not.toHaveBeenCalled();
+    expect(mocks.usage).not.toHaveBeenCalled();
+  });
+  it("requires explicit org provisioning and submits the selected owner", async () => {
+    mocks.wallet.mockReturnValue(query(null));
+    await renderPage(`/billing?ownerId=${ORG}`);
+    expect(mocks.provision).not.toHaveBeenCalled();
+    expect(screen.getByText(/No wallet provisioned\./)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Provision Wallet" }));
+    await waitFor(() =>
+      expect(mocks.provision).toHaveBeenCalledWith({ owner_id: ORG }),
+    );
+  });
+  it("repairs a missing subscription only by explicit setup", async () => {
+    mocks.wallet.mockReturnValue(
+      query({ ...billingWallet(), lago_subscription_id: null }),
+    );
+    await renderPage(`/billing?ownerId=${ORG}`);
+    expect(
+      screen.queryByRole("button", { name: "Add credits" }),
+    ).not.toBeInTheDocument();
+    expect(mocks.provision).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: "Finish wallet setup" }),
+    );
+    await waitFor(() =>
+      expect(mocks.provision).toHaveBeenCalledWith({ owner_id: ORG }),
+    );
+  });
+  it("sends the org to checkout and restores the selected owner in the original shell", async () => {
+    mocks.topup.mockResolvedValue({
+      checkout_url: "https://pay.example/checkout",
+    });
+    await renderPage(`/billing?ownerId=${ORG}`);
+    await user.click(screen.getByRole("button", { name: "Add credits" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continue to payment" }),
+    );
+    await waitFor(() =>
+      expect(mocks.topup).toHaveBeenCalledWith(
+        expect.objectContaining({ owner_id: ORG }),
+      ),
+    );
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://pay.example/checkout",
+    );
+    expect(consumeBillingCheckoutReturn(ACTOR, {})).toEqual(
+      route === "/assistant"
+        ? { to: "/assistant", search: { panel: "billing", panelOwnerId: ORG } }
+        : { to: "/billing", search: { ownerId: ORG } },
+    );
+  });
+  it("resumes an org top-up with the same checkout return context", async () => {
+    mocks.history.mockReturnValue(
+      query({
+        total: 1,
+        topups: [
+          {
+            id: "pending",
+            status: "pending",
+            amount_credits: 10,
+            created_at: "2026-11-05T00:00:00Z",
+            checkout_url: "https://pay.example/resume",
+          },
+        ],
+      }),
+    );
+    await renderPage(`/billing?ownerId=${ORG}`);
+    await user.click(
+      screen.getAllByRole("button", { name: "Resume payment" })[0]!,
+    );
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://pay.example/resume",
+    );
+    expect(consumeBillingCheckoutReturn(ACTOR, {})?.search).toEqual(
+      route === "/assistant"
+        ? { panel: "billing", panelOwnerId: ORG }
+        : { ownerId: ORG },
+    );
+    expect(mocks.topup).not.toHaveBeenCalled();
+  });
+  it("closing an org checkout by changing owner cannot spend from the old wallet", async () => {
+    await renderPage(`/billing?ownerId=${ORG}&action=topup`);
+    await screen.findByRole("dialog");
+    await user.keyboard("{Escape}");
+    await select("Billing owner", "Personal");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    mocks.topup.mockResolvedValue({
+      checkout_url: "https://pay.example/personal",
+    });
+    await user.click(screen.getByRole("button", { name: "Add credits" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continue to payment" }),
+    );
+    await waitFor(() => expect(mocks.topup).toHaveBeenCalled());
+    expect(mocks.topup.mock.calls[0]![0]).not.toHaveProperty("owner_id");
+  });
   it("opens on visual quantities and funding with the grouped list collapsed", async () => {
     await renderPage("/billing?tab=usage", false);
     expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
@@ -162,9 +370,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       document.querySelector(".expandable-service > summary"),
     ).not.toBeVisible();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    await userEvent.click(
-      screen.getByText("Explore by service, model or agent"),
-    );
+    await user.click(screen.getByText("Explore by service, model or agent"));
     expect(
       document.querySelector(".expandable-service > summary"),
     ).toBeVisible();
@@ -175,13 +381,11 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       "data-state",
       "active",
     );
-    expect(screen.getByText("95 credits")).toBeVisible();
+    expect(screen.getByTitle("95")).toBeVisible();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
-    await userEvent.click(
-      screen.getByRole("button", { name: "View breakdown" }),
-    );
+    await user.click(screen.getByRole("button", { name: "View breakdown" }));
     expect(screen.getByText("100 credits")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Add credits" }));
+    await user.click(screen.getByRole("button", { name: "Add credits" }));
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(screen.getAllByText("Top-up history")).toHaveLength(1);
   });
@@ -202,13 +406,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       screen.getAllByText("0.00244", { exact: false }).length,
     ).toBeGreaterThan(0);
-    await userEvent.click(screen.getByText("All metrics & funding"));
+    await user.click(screen.getByText("All metrics & funding"));
     const funding = screen.getByText("Funding breakdown").parentElement!;
     expect(within(funding).getByText("0.001 credits")).toBeVisible();
     expect(within(funding).getByText("0.0012 credits")).toBeVisible();
     expect(within(funding).getByText("0.00024 credits")).toBeVisible();
     expect(within(funding).getByText("1,200")).toBeVisible();
-    await userEvent.click(
+    await user.click(
       screen.getByText("Example LLM", {
         selector: ".expandable-name > strong",
       }),
@@ -231,7 +435,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByRole("combobox", { name: "Time range" }),
     ).toHaveTextContent("Last 30 days");
     expect(servicesChip()).toBeNull();
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     expect(
       picker().getByText("Services with recorded usage in this period."),
     ).toBeVisible();
@@ -266,7 +470,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         .querySelector(".all-metrics")
         ?.textContent?.includes("Reported requests");
     expect(totals()).toBe(true);
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     await selectServices(["Free service", "Example LLM"]);
     expect(servicesChip("Free service")).toHaveTextContent(
       "Service: Free service",
@@ -284,8 +488,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     const { history } = await renderPage(
       `/billing?tab=usage&services=${encodeURIComponent('["free-service"]')}`,
     );
-    await userEvent.click(serviceFilter());
-    await userEvent.click(option("Example LLM"));
+    await user.click(serviceFilter());
+    await user.click(option("Example LLM"));
     await waitFor(() =>
       expect(servicesParam(history)).toEqual(["free-service", "example-llm"]),
     );
@@ -296,14 +500,14 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       picker().queryByRole("button", { name: "Cancel" }),
     ).not.toBeInTheDocument();
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(picker().getByRole("button", { name: "Done" }));
     expect(history.location.pathname).toBe(pageRoute);
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     expect(option("Example LLM")).toBeChecked();
-    await userEvent.click(picker().getByRole("button", { name: "Clear" }));
+    await user.click(picker().getByRole("button", { name: "Clear" }));
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(option("Example LLM")).not.toBeChecked();
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(picker().getByRole("button", { name: "Done" }));
     expect(servicesChip()).toBeNull();
     expect(serviceFilter()).toHaveTextContent("All");
   });
@@ -312,18 +516,18 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       query(usage([...twoServiceRows(), row({ service_slug: "third" })])),
     );
     const { history } = await renderPage();
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     await selectServices(["Free service", "Example LLM"]);
-    await userEvent.click(servicesChip("Free service")!);
+    await user.click(servicesChip("Free service")!);
     expect(option("Free service")).toBeChecked();
     expect(option("Example LLM")).toBeChecked();
     expect(option("third")).not.toBeChecked();
-    await userEvent.type(
+    await user.type(
       picker().getByRole("textbox", { name: "Search services" }),
       "third",
     );
     expect(picker().getAllByRole("checkbox")).toHaveLength(1);
-    await userEvent.click(option("third"));
+    await user.click(option("third"));
     await waitFor(() =>
       expect(servicesParam(history)).toEqual([
         "free-service",
@@ -331,8 +535,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         "third",
       ]),
     );
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
-    await userEvent.click(
+    await user.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(
       screen.getByRole("button", { name: "Remove service: third" }),
     );
     await waitFor(() =>
@@ -340,13 +544,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(servicesChip("Free service")).toBeVisible();
     expect(servicesChip("Example LLM")).toBeVisible();
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     expect(
       picker().getByRole("textbox", { name: "Search services" }),
     ).toHaveValue("");
     expect(option("third")).not.toBeChecked();
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
-    await userEvent.click(
+    await user.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(
       screen.getAllByRole("button", { name: "Clear filters" })[0]!,
     );
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
@@ -376,8 +580,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     const url = `/billing?tab=usage&services=${encodeURIComponent('["example-llm","gone"]')}`;
     const { history } = await renderPage(url);
     const rerender = async () => {
-      await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
-      await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+      await user.click(screen.getByRole("tab", { name: "Billing" }));
+      await user.click(screen.getByRole("tab", { name: "Usage" }));
     };
     expect(servicesParam(history)).toEqual(["example-llm", "gone"]);
     state = { ...query(usage([row()])), isFetching: true };
@@ -399,7 +603,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await select("Time range", "Last 24 hours");
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(screen.getByText("No usage in this period.")).toBeVisible();
-    await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
     expect(
       screen.getByRole("combobox", { name: "Top-up history period" }),
     ).toHaveTextContent("Last 30 days");
@@ -410,7 +614,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await waitFor(() =>
       expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
     );
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -441,9 +645,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       const { history } = await renderPage(url);
       // Usage has settled, so legacy/stale filters are cleaned up first...
       await waitFor(() =>
-        expect(history.location.search).not.toMatch(/(?:service|services|panelService|panelServices)=/),
+        expect(history.location.search).not.toMatch(
+          /(?:service|services|panelService|panelServices)=/,
+        ),
       );
-      expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelAction=topup" : "action=topup");
+      expect(history.location.search).toContain(
+        pageRoute === "/assistant" ? "panelAction=topup" : "action=topup",
+      );
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       // ...and the wallet arrives later: Add credits opens exactly once.
       act(() => {
@@ -456,7 +664,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       await waitFor(() =>
         expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
       );
-      await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
       await waitFor(() =>
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
       );
@@ -482,8 +690,12 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     const { history } = await renderPage("/billing?tab=billing&action=topup");
     // The user picks Usage while the wallet is still loading.
-    await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
-    await waitFor(() => expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage"));
+    await user.click(screen.getByRole("tab", { name: "Usage" }));
+    await waitFor(() =>
+      expect(history.location.search).toContain(
+        pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage",
+      ),
+    );
     expect(history.location.pathname).toBe(pageRoute);
     expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
     act(() => {
@@ -526,6 +738,42 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+  it("includes voice and dictation charges and audio quantities in Usage settings", async () => {
+    mocks.usage.mockReturnValue(
+      query(
+        usage([
+          row({
+            metric: "voice_seconds",
+            model: "gpt-live-1",
+            quantity: 60,
+            estimated_credits_micros: 600_000,
+            wallet_credits_micros: 600_000,
+            grant_credits_micros: 0,
+          }),
+          row({
+            metric: "voice_seconds",
+            model: "gpt-live-transcribe",
+            quantity: 12,
+            estimated_credits_micros: 120_000,
+            wallet_credits_micros: 120_000,
+            grant_credits_micros: 0,
+          }),
+        ]),
+      ),
+    );
+    await renderPage();
+    const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
+    expect(
+      within(spend).getByText("0.72", { selector: "strong", exact: false }),
+    ).toBeVisible();
+    await user.click(screen.getByText("All metrics & funding"));
+    const quantities = screen.getByRole("heading", {
+      name: "Requests & other units",
+    }).parentElement!;
+    expect(
+      within(quantities).getByText("voice seconds").parentElement,
+    ).toHaveTextContent("72");
+  });
   it("does not turn missing costs into zero or count free records as pending", async () => {
     mocks.usage.mockReturnValue(
       query(
@@ -562,7 +810,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         /^1 charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated\. Amounts marked ≥ are lower bounds\./,
       ).length,
     ).toBeGreaterThan(0);
-    await userEvent.click(
+    await user.click(
       screen.getByText("Example LLM", {
         selector: ".expandable-name > strong",
       }),
@@ -579,7 +827,10 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByText("Acknowledged", { selector: ".usage-status" }),
     ).toBeVisible();
     expect(
-      screen.queryByText("Pending", { exact: true }),
+      within(screen.getByRole("tabpanel", { name: "Usage" })).queryByText(
+        "Pending",
+        { exact: true },
+      ),
     ).not.toBeInTheDocument();
   });
   it("switches the optional breakdown between services, models, and agents and searches its groups", async () => {
@@ -616,7 +867,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByText("Model B", { selector: ".expandable-name > strong" }),
     ).toBeVisible();
     await select("Group by", "Agent");
-    await userEvent.type(
+    await user.type(
       screen.getByRole("textbox", { name: "Search usage groups" }),
       "Research",
     );
@@ -651,7 +902,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     ).toBeVisible();
     await select("Activity time range", "Last 30 days");
     expect(mocks.activity).toHaveBeenLastCalledWith(30);
-    await userEvent.click(screen.getByText("View daily values"));
+    await user.click(screen.getByText("View daily values"));
     const table = screen.getByRole("table", {
       name: "Agent activity per UTC day",
     });
@@ -696,9 +947,9 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       screen.queryByText("No usage in this period."),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(mocks.usage().refetch).toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
     expect(screen.getByText("Failed to load top-up history.")).toBeVisible();
     expect(screen.queryByText("No top-ups yet.")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add credits" })).toBeDisabled();
@@ -715,9 +966,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage("/billing");
-    await userEvent.click(
-      screen.getByRole("button", { name: "Provision Wallet" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Provision Wallet" }));
     expect(mocks.provision).toHaveBeenCalledWith({});
   });
 });

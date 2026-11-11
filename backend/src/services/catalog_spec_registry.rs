@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "nyx-panel",
+        include_str!("../../specs/catalog/nyx-panel.openapi.json"),
+    ),
+    (
         "stripe",
         include_str!("../../specs/catalog/stripe.openapi.json"),
     ),
@@ -305,13 +309,18 @@ pub struct OperationMarks {
     /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
     /// than change it.
     pub changes_existing: Option<bool>,
+    /// NyxID-owned append-only attestation, matched by exact route only.
+    pub append_only: bool,
+    pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
 }
 
 impl OperationMarks {
-    pub fn of(operation: &serde_json::Value) -> Self {
+    pub fn of(operation: &'static serde_json::Value) -> Self {
         Self {
             destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
             changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+            append_only: operation["x-nyxid-append-only"].as_bool() == Some(true),
+            append_only_query: operation["x-nyxid-append-only-query"].as_object(),
         }
     }
 }
@@ -356,6 +365,8 @@ pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> Oper
         .unwrap_or_default();
     OperationMarks {
         destructive: by_name.destructive || by_route.destructive,
+        append_only: by_route.append_only,
+        append_only_query: by_route.append_only_query,
         changes_existing: if by_name.changes_existing == Some(true)
             || by_route.changes_existing == Some(true)
         {
@@ -415,6 +426,61 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_instance_contract_exposes_camera_images_without_management() {
+        let spec = spec_for_key("nyx-panel").unwrap();
+        let endpoints =
+            super::super::openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        let camera = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "take_camera_photo")
+            .unwrap();
+        assert_eq!(camera.method, "POST");
+        assert_eq!(camera.path, "/camera/capture");
+        assert_eq!(camera.response.content_types, vec!["image/jpeg"]);
+        for endpoint in &endpoints {
+            assert!(matches!(
+                endpoint.path.as_str(),
+                "/status"
+                    | "/openapi.json"
+                    | "/camera"
+                    | "/camera/capture"
+                    | "/camera/snapshot.jpg"
+                    | "/lcd/snapshot.jpg"
+                    | "/lcd/screen"
+                    | "/lcd/image"
+                    | "/lcd/text"
+                    | "/lcd/clear"
+                    | "/lcd/default-image"
+                    | "/lcd/brightness"
+                    | "/config/audio"
+                    | "/voice/input-mode"
+                    | "/voice"
+                    | "/voice/open"
+                    | "/voice/agents"
+                    | "/voice/agents/refresh"
+                    | "/voice/start"
+                    | "/voice/hold"
+                    | "/voice/say"
+                    | "/voice/microphone"
+                    | "/voice/stop"
+            ));
+            assert!(
+                endpoint.origin.is_none(),
+                "Device routing belongs to the connection"
+            );
+        }
+        assert_eq!(endpoints.len(), 27);
+        let mode = endpoints
+            .iter()
+            .find(|e| e.name == "set_voice_input_mode")
+            .unwrap();
+        let schema = mode.request_body_schema.as_ref().unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"].get("agent_id").is_none());
+        assert!(spec_for_slug("nyx-panel").is_none());
+    }
 
     /// Guests' default access follows what overlays say about an operation:
     /// Aevatar's destructive marker and NyxID's own changes-existing marker,
@@ -655,6 +721,88 @@ mod tests {
     use crate::services::openapi_parser;
 
     #[test]
+    fn lark_base_write_registry_exposes_readonly_field_pages_and_closed_trusted_composite_for_all_four_slugs()
+     {
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let fields = endpoints
+                .iter()
+                .find(|ep| ep.name == "bitable_fields_list")
+                .unwrap();
+            assert_eq!(fields.method, "GET");
+            assert_eq!(
+                fields.path,
+                "/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+            );
+            assert_eq!(
+                fields.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let parameters = fields.parameters.as_ref().unwrap().as_array().unwrap();
+            for name in ["page_size", "page_token"] {
+                assert!(
+                    parameters
+                        .iter()
+                        .any(|p| p["name"] == name && p["in"] == "query" && p["required"] == false)
+                );
+            }
+            let composite = endpoints
+                .iter()
+                .find(|ep| ep.name == "bitable_record_create_with_attachments")
+                .unwrap();
+            assert_eq!(composite.method, "POST");
+            assert_eq!(
+                composite.path,
+                crate::services::lark_attachment_tool::COMPOSITE_PATH
+            );
+            assert_eq!(
+                composite.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let body = composite.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                body["required"],
+                serde_json::json!(["fields", "attachments"])
+            );
+            assert_eq!(body["additionalProperties"], false);
+            let mark = &spec["paths"][crate::services::lark_attachment_tool::COMPOSITE_PATH]["post"]
+                ["x-nyxid-managed-operation"];
+            assert_eq!(
+                mark,
+                &serde_json::json!({"kind":"lark_bitable_record_with_attachments","version":1,
+                "fields_operation":"bitable_fields_list","upload_operation":"bitable_media_upload","create_operation":"bitable_record_create"})
+            );
+        }
+    }
+
+    #[test]
+    fn lark_wiki_lookup_registered_for_four_slugs_with_raw_read_contract() {
+        for slug in super::super::lark_wiki::SLUGS {
+            let spec = spec_for_slug(slug).unwrap();
+            let inputs = crate::services::openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let endpoint = inputs.iter().find(|e| e.name == "wiki_get_node").unwrap();
+            assert_eq!(endpoint.method, "GET");
+            let mark = &spec["paths"][&endpoint.path]["get"]["x-aevatar-tool"];
+            assert_eq!(mark["readOnly"], true);
+            assert_eq!(mark["destructive"], false);
+            assert_eq!(mark["requiresApproval"], false);
+            let schema = &spec["paths"][&endpoint.path]["get"]["parameters"];
+            assert_eq!(schema.as_array().unwrap().len(), 1);
+            assert_eq!(schema[0]["name"], "token");
+            assert_eq!(schema[0]["in"], "query");
+            assert_eq!(schema[0]["required"], true);
+            assert!(
+                mark["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("SAME connection")
+            );
+            assert!(endpoint.path.ends_with("/wiki/v2/spaces/get_node"));
+        }
+    }
+
+    #[test]
     fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
         for slug in ["api-lark", "api-feishu"] {
             let spec = spec_for_slug(slug).unwrap();
@@ -701,6 +849,31 @@ mod tests {
             );
             assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
             assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
+        }
+    }
+
+    #[test]
+    fn cma_uses_remote_discovery_without_a_hosted_overlay() {
+        assert!(spec_for_slug("cma").is_none());
+        assert!(spec_path_for_slug("cma").is_none());
+        for (method, path, name) in [
+            ("POST", "/api/v1/agents", "create_agent"),
+            ("POST", "/api/v1/agents", "post_api_v1_agents"),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "control_task",
+            ),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "post_api_v2_agents_agent_id_responses_response_id_controls",
+            ),
+        ] {
+            assert_eq!(
+                operation_marks("cma", method, path, name),
+                OperationMarks::default()
+            );
         }
     }
 
@@ -822,8 +995,10 @@ mod tests {
     /// (`NyxIdOperationAdmissionProofBuilder`) accepts only this fixed
     /// schema-keyword whitelist and drops the whole endpoint on any other
     /// keyword, an unresolved `$ref`, or a union `type` array. Every
-    /// overlay schema must stay inside the subset or the operation becomes
-    /// invisible to workflow binding (see NyxID#1296).
+    /// schema exposed through /mcp/config must stay inside the subset or the
+    /// operation becomes invisible to workflow binding (see NyxID#1296).
+    /// Hosted IM adapters have a separate server contract: the legacy bridge
+    /// keeps raw message strings and omits image materialization entirely.
     const AEVATAR_SCHEMA_KEYWORDS: &[&str] = &[
         "type",
         "enum",
@@ -838,6 +1013,41 @@ mod tests {
         "examples",
         "deprecated",
     ];
+
+    fn im_contracts(
+        key: &str,
+        spec: &serde_json::Value,
+    ) -> HashMap<String, crate::services::mcp_service::McpToolEndpoint> {
+        use crate::services::{
+            catalog_spec_sync, lark_attachment_tool, lark_im_tool, mcp_service,
+            service_endpoint_service,
+        };
+        let slug = match key {
+            "lark" => "api-lark",
+            "lark-bot" => "api-lark-bot",
+            _ => return HashMap::new(),
+        };
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.slug = slug.into();
+        catalog.created_by = "system".into();
+        catalog_spec_sync::destination_endpoint_inputs(&catalog, spec)
+            .unwrap()
+            .into_iter()
+            .filter_map(|input| {
+                let row = service_endpoint_service::endpoint_from_input(
+                    &catalog.id,
+                    input,
+                    crate::models::service_endpoint::PublicationState::Published,
+                );
+                let mut endpoint = mcp_service::service_endpoints_to_mcp(&[&row])
+                    .pop()
+                    .unwrap();
+                endpoint.attachment_input =
+                    lark_attachment_tool::stored_projection(Some(&catalog), &endpoint);
+                lark_im_tool::kind(&endpoint).map(|_| (endpoint.name.clone(), endpoint))
+            })
+            .collect()
+    }
 
     fn assert_admissible_schema(spec_key: &str, context: &str, schema: &serde_json::Value) {
         let Some(object) = schema.as_object() else {
@@ -877,6 +1087,7 @@ mod tests {
     fn every_schema_stays_inside_aevatar_admission_subset() {
         for (key, _) in HOSTED_SPEC_SOURCES {
             let spec = spec_for_key(key).expect("registered spec");
+            let contracts = im_contracts(key, &spec);
             assert!(
                 spec.pointer("/components/schemas").is_none(),
                 "spec '{key}' must inline schemas; aevatar rejects unresolved $refs"
@@ -899,6 +1110,19 @@ mod tests {
                             .contains("$ref"),
                         "spec '{key}' {method} {path} contains a $ref"
                     );
+                    let mut legacy = operation["operationId"]
+                        .as_str()
+                        .and_then(|id| contracts.get(id))
+                        .cloned();
+                    if let Some(endpoint) = legacy.as_mut() {
+                        if crate::services::lark_im_tool::kind(endpoint)
+                            == Some(crate::services::lark_im_tool::Kind::Image)
+                        {
+                            // This server-only adapter is absent from /mcp/config.
+                            continue;
+                        }
+                        crate::services::lark_im_tool::legacy_message_contract(endpoint);
+                    }
                     for param in operation
                         .get("parameters")
                         .and_then(|params| params.as_array())
@@ -918,8 +1142,16 @@ mod tests {
                         .pointer("/requestBody/content")
                         .and_then(|content| content.as_object())
                     {
-                        for media in content.values() {
+                        for (content_type, media) in content {
                             if let Some(schema) = media.get("schema") {
+                                let schema = if content_type == "application/json" {
+                                    legacy
+                                        .as_ref()
+                                        .and_then(|ep| ep.request_body_schema.as_ref())
+                                        .unwrap_or(schema)
+                                } else {
+                                    schema
+                                };
                                 assert_admissible_schema(
                                     key,
                                     &format!("{method} {path} body"),
@@ -934,9 +1166,10 @@ mod tests {
     }
 
     #[test]
-    fn every_operation_has_unique_operation_id_and_aevatar_marker() {
+    fn every_operation_has_unique_operation_id_and_its_owners_marker() {
         for (key, _) in HOSTED_SPEC_SOURCES {
             let spec = spec_for_key(key).expect("registered spec");
+            let contracts = im_contracts(key, &spec);
             let paths = spec
                 .get("paths")
                 .and_then(|paths| paths.as_object())
@@ -961,6 +1194,20 @@ mod tests {
                         operation_ids.insert(operation_id.to_string()),
                         "spec '{key}' duplicate operationId '{operation_id}'"
                     );
+                    if contracts
+                        .get(operation_id)
+                        .and_then(crate::services::lark_im_tool::kind)
+                        == Some(crate::services::lark_im_tool::Kind::Image)
+                    {
+                        // No Aevatar authority is invented for a NyxID-only
+                        // adapter omitted by the legacy workflow bridge.
+                        assert!(operation.get("x-aevatar-tool").is_none());
+                        assert_eq!(
+                            operation["x-nyxid-managed-operation"],
+                            serde_json::json!({"kind":"lark_im_image","version":1})
+                        );
+                        continue;
+                    }
                     let marker = operation.get("x-aevatar-tool").unwrap_or_else(|| {
                         panic!("spec '{key}' {method} {path} missing x-aevatar-tool")
                     });

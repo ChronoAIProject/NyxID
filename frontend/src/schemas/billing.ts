@@ -16,6 +16,7 @@ export const BILLING_SERVICE_FILTER_LIMIT = 50;
 const billingServiceKeySchema = z.string().trim().min(1).max(200);
 
 export const billingSearchSchema = z.object({
+  ownerId: z.string().uuid().optional().catch(undefined),
   tab: z.enum(["billing", "usage"]).optional().catch(undefined),
   period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
   /** Legacy single-service filter; `services` wins when both are present. */
@@ -47,6 +48,7 @@ export function normalizeBillingSearch(search: Record<string, unknown>) {
       parsed.services ??
       (parsed.service && parsed.service !== "all" ? [parsed.service] : []),
     action: parsed.action,
+    ownerId: parsed.ownerId,
   };
 }
 export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;
@@ -111,6 +113,9 @@ export const billingMachineUsageSchema = z.object({
 
 export const billingUsageRowSchema = z.object({
   ...fundingBreakdownShape,
+  org_channel_guest: z
+    .object({ channel_id: z.string(), sender_hash: z.string() })
+    .optional(),
   machine_usage: billingMachineUsageSchema.optional(),
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
@@ -257,3 +262,52 @@ export type ProvisionBillingWalletRequest = z.infer<
 >;
 export type TopUpBillingRequest = z.infer<typeof topUpBillingRequestSchema>;
 export type TopUpBillingResponse = z.infer<typeof topUpBillingResponseSchema>;
+
+export const billTaxSchema = z.object({
+  code: z.string(),
+  name: z.string(),
+  rate_percent: creditsSchema,
+  amount: creditsSchema,
+});
+export const currentBillSchema = z.object({
+  owner_id: z.string(),
+  currency: z.string(),
+  from: z.string(),
+  to: z.string(),
+  charges: z.array(
+    z.object({
+      metric_code: z.string(),
+      name: z.string(),
+      units: z.string(),
+      amount: creditsSchema,
+    }),
+  ),
+  subtotal: creditsSchema,
+  taxes: z.array(billTaxSchema),
+  tax_breakdown_available: z.boolean().default(false),
+  tax_total: creditsSchema,
+  rounding: creditsSchema,
+  total: creditsSchema,
+});
+export const usageInvoiceSchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  issuing_date: z.string(),
+  currency: z.string(),
+  payment_status: z.string(),
+  subtotal: creditsSchema,
+  taxes: z.array(billTaxSchema),
+  tax_total: creditsSchema,
+  total: creditsSchema,
+  prepaid_credits_applied: creditsSchema,
+  amount_due: creditsSchema,
+});
+export const usageInvoicesSchema = z.object({
+  owner_id: z.string(),
+  page: z.number().int().positive(),
+  per_page: z.number().int().positive(),
+  total: z.number().int().nonnegative(),
+  invoices: z.array(usageInvoiceSchema),
+});
+export type CurrentBill = z.infer<typeof currentBillSchema>;
+export type UsageInvoice = z.infer<typeof usageInvoiceSchema>;

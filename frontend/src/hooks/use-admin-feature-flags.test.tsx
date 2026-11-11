@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import {
   useAdminFeatureFlags,
   useCreateFeatureFlag,
@@ -21,7 +22,8 @@ const { mockGet, mockPut, mockPatch, mockDelete, mockPost } = vi.hoisted(
   }),
 );
 
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: {
     post: mockPost,
     get: mockGet,
@@ -45,6 +47,37 @@ function createWrapper() {
 beforeEach(() => vi.clearAllMocks());
 
 describe("admin feature-flag hooks", () => {
+  it("refreshes saved values after a tag conflict so drafts can recover in place", async () => {
+    mockGet
+      .mockResolvedValueOnce({ flags: [{ key: "team:voice", tags: ["old"] }] })
+      .mockResolvedValue({ flags: [{ key: "team:voice", tags: ["new"] }] });
+    mockPatch.mockRejectedValueOnce(
+      new ApiError(409, {
+        error: "conflict",
+        error_code: 409,
+        message: "Flag tags changed",
+      }),
+    );
+    const { result } = renderHook(
+      () => ({
+        list: useAdminFeatureFlags(),
+        update: useUpdateAdminFeatureFlagMetadata(),
+      }),
+      { wrapper: createWrapper() },
+    );
+    await waitFor(() =>
+      expect(result.current.list.data?.flags[0]?.tags).toEqual(["old"]),
+    );
+    await expect(
+      result.current.update.mutateAsync({
+        flagKey: "team:voice",
+        body: { tags: ["mine"], expected_tags: ["old"] },
+      }),
+    ).rejects.toThrow("Flag tags changed");
+    await waitFor(() =>
+      expect(result.current.list.data?.flags[0]?.tags).toEqual(["new"]),
+    );
+  });
   it("lists platform feature flags", async () => {
     mockGet.mockResolvedValue({ flags: [] });
     const { result } = renderHook(() => useAdminFeatureFlags(), {

@@ -84,15 +84,20 @@ fn operational(entity: &str, key: &str) -> bool {
             | "service_history_ref_epoch"
             | "source"
             | "source_id"
-    ) || (entity == "user_api_keys"
-        && matches!(
-            key,
-            "expires_at"
+    ) || (entity == "user_endpoints" && key == "node_target_revision")
+        || (entity == "user_api_keys"
+            && matches!(
+                key,
+                "expires_at"
                 | "error_message"
                 | "status"
                 | "oauth_attempt_nonce"
                 | "oauth_app_observation"
-        ))
+                // Storage versions are operational metadata.
+                // Credential byte changes still produce user history;
+                // the mutation boundary independently invalidates dependencies.
+                | "secret_context_versions"
+            ))
 }
 
 fn safe_value(field: &str, value: &Bson) -> Option<serde_json::Value> {
@@ -516,4 +521,50 @@ async fn record_service(
         .session(&mut *session)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod storage_metadata_tests {
+    use super::*;
+    #[test]
+    fn node_endpoint_2126_target_revision_is_operational_but_url_edits_are_history() {
+        let before = doc! {"_id":"endpoint", "url":"http://old-monitor"};
+        let mut after = before.clone();
+        after.insert("node_target_revision", 1_i64);
+        let (changes, additional, changed) = diff("user_endpoints", &before, &after, false);
+        assert!(!changed && changes.is_empty() && !additional);
+        // The exception is specific to endpoint metadata; unknown fields on
+        // other entities must still produce a change.
+        let (_, additional, changed) = diff("user_api_keys", &before, &after, false);
+        assert!(changed && additional);
+        after.insert("url", "http://new-monitor");
+        let (changes, additional, changed) = diff("user_endpoints", &before, &after, false);
+        assert!(changed && !additional);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "url");
+    }
+
+    #[test]
+    fn storage_metadata_does_not_turn_refresh_into_user_history() {
+        let before = doc! {"_id":"key","access_token_encrypted":vec![1_i32]};
+        let mut after = before.clone();
+        after.insert("access_token_encrypted", vec![2_i32]);
+        after.insert(
+            "secret_context_versions",
+            doc! {"access_token_encrypted":3_i32},
+        );
+        let (changes, additional, changed) = diff("user_api_keys", &before, &after, true);
+        assert!(!changed);
+        assert!(changes.is_empty());
+        assert!(!additional);
+        let (changes, _, changed) = diff("user_api_keys", &before, &after, false);
+        assert!(changed);
+        assert!(changes.iter().any(|change| change.field == "credential"));
+        after.insert("opaque_storage_metadata", doc! {"version":1_i32});
+        let (_, additional, changed) = diff("user_api_keys", &before, &after, true);
+        assert!(
+            additional && changed,
+            "unrecognized metadata is still a real change"
+        );
+    }
 }

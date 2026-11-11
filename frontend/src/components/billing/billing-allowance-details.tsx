@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { billingMetricLabel } from "@/lib/billing-units";
@@ -21,7 +22,7 @@ function UsedGauge({
   limit: number;
   label: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const percent =
     limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
   const formatted = formatPercent(percent);
@@ -43,11 +44,11 @@ function UsedGauge({
       <span
         className="benefit-track allowance-track"
         role="meter"
-        aria-label={t("{{label}} used", { label: label })}
+        aria-label={translateUi("{{value1}} used", { value1: label })}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent}
-        aria-valuetext={`${formatted}% used${reserved > 0 ? `; ${number(reserved)} reserved` : ""}`}
+        aria-valuetext={`${formatted}% used${reserved > 0 ? `; ${number(reserved)} held` : ""}`}
       >
         <span
           className="allowance-consumed"
@@ -60,7 +61,7 @@ function UsedGauge({
           style={{ width: `${reservedPercent}%` }}
         />
       </span>
-      <span className="benefit-meter-caption">{formatted}{t("% used")}</span>
+      <span className="benefit-meter-caption">{formatted}{translateUi("% used")}</span>
     </span>
   );
 }
@@ -68,7 +69,7 @@ function UsedGauge({
 const PAGE_SIZE = 5;
 
 function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [page, setPage] = useState(0);
   const balance = rows[0]!;
   const lastPage = Math.max(0, Math.ceil(rows.length / PAGE_SIZE) - 1);
@@ -84,62 +85,62 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
           {balance.allowance.recurrence.replaceAll("_", " ")}
         </span>
         <span>
-          {rows.length} {rows.length === 1 ? t("allowance") : t("allowances")}
+          {rows.length} {rows.length === 1 ? translateUi("allowance") : translateUi("allowances")}
         </span>
         <dl>
           <div>
-            <dt>{t("Period starts")}</dt>
+            <dt>{translateUi("Period starts")}</dt>
             <dd>{timestamp(balance.period_start)}</dd>
           </div>
           <div>
-            <dt>{t("Resets / expires")}</dt>
+            <dt>{translateUi("Resets / expires")}</dt>
             <dd>
               {balance.period_end
                 ? timestamp(balance.period_end)
-                : t("No reset or expiry")}
+                : translateUi("No reset or expiry")}
             </dd>
           </div>
         </dl>
         <div
           className="allowance-gauge-legend"
-          aria-label={t("Allowance gauge legend")}
+          aria-label={translateUi("Allowance gauge legend")}
         >
           <span>
-            <i className="allowance-consumed" />{t("Consumed")}</span>
+            <i className="allowance-consumed" />{translateUi("Consumed")}</span>
           <span>
-            <i className="allowance-reserved" />{t("Reserved")}</span>
+            <i className="allowance-reserved" />{translateUi("Held")}</span>
           <span>
-            <i className="allowance-available" />{t("Available")}</span>
+            <i className="allowance-available" />{translateUi("Available")}</span>
         </div>
       </div>
       <div className="allowance-balances">
         {rows.slice(first, first + PAGE_SIZE).map((row, index) => (
           <article className="allowance-balance" key={row.allowance.id}>
             <header>
-              <strong>{t("Allowance ")}{first + index + 1}</strong>
+              <strong>{translateUi("Allowance ")}{first + index + 1}</strong>
               <UsedGauge
                 used={row.consumed_quantity}
-                reserved={row.reserved_quantity}
-                limit={row.allowance.quantity}
-                label={t("{{value}} allowance {{value1}}", { value: billingMetricLabel(row.allowance.metric), value1: first + index + 1 })}
+                reserved={row.held_quantity ?? row.reserved_quantity}
+                limit={row.total_quantity ?? row.allowance.quantity}
+                label={translateUi("{{value1}} allowance {{value2}}", { value1: billingMetricLabel(row.allowance.metric), value2: first + index + 1 })}
               />
             </header>
             <dl>
               <div>
-                <dt>{t("Limit")}</dt>
-                <dd>{number(row.allowance.quantity)}</dd>
+                <dt>{translateUi("Limit")}</dt>
+                <dd>{number(row.total_quantity ?? row.allowance.quantity)}</dd>
               </div>
               <div className="allowance-remaining">
-                <dt>{t("Remaining")}</dt>
+                <dt>{translateUi("Remaining")}</dt>
                 <dd>{number(row.remaining_quantity)}</dd>
               </div>
               <div>
-                <dt>{t("Consumed")}</dt>
+                <dt>{translateUi("Consumed")}</dt>
                 <dd>{number(row.consumed_quantity)}</dd>
               </div>
               <div>
-                <dt>{t("Reserved")}</dt>
-                <dd>{number(row.reserved_quantity)}</dd>
+                <dt>{translateUi("Held")}</dt>
+                <dd>{number(row.held_quantity ?? row.reserved_quantity)}</dd>
               </div>
             </dl>
           </article>
@@ -148,20 +149,20 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
       {lastPage > 0 && (
         <div className="billing-detail-pagination">
           <span>
-            {first + 1}–{Math.min(first + PAGE_SIZE, rows.length)}{t(" of")}{" "}
-            {rows.length}{t(" allowances")}</span>
+            {first + 1}–{Math.min(first + PAGE_SIZE, rows.length)}{translateUi(" of")}{" "}
+            {rows.length}{translateUi(" allowances")}</span>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === 0}
             onClick={() => setPage(currentPage - 1)}
-          >{t("Previous allowances")}</Button>
+          >{translateUi("Previous allowances")}</Button>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === lastPage}
             onClick={() => setPage(currentPage + 1)}
-          >{t("Next allowances")}</Button>
+          >{translateUi("Next allowances")}</Button>
         </div>
       )}
     </>
@@ -173,7 +174,7 @@ export function BillingAllowanceDetails({
 }: {
   families: { name: string; units: AllowanceGroup[] }[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const groups = families.flatMap((family) => family.units);
   const [selectedKeys, setSelectedKeys] = useState<string[]>(() =>
     groups[0] ? [groups[0][0]] : [],
@@ -188,7 +189,9 @@ export function BillingAllowanceDetails({
         options={groups.map(([key, rows]) => {
           const balance = rows[0]!;
           const exhausted = rows.filter(
-            (row) => row.consumed_quantity >= row.allowance.quantity,
+            (row) =>
+              row.consumed_quantity >=
+              (row.total_quantity ?? row.allowance.quantity),
           ).length;
           const recurrence = balance.allowance.recurrence.replaceAll("_", " ");
           const label = billingMetricLabel(balance.allowance.metric);
@@ -206,9 +209,9 @@ export function BillingAllowanceDetails({
           };
         })}
       />
-      <div role="region" aria-label={t("Selected allowance balances")}>
+      <div role="region" aria-label={translateUi("Selected allowance balances")}>
         {selected.length === 0 ? (
-          <p className="empty-inline">{t("Select metrics to inspect allowance balances.")}</p>
+          <p className="empty-inline">{translateUi("Select metrics to inspect allowance balances.")}</p>
         ) : (
           selected.map(([key, rows]) => (
             <div className="allowance-inspector" key={key}>
@@ -217,7 +220,7 @@ export function BillingAllowanceDetails({
           ))
         )}
       </div>
-      <p className="fine-print mt-3">{t("Each allowance has its own limit. Percentages show consumed usage; reserved units are listed separately.")}</p>
+      <p className="fine-print mt-3">{translateUi("Each allowance has its own limit. Percentages show consumed usage; held units are listed separately.")}</p>
     </div>
   );
 }

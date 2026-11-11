@@ -1,11 +1,19 @@
+import type { ExecutionProposal } from "@/schemas/execution-proposal";
+export type GlobalApprovalMode = "writes_only" | "all" | "off";
+
 export interface NotificationSettings {
+  readonly group_mentions_enabled?: boolean;
+  readonly global_approval_mode?: GlobalApprovalMode;
   readonly telegram_connected: boolean;
   readonly telegram_username: string | null;
   readonly telegram_enabled: boolean;
   readonly push_enabled: boolean;
   readonly push_device_count: number;
   readonly approval_required: boolean;
+  /** Older-server compatibility only. */
   readonly approval_suspended: boolean;
+  readonly approval_delivery_configured?: boolean;
+  readonly approval_web_available?: boolean;
   readonly approval_timeout_secs: number;
   readonly grant_expiry_days: number;
 }
@@ -28,6 +36,8 @@ export interface RemoveDeviceResponse {
 }
 
 export interface UpdateNotificationSettingsRequest {
+  readonly group_mentions_enabled?: boolean;
+  readonly global_approval_mode?: GlobalApprovalMode;
   readonly telegram_enabled?: boolean;
   readonly push_enabled?: boolean;
   readonly approval_required?: boolean;
@@ -47,6 +57,7 @@ export interface TelegramDisconnectResponse {
 }
 
 export interface ApprovalRequestItem {
+  readonly execution_proposal?: ExecutionProposal | null;
   readonly id: string;
   readonly service_name: string;
   readonly service_slug: string;
@@ -78,6 +89,16 @@ export interface ApprovalRequestListResponse {
 }
 
 export interface ApprovalGrantItem {
+  readonly execution?: {
+    readonly context_scope?: string | null;
+    readonly supported: boolean;
+    readonly validity: string | null;
+    readonly valid_until: string | null;
+    readonly review?: ExecutionProposal["review"];
+    readonly source_request_id?: string | null;
+    readonly source_review_path?: string | null;
+    readonly last_dispatched_at?: string | null;
+  } | null;
   readonly id: string;
   readonly service_id: string;
   readonly service_name: string;

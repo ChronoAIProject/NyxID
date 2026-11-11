@@ -257,3 +257,8 @@ describe("Studio breadcrumbs", () => {
     ).toEqual([{ label: "AI Setup Guide" }]);
   });
 });
+
+
+it("names the NyxBot usage subsection", () => {
+  expect(buildStudioBreadcrumbs("/admin/usage", {}, { tab: "nyxbot" }).at(-1)).toEqual({ label: "NyxBot" });
+});

@@ -34,6 +34,7 @@ const LAGO_HMAC_SHA256_ALGORITHM: &str = "hmac";
 
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
+    pub owner_id: Option<String>,
     pub machine_id: Option<String>,
     pub job_id: Option<String>,
     pub period: Option<String>,
@@ -54,6 +55,9 @@ pub struct BillingUsageResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BillingUsageRow {
+    /// A verified organization channel guest, never a platform sender ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_channel_guest: Option<crate::models::org_channel::GuestUsage>,
     /// Verified gateway origin, independent of the runtime running-seconds SKU.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
@@ -163,6 +167,18 @@ pub struct BillingWalletResponse {
     pub overdraft_cap: Credits,
 }
 
+/// Stored exact balances for the native personal balance card.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletViewResponse {
+    pub balance: Credits,
+    pub reserved: Credits,
+    pub pending_debits: Credits,
+    pub pending_expiry: Credits,
+    pub available: Credits,
+    pub overdraft_cap: Credits,
+    pub unit: &'static str,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopUpResponse {
     pub owner_id: String,
@@ -213,6 +229,7 @@ pub struct TopUpHistoryResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct TopUpHistoryQuery {
+    pub owner_id: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
     pub period: Option<String>,
@@ -228,6 +245,7 @@ pub struct InvoiceDownloadResponse {
     path = "/api/v1/billing/usage",
     tag = "Billing",
     params(
+        ("owner_id" = Option<String>, Query, description = "Organization owner; requires org admin"),
         ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all"),
         ("bucket" = Option<String>, Query, description = "`day` splits rows by UTC day")
     ),
@@ -241,7 +259,18 @@ pub async fn get_usage(
     auth_user: AuthUser,
     Query(query): Query<UsageQuery>,
 ) -> AppResult<Json<BillingUsageResponse>> {
-    let owner_id = auth_user.user_id.to_string();
+    let actor_id = auth_user.user_id.to_string();
+    let owner_id = if let Some(owner_id) = query.owner_id.as_deref() {
+        let owner = state
+            .billing
+            .owner_resolver()
+            .resolve_for_wallet_management(&actor_id, Some(owner_id))
+            .await?;
+        ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+        owner.owner_id
+    } else {
+        actor_id
+    };
     let period = query.period.unwrap_or_else(|| "30d".to_string());
     let machine_id = query
         .machine_id
@@ -338,6 +367,7 @@ pub async fn get_usage(
                     // optional on the ledger, so absent values group together.
                     "model": "$model",
                     "api_key_id": "$api_key_id",
+                    "org_channel_guest": "$org_channel_guest",
                     "machine_usage": "$machine_usage",
                     // Rows without a wallet were metered for observability
                     // only (service not platform_billable); they carry no
@@ -426,6 +456,12 @@ pub async fn get_usage(
         .await?;
         let costs = usage_costs(&doc, billable, pricing)?;
         rows.push(BillingUsageRow {
+            org_channel_guest: id_doc
+                .get_document("org_channel_guest")
+                .ok()
+                .map(|d| bson::from_document(d.clone()))
+                .transpose()
+                .map_err(|_| AppError::Internal("Invalid guest usage attribution".into()))?,
             machine_usage: id_doc
                 .get("machine_usage")
                 .filter(|value| !matches!(value, bson::Bson::Null))
@@ -531,30 +567,75 @@ pub(crate) async fn ensure_billing_rollout(
     get,
     path = "/api/v1/billing/wallet",
     tag = "Billing",
+    params(("owner_id" = Option<String>, Query, description = "Organization wallet; requires org admin and never auto-provisions")),
     responses(
-        (status = 200, description = "Billing wallet", body = BillingWalletResponse)
+        (status = 200, description = "Billing wallet, or null for an unprovisioned organization wallet", body = Option<BillingWalletResponse>)
     ),
     security(("bearer_auth" = []))
 )]
 pub async fn get_wallet(
     State(state): State<AppState>,
     auth_user: AuthUser,
-) -> AppResult<Json<BillingWalletResponse>> {
+    Query(query): Query<ProvisionWalletRequest>,
+) -> AppResult<Json<Option<BillingWalletResponse>>> {
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&auth_user.user_id.to_string(), None)
+        .resolve_for_wallet_management(&auth_user.user_id.to_string(), query.owner_id.as_deref())
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &auth_user.user_id.to_string()).await?;
     if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
-        return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)?));
+        return Ok(Json(Some(BillingWalletResponse::from_wallet(
+            wallet, false,
+        )?)));
+    }
+    // Explicit owner views are read-only, even when an organization-owned
+    // key resolves its own owner as Direct/Personal in the shared ACL.
+    // Only the historical omitted-owner GET retains auto-provisioning.
+    if query.owner_id.is_some() {
+        return Ok(Json(None));
     }
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
 
-    Ok(Json(BillingWalletResponse::from_wallet(
+    Ok(Json(Some(BillingWalletResponse::from_wallet(
         provisioned.wallet,
         provisioned.created,
-    )?))
+    )?)))
+}
+
+/// Native billing views must not provision a wallet as a read side effect.
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/wallet/view",
+    tag = "Billing",
+    responses(
+        (status = 200, description = "Stored personal balances, or null if absent; first-party people only; never provisions", body = Option<WalletViewResponse>),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Credential or billing rollout does not permit wallet access")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn view_wallet(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<Option<WalletViewResponse>>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    if auth_user.mfa_enabled.is_none() {
+        return Err(AppError::Forbidden(
+            "A first-party person account is required".into(),
+        ));
+    }
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor_id, None)
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+    let wallet = state.billing.get_wallet(&owner.owner_id).await?;
+    Ok(Json(
+        wallet.map(WalletViewResponse::from_wallet).transpose()?,
+    ))
 }
 
 #[utoipa::path(
@@ -580,9 +661,20 @@ pub async fn provision_wallet(
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
+    let wallet = if matches!(
+        owner.pays,
+        crate::services::billing::owner_resolver::PaysFrom::OrgWallet { .. }
+    ) {
+        state
+            .billing
+            .ensure_org_wallet_subscription(&provisioned.wallet)
+            .await?
+    } else {
+        provisioned.wallet
+    };
 
     Ok(Json(BillingWalletResponse::from_wallet(
-        provisioned.wallet,
+        wallet,
         provisioned.created,
     )?))
 }
@@ -636,6 +728,7 @@ pub async fn create_topup(
     get,
     path = "/api/v1/billing/topups",
     tag = "Billing",
+    params(("owner_id" = Option<String>, Query, description = "Organization owner; requires org admin")),
     responses(
         (status = 200, description = "Top-up history", body = TopUpHistoryResponse)
     ),
@@ -650,7 +743,7 @@ pub async fn list_topups(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&actor_id, None)
+        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
 
@@ -777,11 +870,193 @@ pub async fn list_topups(
     }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct BillQuery {
+    pub owner_id: Option<String>,
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillTaxResponse {
+    pub code: String,
+    pub name: String,
+    pub rate_percent: Credits,
+    pub amount: Credits,
+}
+impl From<crate::services::billing::bill::BillTax> for BillTaxResponse {
+    fn from(tax: crate::services::billing::bill::BillTax) -> Self {
+        Self {
+            code: tax.code,
+            name: tax.name,
+            rate_percent: tax.rate_percent,
+            amount: tax.amount,
+        }
+    }
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillChargeResponse {
+    pub metric_code: String,
+    pub name: String,
+    pub units: String,
+    pub amount: Credits,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CurrentBillResponse {
+    pub owner_id: String,
+    pub currency: String,
+    pub from: String,
+    pub to: String,
+    pub charges: Vec<BillChargeResponse>,
+    pub subtotal: Credits,
+    pub taxes: Vec<BillTaxResponse>,
+    pub tax_breakdown_available: bool,
+    pub tax_total: Credits,
+    pub rounding: Credits,
+    pub total: Credits,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UsageInvoiceResponse {
+    pub id: String,
+    pub number: String,
+    pub issuing_date: String,
+    pub currency: String,
+    pub payment_status: String,
+    pub subtotal: Credits,
+    pub taxes: Vec<BillTaxResponse>,
+    pub tax_total: Credits,
+    pub total: Credits,
+    pub prepaid_credits_applied: Credits,
+    pub amount_due: Credits,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UsageInvoicesResponse {
+    pub owner_id: String,
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+    pub invoices: Vec<UsageInvoiceResponse>,
+}
+
+#[utoipa::path(get, path = "/api/v1/billing/bill", tag = "Billing",
+    params(("owner_id" = Option<String>, Query, description = "Personal or authorized organization owner")),
+    responses((status = 200, body = CurrentBillResponse)), security(("bearer_auth" = [])))]
+pub async fn get_bill(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<BillQuery>,
+) -> AppResult<Json<CurrentBillResponse>> {
+    let actor = auth.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor, query.owner_id.as_deref())
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor).await?;
+    let wallet = state
+        .billing
+        .get_wallet(&owner.owner_id)
+        .await?
+        .ok_or_else(|| AppError::BillingNotConfigured("Billing wallet is not configured".into()))?;
+    let lago = state
+        .billing
+        .lago_client()
+        .ok_or_else(|| AppError::BillingNotConfigured("Lago client is not configured".into()))?;
+    let bill = crate::services::billing::bill::current(
+        &state.db,
+        lago.as_ref(),
+        &wallet,
+        state.config.billing_rate_cache_ttl_secs,
+    )
+    .await?;
+    Ok(Json(CurrentBillResponse {
+        owner_id: owner.owner_id,
+        currency: bill.currency,
+        from: bill.from,
+        to: bill.to,
+        charges: bill
+            .charges
+            .into_iter()
+            .map(|c| BillChargeResponse {
+                metric_code: c.metric_code,
+                name: c.name,
+                units: c.units,
+                amount: c.amount,
+            })
+            .collect(),
+        subtotal: bill.subtotal,
+        taxes: bill.taxes.into_iter().map(Into::into).collect(),
+        tax_breakdown_available: bill.tax_breakdown_available,
+        tax_total: bill.tax_total,
+        rounding: bill.rounding,
+        total: bill.total,
+    }))
+}
+
+#[utoipa::path(get, path = "/api/v1/billing/invoices", tag = "Billing",
+    params(("owner_id" = Option<String>, Query), ("page" = Option<u32>, Query), ("per_page" = Option<u32>, Query)),
+    responses((status = 200, body = UsageInvoicesResponse)), security(("bearer_auth" = [])))]
+pub async fn list_invoices(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<BillQuery>,
+) -> AppResult<Json<UsageInvoicesResponse>> {
+    let actor = auth.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor, query.owner_id.as_deref())
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor).await?;
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(10);
+    if page == 0 || !(1..=100).contains(&per_page) {
+        return Err(AppError::BadRequest("Invalid invoice pagination".into()));
+    }
+    let wallet = state
+        .billing
+        .get_wallet(&owner.owner_id)
+        .await?
+        .ok_or_else(|| AppError::BillingNotConfigured("Billing wallet is not configured".into()))?;
+    let lago = state
+        .billing
+        .lago_client()
+        .ok_or_else(|| AppError::BillingNotConfigured("Lago client is not configured".into()))?;
+    let result =
+        crate::services::billing::bill::past(lago.as_ref(), &wallet, page, per_page).await?;
+    Ok(Json(UsageInvoicesResponse {
+        owner_id: owner.owner_id,
+        page,
+        per_page,
+        total: result.total,
+        invoices: result
+            .invoices
+            .into_iter()
+            .map(|i| UsageInvoiceResponse {
+                id: i.id,
+                number: i.number,
+                issuing_date: i.issuing_date,
+                currency: i.currency,
+                payment_status: i.payment_status,
+                subtotal: i.subtotal,
+                taxes: i.taxes.into_iter().map(Into::into).collect(),
+                tax_total: i.tax_total,
+                total: i.total,
+                prepaid_credits_applied: i.prepaid_credits_applied,
+                amount_due: i.amount_due,
+            })
+            .collect(),
+    }))
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/billing/invoices/{invoice_id}/download",
     tag = "Billing",
-    params(("invoice_id" = String, Path, description = "Lago invoice id")),
+    params(
+        ("invoice_id" = String, Path, description = "Lago invoice id"),
+        ("owner_id" = Option<String>, Query, description = "Personal or authorized organization owner")
+    ),
     responses(
         (status = 200, description = "Signed receipt download URL", body = InvoiceDownloadResponse)
     ),
@@ -791,12 +1066,13 @@ pub async fn download_invoice(
     State(state): State<AppState>,
     auth_user: AuthUser,
     axum::extract::Path(invoice_id): axum::extract::Path<String>,
+    Query(query): Query<BillQuery>,
 ) -> AppResult<Json<InvoiceDownloadResponse>> {
     let actor_id = auth_user.user_id.to_string();
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&actor_id, None)
+        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
 
@@ -1124,6 +1400,20 @@ fn sum_optional(values: impl Iterator<Item = Option<Credits>>) -> AppResult<Opti
         total = Some(total.unwrap_or(Credits::ZERO).checked_add(value)?);
     }
     Ok(total)
+}
+
+impl WalletViewResponse {
+    fn from_wallet(wallet: BillingWallet) -> AppResult<Self> {
+        Ok(Self {
+            available: wallet.available_credits()?,
+            balance: wallet.balance_credits,
+            reserved: wallet.reserved_credits,
+            pending_debits: wallet.pending_lago_debits,
+            pending_expiry: wallet.pending_topup_expiry_credits,
+            overdraft_cap: wallet.overdraft_cap_credits,
+            unit: "credits",
+        })
+    }
 }
 
 impl BillingWalletResponse {

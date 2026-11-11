@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { ExternalLink } from "lucide-react";
@@ -40,7 +41,7 @@ export function OAuthCallbackGuidance({
 }: {
   readonly slug: string;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const {
     data: runtimeConfig,
     isError,
@@ -52,14 +53,14 @@ export function OAuthCallbackGuidance({
   if (!callbackUrl) {
     if (isLoading) {
       return (
-        <p className="rounded-md border border-border bg-background/60 p-2 text-xs text-muted-foreground">{t("Loading callback URL...")}</p>
+        <p className="rounded-md border border-border bg-background/60 p-2 text-13 text-muted-foreground">{translateUi("Loading callback URL...")}</p>
       );
     }
     return (
-      <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
+      <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-13 text-warning">
         {isError
-          ? t("Couldn't load callback URL. Please retry. If this persists, contact support.")
-          : t("Callback URL not yet available. Please retry. If this persists, contact support.")}
+          ? translateUi("Couldn't load callback URL. Please retry. If this persists, contact support.")
+          : translateUi("Callback URL not yet available. Please retry. If this persists, contact support.")}
       </p>
     );
   }
@@ -73,17 +74,17 @@ export function OAuthCallbackGuidance({
   return (
     <div className="space-y-2">
       <CopyableUrlCallout
-        label={t(heading)}
+        label={translateUi(heading)}
         url={callbackUrl}
-        description={t(description)}
+        description={translateUi(description)}
       />
       {isTwitter ? (
         <a
           href="https://developer.x.com/en/portal/dashboard"
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
-        >{t("Where do I get Client ID and Client Secret? Open Keys & Tokens in X Developer Console")}<ExternalLink className="h-3 w-3" />
+          className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
+        >{translateUi("Where do I get Client ID and Client Secret? Open Keys & Tokens in X Developer Console")}<ExternalLink className="h-3 w-3" />
         </a>
       ) : null}
     </div>

@@ -56,6 +56,35 @@ function readProfile(env, prefix) {
   };
 }
 
+const NEW_DOMAIN_URLS = [
+  ["apiBaseUrl", "PROD_NEW_API_BASE_URL"],
+  ["frontendUrl", "PROD_NEW_FRONTEND_URL"],
+  ["legalBaseUrl", "PROD_NEW_LEGAL_BASE_URL"],
+];
+
+// Production builds embed this second URL set when all three are configured;
+// the NyxID admin flag `mobile:new-domains` selects between the sets at launch.
+function readNewProductionDomains(env) {
+  const values = NEW_DOMAIN_URLS.map(([, variable]) => (env[variable] || "").trim());
+  if (values.every((value) => !value)) return null;
+
+  const domains = {};
+  NEW_DOMAIN_URLS.forEach(([field, variable], index) => {
+    const value = values[index];
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      fatal(`${variable} must be an absolute HTTPS URL. Set all three PROD_NEW_* URLs, or none.`);
+    }
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+      fatal(`${variable} must be an HTTPS URL without credentials, a query, or a fragment.`);
+    }
+    domains[field] = value;
+  });
+  return domains;
+}
+
 function resolveProfile(appEnv, env, options = {}) {
   if (appEnv !== "dev" && appEnv !== "prod") {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
@@ -63,6 +92,13 @@ function resolveProfile(appEnv, env, options = {}) {
 
   const dev = readProfile(env, "DEV");
   const prod = readProfile(env, "PROD");
+  if (env.PROD_USE_NEW_DOMAINS !== undefined) {
+    console.warn(
+      "[load-env] PROD_USE_NEW_DOMAINS is no longer read. The NyxID admin flag " +
+        "mobile:new-domains selects the production domains at app launch.",
+    );
+  }
+  const newDomains = appEnv === "prod" ? readNewProductionDomains(env) : null;
 
   if (!dev.apiBaseUrl && !prod.apiBaseUrl) {
     fatal(
@@ -89,6 +125,9 @@ function resolveProfile(appEnv, env, options = {}) {
   const resolved = {
     apiBaseUrl: pick("apiBaseUrl"),
     frontendUrl: explicitFrontendUrl || legalBaseUrl,
+    newApiBaseUrl: newDomains?.apiBaseUrl ?? "",
+    newFrontendUrl: newDomains?.frontendUrl ?? "",
+    newLegalBaseUrl: newDomains?.legalBaseUrl ?? "",
     iosBundleId: pick("iosBundleId"),
     androidPackage: pick("androidPackage"),
     appleAscAppId: pick("appleAscAppId"),
@@ -141,7 +180,7 @@ function appIdentity(env) {
     name: env.APP_NAME || "NyxID Mobile",
     slug: env.APP_SLUG || "nyxid-mobile",
     scheme: env.APP_SCHEME || "nyxid",
-    version: env.APP_VERSION || "1.0.1",
+    version: env.APP_VERSION || "1.0.4",
   };
 }
 

@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChannelBotSetup } from "@/components/channels/channel-bot-setup";
@@ -13,7 +14,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { ChannelConnectLink } from "@/schemas/channel-connect-links";
 
 export function ChannelConnectLinkPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { token } = useParams({ strict: false }) as { token: string };
   const { user, isAuthenticated, isLoading } = useAuthStore();
   const navigate = useNavigate();
@@ -35,7 +36,7 @@ export function ChannelConnectLinkPage() {
   return (
     <ChannelConnectionShell
       platform={data?.platform ?? "telegram"}
-      platformName={data?.platform}
+      platformName={data?.platform === "telegram-new" || data?.platform === "telegram" ? "Telegram" : data?.platform}
       complete={data?.status === "completed"}
       email={user?.email}
     >
@@ -62,7 +63,7 @@ export function ChannelConnectLinkPage() {
           />
         </ChannelConnectLinkContext.Provider>
       ) : (
-        <p role="status" className="text-sm text-muted-foreground">{t("Loading connection request…")}</p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading connection request…")}</p>
       )}
     </ChannelConnectionShell>
   );
@@ -81,7 +82,7 @@ function ConnectSession({
   action: ReturnType<typeof useChannelConnectLink>["action"];
   refresh: () => Promise<unknown>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   // Keep the wizard mounted after completion so its one-time secret survives status refreshes.
   const [showSetup, setShowSetup] = useState(
     initial.status === "pending" && !initial.bot_id,
@@ -96,12 +97,12 @@ function ConnectSession({
   return (
     <div className="space-y-4">
       {current.requested_by && (
-        <p className="text-xs text-muted-foreground">{t("Requested by ")}{current.requested_by}
+        <p className="text-13 text-muted-foreground">{translateUi("Requested by ")}{current.requested_by}
         </p>
       )}
       {action.error && <ErrorBanner message={action.error.message} />}
       {current.telegram_requires_original_actor && !terminal ? (
-        <p role="status" className="text-sm">{t("Another administrator started this Telegram setup. Continue using the NyxID account that started it. This page will update when setup finishes.")}</p>
+        <p role="status" className="text-14">{translateUi("Another administrator started this Telegram setup. Continue using the NyxID account that started it. This page will update when setup finishes.")}</p>
       ) : showSetup &&
       !acknowledged &&
       (hasSetupResult || !["cancelled", "expired"].includes(current.status)) ? (
@@ -123,26 +124,26 @@ function ConnectSession({
         />
       ) : (
         <div className="space-y-3">
-          <p role="status" className="text-sm">
+          <p role="status" className="text-14">
             {current.status === "completed"
-              ? t("{{label}} is connected.", { label: current.label })
+              ? translateUi("{{value1}} is connected.", { value1: current.label })
               : current.status === "pending"
-                ? t("Your bot was saved. Retry setup to finish connecting it.")
-                : t("This connection request is {{status}}.", { status: current.status })}
+                ? translateUi("Your bot was saved. Retry setup to finish connecting it.")
+                : translateUi("This connection request is {{value1}}.", { value1: current.status })}
           </p>
           {!terminal && (
             <Button
               variant="primary"
               isLoading={action.isPending}
               onClick={() => action.mutate("retry")}
-            >{t("Retry setup")}</Button>
+            >{translateUi("Retry setup")}</Button>
           )}
           {terminal && current.callback_url && (
             <Button
               variant="primary"
               className="w-full"
               onClick={continueToApp}
-            >{t("Continue")}</Button>
+            >{translateUi("Continue")}</Button>
           )}
           {current.bot_id && (
             <Button
@@ -152,7 +153,7 @@ function ConnectSession({
                   `/channel-bots/${encodeURIComponent(current.bot_id!)}`,
                 )
               }
-            >{t("Open channel bot")}</Button>
+            >{translateUi("Open channel bot")}</Button>
           )}
         </div>
       )}
@@ -163,7 +164,7 @@ function ConnectSession({
             setShowSetup(false);
             action.mutate("retry");
           }}
-        >{t("Retry saved setup")}</Button>
+        >{translateUi("Retry saved setup")}</Button>
       )}
       {!terminal &&
         !current.bot_id &&
@@ -173,7 +174,7 @@ function ConnectSession({
             variant="ghost"
             isLoading={action.isPending}
             onClick={() => action.mutate("decline")}
-          >{t("Decline request")}</Button>
+          >{translateUi("Decline request")}</Button>
         )}
     </div>
   );

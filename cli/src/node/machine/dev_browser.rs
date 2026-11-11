@@ -182,7 +182,10 @@ impl DevBrowser {
                 "/dev",
                 "--ro-bind",
                 "/opt/nyxid/machine-browser/dev-policies",
-                "/etc/chromium/policies/managed",
+                &format!(
+                    "/{}",
+                    super::browser_layout::Layout::detect(secure_binary)?.policies()
+                ),
                 "--",
                 "/bin/sh",
                 "-c",

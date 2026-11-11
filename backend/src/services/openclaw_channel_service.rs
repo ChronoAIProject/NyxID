@@ -43,7 +43,7 @@ fn default_direction() -> String {
 /// Each mapping has its own webhook secret so each user's OpenClaw
 /// instance signs requests independently.
 /// Stored in the `openclaw_channel_mappings` collection.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OpenClawChannelMapping {
     #[serde(rename = "_id")]
     pub id: String,
@@ -228,6 +228,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+impl std::fmt::Debug for OpenClawChannelMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenClawChannelMapping")
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

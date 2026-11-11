@@ -7,6 +7,10 @@ pub const COLLECTION_NAME: &str = "machine_setups";
 #[serde(deny_unknown_fields)]
 pub struct Choices {
     #[serde(default)]
+    pub separation: Option<nyxid_machine::context::Choice>,
+    #[serde(default)]
+    pub legacy_warning_acknowledged: bool,
+    #[serde(default)]
     pub automatic_updates: Option<bool>,
     #[serde(default)]
     pub owner_id: Option<String>,

@@ -1,9 +1,14 @@
 use axum::{
+    Extension,
     body::Body,
     http::{Request, header},
     middleware::Next,
     response::Response,
 };
+
+/// Trusted deployment configuration, never request Host/forwarded headers.
+#[derive(Clone, Copy)]
+struct HttpsBoundary(bool);
 
 /// Middleware that adds security-related HTTP headers to every response.
 ///
@@ -16,16 +21,21 @@ use axum::{
 /// - Permissions-Policy
 /// - X-XSS-Protection
 pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> Response {
+    let https = request
+        .extensions()
+        .get::<HttpsBoundary>()
+        .is_some_and(|p| p.0);
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
-    // HSTS: enforce HTTPS for 1 year, including subdomains
-    headers.insert(
-        header::STRICT_TRANSPORT_SECURITY,
-        "max-age=31536000; includeSubDomains; preload"
-            .parse()
-            .unwrap(),
-    );
+    if https {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            "max-age=31536000".parse().unwrap(),
+        );
+    } else {
+        headers.remove(header::STRICT_TRANSPORT_SECURITY);
+    }
 
     // Prevent MIME-type sniffing
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
@@ -45,18 +55,18 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
     }
 
     // Control referrer information
-    headers.insert(
-        header::REFERRER_POLICY,
-        "strict-origin-when-cross-origin".parse().unwrap(),
-    );
+    headers
+        .entry(header::REFERRER_POLICY)
+        .or_insert("strict-origin-when-cross-origin".parse().unwrap());
 
     // Restrict browser features
-    headers.insert(
-        "permissions-policy".parse::<header::HeaderName>().unwrap(),
-        "camera=(), microphone=(), geolocation=(), interest-cohort=()"
-            .parse()
-            .unwrap(),
-    );
+    headers
+        .entry("permissions-policy".parse::<header::HeaderName>().unwrap())
+        .or_insert(
+            "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+                .parse()
+                .unwrap(),
+        );
 
     // Legacy XSS protection (for older browsers)
     headers.insert(
@@ -146,6 +156,24 @@ where
     router.layer(axum::middleware::from_fn(security_headers_middleware))
 }
 
+pub fn with_response_headers_for_origin<S>(
+    router: axum::Router<S>,
+    public_url: &str,
+) -> anyhow::Result<axum::Router<S>>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let url = url::Url::parse(public_url)?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none(),
+        "Invalid public backend URL"
+    );
+    Ok(with_response_headers(router).layer(Extension(HttpsBoundary(url.scheme() == "https"))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,7 +204,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            resp.headers()
+            !resp
+                .headers()
                 .contains_key(header::STRICT_TRANSPORT_SECURITY)
         );
         assert!(resp.headers().contains_key(header::X_CONTENT_TYPE_OPTIONS));
@@ -207,6 +236,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn outer_policy_covers_middleware_rejections_and_not_found() {
+        async fn reject(_: Request<Body>, _: Next) -> StatusCode {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        let app = with_response_headers_for_origin(
+            Router::new()
+                .route("/limited", get(ok_handler))
+                .route_layer(axum::middleware::from_fn(reject)),
+            "https://auth.example.test",
+        )
+        .unwrap();
+        for (path, status) in [
+            ("/limited", StatusCode::TOO_MANY_REQUESTS),
+            ("/missing", StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers()[header::STRICT_TRANSPORT_SECURITY],
+                "max-age=31536000"
+            );
+            assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+            assert!(
+                response
+                    .headers()
+                    .contains_key(header::CONTENT_SECURITY_POLICY)
+            );
+        }
+    }
+
     /// Helper to get a middleware-wrapped response for header value assertions.
     async fn get_security_response() -> Response {
         let app = Router::new()
@@ -218,23 +282,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hsts_includes_preload_and_subdomains() {
-        let resp = get_security_response().await;
-        let hsts = resp
-            .headers()
-            .get(header::STRICT_TRANSPORT_SECURITY)
-            .unwrap()
-            .to_str()
+    async fn hsts_uses_only_configured_https_boundary() {
+        for (origin, expected) in [
+            ("http://localhost:3001", None),
+            ("https://auth.example.com", Some("max-age=31536000")),
+        ] {
+            let app = with_response_headers_for_origin(
+                Router::new().route("/test", get(ok_handler)),
+                origin,
+            )
             .unwrap();
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/test")
+                        .header("host", "attacker.example")
+                        .header(
+                            "x-forwarded-proto",
+                            if expected.is_some() { "http" } else { "https" },
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.headers()
+                    .get(header::STRICT_TRANSPORT_SECURITY)
+                    .map(|v| v.to_str().unwrap()),
+                expected
+            );
+        }
         assert!(
-            hsts.contains("max-age=31536000"),
-            "HSTS missing 1-year max-age"
+            with_response_headers_for_origin(Router::<()>::new(), "javascript:alert(1)").is_err()
         );
-        assert!(
-            hsts.contains("includeSubDomains"),
-            "HSTS missing includeSubDomains"
+    }
+
+    #[tokio::test]
+    async fn preserves_response_specific_referrer_and_permissions() {
+        async fn handler() -> Response {
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut()
+                .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+            resp.headers_mut()
+                .insert("permissions-policy", "microphone=(self)".parse().unwrap());
+            resp
+        }
+        let app = with_response_headers(Router::new().route("/test", get(handler)));
+        let resp = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers().get(header::REFERRER_POLICY).unwrap(),
+            "no-referrer"
         );
-        assert!(hsts.contains("preload"), "HSTS missing preload");
+        assert_eq!(
+            resp.headers().get("permissions-policy").unwrap(),
+            "microphone=(self)"
+        );
     }
 
     #[tokio::test]

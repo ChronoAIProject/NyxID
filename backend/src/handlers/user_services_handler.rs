@@ -318,6 +318,21 @@ pub async fn list_user_services(
                 .collect()
         };
 
+    let mut displayed_headers = std::collections::HashMap::new();
+    for item in &services {
+        let svc = &item.service;
+        displayed_headers.insert(
+            svc.id.clone(),
+            crate::services::default_header_service::management(
+                Some(&state.encryption_keys),
+                crate::models::user_service::COLLECTION_NAME,
+                &svc.id,
+                &svc.user_id,
+                svc.default_request_headers.as_deref(),
+            )
+            .await?,
+        );
+    }
     let items = services
         .into_iter()
         .map(|item| {
@@ -328,6 +343,7 @@ pub async fn list_user_services(
                 .as_deref()
                 .and_then(|cid| catalog_display_map.get(cid));
             let mut response = user_service_with_source_response(&state.config, item);
+            response.default_request_headers = displayed_headers.remove(&response.id).flatten();
             response.label = label;
             response.catalog_service_name = catalog_display.map(|(name, _)| name.clone());
             response.catalog_service_description =
@@ -422,8 +438,9 @@ pub async fn update_user_service(
         None
     };
 
-    user_service_service::update_user_service(
+    user_service_service::update_user_service_with_keys(
         &state.db,
+        Some(state.encryption_keys.as_ref()),
         &user_id_str,
         &actor_for_node_check,
         &service_id,
@@ -443,6 +460,7 @@ pub async fn update_user_service(
     if body.node_id.is_some() || body.auth_method.is_some() {
         unified_key_service::reconcile_provider_key_for_service_routing(
             &state.db,
+            &state.encryption_keys,
             &user_id_str,
             &service_id,
         )
@@ -479,10 +497,21 @@ pub async fn update_user_service(
             TelemetryEvent::ServiceUserAgentCustomized {
                 provider_slug: svc.slug.clone(),
             },
-        );
+        )
+        .await;
     }
 
-    Ok(Json(user_service_response(&state.config, svc)))
+    let headers = crate::services::default_header_service::management(
+        Some(&state.encryption_keys),
+        crate::models::user_service::COLLECTION_NAME,
+        &svc.id,
+        &svc.user_id,
+        svc.default_request_headers.as_deref(),
+    )
+    .await?;
+    let mut response = user_service_response(&state.config, svc);
+    response.default_request_headers = headers;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -520,7 +549,17 @@ pub async fn patch_user_service_ssh_auth_mode(
     )
     .await?;
 
-    Ok(Json(user_service_response(&state.config, svc)))
+    let headers = crate::services::default_header_service::management(
+        Some(&state.encryption_keys),
+        crate::models::user_service::COLLECTION_NAME,
+        &svc.id,
+        &svc.user_id,
+        svc.default_request_headers.as_deref(),
+    )
+    .await?;
+    let mut response = user_service_response(&state.config, svc);
+    response.default_request_headers = headers;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -577,7 +616,8 @@ pub async fn delete_user_service(
         TelemetryEvent::ServiceDisconnected {
             provider_slug: service_slug,
         },
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -632,7 +672,7 @@ fn user_service_with_source_response(
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope,
         custom_user_agent: svc.custom_user_agent,
-        default_request_headers: crate::models::default_request_header::redact_list_for_response(
+        default_request_headers: crate::models::default_request_header::stored_list_for_response(
             svc.default_request_headers,
         ),
         ws_frame_injections: svc.ws_frame_injections,

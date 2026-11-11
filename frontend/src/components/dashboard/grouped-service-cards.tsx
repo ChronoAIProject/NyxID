@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import type { ServiceGroupOrder } from "@/hooks/use-service-group-order";
 import { ServiceAgentOrderPanel } from "./service-agent-order-panel";
@@ -42,6 +43,7 @@ import {
   matchingConnections,
 } from "@/lib/service-view";
 import { ServiceIcon } from "@/components/service-icon";
+import { ServiceCardSummary } from "@/components/shared/service-card-summary";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -100,7 +102,7 @@ function GroupCard({
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
   readonly filtersRef: RefObject<HTMLDivElement | null>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const identity = useAuthStore((state) => state.user?.id);
   const preferred = preferredConnection(group.connections);
   const ordering = agentOrder?.groupId === group.id ? agentOrder : undefined;
@@ -170,7 +172,11 @@ function GroupCard({
       );
     };
     update();
-    const observer = new ResizeObserver(update);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    });
     observer.observe(card);
     observer.observe(header);
     observer.observe(scroller);
@@ -180,6 +186,7 @@ function GroupCard({
     scroller.addEventListener("scroll", update, { passive: true });
     return () => {
       observer.disconnect();
+      cancelAnimationFrame(frame);
       scroller.removeEventListener("scroll", update);
       headerOffset.current = 0;
       header.style.translate = "";
@@ -255,41 +262,41 @@ function GroupCard({
     (item) => item?.usage?.activity.visibility === "own_requests",
   );
   const keysText = configuredKeys.length
-    ? t(configuredKeys.length === 1 ? "{{count}}{{more}} agent key" : "{{count}}{{more}} agent keys", { count: configuredKeys.length, more: accessIncomplete ? "+" : "" })
+    ? `${configuredKeys.length}${accessIncomplete ? "+" : ""} agent ${configuredKeys.length === 1 ? "key" : "keys"}`
     : accessIncomplete
-      ? t("Agent keys unverified")
-      : t("0 agent keys");
+      ? "Agent keys unverified"
+      : "0 agent keys";
   const useText = latestUse
-    ? t(ownUseOnly ? "Your last use {{time}}" : "Last use {{time}}", { time: formatRelativeTime(latestUse.occurred_at) })
+    ? `${ownUseOnly ? "Your last use" : "Last use"} ${formatRelativeTime(latestUse.occurred_at)}`
     : useTracked
-      ? t("No use recorded · 30d")
-      : t("Last use not reported");
+      ? "No use recorded · 30d"
+      : "Last use not reported";
   const agents =
     insights.status === "loading"
-      ? { text: t("Loading…"), title: t("Loading agent keys and use") }
+      ? { get text() { return translateUi("Loading…"); }, get title() { return translateUi("Loading agent keys and use"); } }
       : insights.status === "restricted"
-        ? { text: t("Restricted"), title: t("Agent key access is restricted") }
+        ? { get text() { return translateUi("Restricted"); }, get title() { return translateUi("Agent key access is restricted"); } }
         : insights.status !== "ready"
           ? {
               text: "—",
               title:
                 insights.status === "unavailable"
-                  ? t("Agent keys and use are not reported by this server")
-                  : t("Agent keys and use couldn't load"),
+                  ? "Agent keys and use are not reported by this server"
+                  : "Agent keys and use couldn't load",
             }
           : {
               text: keysText,
               title: [
                 configuredKeys.length
-                  ? t("Keys with access: {{keys}}", { keys: configuredKeys.join(", ") })
+                  ? translateUi("Keys with access: {{keys}}", { keys: configuredKeys.join(", ") })
                   : accessIncomplete
-                    ? t("Key access incomplete")
-                    : t("No agent keys with access"),
+                    ? "Key access incomplete"
+                    : "No agent keys with access",
                 latestUse
                   ? `${ownUseOnly ? "Your last use" : "Last use"}: ${callerLabel(latestUse.caller)}${latestUse.caller.app_name ? ` · ${latestUse.caller.app_name}` : ""} · ${outcomeLabel(latestUse.outcome)} · ${latestUse.occurred_at}`
                   : useTracked
-                    ? t("No recorded use with exact connection attribution in the last 30 days")
-                    : t("Use is not reported by this server"),
+                    ? "No recorded use with exact connection attribution in the last 30 days"
+                    : "Use is not reported by this server",
               ].join("\n"),
             };
   const openSummary = (
@@ -353,49 +360,42 @@ function GroupCard({
           }}
           className={cn(
             "relative flex flex-col bg-card",
-            expanded ? "border border-border" : "h-72",
+            expanded ? "border border-border" : "min-h-72",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
-            <Glide className="flex items-start gap-3">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
-                <ServiceIcon
-                  slug={group.iconSlug}
-                  iconUrl={group.iconUrl}
-                  size="md"
-                />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3
-                  id={headingId}
-                  className="text-15 font-semibold tracking-tight"
-                >
-                  <button
-                    type="button"
-                    onClick={() => onToggle(cardRef.current)}
-                    aria-expanded={expanded}
-                    aria-controls={contentId}
-                    className="max-w-full cursor-pointer truncate text-left hover:text-primary-text focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
-                  >
-                    {group.name}
-                  </button>
-                </h3>
-                <p className="mt-0.5 text-xs text-muted-foreground">
+            <ServiceCardSummary
+              wrap={(content) => <Glide>{content}</Glide>}
+              hideDescription={expanded}
+              description={search.trim()
+                ? translateUi("Matches: {{value1}}", { value1: connections.map((key) => key.label).join(" · ") })
+                : group.description}
+              name={group.name}
+              titleId={headingId}
+              icon={<ServiceIcon slug={group.iconSlug} iconUrl={group.iconUrl} size="md" />}
+              titleAction={{
+                onClick: () => onToggle(cardRef.current),
+                "aria-expanded": expanded,
+                "aria-controls": contentId,
+              }}
+              subtitle={
+                <>
                   {matchingCount < count
-                    ? t("{{matchingCount}} of {{count}}", { matchingCount: matchingCount, count: count })
+                    ? translateUi("{{value1}} of {{value2}}", { value1: matchingCount, value2: count })
                     : count}{" "}
-                  {count === 1 ? t("connection") : t("connections")}
-                </p>
-              </div>
+                  {count === 1 ? translateUi("connection") : translateUi("connections")}
+                </>
+              }
+            >
               {group.connections.some((connection) => connection.offering_kind === "tool") && (
-                <Badge variant="secondary">{t("Tool · your key")}</Badge>
+                <Badge variant="secondary">{translateUi("Tool · your key")}</Badge>
               )}
               {!expanded && preferred?.preference_rank === 1 && (
                 <button
                   type="button"
                   onClick={() => onToggle(cardRef.current)}
                   className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                  aria-label={t("Preferred: {{label}}", { label: preferred.label })}
+                  aria-label={translateUi("Preferred: {{value1}}", { value1: preferred.label })}
                   title={group.connections
                     .filter((connection) => connection.preference_rank != null)
                     .map(
@@ -404,25 +404,16 @@ function GroupCard({
                     )
                     .join("\n")}
                 >
-                  <Badge variant="accent">{t("Preferred: ")}{preferred.label}</Badge>
+                  <Badge variant="accent">{translateUi("Preferred: ")}{preferred.label}</Badge>
                 </button>
               )}
               {disabled > 0 && (
-                <Badge variant="secondary">{disabled}{t(" disabled")}</Badge>
+                <Badge variant="secondary">{disabled}{translateUi(" disabled")}</Badge>
               )}
-            </Glide>
-            {!expanded && (
-              <Glide className="shrink-0">
-                <p className="line-clamp-2 h-8 text-xs leading-4 text-muted-foreground">
-                  {search.trim()
-                    ? t("Matches: {{value}}", { value: connections.map((key) => key.label).join(" · ") })
-                    : group.description}
-                </p>
-              </Glide>
-            )}
+            </ServiceCardSummary>
             <div
               className={cn(
-                "mt-auto text-xs",
+                "mt-auto text-13",
                 expanded
                   ? "grid items-center gap-x-6 gap-y-2 md:grid-cols-2"
                   : "space-y-0.5",
@@ -462,8 +453,8 @@ function GroupCard({
                         }}
                         aria-expanded={expanded}
                         aria-controls={contentId}
-                        aria-label={t("Show agent keys and use for {{name}}", { name: group.name })}
-                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                        aria-label={translateUi("Show agent keys and use for {{value1}}", { value1: group.name })}
+                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <Clock3
                           className="size-3.5 shrink-0 text-muted-foreground"
@@ -479,13 +470,13 @@ function GroupCard({
                         <span className="shrink-0 whitespace-nowrap text-muted-foreground">
                           {insights.status === "ready"
                             ? useText
-                            : t("Last use unavailable")}
+                            : translateUi("Last use unavailable")}
                         </span>
                       </button>
                     </TooltipTrigger>
                     <TooltipContent
                       collisionPadding={12}
-                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words leading-relaxed [overflow-wrap:anywhere]"
+                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words [overflow-wrap:anywhere]"
                     >
                       {agents.title}
                     </TooltipContent>
@@ -495,17 +486,17 @@ function GroupCard({
               <Glide className="flex h-6 min-w-0 items-center justify-between gap-2">
                 <button
                   type="button"
-                  aria-label={t("Show last edit for {{name}}", { name: group.name })}
+                  aria-label={translateUi("Show last edit for {{value1}}", { value1: group.name })}
                   aria-controls={contentId}
                   onClick={() =>
                     openSummary("history", lastEdit?.connection.id)
                   }
                   title={
                     lastEdit
-                      ? t("{{value}} · {{at}} · {{name}} · {{label}}", { value: lastEdit.edit.action_label ?? t("Last edited"), at: lastEdit.edit.at, name: lastEdit.edit.actor.name, label: lastEdit.connection.label })
-                      : t("No edit attribution was reported for these connections")
+                      ? `${lastEdit.edit.action_label ?? "Last edited"} · ${lastEdit.edit.at} · ${lastEdit.edit.actor.name} · ${lastEdit.connection.label}`
+                      : translateUi("No edit attribution was reported for these connections")
                   }
-                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
                 >
                   <History
                     className="size-3.5 shrink-0 text-muted-foreground"
@@ -513,13 +504,13 @@ function GroupCard({
                   />
                   <span className="truncate text-muted-foreground">
                     {lastEdit
-                      ? t("Last edit {{value}} · {{name}}", { value: formatRelativeTime(lastEdit.edit.at), name: lastEdit.edit.actor.name })
-                      : t("Last edit not recorded")}
+                      ? translateUi("Last edit {{value1}} · {{value2}}", { value1: formatRelativeTime(lastEdit.edit.at), value2: lastEdit.edit.actor.name })
+                      : translateUi("Last edit not recorded")}
                   </span>
                 </button>
                 <ServiceAvatarStack
                   items={sources}
-                  label={t("Show sources for {{name}}", { name: group.name })}
+                  label={translateUi("Show sources for {{value1}}", { value1: group.name })}
                 />
               </Glide>
             </div>
@@ -541,7 +532,7 @@ function GroupCard({
                 }}
                 aria-expanded={expanded && !routingOpen}
                 aria-controls={contentId}
-                aria-label={t("{{value}} {{name}} connections", { value: expanded && !routingOpen ? t("Collapse") : t("Expand"), name: group.name })}
+                aria-label={translateUi("{{value1}} {{value2}} connections", { value1: expanded && !routingOpen ? "Collapse" : "Expand", value2: group.name })}
               >
                 <ChevronRight
                   className={cn(
@@ -550,21 +541,21 @@ function GroupCard({
                   )}
                 />
                 {expanded && !routingOpen
-                  ? t("Hide connections")
-                  : t("View {{matchingCount}} {{value}}", { matchingCount: matchingCount, value: matchingCount === 1 ? t("connection") : t("connections") })}
+                  ? translateUi("Hide connections")
+                  : translateUi("View {{value1}} {{value2}}", { value1: matchingCount, value2: matchingCount === 1 ? "connection" : "connections" })}
               </Button>
             </Glide>
             <Glide className="ml-auto flex flex-wrap items-center gap-2 pr-2">
               {matchingCount < count && (
-                <span className="text-11 text-muted-foreground">
-                  {matchingCount}{t(" of ")}{count}{t(" match")}</span>
+                <span className="text-13 text-muted-foreground">
+                  {matchingCount}{translateUi(" of ")}{count}{translateUi(" match")}</span>
               )}
               <Link
                 to="/keys/services/$groupId"
                 params={{ groupId: group.id }}
-                aria-label={t("View all {{name}} service details", { name: group.name })}
-                className="text-xs text-primary-text hover:underline"
-              >{t("Service details")}</Link>
+                aria-label={translateUi("View all {{value1}} service details", { value1: group.name })}
+                className="type-row-title text-primary-text hover:underline"
+              >{translateUi("Service details")}</Link>
             </Glide>
           </div>
           {expanded && agentOrder && (
@@ -583,11 +574,11 @@ function GroupCard({
                     disabled={Boolean(agentOrder.reason)}
                     title={
                       agentOrder.reason ??
-                      t("Reorder discovery within this service")
+                      translateUi("Reorder discovery within this service")
                     }
                     onClick={() => agentOrder.start(group)}
                   >
-                    <ListOrdered className="size-3.5" aria-hidden="true" />{t("Reorder discovery")}</Button>
+                    <ListOrdered className="size-3.5" aria-hidden="true" />{translateUi("Reorder discovery")}</Button>
                 )
               }
             />
@@ -602,7 +593,7 @@ function GroupCard({
         <CardReveal open={open || isOrdering} onClosed={onClosed}>
           <div className="bg-background/30">
             {ordering && (
-              <p className="p-3 text-11 text-muted-foreground">{t("Kept visible while ordering")}</p>
+              <p className="p-3 text-13 text-muted-foreground">{translateUi("Kept visible while ordering")}</p>
             )}
             {routingOpen && !ordering ? (
               <FadeIn key="routing">
@@ -631,8 +622,8 @@ function GroupCard({
                           ? selectedPool.user_id
                           : undefined,
                     }}
-                    className="ml-auto text-xs text-primary-text hover:underline"
-                  >{t("Manage in Service Pools")}</Link>
+                    className="ml-auto type-row-title text-primary-text hover:underline"
+                  >{translateUi("Manage in Service Pools")}</Link>
                 </div>
                 {selectedPool ? (
                   <ServicePoolRoutingPanel
@@ -642,16 +633,16 @@ function GroupCard({
                     insights={insights}
                   />
                 ) : (
-                  <p className="p-4 text-xs text-muted-foreground">
+                  <p className="p-4 text-13 text-muted-foreground">
                     {routing.loading
-                      ? t("Loading saved pools…")
+                      ? translateUi("Loading saved pools…")
                       : routing.incomplete
-                        ? t("Some pools could not be inspected. Organization pool settings require admin access.")
-                        : t("These connections use their individual slugs. Create a pool to give compatible connections one route with rotation or priority failover.")}
+                        ? translateUi("Some pools could not be inspected. Organization pool settings require admin access.")
+                        : translateUi("These connections use their individual slugs. Create a pool to give compatible connections one route with rotation or priority failover.")}
                   </p>
                 )}
                 {selectedPool && routing.incomplete && (
-                  <p className="px-4 pb-4 text-xs text-muted-foreground">{t("Additional organization pools may require admin access.")}</p>
+                  <p className="px-4 pb-4 text-13 text-muted-foreground">{translateUi("Additional organization pools may require admin access.")}</p>
                 )}
               </FadeIn>
             ) : (
@@ -707,7 +698,7 @@ export function GroupedServiceCards({
   readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
   readonly renderTable?: (keys: readonly KeyInfo[]) => ReactNode;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const view = useServiceView();
   const containerRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<HTMLDivElement>(null);
@@ -761,12 +752,20 @@ export function GroupedServiceCards({
       updateShadow();
     };
     measure();
-    const observer = new ResizeObserver(measure);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      // Updating the sticky filter height can resize the observed main. Commit
+      // those CSS variables after delivery, rather than resizing its ancestor
+      // during the same ResizeObserver notification cycle.
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    });
     observer.observe(surface);
     if (scroller) observer.observe(scroller);
     scroller?.addEventListener("scroll", updateShadow, { passive: true });
     return () => {
       observer.disconnect();
+      cancelAnimationFrame(frame);
       scroller?.removeEventListener("scroll", updateShadow);
     };
   }, [view.accountId]);
@@ -814,10 +813,10 @@ export function GroupedServiceCards({
         stuck={filtersStuck}
         actions={actions}
       >
-        <span className="text-xs text-muted-foreground" aria-live="polite">
-          {visible.length} {visible.length === 1 ? t("service") : t("services")} ·{" "}
-          {matchingKeys.length}{t(" matching")}{" "}
-          {matchingKeys.length === 1 ? t("connection") : t("connections")}
+        <span className="text-13 text-muted-foreground" aria-live="polite">
+          {visible.length} {visible.length === 1 ? translateUi("service") : translateUi("services")} ·{" "}
+          {matchingKeys.length}{translateUi(" matching")}{" "}
+          {matchingKeys.length === 1 ? translateUi("connection") : translateUi("connections")}
         </span>
         {expandedId && (
           <Button
@@ -826,7 +825,7 @@ export function GroupedServiceCards({
             onClick={() => {
               if (!agentOrder || agentOrder.guard()) sequence.request(null);
             }}
-          >{t("Collapse")}</Button>
+          >{translateUi("Collapse")}</Button>
         )}
       </ServiceViewToolbar>
       {visible.length ? (
@@ -834,7 +833,7 @@ export function GroupedServiceCards({
           renderTable(matchingKeys)
         ) : (
           <MotionConfig reducedMotion="user">
-            <div className="grid items-start gap-6 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="shell-card-grid grid items-start sm:grid-cols-2 xl:grid-cols-3">
               {visible.map(({ group, matches }) => (
                 <GroupCard
                   key={group.id}
@@ -868,12 +867,12 @@ export function GroupedServiceCards({
           </MotionConfig>
         )
       ) : (
-        <p className="py-10 text-center text-sm text-muted-foreground">
+        <p className="py-10 text-center text-14 text-muted-foreground">
           {keys.length
             ? filters.source === "personal"
-              ? t("No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform.")
-              : t("No services match these filters. Clear filters to see all services.")
-            : t("No connected services.")}
+              ? translateUi("No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform.")
+              : translateUi("No services match these filters. Clear filters to see all services.")
+            : translateUi("No connected services.")}
         </p>
       )}
     </div>

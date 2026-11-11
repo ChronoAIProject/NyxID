@@ -76,6 +76,7 @@ export type RuntimeStepInfo = {
 };
 
 export type RuntimeToolCallInfo = {
+  decision?: import("./activity-decision").ActivityDecision | null;
   machine?: MachineReceipt;
   conversationId?: string;
   id: string;
@@ -85,7 +86,7 @@ export type RuntimeToolCallInfo = {
   finishedAt?: number;
   result?: string;
   error?: string;
-  failure?: { readonly kind: "service_status" | "tool_error" | "refused" | "internal"; readonly status?: number } | null;
+  failure?: { readonly reason?: string; readonly kind: "service_status" | "tool_error" | "refused" | "internal"; readonly status?: number } | null;
 };
 
 export type RuntimeToolApprovalRequestInfo = {

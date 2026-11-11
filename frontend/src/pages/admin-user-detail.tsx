@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { AccountErasureProgress } from "@/components/shared/account-erasure-progress";
 import {
   changedFields,
   describeChanges,
@@ -107,12 +108,13 @@ const ROLE_LABEL: Record<PlatformRole, string> = {
 };
 
 export function AdminUserDetailPage() {
+  useUiTranslation();
   const { userId } = useParams({ strict: false }) as { userId: string };
   return <AdminUserDetailPageEditor key={userId} userId={userId} />;
 }
 
 function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
 
@@ -203,7 +205,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         userId,
         role: pendingRole,
       });
-      toast.success(translateUi("Role updated to {{value}}", { value: ROLE_LABEL[pendingRole] }));
+      toast.success(translateUi(`Role updated to ${ROLE_LABEL[pendingRole]}`));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to update role"),
@@ -222,9 +224,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         isActive: !user.is_active,
       });
       toast.success(
-        user.is_active
-          ? "User disabled. Existing access tokens may remain valid for up to 15 minutes."
-          : "User enabled",
+        translateUi(user.is_active
+          ? "User disabled. Protected requests are rejected by the live account check."
+          : "User enabled"),
       );
     } catch (err) {
       toast.error(
@@ -251,8 +253,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(userId);
-      toast.success(translateUi("User deleted"));
-      void navigate({ to: "/admin/users" });
+      toast.success(translateUi("Account deletion accepted. Inspect erasure progress for verified completion."));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete user"),
@@ -279,7 +280,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
     try {
       const result = await revokeSessionsMutation.mutateAsync(userId);
       toast.success(
-        translateUi("{{value}} session(s) revoked. Existing access tokens may remain valid for up to 15 minutes.", { value: String(result.revoked_count) }),
+        translateUi(`${String(result.revoked_count)} session(s) revoked. Session-bound access is blocked on the next protected request. Credentials without a session binding have separate revocation controls.`),
       );
     } catch (err) {
       toast.error(
@@ -304,18 +305,20 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">{t("User not found")}</h3>
-        <p className="mb-4 text-sm text-muted-foreground">{t("The user you are looking for does not exist or has been deleted.")}</p>
+        <h3 className="mb-2 font-display type-card-title">{translateUi("Account source unavailable")}</h3>
+        <p className="mb-4 text-14 text-muted-foreground">{translateUi("Source absence does not establish erasure completion. Inspect durable progress below.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: "/admin/users" })}
-        >{t("Back to Users")}</Button>
+        >{translateUi("Back to Users")}</Button>
+        <AccountErasureProgress userId={userId} />
       </div>
     );
   }
 
   return (
     <div className="space-y-8">
+      <AccountErasureProgress userId={userId} />
       <PageHeader
         title={user.display_name ?? user.email}
         description={user.display_name ? user.email : undefined}
@@ -325,7 +328,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
               <Button variant="outline" onClick={openEditDialog}>
                 <ButtonIcon>
                   <Pencil className="h-3 w-3" />
-                </ButtonIcon>{t("Edit")}</Button>
+                </ButtonIcon>{translateUi("Edit")}</Button>
               {!isSelf && (
                 <Button
                   variant="destructive"
@@ -333,22 +336,22 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                 >
                   <ButtonIcon variant="destructive">
                     <Trash2 className="h-3 w-3 text-destructive" />
-                  </ButtonIcon>{t("Delete")}</Button>
+                  </ButtonIcon>{translateUi("Delete")}</Button>
               )}
             </>
           ) : null
         }
       />
 
-      <DetailSection title={t("User Information")}>
-        <DetailRow label={t("ID")} value={user.id} copyable />
-        <DetailRow label={t("Email")} value={user.email} copyable />
+      <DetailSection title={translateUi("User Information")}>
+        <DetailRow label={translateUi("ID")} value={user.id} copyable />
+        <DetailRow label={translateUi("Email")} value={user.email} copyable />
         <DetailRow
-          label={t("Display Name")}
+          label={translateUi("Display Name")}
           value={user.display_name ?? "Not set"}
         />
         <DetailRow
-          label={t("Status")}
+          label={translateUi("Status")}
           value={user.is_active ? "Active" : "Disabled"}
           badge
           badgeVariant={user.is_active ? "success" : "destructive"}
@@ -359,7 +362,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
             role === "admin" ? "default" : "secondary";
           return (
             <DetailRow
-              label={t("Role")}
+              label={translateUi("Role")}
               value={ROLE_LABEL[role]}
               badge
               badgeVariant={variant}
@@ -367,24 +370,24 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
           );
         })()}
         <DetailRow
-          label={t("Email Verified")}
+          label={translateUi("Email Verified")}
           value={user.email_verified ? "Verified" : "Unverified"}
           badge
           badgeVariant={user.email_verified ? "success" : "warning"}
         />
         <DetailRow
-          label={t("MFA")}
+          label={translateUi("MFA")}
           value={user.mfa_enabled ? "Enabled" : "Disabled"}
           badge
           badgeVariant={user.mfa_enabled ? "success" : "secondary"}
         />
-        <DetailRow label={t("Created")} value={formatDate(user.created_at)} />
-        <DetailRow label={t("Last Login")} value={formatDate(user.last_login_at)} />
+        <DetailRow label={translateUi("Created")} value={formatDate(user.created_at)} />
+        <DetailRow label={translateUi("Last Login")} value={formatDate(user.last_login_at)} />
       </DetailSection>
 
       {canWrite && (
         <>
-          <DetailSection title={t("Actions")}>
+          <DetailSection title={translateUi("Actions")}>
             <div className="flex flex-wrap items-center gap-2 px-4 py-3">
               {!isSelf && (
                 <>
@@ -403,9 +406,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="user">{t("User")}</SelectItem>
-                        <SelectItem value="operator">{t("Operator (read-only)")}</SelectItem>
-                        <SelectItem value="admin">{t("Admin")}</SelectItem>
+                        <SelectItem value="user">{translateUi("User")}</SelectItem>
+                        <SelectItem value="operator">{translateUi("Operator (read-only)")}</SelectItem>
+                        <SelectItem value="admin">{translateUi("Admin")}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -420,7 +423,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                         <UserCheck className="h-3 w-3" />
                       )}
                     </ButtonIcon>
-                    {user.is_active ? t("Disable") : t("Enable")}
+                    {user.is_active ? translateUi("Disable") : translateUi("Enable")}
                   </Button>
                 </>
               )}
@@ -431,7 +434,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                 >
                   <ButtonIcon>
                     <MailCheck className="h-3 w-3" />
-                  </ButtonIcon>{t("Verify Email")}</Button>
+                  </ButtonIcon>{translateUi("Verify Email")}</Button>
               )}
               <Button
                 variant="outline"
@@ -439,14 +442,14 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
               >
                 <ButtonIcon>
                   <KeyRound className="h-3 w-3" />
-                </ButtonIcon>{t("Reset Password")}</Button>
+                </ButtonIcon>{translateUi("Reset Password")}</Button>
               <Button
                 variant="outline"
                 onClick={() => setConfirmAction("revoke-sessions")}
               >
                 <ButtonIcon>
                   <LogOut className="h-3 w-3" />
-                </ButtonIcon>{t("Revoke Sessions")}</Button>
+                </ButtonIcon>{translateUi("Revoke Sessions")}</Button>
             </div>
           </DetailSection>
         </>
@@ -456,50 +459,50 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
 
       <UserGroupsSection userId={userId} />
 
-      <DetailSection title={t("Sessions")}>
+      <DetailSection title={translateUi("Sessions")}>
         {sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BiometricIdentityIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">{t("No sessions found.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("No sessions found.")}</p>
           </div>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("IP Address")}</TableHead>
-                <TableHead>{t("User Agent")}</TableHead>
-                <TableHead>{t("Created")}</TableHead>
-                <TableHead>{t("Expires")}</TableHead>
-                <TableHead>{t("Last Active")}</TableHead>
-                <TableHead>{t("Status")}</TableHead>
+                <TableHead>{translateUi("IP Address")}</TableHead>
+                <TableHead>{translateUi("User Agent")}</TableHead>
+                <TableHead>{translateUi("Created")}</TableHead>
+                <TableHead>{translateUi("Expires")}</TableHead>
+                <TableHead>{translateUi("Last Active")}</TableHead>
+                <TableHead>{translateUi("Status")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {sessions.map((session) => (
                 <TableRow key={session.id}>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-mono text-14">
                     {session.ip_address ?? "--"}
                   </TableCell>
                   <TableCell
-                    className="max-w-[200px] truncate text-xs"
+                    className="max-w-[200px] truncate text-14"
                     title={session.user_agent ?? undefined}
                   >
                     {session.user_agent ?? "--"}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-14">
                     {formatRelativeTime(session.created_at)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-14">
                     {formatDate(session.expires_at)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-14">
                     {formatRelativeTime(session.last_active_at)}
                   </TableCell>
                   <TableCell>
                     <Badge
                       variant={session.revoked ? "destructive" : "success"}
                     >
-                      {session.revoked ? t("Revoked") : t("Active")}
+                      {session.revoked ? translateUi("Revoked") : translateUi("Active")}
                     </Badge>
                   </TableCell>
                 </TableRow>
@@ -514,8 +517,8 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Edit User")}</DialogTitle>
-            <DialogDescription>{t("Update user profile fields for ")}{user.email}.
+            <DialogTitle>{translateUi("Edit User")}</DialogTitle>
+            <DialogDescription>{translateUi("Update user profile fields for ")}{user.email}.
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
@@ -528,9 +531,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                 name="display_name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Display Name")}</FormLabel>
+                    <FormLabel>{translateUi("Display Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Display name")} {...field} />
+                      <Input placeholder={translateUi("Display name")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -541,9 +544,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Email")}</FormLabel>
+                    <FormLabel>{translateUi("Email")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("user@example.com")} {...field} />
+                      <Input placeholder={translateUi("user@example.com")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -554,7 +557,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                 name="avatar_url"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Avatar URL")}</FormLabel>
+                    <FormLabel>{translateUi("Avatar URL")}</FormLabel>
                     <FormControl>
                       <Input placeholder="https://..." {...field} />
                     </FormControl>
@@ -567,12 +570,12 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                   type="button"
                   variant="outline"
                   onClick={() => setEditOpen(false)}
-                >{t("Cancel")}</Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={updateMutation.isPending}
-                >{t("Save Changes")}</Button>
+                >{translateUi("Save Changes")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -592,9 +595,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
                   setPendingRole(null);
                 }
               }}
-              title={t("Change role to {{value}}", { value: ROLE_LABEL[pendingRole] })}
-              description={t("Are you sure you want to change {{email}} from {{value}} to {{value2}}?", { email: user.email, value: ROLE_LABEL[currentRole], value2: ROLE_LABEL[pendingRole] })}
-              confirmLabel={t("Change to {{value}}", { value: ROLE_LABEL[pendingRole] })}
+              title={translateUi("Change role to {{value1}}", { value1: ROLE_LABEL[pendingRole] })}
+              description={translateUi("Are you sure you want to change {{value1}} from {{value2}} to {{value3}}?", { value1: user.email, value2: ROLE_LABEL[currentRole], value3: ROLE_LABEL[pendingRole] })}
+              confirmLabel={translateUi("Change to {{value1}}", { value1: ROLE_LABEL[pendingRole] })}
               variant="destructive"
               isPending={roleMutation.isPending}
               onConfirm={() => void handleSetRole()}
@@ -607,13 +610,13 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title={user.is_active ? t("Disable User") : t("Enable User")}
+        title={user.is_active ? translateUi("Disable User") : translateUi("Enable User")}
         description={
           user.is_active
-            ? t("Are you sure you want to disable {{email}}? They will be immediately logged out.", { email: user.email })
-            : t("Are you sure you want to enable {{email}}?", { email: user.email })
+            ? translateUi("Are you sure you want to disable {{value1}}? They will be immediately logged out.", { value1: user.email })
+            : translateUi("Are you sure you want to enable {{value1}}?", { value1: user.email })
         }
-        confirmLabel={user.is_active ? t("Disable") : t("Enable")}
+        confirmLabel={user.is_active ? translateUi("Disable") : translateUi("Enable")}
         variant="destructive"
         isPending={statusMutation.isPending}
         onConfirm={() => void handleToggleStatus()}
@@ -624,9 +627,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title={t("Delete User")}
-        description={t("Are you sure you want to permanently delete {{email}}? This cannot be undone. All sessions, tokens, connections, and API keys will be deleted.", { email: user.email })}
-        confirmLabel={t("Delete User")}
+        title={translateUi("Delete User")}
+        description={translateUi("Are you sure you want to permanently delete {{value1}}? This cannot be undone. All sessions, tokens, connections, and API keys will be deleted.", { value1: user.email })}
+        confirmLabel={translateUi("Delete User")}
         variant="destructive"
         isPending={deleteMutation.isPending}
         onConfirm={() => void handleDelete()}
@@ -637,9 +640,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title={t("Revoke All Sessions")}
-        description={t("Are you sure you want to revoke all sessions for {{email}}? They will be immediately logged out.", { email: user.email })}
-        confirmLabel={t("Revoke Sessions")}
+        title={translateUi("Revoke All Sessions")}
+        description={translateUi("Are you sure you want to revoke all sessions for {{value1}}? They will be immediately logged out.", { value1: user.email })}
+        confirmLabel={translateUi("Revoke Sessions")}
         variant="destructive"
         isPending={revokeSessionsMutation.isPending}
         onConfirm={() => void handleRevokeSessions()}
@@ -650,9 +653,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title={t("Force Password Reset")}
-        description={t("Send a password reset email to {{email}}? Their current sessions will be revoked.", { email: user.email })}
-        confirmLabel={t("Reset Password")}
+        title={translateUi("Force Password Reset")}
+        description={translateUi("Send a password reset email to {{value1}}? Their current sessions will be revoked.", { value1: user.email })}
+        confirmLabel={translateUi("Reset Password")}
         variant="destructive"
         isPending={passwordResetMutation.isPending}
         onConfirm={() => void handlePasswordReset()}
@@ -663,9 +666,9 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title={t("Verify Email")}
-        description={t("Manually verify the email address for {{email}}?", { email: user.email })}
-        confirmLabel={t("Verify Email")}
+        title={translateUi("Verify Email")}
+        description={translateUi("Manually verify the email address for {{value1}}?", { value1: user.email })}
+        confirmLabel={translateUi("Verify Email")}
         variant="destructive"
         isPending={verifyEmailMutation.isPending}
         onConfirm={() => void handleVerifyEmail()}
@@ -692,7 +695,7 @@ function UserRolesSection({
   readonly userId: string;
   readonly canWrite: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: userRolesData, isLoading } = useUserRoles(userId);
   const { data: allRolesData } = useRoles();
   const assignMutation = useAssignRole();
@@ -735,14 +738,14 @@ function UserRolesSection({
 
   if (isLoading) {
     return (
-      <DetailSection title={t("Roles")}>
+      <DetailSection title={translateUi("Roles")}>
         <Skeleton className="h-20 w-full" />
       </DetailSection>
     );
   }
 
   return (
-    <DetailSection title={t("Roles")}>
+    <DetailSection title={translateUi("Roles")}>
       <div className="space-y-3 px-4 py-3">
         {canWrite && (
           <div>
@@ -750,13 +753,13 @@ function UserRolesSection({
               size="sm"
               variant="outline"
               onClick={() => setAssignOpen(true)}
-            >{t("Assign Role")}</Button>
+            >{translateUi("Assign Role")}</Button>
           </div>
         )}
 
         {directRoles.length > 0 && (
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Direct Roles")}</p>
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Direct Roles")}</p>
             <div className="flex flex-wrap gap-2">
               {directRoles.map((role) => (
                 <Badge key={role.id} variant="default" className="gap-1">
@@ -767,7 +770,7 @@ function UserRolesSection({
                       className="ml-1 rounded-full hover:bg-primary-foreground/20 disabled:opacity-50"
                       onClick={() => void handleRevoke(role.id)}
                       disabled={revokeMutation.isPending}
-                      aria-label={t("Revoke {{name}}", { name: role.name })}
+                      aria-label={translateUi("Revoke {{value1}}", { value1: role.name })}
                     >
                       x
                     </button>
@@ -780,7 +783,7 @@ function UserRolesSection({
 
         {inheritedRoles.length > 0 && (
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Inherited from Groups")}</p>
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Inherited from Groups")}</p>
             <div className="flex flex-wrap gap-2">
               {inheritedRoles.map((role) => (
                 <Badge key={role.id} variant="secondary">
@@ -793,13 +796,13 @@ function UserRolesSection({
 
         {effectivePermissions.length > 0 && (
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Effective Permissions")}</p>
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Effective Permissions")}</p>
             <div className="flex flex-wrap gap-1">
               {effectivePermissions.map((perm) => (
                 <Badge
                   key={perm}
                   variant="secondary"
-                  className="font-mono text-xs"
+                  className="font-mono text-12"
                 >
                   {perm}
                 </Badge>
@@ -809,20 +812,20 @@ function UserRolesSection({
         )}
 
         {directRoles.length === 0 && inheritedRoles.length === 0 && (
-          <p className="text-sm text-muted-foreground">{t("No roles assigned.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("No roles assigned.")}</p>
         )}
       </div>
 
       <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Assign Role")}</DialogTitle>
-            <DialogDescription>{t("Select a role to assign to this user.")}</DialogDescription>
+            <DialogTitle>{translateUi("Assign Role")}</DialogTitle>
+            <DialogDescription>{translateUi("Select a role to assign to this user.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <Select value={selectedRoleId} onValueChange={setSelectedRoleId}>
               <SelectTrigger>
-                <SelectValue placeholder={t("Select a role...")} />
+                <SelectValue placeholder={translateUi("Select a role...")} />
               </SelectTrigger>
               <SelectContent>
                 {availableRoles.map((role) => (
@@ -834,12 +837,12 @@ function UserRolesSection({
             </Select>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAssignOpen(false)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setAssignOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               onClick={() => void handleAssign()}
               disabled={!selectedRoleId}
               isLoading={assignMutation.isPending}
-            >{t("Assign Role")}</Button>
+            >{translateUi("Assign Role")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -851,23 +854,23 @@ function UserRolesSection({
 // detail page, not here. No `canWrite` prop needed today; add one when
 // inline write controls show up on this page.
 function UserGroupsSection({ userId }: { readonly userId: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: userGroupsData, isLoading } = useUserGroups(userId);
   const groups = userGroupsData?.groups ?? [];
 
   if (isLoading) {
     return (
-      <DetailSection title={t("Groups")}>
+      <DetailSection title={translateUi("Groups")}>
         <Skeleton className="h-20 w-full" />
       </DetailSection>
     );
   }
 
   return (
-    <DetailSection title={t("Groups")}>
+    <DetailSection title={translateUi("Groups")}>
       <div className="px-4 py-3">
         {groups.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t("No group memberships.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("No group memberships.")}</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {groups.map((group) => (
@@ -908,7 +911,7 @@ function ConfirmDialog({
   isPending,
   onConfirm,
 }: ConfirmDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -917,7 +920,7 @@ function ConfirmDialog({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>{t("Cancel")}</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{translateUi("Cancel")}</Button>
           <Button variant={variant} onClick={onConfirm} isLoading={isPending}>
             {confirmLabel}
           </Button>

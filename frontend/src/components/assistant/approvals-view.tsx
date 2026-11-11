@@ -1,127 +1,87 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
-import { useEffect } from "react";
+import { ExecutionPermissionCard } from "@/components/assistant/blocks/execution-permission-card";
+import { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
+import { ApprovalAction, ApprovalIdentity } from "@/components/shared/approval-history-fields";
 import { ServiceIcon } from "@/components/service-icon";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  SegmentedControl,
+  SegmentedControlList,
+  SegmentedControlTrigger,
+  SegmentedControlContent,
+} from "@/components/ui/segmented-control";
+import { WorkspacePageHeader } from "./workspace-page-header";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useAssistantApprovals } from "@/hooks/use-assistant-workspace";
 import { ApiError } from "@/lib/api-client";
-import { formatDate } from "@/lib/utils";
 import type { AssistantApprovalEntry } from "@/lib/assistant/approvals";
-import type {
-  ApprovalDecision,
-  ApprovalDecisionChannel,
-} from "@/types/assistant";
-
-// Decision vocabulary mirrors the Studio approval-history page (badge variants
-// per status); "denied" is the assistant-block spelling of NyxID "rejected"
-// (PRD §5.5).
-function getDecisionBadge(decision: ApprovalDecision) {
-  switch (decision) {
-    case "approved":
-      return <Badge variant="success">{translateUi("Approved")}</Badge>;
-    case "denied":
-      return <Badge variant="destructive">{translateUi("Denied")}</Badge>;
-    case "expired":
-      return <Badge variant="secondary">{translateUi("Expired")}</Badge>;
-    case "cancelled":
-      return <Badge variant="secondary">{translateUi("Cancelled")}</Badge>;
-  }
-}
+import type { ApprovalDecisionChannel } from "@/types/assistant";
 
 function channelLabel(channel: ApprovalDecisionChannel | null): string {
-  switch (channel) {
-    case "web":
-      return "Web";
-    case "telegram":
-      return "Telegram";
-    case "mobile":
-      return "Mobile";
-    default:
-      return "—";
-  }
+  return channel === "web"
+    ? "Web"
+    : channel === "telegram"
+      ? "Telegram"
+      : channel === "mobile"
+        ? "Mobile"
+        : "";
 }
 
-/** ISO-8601 comparator that always sorts absent values after present ones. */
+function timestamp(value: string | null | undefined): number | null {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Missing and malformed timestamps always follow dated entries. */
 function compareIsoDates(
   left: string | null | undefined,
   right: string | null | undefined,
   direction: "ascending" | "descending",
-): number {
-  if (!left) return right ? 1 : 0;
-  if (!right) return -1;
-  return direction === "ascending"
-    ? left.localeCompare(right)
-    : right.localeCompare(left);
+) {
+  const a = timestamp(left),
+    b = timestamp(right);
+  if (a === null) return b === null ? 0 : 1;
+  if (b === null) return -1;
+  return direction === "ascending" ? a - b : b - a;
 }
 
-function ServiceCell({ slug }: { readonly slug: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-      <ServiceIcon slug={`api-${slug}`} size="xs" />
-      {slug}
-    </span>
-  );
+function dayLabel(value: string | null | undefined) {
+  const time = timestamp(value);
+  if (time === null) return "Unknown date";
+  const date = new Date(time);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return "Today";
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return date.toLocaleDateString(getFormattingLocale(), {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
-function PendingSection({
-  entries,
-  onDecide,
-}: {
-  readonly entries: readonly AssistantApprovalEntry[];
-  readonly onDecide: (
-    entry: AssistantApprovalEntry,
-    approved: boolean,
-  ) => Promise<void>;
-}) {
-  const { t } = useUiTranslation();
-  if (entries.length === 0) {
-    return (
-      <div className="flex flex-col items-center rounded-xl border border-border bg-card px-6 py-12 text-center">
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-success/25 bg-success/[0.06]">
-          <ShieldCheck className="h-5 w-5 text-success" />
-        </div>
-        <p className="mt-3 text-13 font-medium text-foreground">{t("Nothing waiting on you")}</p>
-        <p className="mt-1 text-11 text-muted-foreground">{t("Approval requests show up here when a write needs your sign-off.")}</p>
-      </div>
-    );
-  }
-
+function EmptyState({ history = false }: { readonly history?: boolean }) {
+  useUiTranslation();
   return (
-    <>
-      {/* A div, not a p: `Badge` renders a div, which is invalid inside a p and
-          gets reparented by the browser. */}
-      <div className="mb-2.5 flex items-center gap-2 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("Waiting on you")}<Badge variant="warning">{entries.length}</Badge>
-      </div>
-      <div className="space-y-5">
-        {entries.map((entry) => (
-          <div key={entry.requestId}>
-            <p className="mb-2 flex items-center gap-1.5 text-12 font-medium text-muted-foreground">
-              <ServiceIcon slug={`api-${entry.block.service_slug}`} size="xs" />
-              <span className="truncate">{entry.serviceName}</span>
-            </p>
-            <ApprovalCard
-              block={entry.block}
-              onDecide={(approved) => onDecide(entry, approved)}
-            />
-          </div>
-        ))}
-      </div>
-    </>
+    <div className="flex flex-col items-center py-12 text-center">
+      <ShieldCheck aria-hidden className="mb-3 size-6 text-text-tertiary" />
+      <p className="type-card-title">
+        {history ? translateUi("No decisions yet") : translateUi("Nothing waiting on you")}
+      </p>
+      <p className="mt-1 text-13 text-text-tertiary">
+        {history
+          ? translateUi("Decided approvals will show up here.")
+          : translateUi("Approval requests appear when an action needs your sign-off.")}
+      </p>
+    </div>
   );
 }
 
@@ -130,116 +90,102 @@ function HistorySection({
 }: {
   readonly entries: readonly AssistantApprovalEntry[];
 }) {
-  const { t } = useUiTranslation();
-  if (entries.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("Decided approvals will show up here.")}</div>
-    );
+  useUiTranslation();
+  if (!entries.length) return <EmptyState history />;
+  const proposals = entries.filter((entry) => entry.block.execution_proposal);
+  const legacy = entries.filter((entry) => !entry.block.execution_proposal);
+  const days = new Map<string, AssistantApprovalEntry[]>();
+  for (const entry of legacy) {
+    const day = dayLabel(entry.decidedAt ?? entry.requestedAt);
+    days.set(day, [...(days.get(day) ?? []), entry]);
   }
-
   return (
-    <>
-      {/* Mobile card view */}
-      <div className="flex flex-col gap-3 md:hidden">
-        {entries.map((entry) => (
-          <div
-            key={entry.requestId}
-            className="rounded-xl border border-border/50 bg-card p-4"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <p className="min-w-0 text-13 font-medium text-foreground line-clamp-2">
-                {entry.block.body}
-              </p>
-              {entry.block.decision !== null &&
-                getDecisionBadge(entry.block.decision)}
-            </div>
-            <p className="mt-1.5 flex items-center gap-1.5 text-11 text-muted-foreground">
-              <ServiceCell slug={entry.block.service_slug} />
-              {entry.block.decision_channel !== null &&
-                t("via {{value}}", { value: t(channelLabel(entry.block.decision_channel)) })}
-            </p>
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-              <span className="text-11 text-muted-foreground">
-                {formatDate(entry.decidedAt ?? entry.requestedAt)}
-              </span>
-              <span className="text-11 text-text-tertiary">
-                {entry.block.agent_key_prefix}
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Desktop table view */}
-      <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t("Request")}</TableHead>
-              <TableHead>{t("Service")}</TableHead>
-              <TableHead>{t("Decision")}</TableHead>
-              <TableHead>{t("Channel")}</TableHead>
-              <TableHead>{t("When")}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {entries.map((entry) => (
-              <TableRow key={entry.requestId}>
-                <TableCell>
-                  <div className="flex min-w-0 flex-col gap-0.5">
+    <div className="space-y-6">
+      {proposals.length ? (
+        <div className="space-y-3">
+          {proposals.map((entry) => (
+            <ExecutionPermissionCard
+              key={entry.requestId}
+              requestId={entry.requestId}
+              proposal={entry.block.execution_proposal!}
+            />
+          ))}
+        </div>
+      ) : null}
+      {[...days].map(([day, rows]) => (
+        <GroupedList key={day} title={day}>
+          {rows.map((entry) => {
+            const decision = entry.block.decision;
+            const at = timestamp(entry.decidedAt ?? entry.requestedAt);
+            return (
+              <GroupedRow
+                key={entry.requestId}
+                leading={
+                  <ServiceIcon
+                    slug={`api-${entry.block.service_slug}`}
+                    size="sm"
+                  />
+                }
+                title={<>
+                  <ApprovalIdentity className="block">{entry.serviceName}</ApprovalIdentity>
+                  <ApprovalAction
+                    className="mt-1 line-clamp-2 break-words"
+                    title={entry.block.body}
+                  >
+                    {entry.block.body}
+                  </ApprovalAction>
+                  <p className="mt-1 type-secondary text-text-tertiary">
                     <span
-                      className="max-w-[260px] truncate"
-                      title={entry.block.body}
+                      className={
+                        decision === "approved"
+                          ? "workspace-status-success"
+                          : decision === "denied"
+                            ? "workspace-status-destructive"
+                            : undefined
+                      }
                     >
-                      {entry.block.body}
+                      {decision
+                        ? decision.charAt(0).toUpperCase() + decision.slice(1)
+                        : translateUi("Pending")}
                     </span>
-                    <span className="text-11 text-text-tertiary">
-                      {entry.block.agent_key_prefix}
-                    </span>
-                  </div>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  <ServiceCell slug={entry.block.service_slug} />
-                </TableCell>
-                <TableCell>
-                  {entry.block.decision !== null &&
-                    getDecisionBadge(entry.block.decision)}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {t(channelLabel(entry.block.decision_channel))}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {formatDate(entry.decidedAt ?? entry.requestedAt)}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </>
+                    {[
+                      channelLabel(entry.block.decision_channel),
+                      at === null
+                        ? ""
+                        : new Date(at).toLocaleTimeString(getFormattingLocale(), {
+                            hour: "numeric",
+                            minute: "2-digit",
+                          }),
+                      entry.block.agent_key_prefix,
+                    ]
+                      .filter(Boolean)
+                      .map((part, i) => (
+                        <span key={i}> · {part}</span>
+                      ))}
+                  </p>
+                </>}
+              />
+            );
+          })}
+        </GroupedList>
+      ))}
+    </div>
   );
 }
 
 export function ApprovalsView() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const approvals = useAssistantApprovals();
-  // A dead backend must not take the view away: the failure is a toast, the
-  // sections render whatever is cached (or their own empty states), and the
-  // retry affordance lives inside the working view.
+  const [tab, setTab] = useState("pending");
   useEffect(() => {
     if (!approvals.isError) return;
-    toast.error(translateUi("Could not load approvals"), {
+    toast.error(translateErrorMessage("Could not load approvals"), {
       id: "assistant-approvals-load-failed",
       description:
         "The assistant backend did not respond. Deciding from Telegram or mobile still works — retry below.",
     });
   }, [approvals.isError]);
   const decide = useDecideApproval();
-
-  // Pending: most urgent (soonest expiry) first. History: newest first.
-  // Both keys are ISO strings the API always sends, but a comparator that
-  // throws takes the whole route down with it (the router unmounts to a blank
-  // page), so one absent timestamp must degrade to "sorts last" instead.
   const pending = [...approvals.pending].sort((a, b) =>
     compareIsoDates(a.block.expires_at, b.block.expires_at, "ascending"),
   );
@@ -257,7 +203,7 @@ export function ApprovalsView() {
   ): Promise<void> {
     try {
       await decide.mutateAsync({ requestId: entry.requestId, approved });
-      toast.success(approved ? "Request approved" : "Request denied");
+      toast.success(translateUi(approved ? "Request approved" : "Request denied"));
     } catch (error) {
       toast.error(
         translateErrorMessage(error instanceof ApiError
@@ -268,43 +214,76 @@ export function ApprovalsView() {
   }
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
-      <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">{t("Approvals")}</h1>
-        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">{t("Write actions gated by your NyxID policy wait here for your decision. Deciding here, in Telegram, or on mobile converges to the same result.")}</p>
-      </div>
-
-      <div className="max-w-[680px] px-5 pb-10 pt-5 sm:px-8">
+    <div className="shell-page-stack">
+      <WorkspacePageHeader
+        column
+        title={translateUi("Approvals")}
+        description={translateUi("Review actions waiting for your permission. Decisions here, in Telegram or on mobile stay in sync.")}
+      />
+      <SegmentedControl
+        value={tab}
+        onValueChange={setTab}
+        className="max-w-2xl space-y-6"
+      >
+        <SegmentedControlList aria-label={translateUi("Approval status")} className="max-w-80">
+          <SegmentedControlTrigger value="pending">{translateUi("Pending (")}{pending.length})
+          </SegmentedControlTrigger>
+          <SegmentedControlTrigger value="history">{translateUi("History")}</SegmentedControlTrigger>
+        </SegmentedControlList>
+        {approvals.isError ? (
+          <GroupedList footer={translateUi("Approvals may be out of date until the backend responds.")}>
+            <GroupedRow asChild interactive>
+              <button onClick={approvals.refetch}>
+                <RefreshCw aria-hidden />{translateUi("Retry")}</button>
+            </GroupedRow>
+          </GroupedList>
+        ) : null}
         {approvals.isLoading ? (
-          <div className="space-y-3">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton
-                key={`approval-skel-${String(i)}`}
-                className="h-24 w-full"
-              />
+          <div
+            role="status"
+            aria-label={translateUi("Loading approvals")}
+            className="space-y-3"
+          >
+            {Array.from({ length: 3 }, (_, i) => (
+              <Skeleton key={i} className="h-24 w-full" />
             ))}
           </div>
         ) : (
           <>
-            {approvals.isError ? (
-              <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-                <p className="text-12 text-muted-foreground">{t("Approvals may be out of date until the backend responds.")}</p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={approvals.refetch}
-                >
-                  <RefreshCw />{t("Retry")}</Button>
-              </div>
-            ) : null}
-            <PendingSection entries={pending} onDecide={handleDecide} />
-
-            <p className="mb-2.5 mt-8 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("History")}</p>
-            <HistorySection entries={decided} />
+            <SegmentedControlContent
+              value="pending"
+              className="space-y-6"
+            >
+              {pending.length ? (
+                pending.map((entry) => (
+                  <article
+                    key={entry.requestId}
+                    aria-label={translateUi("{{value1}} request", { value1: entry.serviceName })}
+                    className="assistant-workspace-approval space-y-2"
+                  >
+                    <h3 className="flex items-center gap-2 px-4 type-row-title">
+                      <ServiceIcon
+                        slug={`api-${entry.block.service_slug}`}
+                        size="xs"
+                      />
+                      {entry.serviceName}
+                    </h3>
+                    <ApprovalCard
+                      block={entry.block}
+                      onDecide={(approved) => handleDecide(entry, approved)}
+                    />
+                  </article>
+                ))
+              ) : (
+                <EmptyState />
+              )}
+            </SegmentedControlContent>
+            <SegmentedControlContent value="history">
+              <HistorySection entries={decided} />
+            </SegmentedControlContent>
           </>
         )}
-      </div>
+      </SegmentedControl>
     </div>
   );
 }

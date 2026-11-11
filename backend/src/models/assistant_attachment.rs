@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "assistant_attachments";
 /// and follow the runtime tool-image policy (conversation lifetime by default).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAttachment {
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     #[serde(default = "tool_origin")]
@@ -15,6 +17,9 @@ pub struct AssistantAttachment {
     pub conversation_id: String,
     pub turn_id: String,
     pub content_type: String,
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     pub size: i64,
     #[serde(with = "super::bson_bytes::required")]
     pub data_encrypted: Vec<u8>,

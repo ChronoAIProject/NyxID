@@ -96,12 +96,23 @@ pub struct ExactServiceApprovalBinding {
     /// this gate and remain bounded by approval expiry and the other fences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_authority_binding: Option<ExactServiceExecutionAuthorityBinding>,
+    /// Separate authority for automatic no-auth optional legacy delegation.
+    /// Missing historical bindings cannot authorize newly inherited credentials.
+    /// This additive slot does not redefine either execution-authority projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_provider_authority_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redemption: Option<ExactServiceApprovalRedemption>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_execution: Option<super::assistant_conversation::ActivityExecution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_proposal: Option<super::execution_proposal::ExecutionProposal>,
     #[serde(default)]
     pub assistant_group: Option<GroupApprovalBinding>,
     /// UUID v4 string
@@ -261,6 +272,9 @@ mod tests {
 
     fn make_approval_request() -> ApprovalRequest {
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -349,6 +363,7 @@ mod tests {
             arguments: serde_json::json!({}),
             execution_authority_digest: None,
             execution_authority_binding: None,
+            optional_provider_authority_digest: None,
             redemption: None,
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
@@ -381,6 +396,7 @@ mod tests {
                 projection_version: "nyxid-exact-execution-authority.v2".to_string(),
                 digest: "sha256:exec-v2".to_string(),
             }),
+            optional_provider_authority_digest: None,
             redemption: None,
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
@@ -411,11 +427,14 @@ mod tests {
                 projection_version: "nyxid-exact-execution-authority.v2".to_string(),
                 digest: "sha256:current-v2".to_string(),
             }),
+            optional_provider_authority_digest: None,
             redemption: None,
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
         doc.remove("execution_authority_binding");
+        doc.remove("optional_provider_authority_digest");
         binding = bson::from_document(doc).expect("deserialize legacy v1 authority binding");
+        assert!(binding.optional_provider_authority_digest.is_none());
         assert!(binding.execution_authority_binding.is_none());
         assert_eq!(
             binding.execution_authority_digest.as_deref(),

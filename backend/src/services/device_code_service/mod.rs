@@ -76,7 +76,9 @@ pub enum DeviceCodePoll {
         api_key: String,
         node_id: String,
         refresh_token: String,
+        /// Delivery envelope lifetime, not the API key lifetime.
         expires_in: i64,
+        api_key_expires_at: Option<String>,
     },
 }
 
@@ -94,6 +96,7 @@ pub struct DeviceCodeApprove {
     pub device_label: String,
     pub hw_id: String,
     pub api_key_id: String,
+    pub api_key_expires_at: Option<String>,
     pub node_id: String,
     pub owner_user_id: String,
     pub org_id: Option<String>,
@@ -127,7 +130,9 @@ pub struct DeviceOnboardRedeem {
     pub api_key: String,
     pub node_id: String,
     pub refresh_token: String,
+    /// Delivery envelope lifetime; api_key_expires_at is the credential policy.
     pub expires_in: i64,
+    pub api_key_expires_at: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -200,12 +205,14 @@ impl fmt::Debug for DeviceCodePoll {
                 node_id,
                 refresh_token,
                 expires_in,
+                api_key_expires_at,
             } => f
                 .debug_struct("DeviceCodePoll::Approved")
                 .field("api_key", &RedactedLen(api_key.len()))
                 .field("node_id", node_id)
                 .field("refresh_token", &RedactedLen(refresh_token.len()))
                 .field("expires_in", expires_in)
+                .field("api_key_expires_at", api_key_expires_at)
                 .finish(),
         }
     }

@@ -1,5 +1,8 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { ExecutionPermissionCard } from "./execution-permission-card";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import {
   Ban,
   Check,
@@ -13,11 +16,6 @@ import {
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import type {
   ApprovalCardContentBlock,
   ApprovalDecision,
@@ -43,8 +41,9 @@ function grantDurationLabel(seconds: number | null): string {
 
 /** Small mono chip used by the scope row (mockup: `.a-scope code`). */
 function ScopeChip({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   return (
-    <span className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-10 text-muted-foreground">
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-12 text-muted-foreground">
       {children}
     </span>
   );
@@ -56,10 +55,10 @@ function ScopeChip({ children }: { readonly children: ReactNode }) {
  * three facts scan independently.
  */
 function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-      <span className="text-10 font-semibold uppercase tracking-[1px] text-muted-foreground">{t("Scope")}</span>
+      <span className="type-table-header uppercase tracking-[1px] text-muted-foreground">{translateUi("Scope")}</span>
       <ScopeChip>
         <ServiceIcon slug={`api-${block.service_slug}`} size="2xs" />
         <span className="truncate">{block.service_slug}</span>
@@ -70,8 +69,8 @@ function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
       </ScopeChip>
       <ScopeChip>
         {block.approval_mode === "per_request"
-          ? t("per-request approval")
-          : t("grant · {{value}}", { value: grantDurationLabel(block.grant_duration_sec) })}
+          ? translateUi("per-request approval")
+          : translateUi("grant · {{value1}}", { value1: grantDurationLabel(block.grant_duration_sec) })}
       </ScopeChip>
     </div>
   );
@@ -83,7 +82,7 @@ const DECIDED_STYLE: Record<
 > = {
   approved: {
     container: "border-success/30 bg-success/[0.06]",
-    title: "Approved and sent",
+    title: "Approved",
   },
   denied: {
     container: "border-destructive/30 bg-destructive/[0.06]",
@@ -97,6 +96,7 @@ const DECIDED_STYLE: Record<
 };
 
 function DecidedIcon({ decision }: { readonly decision: ApprovalDecision }) {
+  useUiTranslation();
   switch (decision) {
     case "approved":
       return <Check className="h-4 w-4 shrink-0 text-success" />;
@@ -109,37 +109,32 @@ function DecidedIcon({ decision }: { readonly decision: ApprovalDecision }) {
   }
 }
 
-function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
-  const { t } = useUiTranslation();
+function DecidedCard({ block, onRequestAgain, disabled }: { readonly block: ApprovalCardContentBlock; readonly onRequestAgain?: () => void; readonly disabled?: boolean }) {
+  useUiTranslation();
   const decision = block.decision;
   if (decision === null) return null;
   const style = DECIDED_STYLE[decision];
 
   return (
-    <section className={`rounded-xl border p-4 ${style.container}`}>
-      <div className="flex flex-wrap items-center gap-2 text-12 font-semibold text-foreground">
+    <section className={`${STATUS_CARD_MAX_W} rounded-xl border p-4 ${style.container}`}>
+      <div className="flex flex-wrap items-center gap-2 type-body-strong text-foreground">
         <DecidedIcon decision={decision} />
         <span>{style.title}</span>
         {block.decision_channel && (
-          <Badge variant="secondary" className="ml-auto">{t("via ")}{block.decision_channel}
+          <Badge variant="secondary" className="ml-auto">{translateUi("via ")}{block.decision_channel}
           </Badge>
         )}
       </div>
-      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
+      <p className="mt-2 text-14 text-muted-foreground">
         {block.body}
       </p>
       {decision !== "approved" && (
-        <p className="mt-1.5 text-11 text-text-tertiary">{t("Nothing was sent.")}</p>
+        <p className="mt-1.5 text-13 text-text-tertiary">{translateUi("Nothing was sent.")}</p>
       )}
-      {decision === "expired" && (
+      {decision === "expired" && onRequestAgain && (
         <div className="mt-3">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button type="button" variant="secondary" size="sm">
-                <RotateCcw />{t("Request again")}</Button>
-            </TooltipTrigger>
-            <TooltipContent>{t("Wired in the API pass")}</TooltipContent>
-          </Tooltip>
+          <Button type="button" variant="secondary" size="sm" disabled={disabled} onClick={onRequestAgain}>
+            <RotateCcw />{translateUi("Ask for a new confirmation")}</Button>
         </div>
       )}
     </section>
@@ -151,30 +146,34 @@ function SubmittedCard({
 }: {
   readonly block: ApprovalCardContentBlock;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (!block.decision_submission) return null;
   return (
-    <section className="rounded-xl border border-warning/30 bg-warning/[0.06] p-4">
-      <div className="flex items-center gap-2 text-12 font-semibold text-foreground">
-        <Loader2 className="h-4 w-4 animate-spin text-warning" />{t("Decision sent")}</div>
-      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
+    <section className={`${STATUS_CARD_MAX_W} rounded-xl border border-warning/30 bg-warning/[0.06] p-4`}>
+      <div className="flex items-center gap-2 type-body-strong text-foreground">
+        <Loader2 className="h-4 w-4 animate-spin text-warning" />{translateUi("Decision sent")}</div>
+      <p className="mt-2 text-14 text-muted-foreground">
         {block.body}
       </p>
-      <p className="mt-1.5 text-11 text-text-tertiary">{t("Waiting for the committed ")}{block.decision_submission}{t(" decision.")}</p>
+      <p className="mt-1.5 text-13 text-text-tertiary">{translateUi("Waiting for the committed ")}{block.decision_submission}{translateUi(" decision.")}</p>
     </section>
   );
 }
 
-export function ApprovalCard({
+function LegacyApprovalCard({
   block,
   disabled = false,
   onDecide,
+  onRequestAgain,
+  reviewPath,
 }: {
   readonly block: ApprovalCardContentBlock;
   readonly disabled?: boolean;
+  readonly onRequestAgain?: () => void;
+  readonly reviewPath?: string;
   readonly onDecide: (approved: boolean) => Promise<void> | void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [pendingAction, setPendingAction] = useState<"approve" | "deny" | null>(
     null,
   );
@@ -189,6 +188,7 @@ export function ApprovalCard({
   async function decide(approved: boolean) {
     const clickedAt = Date.now();
     if (
+      Date.parse(block.expires_at) <= clickedAt ||
       block.decision !== null ||
       block.decision_submission != null ||
       disabled ||
@@ -211,8 +211,11 @@ export function ApprovalCard({
     }
   }
 
-  if (block.decision !== null) {
-    return <DecidedCard block={block} />;
+  if (block.decision !== null || (!block.decision_submission && Date.parse(block.expires_at) <= now)) {
+    return <div className="space-y-2">
+      <DecidedCard block={{ ...block, decision: block.decision ?? "expired" }} onRequestAgain={onRequestAgain} disabled={disabled} />
+      {reviewPath ? <a className="type-row-title underline" href={reviewPath}>{translateUi("Open Approvals")}</a> : null}
+    </div>;
   }
   if (block.decision_submission) {
     return <SubmittedCard block={block} />;
@@ -224,22 +227,22 @@ export function ApprovalCard({
   const busy = pendingAction !== null;
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <section className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-xl border border-border bg-card shadow-sm`}>
       <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-nyx-secondary-400/30 bg-nyx-secondary-400/10">
           <ShieldAlert className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-13 font-semibold text-foreground">{t("Approval required")}</h3>
-          <p className="mt-0.5 text-11 leading-relaxed text-muted-foreground">{t("Review the destination and access scope before this action runs.")}</p>
+          <h3 className="type-card-title text-foreground">{translateUi("Approval required")}</h3>
+          <p className="mt-0.5 text-13 text-muted-foreground">{translateUi("Review the destination and access scope before this action runs.")}</p>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
-          <Badge variant="accent">{t("Pending")}</Badge>
+          <Badge variant="accent">{translateUi("Pending")}</Badge>
           <span
-            className={`flex items-center gap-1 font-mono text-10 ${
+            className={`flex items-center gap-1 font-mono ${
               expired || urgent
-                ? "font-semibold text-destructive"
-                : "text-muted-foreground"
+                ? "type-table-header text-destructive"
+                : "type-account-email text-muted-foreground"
             }`}
           >
             <Clock3 className="h-3 w-3" />
@@ -249,14 +252,15 @@ export function ApprovalCard({
       </div>
 
       <div className="px-4 py-3.5">
-        <p className="text-13 font-medium leading-relaxed text-foreground">
+        <p className="type-card-title text-foreground">
           {block.body}
         </p>
 
         <ScopeRow block={block} />
+        {reviewPath ? <a className="type-row-title underline" href={reviewPath}>{translateUi("Open Approvals")}</a> : null}
 
         {block.approval_mode === "grant" && (
-          <p className="mt-2.5 text-11 leading-relaxed text-muted-foreground">{t("Approving also allows repeat ")}{block.service_slug}{t(" writes for the next ")}{grantDurationLabel(block.grant_duration_sec)}{t(" without asking again.")}</p>
+          <p className="mt-2.5 text-13 text-muted-foreground">{translateUi("Approving also allows repeat ")}{block.service_slug}{translateUi(" writes for the next ")}{grantDurationLabel(block.grant_duration_sec)}{translateUi(" without asking again.")}</p>
         )}
       </div>
 
@@ -265,26 +269,33 @@ export function ApprovalCard({
           type="button"
           disabled={busy || disabled}
           onClick={() => void decide(true)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-success/40 bg-success/15 px-3 text-12 font-medium text-success transition-colors hover:bg-success/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-success/40 bg-success/15 px-3 type-row-title text-success transition-colors hover:bg-success/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
           {pendingAction === "approve" ? (
             <Loader2 className="h-3 w-3 animate-spin light:text-success" />
           ) : (
             <Check className="h-3 w-3 light:text-success" />
-          )}{t("Approve and send")}</button>
+          )}{translateUi("Approve and send")}</button>
         <button
           type="button"
           disabled={busy || disabled}
           onClick={() => void decide(false)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/15 px-3 text-12 font-medium text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/15 px-3 type-row-title text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
           {pendingAction === "deny" ? (
             <Loader2 className="h-3 w-3 animate-spin light:text-destructive" />
           ) : (
             <X className="h-3 w-3 light:text-destructive" />
-          )}{t("Deny")}</button>
-        <span className="ml-auto text-10 text-muted-foreground">{t("Nothing is sent until you decide.")}</span>
+          )}{translateUi("Deny")}</button>
+        <span className="ml-auto text-12 text-muted-foreground">{translateUi("Nothing is sent until you decide.")}</span>
       </div>
     </section>
   );
+}
+
+export function ApprovalCard(props: Parameters<typeof LegacyApprovalCard>[0]) {
+  useUiTranslation();
+  return props.block.execution_proposal
+    ? <ExecutionPermissionCard requestId={props.block.approval_request_id} proposal={props.block.execution_proposal} disabled={props.disabled} />
+    : <LegacyApprovalCard {...props} />;
 }

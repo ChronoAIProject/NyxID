@@ -36,9 +36,11 @@ describe("GrantRevokeDescription", () => {
       </Dialog>,
     );
 
-    expect(screen.getByText(/affects this period only/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/Pausing the schedule stops future disbursements/i),
+      screen.getByText(/affects this allocation only/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Pausing the schedule stops future issuance/i),
     ).toBeInTheDocument();
   });
 });

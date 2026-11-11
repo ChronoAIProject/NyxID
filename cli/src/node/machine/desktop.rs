@@ -23,6 +23,23 @@ pub struct Session {
     sequence: u64,
     frame_sequence: u64,
 }
+
+#[cfg(test)]
+pub(super) fn custody_test_session() -> Session {
+    Session {
+        id: Uuid::new_v4(),
+        refreshed: Instant::now(),
+        controller: None,
+        control_revision: 0,
+        owner_text: zeroize::Zeroizing::new(String::new()),
+        frame_revision: 0,
+        coordinates: None,
+        budget: FrameBudget::default(),
+        sequence: 0,
+        frame_sequence: 0,
+    }
+}
+
 #[derive(Default)]
 pub struct Desktop {
     pub session: Mutex<Option<Session>>,

@@ -345,6 +345,7 @@ mod tests {
         let now = Utc::now();
         let mut consent = Consent {
             revision: None,
+            write_version: None,
             issuance_fence: None,
             id: "consent-1".to_string(),
             user_id: "user-1".to_string(),

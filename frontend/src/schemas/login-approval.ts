@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mfaLoginCodeSchema } from "./auth";
 
 export const approvalIdentitySchema = z.object({
   id: z.string().uuid(),
@@ -19,5 +20,5 @@ export const approvalIdentitySchema = z.object({
 export type ApprovalIdentity = z.infer<typeof approvalIdentitySchema>;
 
 export const approvalMfaSchema = z.object({
-  code: z.string().regex(/^\d{6}$/, "Enter the six-digit authenticator code"),
+  code: mfaLoginCodeSchema,
 });

@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 // OAuth and device-code sub-flows for the ai-key pairing panel.
 //
 // Ported from cli/src/wizard/assets/wizard.js::runOauthFlow and
@@ -53,11 +54,12 @@ interface FlowProps {
    */
   readonly pairingId: string;
   /**
-   * `system` / `user` / `both`. OAuth flows only — when `user` or
-   * `both`, the flow runs a pre-step that PUTs the user's own
-   * `client_id` / `client_secret` onto the provider before redirect.
+   * OAuth flows only: collect the user's own OAuth app Client ID / Secret
+   * before sign-in and store them on the new connection. `false` signs in
+   * through NyxID's OAuth app. The caller decides from the provider's
+   * `credential_mode` and the user's choice of app.
    */
-  readonly credentialMode?: string;
+  readonly ownOAuthApp?: boolean;
   /** Admin-provided docs URL rendered in the OAuth-credentials step. */
   readonly documentationUrl?: string;
   /**
@@ -102,11 +104,6 @@ interface FlowProps {
  * register their own OAuth app and supply the resulting client
  * credentials before NyxID can redirect to the authorization URL.
  */
-function needsUserOAuthCredentials(credentialMode: string | undefined): boolean {
-  const m = (credentialMode ?? "system").toLowerCase();
-  return m === "user" || m === "both";
-}
-
 interface PlaceholderKeyResponse {
   readonly id: string;
   readonly status: string;
@@ -559,7 +556,7 @@ export function OAuthFlow({
   targetOrgId,
   endpointUrl,
   pairingId,
-  credentialMode,
+  ownOAuthApp = false,
   documentationUrl,
   scopeOverride,
   reconnectKeyId,
@@ -567,15 +564,14 @@ export function OAuthFlow({
   onSuccess,
   onCancel,
 }: FlowProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   // Manage-scopes mode: re-auth an existing connection rather than minting a
   // placeholder. The credential sub-step is skipped (the connection already
   // carries its BYO creds), so we go straight to "starting".
   const isReconnect = Boolean(reconnectKeyId);
   // Distinct phase for the user-OAuth-app credential sub-step. When
-  // `credentialMode` allows user credentials we first GET the existing
-  // metadata; if already set we skip straight to the OAuth redirect,
-  // otherwise we gate on the user pasting client_id / client_secret.
+  // `ownOAuthApp` is set the user pastes client_id / client_secret (or
+  // copies them from an existing connection) before the OAuth redirect.
   const [phase, setPhase] = useState<
     "checking-credentials"
     | "needs-credentials"
@@ -584,7 +580,7 @@ export function OAuthFlow({
     | "done"
     | "error"
   >(
-    !isReconnect && needsUserOAuthCredentials(credentialMode)
+    !isReconnect && ownOAuthApp
       ? "checking-credentials"
       : "starting",
   );
@@ -807,8 +803,8 @@ export function OAuthFlow({
     onCancel();
   }
 
-  // Credential-mode pre-check. Skipped entirely when the provider
-  // uses `system` credentials.
+  // Own-app pre-step. Skipped when sign-in goes through NyxID's OAuth
+  // app.
   //
   // Multi-connection (NyxID): for BYO providers (`credential_mode:
   // "user"` — Lark / Feishu / Twitter) we ALWAYS show the credentials
@@ -828,7 +824,7 @@ export function OAuthFlow({
     // Manage-scopes mode re-auths an existing connection that already carries
     // its BYO credentials — skip the credential sub-step entirely.
     if (isReconnect) return;
-    if (!needsUserOAuthCredentials(credentialMode)) return;
+    if (!ownOAuthApp) return;
     setPhase("needs-credentials");
     // Fetch existing active keys to offer "copy from" when the user
     // already has a connection to this provider with BYO creds.
@@ -861,7 +857,7 @@ export function OAuthFlow({
         // Best-effort: if the fetch fails we just don't show the picker.
       }
     })();
-  }, [credentialMode, slug]);
+  }, [ownOAuthApp, slug]);
 
   function saveUserCredentials() {
     const copyMode = !!copyFromKeyId;
@@ -919,9 +915,9 @@ export function OAuthFlow({
           // Multi-connection BYO providers: thread the just-entered
           // `clientId` / `clientSecret` into `POST /keys` so the new
           // `UserApiKey` carries its own encrypted copy of the Custom
-          // App credentials. `credential_mode: "system"` providers
-          // (the codex / device-code case) just pass through empty
-          // strings here and the backend ignores them.
+          // App credentials. Sign-ins through NyxID's OAuth app just
+          // pass through empty strings here and the backend ignores
+          // them.
           const createPromise = createPlaceholderKey(
             slug,
             label,
@@ -967,8 +963,11 @@ export function OAuthFlow({
         // UserApiKey (rather than the legacy user_provider_tokens path).
         // Harmless for legacy keys: the backend just falls back to the
         // legacy write path when the key carries no connection_id.
+        // `flow=wz` lands the provider tab on the standalone completion page
+        // instead of the web app; `redirect_path` covers older servers.
         const initiateQuery = new URLSearchParams({
           redirect_path: `/keys/${placeholder.id}`,
+          flow: "wz",
           key_id: placeholder.id,
         });
         // Scope picker selection (NyxID#917). Sent as `scope_override` (the
@@ -1117,19 +1116,19 @@ export function OAuthFlow({
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h3 className="font-medium">
+          <h3 className="type-card-title text-foreground">
             {hasCopyOptions
-              ? t("OAuth app credentials")
-              : t("Paste your OAuth app credentials")}
+              ? translateUi("OAuth app credentials")
+              : translateUi("Paste your OAuth app credentials")}
           </h3>
-          <p className="text-12 text-muted-foreground">{t("This provider expects you to register your own OAuth app and supply the resulting Client ID and Client Secret.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("Register your own OAuth app with the provider and paste its Client ID and Client Secret.")}</p>
           {documentationUrl ? (
             <a
               href={documentationUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
-            >{t("How to create an OAuth app")}<ExternalLink className="h-3 w-3" />
+              className="inline-flex items-center gap-1 type-row-title text-muted-foreground underline-offset-2 hover:underline"
+            >{translateUi("How to create an OAuth app")}<ExternalLink className="h-3 w-3" />
             </a>
           ) : null}
         </div>
@@ -1142,7 +1141,7 @@ export function OAuthFlow({
 
         {hasCopyOptions ? (
           <div className="flex flex-col gap-2">
-            <Label className="text-12 font-medium">{t("Use credentials from an existing connection")}</Label>
+            <Label>{translateUi("Use credentials from an existing connection")}</Label>
             <div className="flex flex-col gap-1.5">
               {existingConnections.map((conn) => (
                 <button
@@ -1153,14 +1152,14 @@ export function OAuthFlow({
                     setClientId("");
                     setClientSecret("");
                   }}
-                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-14 transition-colors ${
                     copyFromKeyId === conn.id
                       ? "border-primary bg-primary/5"
                       : "border-border hover:border-primary/50"
                   }`}
                 >
                   <span className="flex-1 truncate">{conn.slug}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
+                  <span className="shrink-0 text-13 text-muted-foreground">
                     {conn.oauthClientId}
                   </span>
                 </button>
@@ -1170,12 +1169,12 @@ export function OAuthFlow({
                 onClick={() => {
                   setCopyFromKeyId(null);
                 }}
-                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-14 transition-colors ${
                   !copyFromKeyId
                     ? "border-primary bg-primary/5"
                     : "border-border hover:border-primary/50"
                 }`}
-              >{t("Enter new credentials")}</button>
+              >{translateUi("Enter new credentials")}</button>
             </div>
           </div>
         ) : null}
@@ -1183,7 +1182,7 @@ export function OAuthFlow({
         {!copyModeActive ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="pair-aikey-oauth-client-id">{t("Client ID")}</Label>
+              <Label htmlFor="pair-aikey-oauth-client-id">{translateUi("Client ID")}</Label>
               <Input
                 id="pair-aikey-oauth-client-id"
                 value={clientId}
@@ -1195,7 +1194,7 @@ export function OAuthFlow({
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="pair-aikey-oauth-client-secret">{t("Client Secret")}</Label>
+              <Label htmlFor="pair-aikey-oauth-client-secret">{translateUi("Client Secret")}</Label>
               <Input
                 id="pair-aikey-oauth-client-secret"
                 type="password"
@@ -1218,9 +1217,9 @@ export function OAuthFlow({
             !copyModeActive && (!clientId.trim() || !clientSecret.trim())
           }
         >
-          {copyModeActive ? t("Continue with existing credentials") : t("Save and continue")}
+          {copyModeActive ? translateUi("Continue with existing credentials") : translateUi("Save and continue")}
         </Button>
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{t("Cancel")}</Button>
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
       </div>
     );
   }
@@ -1228,18 +1227,18 @@ export function OAuthFlow({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="font-medium">{t("Complete sign-in on the provider")}</h3>
-        <p className="text-12 text-muted-foreground">{t("We opened a new tab where you'll authorize NyxID. When it completes, come back — this page will finish automatically.")}</p>
+        <h3 className="type-card-title text-foreground">{translateUi("Complete sign-in on the provider")}</h3>
+        <p className="text-14 text-muted-foreground">{translateUi("We opened a new tab where you'll authorize NyxID. When it completes, come back — this page will finish automatically.")}</p>
       </div>
       {phase === "checking-credentials" ? (
-        <div className="flex items-center gap-2 text-12 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />{t("Checking provider credentials...")}</div>
+        <div className="flex items-center gap-2 text-14 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Checking provider credentials...")}</div>
       ) : phase === "starting" ? (
-        <div className="flex items-center gap-2 text-12 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />{t("Creating placeholder service...")}</div>
+        <div className="flex items-center gap-2 text-14 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Creating placeholder service...")}</div>
       ) : phase === "waiting" ? (
-        <div className="flex items-center gap-2 text-12 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />{t("Waiting for provider authorization...")}</div>
+        <div className="flex items-center gap-2 text-14 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Waiting for provider authorization...")}</div>
       ) : null}
 
       {authUrl && phase === "waiting" ? (
@@ -1247,15 +1246,15 @@ export function OAuthFlow({
           href={authUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-12 hover:bg-muted"
-        >{t("Reopen provider sign-in")}<ExternalLink className="h-4 w-4" />
+          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 type-row-title hover:bg-muted"
+        >{translateUi("Reopen provider sign-in")}<ExternalLink className="h-4 w-4" />
         </a>
       ) : null}
 
       {error ? <ErrorLine message={error} /> : null}
 
       {phase !== "done" ? (
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{t("Cancel")}</Button>
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
       ) : null}
     </div>
   );
@@ -1275,7 +1274,7 @@ export function DeviceCodeFlow({
   onSuccess,
   onCancel,
 }: FlowProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [code, setCode] = useState<string | null>(null);
   const [verifyUrl, setVerifyUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<
@@ -1674,25 +1673,25 @@ export function DeviceCodeFlow({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="font-medium">{t("Authorize via device code")}</h3>
-        <p className="text-12 text-muted-foreground">{t("Open the verification URL, enter the code, and complete sign-in on the provider. This page will finish automatically.")}</p>
+        <h3 className="type-card-title text-foreground">{translateUi("Authorize via device code")}</h3>
+        <p className="text-14 text-muted-foreground">{translateUi("Open the verification URL, enter the code, and complete sign-in on the provider. This page will finish automatically.")}</p>
       </div>
 
       {phase === "starting" ? (
-        <div className="flex items-center gap-2 text-12 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />{t("Requesting device code...")}</div>
+        <div className="flex items-center gap-2 text-14 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Requesting device code...")}</div>
       ) : phase === "waiting" && code && verifyUrl ? (
         <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
           <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">{t("Code")}</span>
+              <span className="text-13 uppercase tracking-wide text-muted-foreground">{translateUi("Code")}</span>
               {secondsRemaining > 0 ? (
-                <span className="text-xs tabular-nums text-muted-foreground">{t("Expires in ")}{formatRemaining(secondsRemaining)}
+                <span className="text-13 tabular-nums text-muted-foreground">{translateUi("Expires in ")}{formatRemaining(secondsRemaining)}
                 </span>
               ) : null}
             </div>
             <div className="flex items-center gap-2">
-              <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
+              <code className="rounded bg-background px-3 py-1.5 font-mono text-14">
                 {code}
               </code>
               <Button
@@ -1700,36 +1699,36 @@ export function DeviceCodeFlow({
                 onClick={() => void handleCopy()}
               >
                 <ButtonIcon><Copy className="h-3.5 w-3.5" /></ButtonIcon>
-                {copied ? t("Copied") : t("Copy")}
+                {copied ? translateUi("Copied") : translateUi("Copy")}
               </Button>
             </div>
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">{t("Visit")}</span>
+            <span className="text-13 uppercase tracking-wide text-muted-foreground">{translateUi("Visit")}</span>
             <a
               href={verifyUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-12 underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-1.5 type-row-title underline-offset-2 hover:underline"
             >
               {verifyUrl}
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />{t("Waiting for authorization...")}</div>
+          <div className="flex items-center gap-2 text-13 text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />{translateUi("Waiting for authorization...")}</div>
         </div>
       ) : phase === "expired" ? (
         <div className="flex flex-col gap-2">
-          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">{t("The device code expired before authorization completed.")}</p>
-          <Button variant="primary" onClick={() => void startSession()}>{t("Request a new code")}</Button>
+          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">{translateUi("The device code expired before authorization completed.")}</p>
+          <Button variant="primary" onClick={() => void startSession()}>{translateUi("Request a new code")}</Button>
         </div>
       ) : null}
 
       {error ? <ErrorLine message={error} /> : null}
 
       {phase !== "done" ? (
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{t("Cancel")}</Button>
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
       ) : null}
     </div>
   );
@@ -1738,10 +1737,10 @@ export function DeviceCodeFlow({
 // ── helpers ──────────────────────────────────────────────────────────
 
 function ErrorLine({ message }: { readonly message: string }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
-      {t(message)}
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
+      {translateUi(message)}
     </p>
   );
 }

@@ -12,6 +12,20 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default)]
+    pub delegated_images: super::assistant_delegated_image::DelegatedImages,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_queue_notice_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_pending: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_bound: Option<super::assistant_channel_media::MediaBound>,
     /// Metadata-only handoff to manager delivery, including fresh event replies.
     #[serde(default)]
     pub platform_delivery_recovery_queued: bool,
@@ -113,7 +127,16 @@ impl std::fmt::Debug for AssistantMessage {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceFragment {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceTranscript {
+    #[serde(default)]
+    pub fragments: Vec<VoiceFragment>,
     pub session_id: String,
     pub segment_id: String,
     pub start_ms: i64,
@@ -143,6 +166,65 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_recovery_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_delivery: Option<super::generated_artifact::SavedOutcome>,
+    /// Server-observed business-system success; missing legacy rows are not evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkEvidence>,
+    #[serde(default)]
+    pub timing: Option<TurnTiming>,
+    /// Closed metadata from a failed model callback, or the upstream code alone.
+    #[serde(default)]
+    pub failure_reason: Option<Box<TurnFailureReason>>,
+    #[serde(default)]
+    pub channel_delivery: Option<ChannelDelivery>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnFailureReason {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route: Option<Box<super::assistant_conversation::ModelRouteDiagnostic>>,
+    pub source: String,
+    pub stage: String,
+    pub code: String,
+    pub http_status: Option<u16>,
+    pub nyxid_error_code: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelDelivery {
+    pub status: String,
+    pub heard_prefix_chars: Option<i64>,
+    pub heard_prefix_matches_sent: bool,
+}
+
+/// Metadata only. Durations sum per-call wall time (parallel calls may overlap).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurnTiming {
+    pub queue_wait_ms: u64,
+    pub admission_wait_ms: u64,
+    pub first_output_ms: Option<u64>,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub model_calls: u64,
+    pub tool_calls: u64,
+    pub total_ms: u64,
+}
+
+/// Analytics evidence only; no connection identifiers, arguments or message text.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WorkEvidence {
+    /// Shared by all copies of a settled turn, including delayed voice delivery.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub settled_at: Option<DateTime<Utc>>,
+    pub owner_id: String,
+    pub source: String,
+    pub business_system_success: bool,
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
 }

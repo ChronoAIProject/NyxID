@@ -1,0 +1,98 @@
+{
+  "billing_enabled": true,
+  "lago_configured": true,
+  "resale_enabled": false,
+  "default_overdraft_cap_credits": {
+    "effective": 0,
+    "source": "env",
+    "global": null,
+    "env": 0
+  },
+  "max_default_overdraft_cap_credits": 1000000000000,
+  "environment": [
+    {
+      "key": "BILLING_ENABLED",
+      "value": "true",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_RESALE_ENABLED",
+      "value": "false",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "LAGO_API_URL",
+      "value": "https://billing.chrono-ai.fun/api",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "LAGO_PLAN_CODE",
+      "value": "starter",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "LAGO_PAYMENT_PROVIDER_CODE",
+      "value": "stripe_chrono_prod",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_RECONCILE_INTERVAL_SECS",
+      "value": "300",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_RATE_CACHE_TTL_SECS",
+      "value": "900",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_RESERVATION_ABANDON_SECS",
+      "value": "600",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS",
+      "value": "0",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_FAIL_CLOSED",
+      "value": "false",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "BILLING_EXACT_CUTOVER_DRAINED",
+      "value": "true",
+      "source": "env",
+      "secret_set": null
+    },
+    {
+      "key": "LAGO_API_KEY",
+      "value": null,
+      "source": "env",
+      "secret_set": true
+    },
+    {
+      "key": "LAGO_WEBHOOK_SECRET",
+      "value": null,
+      "source": "env",
+      "secret_set": true
+    },
+    {
+      "key": "BILLING_LEDGER_HMAC_KEY",
+      "value": null,
+      "source": "env",
+      "secret_set": true
+    }
+  ]
+}

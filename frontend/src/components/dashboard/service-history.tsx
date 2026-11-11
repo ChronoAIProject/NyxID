@@ -1,6 +1,6 @@
-import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -27,6 +27,7 @@ export function HistoryTime({
   readonly relative?: boolean;
   readonly expanded?: boolean;
 }) {
+  useUiTranslation();
   const date = new Date(value);
   const exact = date.toLocaleString(getFormattingLocale(), {
     dateStyle: "full",
@@ -39,7 +40,7 @@ export function HistoryTime({
           dateTime={value}
           tabIndex={0}
           aria-label={exact}
-          className="rounded-sm font-mono text-11 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+          className="rounded-sm font-mono text-13 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
         >
           {expanded
             ? exact
@@ -68,7 +69,7 @@ function actorName(
       system: "System",
     } as Record<string, string>
   )[actor.kind];
-  return kind ? `${actor.name} (${translateUi(kind)})` : actor.name;
+  return kind ? `${actor.name} (${kind})` : actor.name;
 }
 
 export function ServiceAuthorshipFooter({
@@ -78,34 +79,34 @@ export function ServiceAuthorshipFooter({
   readonly authorship?: ServiceAuthorship | null;
   readonly className?: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (!authorship) return null;
   return (
     <div
       className={cn(
-        "mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-11 text-muted-foreground",
+        "mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-13 text-muted-foreground",
         className,
       )}
-      aria-label={t("Service authorship")}
+      aria-label={translateUi("Service authorship")}
     >
       <p className="max-w-full break-words">
         {authorship.created_by ? (
-          <>{t("Created by ")}{actorName(authorship.created_by.actor)} ·{" "}
+          <>{translateUi("Created by ")}{actorName(authorship.created_by.actor)} ·{" "}
             <HistoryTime value={authorship.created_by.at} />
           </>
         ) : (
-          t("Creator not recorded")
+          translateUi("Creator not recorded")
         )}
       </p>
       <p className="max-w-full break-words">
         {authorship.last_change ? (
-          <>{t("Last edited by ")}{actorName(authorship.last_change.actor)} ·{" "}
+          <>{translateUi("Last edited by ")}{actorName(authorship.last_change.actor)} ·{" "}
             <HistoryTime value={authorship.last_change.at} relative />
           </>
         ) : authorship.created_by ? (
-          t("No edits since creation")
+          translateUi("No edits since creation")
         ) : (
-          t("Earlier edits not recorded")
+          translateUi("Earlier edits not recorded")
         )}
       </p>
     </div>
@@ -144,7 +145,7 @@ function safeValue(field: string, value: unknown): string {
 }
 
 export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [actions, setActions] = useState<string[]>([]);
   const query = useServiceHistory(serviceId, actions);
   // An authorization or context failure must immediately hide previously cached rows.
@@ -152,51 +153,51 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
   const first = pages?.[0];
   const groups = pages?.flatMap((page) => page.groups) ?? [];
   return (
-    <section className="space-y-4" aria-label={t("Service history")}>
+    <section className="space-y-4" aria-label={translateUi("Service history")}>
       <div className="max-w-lg">
         <AsyncOptionSelect
           optionSet="service-history-action"
           context={{ kind: "service-history" }}
-          label={t("Filter history actions")}
+          label={translateUi("Filter history actions")}
           value={actions}
           onChange={setActions}
         />
       </div>
       {query.isPending && (
-        <p role="status" className="text-12 text-muted-foreground">{t("Loading service history…")}</p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading service history…")}</p>
       )}
       {query.isError && (
-        <div role="alert" className="space-y-2 text-12">
+        <div role="alert" className="space-y-2 text-14">
           <p>
             {query.error instanceof ApiError &&
             [403, 404].includes(query.error.status)
-              ? t("Service history is unavailable. Personal owners and currently permitted organization admins can view it.")
-              : t("Service history could not be loaded.")}
+              ? translateUi("Service history is unavailable. Personal owners and currently permitted organization admins can view it.")
+              : translateUi("Service history could not be loaded.")}
           </p>
           <Button
             size="sm"
             variant="outline"
             onClick={() => void query.refetch()}
-          >{t("Retry history")}</Button>
+          >{translateUi("Retry history")}</Button>
         </div>
       )}
       {first?.deleted && (
-        <p className="text-12 text-muted-foreground">{t("This service was deleted. Its recorded history is retained.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("This service was deleted. Its recorded history is retained.")}</p>
       )}
       {first?.legacy && (
-        <p className="text-12 text-muted-foreground">{t("Creator and earlier edits may not have been recorded.")}{first.tracked_since && (
+        <p className="text-14 text-muted-foreground">{translateUi("Creator and earlier edits may not have been recorded.")}{first.tracked_since && (
             <>
-              {" "}{t("Reliable tracking began")}{" "}
+              {" "}{translateUi("Reliable tracking began")}{" "}
               <HistoryTime value={first.tracked_since} />.
             </>
           )}
         </p>
       )}
       {first && groups.length === 0 && (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           {actions.length
-            ? t("No changes match these filters.")
-            : t("No recorded changes yet.")}
+            ? translateUi("No changes match these filters.")
+            : translateUi("No recorded changes yet.")}
         </p>
       )}
       <ol className="space-y-3">
@@ -211,30 +212,30 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
           return (
             <li key={group.id}>
               <details className="rounded-xl border border-border/50 bg-card p-4">
-                <summary className="cursor-pointer text-12 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
+                <summary className="cursor-pointer text-14 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
                   <span className="font-medium">
-                    {summaryEvent.action_label || t("Service updated")}
+                    {summaryEvent.action_label || translateUi("Service updated")}
                   </span>
                   <span className="ml-2 text-muted-foreground">
                     {actorName(summaryEvent.actor)} ·{" "}
                     <HistoryTime value={lastEvent.committed_at} />
                     {group.events.length > 1 &&
-                      t(" · {{length}} changes", { length: group.events.length })}
+                      translateUi(" · {{length}} changes", { length: group.events.length })}
                   </span>
                 </summary>
                 <div className="mt-3 space-y-4">
                   {group.events.map((event) => (
-                    <div key={event.id} className="space-y-2 text-12">
+                    <div key={event.id} className="space-y-2 text-14">
                       <p>
-                        {event.action_label || t("Service updated")} ·{" "}
+                        {event.action_label || translateUi("Service updated")} ·{" "}
                         {actorName(event.actor)} ·{" "}
                         <HistoryTime value={event.committed_at} expanded />
                       </p>
                       {event.actor.api_key_id && (
-                        <p className="text-muted-foreground">{t("Authenticated API key")}</p>
+                        <p className="text-muted-foreground">{translateUi("Authenticated API key")}</p>
                       )}
                       {event.actor.app_id && (
-                        <p className="break-all text-muted-foreground">{t("Application ")}{event.actor.app_id}
+                        <p className="break-all text-muted-foreground">{translateUi("Application ")}{event.actor.app_id}
                         </p>
                       )}
                       <dl className="space-y-1">
@@ -244,22 +245,22 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
                             className="flex flex-wrap gap-x-2"
                           >
                             <dt className="font-medium">
-                              {change.label || t("Service setting")}
+                              {change.label || translateUi("Service setting")}
                             </dt>
                             <dd className="break-words text-muted-foreground">
                               {JSON.stringify(change.before ?? null) ===
                               JSON.stringify(change.after ?? null)
-                                ? t("Changed; values omitted")
-                                : t("{{value}} → {{value1}}", { value: safeValue(change.field, change.before), value1: safeValue(change.field, change.after) })}
+                                ? translateUi("Changed; values omitted")
+                                : translateUi("{{value}} → {{value1}}", { value: safeValue(change.field, change.before), value1: safeValue(change.field, change.after) })}
                             </dd>
                           </div>
                         ))}
                       </dl>
                       {event.additional_changes && (
-                        <p className="text-muted-foreground">{t("Other service settings updated. Additional change details are unavailable.")}</p>
+                        <p className="text-muted-foreground">{translateUi("Other service settings updated. Additional change details are unavailable.")}</p>
                       )}
                       {event.audit_status === "mismatch" && (
-                        <p role="alert" className="text-destructive">{t("This record differs from its audit mirror.")}</p>
+                        <p role="alert" className="text-destructive">{translateUi("This record differs from its audit mirror.")}</p>
                       )}
                     </div>
                   ))}
@@ -274,58 +275,58 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
           variant="outline"
           isLoading={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
-        >{t("Load older changes")}</Button>
+        >{translateUi("Load older changes")}</Button>
       )}
     </section>
   );
 }
 
 export function ArchivedServiceHistory() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
-    <section className="mt-6 space-y-3" aria-label={t("Deleted service history")}>
+    <section className="mt-6 space-y-3" aria-label={translateUi("Deleted service history")}>
       <Button
         variant="outline"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-      >{t("Deleted service history")}</Button>
+      >{translateUi("Deleted service history")}</Button>
       {open && <ArchiveList />}
     </section>
   );
 }
 function ArchiveList() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const query = useArchivedServiceHistory();
   const rows = query.isError
     ? []
     : (query.data?.pages.flatMap((page) => page.services) ?? []);
   return (
     <div className="space-y-3 rounded-xl border border-border/50 p-4">
-      <p className="text-xs text-muted-foreground">{t("Recorded history of deleted services you currently have permission to manage.")}</p>
-      {query.isPending && <p role="status">{t("Loading deleted service history…")}</p>}
+      <p className="text-13 text-muted-foreground">{translateUi("Recorded history of deleted services you currently have permission to manage.")}</p>
+      {query.isPending && <p role="status">{translateUi("Loading deleted service history…")}</p>}
       {query.isError && (
         <div role="alert">
-          <p>{t("Deleted service history could not be loaded.")}</p>
-          <Button variant="outline" onClick={() => void query.refetch()}>{t("Retry archived history")}</Button>
+          <p>{translateUi("Deleted service history could not be loaded.")}</p>
+          <Button variant="outline" onClick={() => void query.refetch()}>{translateUi("Retry archived history")}</Button>
         </div>
       )}
       {query.isSuccess && !rows.length && (
-        <p className="text-xs text-muted-foreground">{t("No deleted service history is available.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("No deleted service history is available.")}</p>
       )}
       <ul className="space-y-2">
         {rows.map((row) => (
           <li
             key={row.service_id}
-            className="flex flex-wrap justify-between gap-2 text-xs"
+            className="flex flex-wrap justify-between gap-2 text-13"
           >
             <Link
               to="/keys/$keyId"
               params={{ keyId: row.service_id }}
               className="break-all text-primary-text underline underline-offset-2"
             >
-              {row.service_slug}{t(" · View history")}</Link>
-            <span className="text-muted-foreground">{t("Last change ")}<HistoryTime value={row.last_changed_at} />
+              {row.service_slug}{translateUi(" · View history")}</Link>
+            <span className="text-muted-foreground">{translateUi("Last change ")}<HistoryTime value={row.last_changed_at} />
             </span>
           </li>
         ))}
@@ -335,7 +336,7 @@ function ArchiveList() {
           variant="outline"
           isLoading={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
-        >{t("Load older deleted services")}</Button>
+        >{translateUi("Load older deleted services")}</Button>
       )}
     </div>
   );

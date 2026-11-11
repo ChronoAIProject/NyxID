@@ -132,6 +132,8 @@ pub(super) fn parse_chat(body: &Value, own_id: &str) -> AppResult<Vec<InboundMes
         return Err(protocol_error());
     }
     Ok(vec![InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: uuid::Uuid::parse_str(id)
             .map_err(|_| protocol_error())?
             .to_string(),
@@ -168,6 +170,8 @@ pub(super) fn parse_own_post(body: &Value, own_id: &str) -> AppResult<Vec<Inboun
         .filter(|id| numeric_id(id))
         .ok_or_else(protocol_error)?;
     Ok(vec![InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: id.into(),
         conversation_id: format!("post:{conversation}"),
         conversation_type: "channel".into(),

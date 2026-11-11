@@ -229,7 +229,8 @@ pub async fn disconnect_sa_provider(
             TelemetryEvent::KeyDeleted {
                 source: event.source.clone(),
             },
-        );
+        )
+        .await;
     }
 
     audit_service::log_for_user(

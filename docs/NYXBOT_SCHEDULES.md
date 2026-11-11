@@ -145,6 +145,52 @@ And a new **delivery**:
   dedup claims and payload limits. Event payloads are never persisted beyond
   what the turn transcript naturally stores (existing ADR-013 rules).
 
+### Notification result delivery
+
+`deliver_to: {"type":"notification"}` selects **mobile push (FCM/APNs)**.
+It does not send through the account's linked Telegram notification bot. To
+receive reports in Telegram, select an authorized `chat` destination with posting
+allowed. Generic trigger/reminder `delivery.type=notification` retains its
+separate Telegram-plus-push behavior. The editor and NyxBot tool description make
+this distinction explicit.
+
+The full result stays in the selected thread, including dedicated threads. Push
+contains a 200-character preview, `conversation_id`, and the canonical
+`AssistantPage::Conversation` URL as `deeplink`, consumed by the mobile tap
+handler to open that thread. A provider acceptance
+on one registered device satisfies this destination; it is not a device read
+receipt. Configured devices receive the notification; an uncertain response ends
+that attempt. Partial acceptance never authorizes a batch retry.
+
+Run history and schedule-tool readback expose `execution_outcome` independently
+of `notification_delivery` (`state`, fixed `reason`/actionable `message`, attempt
+count, optional HTTP status and retry time). A completed task with failed or
+unknown delivery has overall run outcome `failed`. Final delivery failures also
+commit one durable event beside the saved report, with an Automations link and
+recovery instructions. The list highlights the last run's delivery problem.
+Availability failures distinguish missing setup, disabled push, no devices and
+missing server provider configuration. Invalid device tokens and provider
+rejections have separate remedies. No provider prose, report content, device
+identifiers or credentials enter run metadata or delivery diagnostics.
+
+Push settlement uses the versioned result lease (360 seconds), a sending barrier
+before outbound I/O, and an acceptance/refusal receipt before finalization. A
+live claim stays pending. An expired `sending` claim becomes `unknown`, never
+resent; a stored acceptance is finalized without another send. Only explicit
+HTTP 429/503 refusals permit retry, at least 60 seconds apart and honoring
+`Retry-After`, at most three attempts within 30 minutes. Preferences and device
+configuration are reread each time. Retries read the original reply and never
+execute the task again. A transport error, timeout or uncertain crash does not
+authorize retry. Expiry/exhaustion is a visible actionable failure. Delivery waits
+retain ordinary overlap behavior; they do not clear live executions.
+
+Fields are additive and old unclaimed rows can use this settlement. Legacy
+claimed sends remain non-replayable and receive an uncertainty notice on new
+workers. Old workers retain the `result_claimed` guard, preventing duplicate
+sends, but can still terminate a new notification lease as interrupted; upgrade
+and drain all scheduler workers to obtain the new retry/status guarantees.
+There is no automatic replay or backfill of terminal historical failures.
+
 ### S4. Exactly-once runs, safe across replicas
 
 - **The worker.** A leased, fenced scheduler worker per replica claims due
@@ -357,12 +403,25 @@ run with `target_changed` after the pending decision is resolved.
 
 Run outcomes are `pending`, `started`, `waiting`, `completed`, `failed`, or
 `skipped`. Run records hold identifiers, timing, confirmation IDs, destination
-metadata and outcome only. The complete answer lives in the assistant transcript.
+metadata and outcome only. Additive `failure_reason` retains the latest settled
+turn's closed failure metadata (source, stage, code, HTTP status and NyxID error
+code); the owner history UI displays it when present and falls back to `reason`
+for old runs. It is written with turn settlement, including recovery, and never
+contains prompts, payloads or upstream error prose. The complete answer lives in
+the assistant transcript.
 `deliver_to` is `{"type":"thread"}`, `{"type":"notification"}` (push only), or
 `{"type":"chat","chat_id":"..."}`. Chat access is checked both at configuration
 and delivery, through the existing post-to-chat path. Long replies respect the
 destination platform limit and explicitly say they were shortened, with a full
 thread link. Push has a concise preview and thread ID.
+A run whose saved `deliver_to` targets a chat receives that platform’s one-message
+length guidance in turn-only context, including confirmation continuations and
+specialist reports. Telegram prefers one 4,096-character message; an explicit
+request for long or complete output permits multiple parts. The delivery planner
+keeps all content and splits longer replies. Thread-only runs receive no channel
+length guidance. `list_channel_chats` supplies the same per-destination guidance
+for explicit `post_to_chat` calls.
+
 Successful `deliver_to: {"type":"chat"}` results send retained tool images,
 one per message, before the result text. Images use the same prepared target and
 live agent, org, bot and `allow_posts` checks. The text consumes one initiate
@@ -429,6 +488,12 @@ requires an owner action card for every changing call; `destructive` permits
 other changes and requires explicit owner selection with a warning. Service
 classification shares guest access's HTTP method and catalog contract rules,
 including NyxID markers; names and payload instructions never authorize changes.
+Stateless model callbacks use the existing closed inference body contract even
+when the catalog has no endpoint rows; the raw webhook gate recognizes thinking
+before applying its write floor. Ordinary service writes and stateful, hosted or
+unknown model effects still require the existing authority/card path. Fresh
+per-run and dedicated threads use the same conversation-key provisioning and
+model selection as other threads, without widening grants or changing billing.
 Native tools use their closed effect inventory. Policy is snapshotted at run
 admission and persists across confirmation continuations. Scheduled turns retain
 normal owner authority. Full access bypasses webhook confirmation with an auto-allowed receipt. Auto
@@ -596,3 +661,77 @@ the shared ten-second admission delay; policy constants live in
 `services/assistant_engine_policy.rs`. Exhaustion
 reports the measured wait. A missing wait field on older runs is not a zero-wait
 claim.
+
+## Coordinator completion v2
+
+`AUTOMATION_CONTINUATION_V2_ENABLED=false` preserves legacy completion. With it
+on, first assistant admission enrolls only after the full declared/drained fleet
+advertises `automation:coordinator-completion-v2`. Missing readiness falls back to
+legacy admission. Started runs and confirmation waits admitted by legacy code
+finish using legacy behavior. No trigger protocol stamp or data migration exists.
+
+The coordinator is the thread selected by the delivery: NyxBot's home for a home
+delivery; the trigger's dedicated NyxBot or specialist thread for a dedicated
+webhook; or the new thread for a per-run delivery. Run now uses the same delivery
+policy. A specialist receiving a webhook can therefore be the coordinator. Group
+members and directly assigned specialists are child work; their replies do not
+complete the run by themselves.
+
+V2 tracks accepted direct assignments, group dispatches and members' @mention
+handoffs until their results are durably delivered. It resumes the coordinator
+with those results automatically. Failed/stopped/deleted children produce failure
+results. Group handoffs also obey `max_group_handoffs` and the hourly group limit.
+Capacity/limit refusals are visible tool errors or group result notices, never
+silently accepted work. Child confirmation and asynchronous work retain the same
+logical work identity. Webhook children inherit the run's confirmation floor
+(`changes` or `destructive`), a stricter v2-only rule, without inheriting the
+coordinator's credentials, grants or execution permissions. Automation work stays
+outside execution-permission coverage, including child and continuation turns.
+
+Initial admission debits the owner's occurrence budgets once (30/hour and
+300/day by default). Neither coordinator nor confirmation continuations debit or
+defer on those budgets. Each v2 run has at most 32 delegated dispatches and 32
+coordinator continuations, normal model billing, and a fixed one-hour hard
+deadline (`COORDINATOR_DEADLINE_SECONDS`) starting at initial admission. History
+shows the waiting deadline and the terminal `coordinator_timeout` reason. Result
+publication wakes the run; a 60–300 second backstop recovers missed callbacks
+without replaying an admitted child. Admission uses a separate 120-second lease, checked transactionally with its
+claim fence. Its future runs through driver spawn without a wall-clock timeout,
+so a committed turn cannot be orphaned by dropping admission. Child confirmation
+and async fences write the child's thread; only registration, settlement and
+coordinator continuation admission contend on the run row. New indexes on
+existing collections are partial indexes covering enrolled work only.
+
+Direct assignments retain the acting person's live org/shared-agent authority
+and the target's own grants. Personal groups accept available owned, org and
+shared specialists, resolving recipients by mentions, then the group's saved
+selection, then its lead. Organization-group posting remains unavailable to
+NyxBot, as on the legacy path; collaboration groups keep their separate routing.
+
+On a thread that has hosted v2 work, Stop cancels ordinary watches and machine
+jobs, including background work from earlier turns, while preserving work bound
+to other live runs. Machine jobs retain an optional run ID for this lifecycle
+selection. Scoped machine cancellation uses exact job/turn cancellation; older
+nodes receive individual job cancellations rather than a conversation-wide
+cancellation that could stop another run.
+
+Stop targets the captured active turn; an idle Stop does not select a waiting
+run. Use Cancel on a waiting run in Automations history, or the first-party human
+`POST /api/v1/triggers/{id}/runs/{run_id}/cancel` route. Cancel is owner-scoped,
+idempotent after termination, and fences descendants and queued results.
+
+Deploy upgraded binaries with the option off first. Drain old/unregistered
+writers, configure the complete identical `SECURITY_ROLLOUT_REPLICAS` roster,
+unique `INSTANCE_NAME`s and `SECURITY_ROLLOUT_DRAINED=true`, then enable the option
+on every replica. `GET /api/v1/admin/automation-continuations/readiness` is a
+metadata-only admin/operator diagnostic for admission readiness and indexed drain
+blockers. Disabling prevents new enrollment while existing v2 runs and their
+children continue draining. Before downgrading, disable everywhere, drain or
+cancel enrolled runs, and require no nonterminal runs, bound queued events,
+active children, pending receipts, group followers, cards or async watches in the
+diagnostic. The roster is an operator assertion; it cannot discover hidden old
+writers. A disabled option alone does not make a downgrade safe.
+
+Completion records the coordinator's settled result; verifying external business
+outcomes such as published post IDs remains the coordinator agent's job and is
+outside this change (the remaining part of issue #2040).

@@ -1,4 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Check, FlaskConical, RotateCcw, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,7 +28,6 @@ function activityAge(at: number): string {
 }
 
 export function MockScenariosAction() {
-  const { t } = useUiTranslation();
   const enabled = useAssistantMockScenariosStore((state) => state.enabled);
   const disabledScenarioIds = useAssistantMockScenariosStore(
     (state) => state.disabledScenarioIds,
@@ -62,7 +61,7 @@ export function MockScenariosAction() {
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={t("Mock scenarios")}
+              aria-label="Mock scenarios"
               className="relative shrink-0 text-text-tertiary"
             >
               <FlaskConical className="h-4 w-4" />
@@ -76,7 +75,7 @@ export function MockScenariosAction() {
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>
-        <TooltipContent>{t("Mock scenarios")}</TooltipContent>
+        <TooltipContent>Mock scenarios</TooltipContent>
       </Tooltip>
 
       <PopoverContent
@@ -87,24 +86,36 @@ export function MockScenariosAction() {
         <section className="space-y-3 p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="text-13 font-semibold text-foreground">{t("Mock scenarios")}</h2>
+              <h2 className="type-card-title text-foreground">
+                Mock scenarios
+              </h2>
               {engineState === "loading" ? (
-                <p role="status" className="mt-0.5 text-11 text-warning">{t("Loading...")}</p>
+                <p role="status" className="mt-0.5 text-13 text-warning">
+                  Loading...
+                </p>
               ) : engineState === "error" ? (
-                <p role="alert" className="mt-0.5 text-11 text-destructive">{t("Scenario engine failed to load.")}</p>
+                <p role="alert" className="mt-0.5 text-13 text-destructive">
+                  Scenario engine failed to load.
+                </p>
               ) : null}
             </div>
             <Switch
               checked={enabled}
               onCheckedChange={setEnabled}
               disabled={engineState === "loading"}
-              aria-label={t("Enable mock scenarios")}
+              aria-label="Enable mock scenarios"
             />
           </div>
-          <p className="text-11 leading-4 text-muted-foreground">{t("Shapes matching assistant HTTP fixtures. Session-only; other messages use the default fixture stream.")}</p>
-          <div className="flex gap-2 text-11 leading-4 text-warning">
+          <p className="text-13 text-muted-foreground">
+            Shapes matching assistant HTTP fixtures. Session-only; other
+            messages use the default fixture stream.
+          </p>
+          <div className="flex gap-2 text-13 text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
-            <p>{t("Action cards open real connection journeys and can create real keys on your account.")}</p>
+            <p>
+              Action cards open real connection journeys and can create real
+              keys on your account.
+            </p>
           </div>
         </section>
 
@@ -114,8 +125,10 @@ export function MockScenariosAction() {
         >
           <h3
             id="mock-scenario-list-heading"
-            className="mb-1 text-10 font-semibold uppercase text-text-tertiary"
-          >{t("Scenarios")}</h3>
+            className="mb-1 type-table-header uppercase text-text-tertiary"
+          >
+            Scenarios
+          </h3>
           <div className="divide-y divide-border/50">
             {assistantHttpScenarios.map((entry) => {
               const scenarioEnabled = !disabledScenarioIds.includes(entry.id);
@@ -130,21 +143,22 @@ export function MockScenariosAction() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <p className="truncate text-12 font-medium text-foreground">
+                      <p className="truncate type-row-title text-foreground">
                         {scenarioName(entry.id)}
                       </p>
                       {matched && lastActivity ? (
                         <span
                           data-testid={`scenario-activity-${entry.id}`}
-                          className="flex shrink-0 items-center gap-1 text-10 text-success"
+                          className="flex shrink-0 items-center gap-1 text-12 text-success"
                         >
-                          <Check className="h-3 w-3" />{t("Matched ")}{activityAge(lastActivity.at)}
+                          <Check className="h-3 w-3" />
+                          Matched {activityAge(lastActivity.at)}
                         </span>
                       ) : null}
                     </div>
                     <p
                       title={expression}
-                      className="truncate font-mono text-10 text-text-tertiary"
+                      className="truncate font-mono text-12 text-text-tertiary"
                     >
                       {expression}
                     </p>
@@ -154,7 +168,7 @@ export function MockScenariosAction() {
                     onCheckedChange={(checked) =>
                       setScenarioEnabled(entry.id, checked)
                     }
-                    aria-label={t("Enable {{id}} scenario", { id: entry.id })}
+                    aria-label={translateUi("Enable {{id}} scenario", { id: entry.id })}
                   />
                 </div>
               );
@@ -163,8 +177,11 @@ export function MockScenariosAction() {
           {lastActivity && !lastActivity.matched ? (
             <p
               data-testid="unmatched-scenario-activity"
-              className="border-t border-border/50 pt-2 text-10 text-text-tertiary"
-            >{t("No scenario matched - ")}{activityAge(lastActivity.at)}{t("; message passed through.")}</p>
+              className="border-t border-border/50 pt-2 text-12 text-text-tertiary"
+            >
+              No scenario matched - {activityAge(lastActivity.at)}; message
+              passed through.
+            </p>
           ) : null}
         </section>
 
@@ -175,33 +192,40 @@ export function MockScenariosAction() {
           <div className="flex items-center justify-between gap-3">
             <h3
               id="mock-scenario-world-heading"
-              className="text-10 font-semibold uppercase text-text-tertiary"
-            >{t("Connected (mock)")}</h3>
+              className="type-table-header uppercase text-text-tertiary"
+            >
+              Connected (mock)
+            </h3>
             <Button
               type="button"
               variant="ghost"
               size="sm"
               onClick={resetWorld}
               disabled={world.connected.length === 0}
-              className="h-6 px-1.5 text-10"
+              className="h-6 px-1.5 text-14"
             >
-              <RotateCcw />{t("Reset world")}</Button>
+              <RotateCcw />
+              Reset world
+            </Button>
           </div>
           {world.connected.length === 0 ? (
-            <p className="mt-2 text-11 leading-4 text-text-tertiary">{t("Nothing connected - ")}<code className="font-mono">need</code>{t(" flows will run their connect step.")}</p>
+            <p className="mt-2 text-13 text-text-tertiary">
+              Nothing connected - <code className="font-mono">need</code> flows
+              will run their connect step.
+            </p>
           ) : (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {world.connected.map((serviceSlug) => (
                 <span
                   key={serviceSlug}
-                  className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-success/30 bg-success/10 pl-2 pr-1 text-10 text-success"
+                  className="inline-flex max-w-full items-center gap-1 rounded-md border border-success/30 bg-success/10 pl-2 pr-1 text-12 text-success"
                 >
                   <span className="truncate font-mono">{serviceSlug}</span>
-                  <button
+                  <button data-icon-button=""
                     type="button"
                     onClick={() => disconnectService(serviceSlug)}
-                    aria-label={t("Remove {{serviceSlug}} from mock world", { serviceSlug: serviceSlug })}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] hover:bg-success/15 focus-visible:outline-none"
+                    aria-label={translateUi("Remove {{serviceSlug}} from mock world", { serviceSlug: serviceSlug })}
+                    className="flex shrink-0 items-center justify-center rounded-[4px] hover:bg-success/15 focus-visible:outline-none"
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -211,15 +235,16 @@ export function MockScenariosAction() {
           )}
         </section>
 
-        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-10 leading-4 text-text-tertiary">
-          <p>{t("Edit flows in")}{" "}
+        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-12 text-text-tertiary">
+          <p>
+            Edit flows in{" "}
             <code className="font-mono">
               src/lib/assistant/assistant-http-scenarios.ts
             </code>
             .
           </p>
-          <p>{t("Fixture conversations are session-only and disappear on reload.")}</p>
-          <p>{t("Settings use last-write-wins across tabs.")}</p>
+          <p>Fixture conversations are session-only and disappear on reload.</p>
+          <p>Settings use last-write-wins across tabs.</p>
         </footer>
       </PopoverContent>
     </Popover>

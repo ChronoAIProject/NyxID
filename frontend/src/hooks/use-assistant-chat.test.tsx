@@ -8,6 +8,13 @@ import {
   useAssistantChat,
 } from "@/hooks/use-assistant-chat";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
+import { capture } from "@/lib/telemetry";
+
+vi.mock("@/lib/telemetry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/telemetry")>()),
+  capture: vi.fn(),
+  isTelemetryActive: () => false,
+}));
 
 const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const OTHER_ACTOR_ID = "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae";
@@ -286,6 +293,7 @@ function installDefaultMock(
 
 describe("useAssistantChat", () => {
   beforeEach(() => {
+    vi.mocked(capture).mockClear();
     useAssistantWireLogStore.setState({
       featureEnabled: false,
       captureEnabled: false,
@@ -295,6 +303,47 @@ describe("useAssistantChat", () => {
       captureBytes: 0,
     });
     installDefaultMock();
+  });
+
+  it("records a failed HTTP 200 turn once, including its displayed trace reference", async () => {
+    const failure = {
+      runError: {
+        runId: "turn-failed",
+        code: "upstream_failed",
+        correlationId: "correlation-123",
+        message:
+          "Private error. Trace ID: 76dd13d5-e7cf-4c63-a33b-26036d2a495d",
+      },
+    };
+    installDefaultMock(() =>
+      sse([
+        { runStarted: { actorId: ACTOR_ID, runId: "turn-failed" } },
+        failure,
+        failure,
+      ]),
+    );
+    const { result } = renderHook(() => useAssistantChat({}));
+    await waitFor(() => expect(result.current.listLoading).toBe(false));
+    await act(async () => result.current.send("Private prompt"));
+
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({
+        error_code: "NYXBOT_RUN_ERROR",
+        http_status: 200,
+        upstream_error_code: "upstream_failed",
+        trace_id: "76dd13d5-e7cf-4c63-a33b-26036d2a495d",
+        conversation_id: ACTOR_ID,
+        turn_id: "turn-failed",
+      }),
+    });
+    expect(vi.mocked(capture).mock.calls[0]?.[0].props).toHaveProperty(
+      "request_id",
+      expect.any(String),
+    );
+    expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toMatch(
+      /Private/,
+    );
   });
 
   afterEach(() => {
@@ -442,6 +491,7 @@ describe("useAssistantChat", () => {
     await act(async () => sendPromise!);
     expect(result.current.session?.status).toBe("stopped");
     expect(result.current.session?.messages.at(-1)?.error).toBeUndefined();
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("accepts an immediate follow-up after Stop while the sidebar refresh is pending", async () => {
@@ -542,6 +592,10 @@ describe("useAssistantChat", () => {
       new ChatStartTimeoutError().message,
     );
     expect(result.current.session?.messages).toHaveLength(2);
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({ error_code: "NYXBOT_START_TIMEOUT" }),
+    });
   });
 
   it("expires a keepalive-only stream and issues a best-effort stop", async () => {
@@ -584,6 +638,10 @@ describe("useAssistantChat", () => {
     expect(result.current.session?.messages.at(-1)?.error).toBe(
       new ChatProgressTimeoutError().message,
     );
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({ error_code: "NYXBOT_STREAM_TIMEOUT" }),
+    });
   });
 
   it("rejects an HTTP failure before RUN_STARTED and removes the optimistic turn", async () => {
@@ -610,6 +668,13 @@ describe("useAssistantChat", () => {
     expect(result.current.session).toMatchObject({
       status: "draft",
       messages: [],
+    });
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({
+        error_code: "NYXBOT_HTTP_SERVER_ERROR",
+        http_status: 503,
+      }),
     });
   });
 

@@ -45,7 +45,7 @@ pub async fn require_use(db: &Database, actor: &str, agent: &AssistantAgent) -> 
     if actor == agent.user_id {
         return Ok(());
     }
-    if !can_use(&Box::pin(access(db, actor, &agent.user_id)).await?) || agent.is_nyxbot() {
+    if agent.is_nyxbot() || resolve_agent_access(db, actor, agent).await?.is_none() {
         return Err(AppError::Forbidden(
             "Active organization membership with service access is required to use this agent"
                 .into(),
@@ -142,17 +142,17 @@ pub async fn validate_grants(db: &Database, actor: &str, agent: &AssistantAgent)
         return Ok(());
     }
     require_maintain(db, actor, agent).await?;
-    if agent.grants.account_read
-        || !agent.saved_login_ids.is_empty()
-        || !agent.guest_access.is_empty()
-    {
-        return Err(AppError::Forbidden("Organization agents cannot receive personal account access, saved logins or guest sharing".into()));
-    }
-    if !agent.grants.platform_service_ids.is_empty() {
-        return Err(AppError::ValidationError(
-            "Grant the organization's platform connection ID instead of an unbound catalog service"
-                .into(),
+    if agent.grants.account_read || !agent.saved_login_ids.is_empty() {
+        return Err(AppError::Forbidden(
+            "Organization agents cannot receive personal account access or saved logins".into(),
         ));
+    }
+    for id in &agent.grants.platform_service_ids {
+        let model = db.collection::<crate::models::platform_model::PlatformModel>("platform_models")
+            .find_one(doc! {"billing_service_id":id,"enabled":true,"lifecycle":"active"}).await?
+            .ok_or_else(|| AppError::ValidationError("Grant the organization's connection ID; only platform model offerings support an unbound catalog grant".into()))?;
+        super::assistant_platform_model::require_ready(db).await?;
+        super::platform_model_service::authorized_model(db, actor, &model.public_id).await?;
     }
     let acl = access(db, actor, &agent.user_id).await?;
     for id in &agent.grants.service_ids {
@@ -175,6 +175,37 @@ pub async fn validate_grants(db: &Database, actor: &str, agent: &AssistantAgent)
     .await
 }
 
+/// Authorize the requested guest-policy mutation, including clearing a restriction.
+/// Looking only at the resulting maps would let a Member restore the default Use
+/// level. Fence the admin membership in the same transaction as the policy write.
+pub(crate) async fn authorize_guest_change(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if actor == agent.user_id {
+        return Ok(());
+    }
+    require_creation_enabled(db, actor).await?;
+    super::org_channel_service::enabled(db, actor).await?;
+    super::org_channel_service::require_admin(db, actor, &agent.user_id).await?;
+    for (collection, filter) in [
+        (
+            "users",
+            doc! {"_id":&agent.user_id,"user_type":"org","is_active":true},
+        ),
+        ("users", doc! {"_id":actor,"is_active":true}),
+        (
+            "org_memberships",
+            doc! {"org_user_id":&agent.user_id,"member_user_id":actor,"role":"admin","revoked_at":null},
+        ),
+    ] {
+        super::org_channel_service::live_doc(db, session, collection, filter, true).await?;
+    }
+    Ok(())
+}
+
 /// Request-local, server-resolved membership. Never persisted or cached across
 /// authentications. Private fields bind reuse to the same person and owner.
 #[derive(Debug)]
@@ -182,9 +213,72 @@ pub struct RequestAccess {
     actor: String,
     owner: String,
     acl: OwnerAccess,
+    shared: Option<super::shared_agent_service::RequestAccess>,
+    channel: Option<super::org_channel_service::Access>,
 }
 
 impl RequestAccess {
+    pub(crate) fn channel(&self) -> Option<&super::org_channel_service::Access> {
+        self.channel.as_ref()
+    }
+
+    pub(crate) async fn from_channel(
+        db: &Database,
+        channel: super::org_channel_service::Access,
+    ) -> AppResult<std::sync::Arc<Self>> {
+        let e = channel.execution();
+        let acl = if e.guest {
+            OwnerAccess::Forbidden
+        } else {
+            let acl = access(db, &e.actor_id, &e.org_id).await?;
+            if !can_use(&acl) {
+                return Err(super::org_channel_service::denied());
+            }
+            acl
+        };
+        Ok(std::sync::Arc::new(Self {
+            actor: e.actor_id.clone(),
+            owner: e.org_id.clone(),
+            acl,
+            shared: None,
+            channel: Some(channel),
+        }))
+    }
+
+    pub(crate) fn shared(&self) -> Option<&super::shared_agent_service::RequestAccess> {
+        self.shared.as_ref()
+    }
+
+    pub(crate) fn from_shared(shared: super::shared_agent_service::RequestAccess) -> Self {
+        Self {
+            actor: shared.actor().into(),
+            owner: shared.owner().into(),
+            acl: OwnerAccess::Forbidden,
+            shared: Some(shared),
+            channel: None,
+        }
+    }
+
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Whether this request snapshot permits the given organization service.
+    /// The snapshot is the authoritative ACL for an organization-bound key;
+    /// callers must not resolve membership a second time.
+    pub(crate) fn allows_service(&self, service: &UserService) -> bool {
+        if let Some(channel) = &self.channel {
+            return channel.allows_service(service)
+                && (channel.execution().guest
+                    || (self.acl.allows_resource(&service.id)
+                        && (!service.admin_only || self.acl.can_write())));
+        }
+        if let Some(shared) = &self.shared {
+            return shared.allows_connection(service);
+        }
+        self.acl.allows_resource(&service.id) && (!service.admin_only || self.acl.can_write())
+    }
+
     pub(crate) fn can_maintain(&self) -> bool {
         can_maintain(&self.acl)
     }
@@ -198,7 +292,9 @@ impl RequestAccess {
     }
 
     pub(crate) fn matches(&self, actor: &str, owner: &str) -> bool {
-        self.actor == actor && self.owner == owner && can_use(&self.acl)
+        self.actor == actor
+            && self.owner == owner
+            && (self.shared.is_some() || self.channel.is_some() || can_use(&self.acl))
     }
     pub async fn conversation(
         &self,
@@ -223,6 +319,25 @@ impl RequestAccess {
 
     pub async fn agent(&self, db: &Database, actor: &str, id: &str) -> AppResult<AssistantAgent> {
         self.check(actor, &self.owner)?;
+        if let Some(channel) = &self.channel {
+            if channel.agent().id != id {
+                return Err(super::org_channel_service::denied());
+            }
+            let mut agent = channel.agent().clone();
+            if channel.execution().guest {
+                agent.memory.clear();
+                agent.machine_node_ids.clear();
+                agent.saved_login_ids.clear();
+                agent.grants.account_read = false;
+            }
+            return Ok(agent);
+        }
+        if let Some(shared) = &self.shared {
+            if !shared.matches(actor, &self.owner, id) {
+                return Err(super::shared_agent_service::missing());
+            }
+            return Ok(shared.agent().clone());
+        }
         db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
             .find_one(doc! {"_id": id, "user_id": &self.owner, "kind": "specialist"})
             .await?
@@ -230,7 +345,7 @@ impl RequestAccess {
     }
 
     fn check(&self, actor: &str, owner: &str) -> AppResult<()> {
-        if self.actor != actor || self.owner != owner || !can_use(&self.acl) {
+        if !self.matches(actor, owner) {
             return Err(AppError::Forbidden(
                 "Organization agent access snapshot does not match this request".into(),
             ));
@@ -242,10 +357,25 @@ impl RequestAccess {
         &self,
         row: &crate::models::assistant_conversation::AssistantConversation,
     ) -> AppResult<()> {
+        if let Some(channel) = &self.channel {
+            return channel.check_conversation(row);
+        }
         self.check(
             &row.user_id,
             row.agent_owner_id.as_deref().unwrap_or_default(),
         )?;
+        if let Some(shared) = &self.shared
+            && (!shared.matches(
+                &row.user_id,
+                &self.owner,
+                row.agent_id.as_deref().unwrap_or_default(),
+            ))
+        {
+            return Err(super::shared_agent_service::missing());
+        }
+        if self.shared.is_some() {
+            super::assistant_group_service::check_shared_surface(row)?;
+        }
         if row.guest_turn || row.channel.is_some() {
             return Err(AppError::Forbidden(
                 "Organization agents require a private member thread".into(),
@@ -255,15 +385,139 @@ impl RequestAccess {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_request_access(actor: &str, owner: &str, acl: OwnerAccess) -> RequestAccess {
+    RequestAccess {
+        actor: actor.into(),
+        owner: owner.into(),
+        acl,
+        shared: None,
+        channel: None,
+    }
+}
+
 pub async fn resolve_key_access(
     db: &Database,
     actor: &str,
     owner: Option<&str>,
 ) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
+    resolve_access(db, actor, owner, None, None).await
+}
+
+pub async fn resolve_agent_access(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
+    resolve_access(db, actor, Some(&agent.user_id), Some(agent), None).await
+}
+
+/// Resolve only the personal shared-agent lane. Organization specialists keep
+/// the existing lazy access resolution used by their execution paths; callers
+/// that construct a chat authority must not eagerly attach an org snapshot.
+pub async fn resolve_shared_agent_access(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
+    let shared = match super::shared_agent_service::require(db, actor, agent).await {
+        Ok(shared) => shared,
+        Err(AppError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(std::sync::Arc::new(RequestAccess::from_shared(
+        shared,
+    ))))
+}
+
+pub async fn resolve_credential_access(
+    db: &Database,
+    key: &crate::models::api_key::ApiKey,
+) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
+    // Channel, relay and ordinary API keys may carry an assistant owner
+    // marker for legacy routing metadata, but they are not conversation
+    // credentials.  Keep those keys on the existing no-read path; otherwise
+    // a foreign marker would trigger a personal-thread lookup that can never
+    // resolve and would break channel ingress.
+    if key.platform.as_deref()
+        != Some(super::assistant_agent_credential_service::ASSISTANT_PLATFORM)
+        && key.assistant_group_id.is_none()
+        && !key.allow_auto_connected_services
+    {
+        return Ok(None);
+    }
+    // Every org-channel key carries its specialist owner, including guests
+    // whose actor is that org. Ordinary unmarked keys keep their no-read path.
+    if key.assistant_agent_owner_id.is_some()
+        && let Some(row) = db.collection::<crate::models::assistant_conversation::AssistantConversation>("assistant_conversations")
+        .find_one(doc! {"user_id":&key.user_id,"credential_api_key_id":&key.id,
+            "$or":[{"channel.org_execution":{"$type":"object"}},{"reply_channel.org_execution":{"$type":"object"}}]}).await?
+    {
+        return super::org_channel_service::conversation_access(db, &row).await;
+    }
+    resolve_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+        None,
+        Some(&key.id),
+    )
+    .await
+}
+
+async fn resolve_access(
+    db: &Database,
+    actor: &str,
+    owner: Option<&str>,
+    agent: Option<&AssistantAgent>,
+    key: Option<&str>,
+) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
     let Some(owner) = owner.filter(|owner| *owner != actor) else {
         return Ok(None);
     };
-    let acl = Box::pin(access(db, actor, owner)).await?;
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": owner, "is_active": true})
+        .await?
+        .ok_or_else(super::shared_agent_service::missing)?;
+    if !user.user_type.is_org() {
+        let loaded;
+        let agent = if let Some(agent) = agent {
+            agent
+        } else {
+            let key = key.ok_or_else(super::shared_agent_service::missing)?;
+            let row = db
+                .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(
+                    doc! {"user_id": actor, "agent_owner_id": owner, "credential_api_key_id": key},
+                )
+                .await?
+                .ok_or_else(super::shared_agent_service::missing)?;
+            loaded = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(doc! {"_id": row.agent_id.ok_or_else(super::shared_agent_service::missing)?, "user_id": owner})
+                .await?.ok_or_else(super::shared_agent_service::missing)?;
+            &loaded
+        };
+        let shared = super::shared_agent_service::require(db, actor, agent).await?;
+        return Ok(Some(std::sync::Arc::new(RequestAccess::from_shared(
+            shared,
+        ))));
+    }
+    resolve_org_access(db, actor, owner, user.is_active).await
+}
+
+pub(crate) async fn resolve_org_access(
+    db: &Database,
+    actor: &str,
+    owner: &str,
+    active: bool,
+) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
+    if !active {
+        return Err(super::shared_agent_service::missing());
+    }
+    let acl = Box::pin(org_service::resolve_owner_access(db, actor, owner)).await?;
     if !can_use(&acl) {
         return Err(AppError::Forbidden(
             "Organization agent access was revoked or is no longer permitted".into(),
@@ -273,6 +527,8 @@ pub async fn resolve_key_access(
         actor: actor.into(),
         owner: owner.into(),
         acl,
+        shared: None,
+        channel: None,
     })))
 }
 
@@ -326,7 +582,7 @@ pub(crate) async fn chat_agent_with_access(
     if agent.user_id != chat.user_id && agent.is_nyxbot() {
         return Err(AppError::NotFound("Agent not found".into()));
     }
-    let access = resolve_key_access(db, &chat.user_id, Some(&agent.user_id)).await?;
+    let access = resolve_agent_access(db, &chat.user_id, &agent).await?;
     Ok((agent, access))
 }
 
@@ -335,6 +591,10 @@ fn bound_access<'a>(
     owner: Option<&str>,
     snapshot: Option<&'a RequestAccess>,
 ) -> AppResult<Option<&'a RequestAccess>> {
+    if let Some(snapshot) = snapshot.filter(|s| s.channel.is_some()) {
+        snapshot.check(actor, owner.unwrap_or(actor))?;
+        return Ok(Some(snapshot));
+    }
     let Some(owner) = owner.filter(|owner| *owner != actor) else {
         if snapshot.is_some() {
             return Err(AppError::Forbidden(
@@ -371,8 +631,12 @@ pub async fn key_services(
     else {
         return Ok(None);
     };
+    if let Some(shared) = access.shared() {
+        let mut ids: Vec<_> = shared.connections().keys().cloned().collect();
+        ids.sort();
+        return Ok(Some(ids));
+    }
     let owner = &access.owner;
-    let acl = &access.acl;
     let rows: Vec<UserService> = db
         .collection(SERVICES)
         .find(doc! {"_id": {"$in": &key.allowed_service_ids}, "user_id": owner, "is_active": true})
@@ -381,7 +645,7 @@ pub async fn key_services(
         .await?;
     Ok(Some(
         rows.into_iter()
-            .filter(|s| acl.allows_resource(&s.id) && (!s.admin_only || acl.can_write()))
+            .filter(|s| access.allows_service(s))
             .map(|s| s.id)
             .collect(),
     ))
@@ -400,6 +664,9 @@ pub async fn key_nodes(
     else {
         return Ok((key.allow_all_nodes, key.allowed_node_ids.clone()));
     };
+    if access.shared().is_some() || access.channel().is_some_and(|c| c.execution().guest) {
+        return Ok((false, Vec::new()));
+    }
     let rows: Vec<crate::models::node::Node> = db
         .collection(crate::models::node::COLLECTION_NAME)
         .find(doc! {"user_id": &access.owner, "is_active": true})
@@ -448,6 +715,18 @@ pub async fn authorize_service_with_access(
     let Some(access) = bound_access(actor, bound_owner, snapshot)? else {
         return Ok(());
     };
+    if let Some(shared) = access.shared() {
+        let id = instance.ok_or_else(super::shared_agent_service::missing)?;
+        let service = db
+            .collection::<UserService>(SERVICES)
+            .find_one(doc! {"_id": id, "is_active": true})
+            .await?
+            .ok_or_else(super::shared_agent_service::missing)?;
+        if !shared.allows_connection(&service) {
+            return Err(super::shared_agent_service::missing());
+        }
+        return Ok(());
+    }
     let owner = &access.owner;
     let id = instance.ok_or_else(|| {
         AppError::Forbidden(
@@ -458,8 +737,7 @@ pub async fn authorize_service_with_access(
         .collection::<UserService>(SERVICES)
         .find_one(doc! {"_id": id, "user_id": owner, "is_active": true})
         .await?;
-    let acl = &access.acl;
-    if row.is_none_or(|s| !acl.allows_resource(id) || (s.admin_only && !acl.can_write())) {
+    if row.is_none_or(|s| !access.allows_service(&s)) {
         return Err(AppError::Forbidden(
             "This service is outside the organization's live member access".into(),
         ));

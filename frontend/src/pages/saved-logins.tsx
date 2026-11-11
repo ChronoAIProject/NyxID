@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -41,7 +41,7 @@ import {
 } from "@/schemas/saved-logins";
 
 export function SavedLoginsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [owner, setOwner] = useState<string | null>(null);
   const logins = useSavedLogins(owner);
   const remove = useDeleteSavedLogin();
@@ -50,28 +50,28 @@ export function SavedLoginsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t("Saved logins")}
-        description={t("Let NyxBot sign in to approved websites. Specialists need an explicit grant. Never put a password in chat.")}
+        title={translateUi("Saved logins")}
+        description={translateUi("Let NyxBot sign in to approved websites. Specialists need an explicit grant. Never put a password in chat.")}
         actions={
-          <AddCtaButton label={t("Add login")} onClick={() => setEditing("new")} />
+          <AddCtaButton label={translateUi("Add login")} onClick={() => setEditing("new")} />
         }
       />
       <div className="max-w-xs">
         <OrgScopeSelect value={owner} onChange={setOwner} />
       </div>
-      <p className="rounded-lg border border-border p-4 text-12 text-muted-foreground">
+      <p className="rounded-lg border border-border p-4 text-14 text-muted-foreground">
         {SAVED_LOGIN_RESIDUAL}
       </p>
       {logins.isLoading ? (
-        <p className="text-12">{t("Loading saved logins…")}</p>
+        <p className="text-14">{translateUi("Loading saved logins…")}</p>
       ) : null}
       {logins.error || remove.error ? (
-        <p role="alert" className="text-12 text-destructive">
-          {translateUi((logins.error ?? remove.error)?.message ?? "")}
+        <p role="alert" className="text-14 text-destructive">
+          {(logins.error ?? remove.error)?.message}
         </p>
       ) : null}
       {!logins.isLoading && !logins.data?.length ? (
-        <p className="text-12 text-muted-foreground">{t("No saved logins in this account.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("No saved logins in this account.")}</p>
       ) : null}
       <div className="grid gap-4 sm:grid-cols-2">
         {logins.data?.map((login) => (
@@ -99,11 +99,11 @@ export function SavedLoginsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete ")}{deleting?.label}?</DialogTitle>
-            <DialogDescription>{t("This removes the saved login and its specialist grants.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete ")}{deleting?.label}?</DialogTitle>
+            <DialogDescription>{translateUi("This removes the saved login and its specialist grants.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setDeleting(undefined)}>{t("Cancel")}</Button>
+            <Button variant="ghost" onClick={() => setDeleting(undefined)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={remove.isPending}
@@ -114,7 +114,7 @@ export function SavedLoginsPage() {
                     .then(() => setDeleting(undefined))
                     .catch(() => undefined);
               }}
-            >{t("Delete login")}</Button>
+            >{translateUi("Delete login")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -130,28 +130,28 @@ function SavedLoginCard({
   readonly onEdit: (login: SavedLogin) => void;
   readonly onDelete: (login: SavedLogin) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <article className="space-y-3 rounded-xl border border-border bg-card p-4">
-      <h2 className="font-display text-15 font-medium">{login.label}</h2>
-      <p className="break-all text-12 text-muted-foreground">
+      <h2 className="font-display type-card-title">{login.label}</h2>
+      <p className="break-all text-14 text-muted-foreground">
         {login.allowed_origins.join(", ")}
       </p>
-      <p className="text-12">{t("Username ")}{login.username_hint}</p>
+      <p className="text-14">{translateUi("Username ")}{login.username_hint}</p>
       <div className="flex flex-wrap gap-2">
         {login.has_password ? (
-          <Badge variant="secondary">{t("Password set")}</Badge>
+          <Badge variant="secondary">{translateUi("Password set")}</Badge>
         ) : null}
         {login.has_totp ? (
-          <Badge variant="secondary">{t("One-time codes")}</Badge>
+          <Badge variant="secondary">{translateUi("One-time codes")}</Badge>
         ) : null}
         {login.confirm_each_sign_in ? (
-          <Badge variant="info">{t("Confirm each sign-in")}</Badge>
+          <Badge variant="info">{translateUi("Confirm each sign-in")}</Badge>
         ) : null}
       </div>
       <div className="flex gap-2">
-        <Button onClick={() => onEdit(login)}>{t("Replace")}</Button>
-        <Button variant="destructive" onClick={() => onDelete(login)}>{t("Delete")}</Button>
+        <Button onClick={() => onEdit(login)}>{translateUi("Replace")}</Button>
+        <Button variant="destructive" onClick={() => onDelete(login)}>{translateUi("Delete")}</Button>
       </div>
     </article>
   );
@@ -166,7 +166,7 @@ function LoginEditor({
   readonly owner: string | null;
   readonly onClose: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const query = useQueryClient();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
@@ -215,12 +215,12 @@ function LoginEditor({
       >
         <DialogHeader>
           <DialogTitle>
-            {login ? t("Replace saved login") : t("Add saved login")}
+            {login ? translateUi("Replace saved login") : translateUi("Add saved login")}
           </DialogTitle>
-          <DialogDescription>{t("Secrets are write-only.")}{" "}
+          <DialogDescription>{translateUi("Secrets are write-only.")}{" "}
             {login
-              ? t("Re-enter every value to replace this login atomically.")
-              : t("Enter them here, never in chat.")}
+              ? translateUi("Re-enter every value to replace this login atomically.")
+              : translateUi("Enter them here, never in chat.")}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -234,7 +234,7 @@ function LoginEditor({
               name="label"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Label")}</FormLabel>
+                  <FormLabel>{translateUi("Label")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -247,7 +247,7 @@ function LoginEditor({
               name="allowed_origins"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Allowed HTTPS origins (one per line)")}</FormLabel>
+                  <FormLabel>{translateUi("Allowed HTTPS origins (one per line)")}</FormLabel>
                   <FormControl>
                     <Textarea
                       className="min-h-20"
@@ -265,8 +265,8 @@ function LoginEditor({
                       <p
                         key={index}
                         role="alert"
-                        className="text-12 text-destructive"
-                      >{t("Line ")}{index + 1}: {message}
+                        className="text-14 text-destructive"
+                      >{translateUi("Line ")}{index + 1}: {message}
                       </p>
                     ) : null;
                   })}
@@ -282,10 +282,10 @@ function LoginEditor({
                   <FormItem>
                     <FormLabel>
                       {name === "username"
-                        ? t("Username")
+                        ? translateUi("Username")
                         : name === "password"
-                          ? t("Password (optional)")
-                          : t("TOTP secret or otpauth URI (optional)")}
+                          ? translateUi("Password (optional)")
+                          : translateUi("TOTP secret or otpauth URI (optional)")}
                     </FormLabel>
                     <FormControl>
                       <Input
@@ -307,7 +307,7 @@ function LoginEditor({
               name="confirm_each_sign_in"
               render={({ field }) => (
                 <FormItem className="flex items-center justify-between">
-                  <FormLabel>{t("Confirm each sign-in")}</FormLabel>
+                  <FormLabel>{translateUi("Confirm each sign-in")}</FormLabel>
                   <FormControl>
                     <Switch
                       checked={field.value}
@@ -318,7 +318,7 @@ function LoginEditor({
               )}
             />
             {error ? (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {translateUi(error)}
               </p>
             ) : null}
@@ -331,7 +331,7 @@ function LoginEditor({
                   form.reset();
                   onClose();
                 }}
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -341,7 +341,7 @@ function LoginEditor({
                   !form.watch("username") ||
                   !form.watch("label")
                 }
-              >{t("Save login")}</Button>
+              >{translateUi("Save login")}</Button>
             </DialogFooter>
           </form>
         </Form>

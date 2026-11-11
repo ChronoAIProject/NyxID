@@ -328,6 +328,7 @@ pub async fn create_request(
             projection_version: execution_authority::CONTRACT_VERSION.to_string(),
             digest: execution_authority.digest,
         }),
+        optional_provider_authority_digest: execution_authority.optional_provider_authority_digest,
         redemption: None,
     };
     let mut operation = approval_service::ApprovalRequestOperation::from_descriptor(
@@ -493,6 +494,9 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            strict_response_utf8: false,
+            execution_permission: None,
+            assistant_chat: None,
             response_body_limit: None,
             actor_user_id: Some(&caller.actor_user_id),
             caller_token: None,
@@ -518,6 +522,7 @@ pub async fn redeem_request(
             agent_owner: caller.agent_owner.as_deref(),
             operation_scopes: Some(&caller.operation_scopes),
             api_key_id: caller.api_key_id.as_deref(),
+            api_key_credential_id: None,
             allow_all_nodes: caller.allow_all_nodes,
             allowed_node_ids: &caller.allowed_node_ids,
         };
@@ -598,6 +603,7 @@ pub async fn redeem_request(
             has_cred_for_fallback,
             billing_context_builder,
             execution.resolution.catalog_service_slug.as_deref(),
+            Some(execution.delegated_credentials),
         ))
         .await;
 
@@ -889,6 +895,8 @@ struct ResolvedExecution {
     configured_fallback_node_ids: Vec<String>,
     digest: String,
     legacy_digest: String,
+    optional_provider_authority_digest: Option<String>,
+    delegated_credentials: Vec<super::delegation_service::DelegatedCredential>,
 }
 
 #[derive(Clone, Copy)]
@@ -1018,6 +1026,35 @@ async fn resolve_execution_authority(
         &resolution.target.service.id,
     )
     .await?;
+    let mut optional_provider_authority_digest = None;
+    let mut delegated_credentials = Vec::new();
+    if resolution.node_id.is_none()
+        && let mcp_service::McpToolSource::UserManaged {
+            catalog_service_id: Some(catalog_service_id),
+            ..
+        } = &operation.service().source
+    {
+        let snapshot = super::delegation_service::read_optional_auto_provision_snapshot(
+            &state.db,
+            effective_owner,
+            user_service_id,
+            catalog_service_id,
+            &resolution.target,
+        )
+        .await?;
+        if matches!(mode, ExecutionResolutionMode::MaterializeForExecution) {
+            delegated_credentials =
+                super::delegation_service::materialize_optional_auto_provision_snapshot(
+                    &state.db,
+                    &state.encryption_keys,
+                    &resolution.target,
+                    &snapshot,
+                    Some(&state.connection_expiry_notifier),
+                )
+                .await?;
+        }
+        optional_provider_authority_digest = snapshot.digest;
+    }
     let projection = execution_authority::build_projection(
         &resolution,
         override_identity.as_ref(),
@@ -1033,6 +1070,8 @@ async fn resolve_execution_authority(
         configured_fallback_node_ids,
         digest,
         legacy_digest,
+        optional_provider_authority_digest,
+        delegated_credentials,
     })
 }
 
@@ -1079,6 +1118,13 @@ fn evaluate_authority(
     binding: &ExactServiceApprovalBinding,
     live: ResolvedExecution,
 ) -> ExecutionAuthorityEvaluation {
+    if binding.optional_provider_authority_digest != live.optional_provider_authority_digest {
+        return execution_authority_terminal(
+            ExactServiceApprovalState::Drifted,
+            ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        );
+    }
     match execution_authority_digest_decision(binding, &live.digest, &live.legacy_digest) {
         ExecutionAuthorityDigestDecision::Matched => {
             ExecutionAuthorityEvaluation::Matched(Box::new(live))
@@ -1404,6 +1450,7 @@ async fn approval_target(
         user_service_id,
         Some(&service.service_slug),
         None,
+        None,
     )
     .await?
     .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;
@@ -1427,7 +1474,8 @@ async fn load_bound_request(
         .find_one(doc! { "_id": request_id })
         .await?
         .ok_or_else(|| AppError::NotFound("exact_service_request_not_found".to_string()))?;
-    if request.exact_service.is_none()
+    if request.execution_proposal.is_some()
+        || request.exact_service.is_none()
         || request.requester_type != caller.requester_type
         || request.requester_id != caller.requester_id
         || request
@@ -1875,6 +1923,9 @@ fn safe_execution_failure_code(error: &AppError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    mod optional_provider_tests {
+        include!("exact_service_approval_optional_provider_tests.rs");
+    }
     use std::collections::HashMap;
     use std::sync::{
         Arc,
@@ -2028,6 +2079,7 @@ mod tests {
             arguments: input.arguments,
             execution_authority_digest: None,
             execution_authority_binding: None,
+            optional_provider_authority_digest: None,
             redemption: None,
         }
     }
@@ -2129,7 +2181,8 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: Vec::new(),
             created_at: Utc::now(),
@@ -2254,6 +2307,9 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-alpha".to_string(),
@@ -2309,6 +2365,7 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),
                 action_description: None,

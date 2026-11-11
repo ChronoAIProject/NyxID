@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { ProviderConfig } from "@/types/api";
 import {
@@ -31,7 +32,7 @@ export function ApiKeyDialog({
   onCancel,
   isPending,
 }: ApiKeyDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [apiKey, setApiKey] = useState("");
   const [label, setLabel] = useState("");
   const [gatewayUrl, setGatewayUrl] = useState("");
@@ -61,17 +62,17 @@ export function ApiKeyDialog({
     <Dialog open onOpenChange={onCancel}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Connect to ")}{provider.name}</DialogTitle>
+          <DialogTitle>{translateUi("Connect to ")}{provider.name}</DialogTitle>
           <DialogDescription>
             {requiresGatewayUrl
-              ? t("Enter your {{name}} instance URL and bearer token. Your credentials will be encrypted at rest.", { name: provider.name })
-              : t("Enter your API key to connect this provider. Your key will be encrypted at rest.")}
+              ? translateUi("Enter your {{value1}} instance URL and bearer token. Your credentials will be encrypted at rest.", { value1: provider.name })
+              : translateUi("Enter your API key to connect this provider. Your key will be encrypted at rest.")}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {provider.api_key_instructions && (
-            <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
+            <div className="rounded-lg bg-muted p-3 text-14 text-muted-foreground">
               {provider.api_key_instructions}
             </div>
           )}
@@ -81,14 +82,14 @@ export function ApiKeyDialog({
               href={provider.api_key_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-12 text-primary-text hover:underline"
-            >{t("Get your API key")}<ExternalLink className="h-3 w-3" />
+              className="inline-flex items-center gap-1.5 type-row-title text-primary-text hover:underline"
+            >{translateUi("Get your API key")}<ExternalLink className="h-3 w-3" />
             </a>
           )}
 
           {requiresGatewayUrl && (
             <div className="space-y-2">
-              <Label htmlFor="provider-gateway-url">{t("Gateway URL")}</Label>
+              <Label htmlFor="provider-gateway-url">{translateUi("Gateway URL")}</Label>
               <Input
                 id="provider-gateway-url"
                 type="url"
@@ -98,31 +99,31 @@ export function ApiKeyDialog({
                 maxLength={2048}
                 autoComplete="url"
               />
-              <p className="text-xs text-muted-foreground">{t("Your self-hosted ")}{provider.name}{t(" instance URL")}</p>
+              <p className="text-13 text-muted-foreground">{translateUi("Your self-hosted ")}{provider.name}{translateUi(" instance URL")}</p>
             </div>
           )}
 
           <div className="space-y-2">
             <Label htmlFor="provider-api-key">
-              {requiresGatewayUrl ? t("Bearer Token") : t("API Key")}
+              {requiresGatewayUrl ? translateUi("Bearer Token") : translateUi("API Key")}
             </Label>
             <Input
               id="provider-api-key"
               type="password"
-              placeholder={requiresGatewayUrl ? t("Bearer token...") : "sk-..."}
+              placeholder={requiresGatewayUrl ? translateUi("Bearer token...") : "sk-..."}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               maxLength={4096}
               autoComplete="off"
             />
-            <p className="text-xs text-muted-foreground">{t("Max 4096 characters")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Max 4096 characters")}</p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="provider-label">{t("Label (optional)")}</Label>
+            <Label htmlFor="provider-label">{translateUi("Label (optional)")}</Label>
             <Input
               id="provider-label"
-              placeholder={t("e.g., Production Key")}
+              placeholder={translateUi("e.g., Production Key")}
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               maxLength={200}
@@ -130,7 +131,7 @@ export function ApiKeyDialog({
           </div>
 
           {isPending && (
-            <p className="text-xs text-muted-foreground">{t("Validating your credentials with ")}{provider.name}...
+            <p className="text-13 text-muted-foreground">{translateUi("Validating your credentials with ")}{provider.name}...
             </p>
           )}
 
@@ -140,9 +141,9 @@ export function ApiKeyDialog({
               variant="outline"
               onClick={onCancel}
               disabled={isPending}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button variant="primary" type="submit" disabled={!canSubmit} isLoading={isPending}>
-              {isPending ? t("Validating...") : t("Connect")}
+              {isPending ? translateUi("Validating...") : translateUi("Connect")}
             </Button>
           </DialogFooter>
         </form>

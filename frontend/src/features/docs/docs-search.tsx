@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Search, X } from "lucide-react";
@@ -26,10 +26,17 @@ export function DocsSearch({
   readonly open: boolean;
   readonly onClose: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [entries, setEntries] = useState<IndexEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [previousOpen, setPreviousOpen] = useState(open);
+  // Reset as part of the opening transition. Async loading and delayed focus
+  // must never overwrite a selection the user has already made.
+  if (previousOpen !== open) {
+    setPreviousOpen(open);
+    if (open) setActiveIndex(0);
+  }
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const navigate = useNavigate();
@@ -42,12 +49,13 @@ export function DocsSearch({
         .then((d) => setEntries(Array.isArray(d) ? (d as IndexEntry[]) : []))
         .catch(() => {});
     }
-    const id = window.setTimeout(() => {
-      inputRef.current?.focus();
-      setActiveIndex(0); // start each open at the top of the result list
-    }, 20);
-    return () => window.clearTimeout(id);
   }, [open, entries.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => inputRef.current?.focus(), 20);
+    return () => window.clearTimeout(id);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -113,24 +121,24 @@ export function DocsSearch({
               setActiveIndex(0); // a new query resets the highlight to the top
             }}
             onKeyDown={onInputKeyDown}
-            placeholder={t("Search the docs…")}
+            placeholder={translateUi("Search the docs…")}
             role="combobox"
             aria-expanded={results.length > 0}
             aria-controls="docs-search-results"
             aria-activedescendant={
               results.length > 0 ? `docs-search-opt-${activeIndex}` : undefined
             }
-            className="h-12 flex-1 bg-transparent text-sm text-foreground placeholder:text-text-tertiary focus:outline-none"
+            className="h-12 flex-1 bg-transparent text-14 text-foreground placeholder:text-text-tertiary focus:outline-none"
           />
-          <button type="button" aria-label={t("Close search")} onClick={onClose}>
+          <button type="button" aria-label={translateUi("Close search")} onClick={onClose}>
             <X className="h-4 w-4 text-text-tertiary transition-colors hover:text-foreground" />
           </button>
         </div>
         <div className="max-h-[60vh] overflow-y-auto p-2">
           {query.trim() === "" ? (
-            <p className="px-3 py-6 text-center text-sm text-text-tertiary">{t("Type to search across CLI, Web, AI-assisted, and Concepts.")}</p>
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("Type to search across CLI, Web, AI-assisted, and Concepts.")}</p>
           ) : results.length === 0 ? (
-            <p className="px-3 py-6 text-center text-sm text-text-tertiary">{t("No results for “")}{query}”.</p>
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}”.</p>
           ) : (
             <ul className="space-y-0.5" id="docs-search-results" role="listbox" ref={listRef}>
               {results.map((e, i) => {
@@ -148,13 +156,13 @@ export function DocsSearch({
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-10 tracking-wider text-nyx-secondary-400 uppercase">
+                        <span className="font-mono text-12 tracking-wider text-nyx-secondary-400 uppercase">
                           {TAB_LABEL[docTabForSlug(slug)] ?? ""}
                         </span>
-                        <span className="text-sm font-medium text-foreground">{e.title}</span>
+                        <span className="type-row-title text-foreground">{e.title}</span>
                       </div>
                       {e.description && (
-                        <p className="mt-0.5 line-clamp-1 text-xs text-text-tertiary">{e.description}</p>
+                        <p className="mt-0.5 line-clamp-1 text-13 text-text-tertiary">{e.description}</p>
                       )}
                     </Link>
                   </li>
@@ -163,14 +171,14 @@ export function DocsSearch({
             </ul>
           )}
         </div>
-        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-11 text-text-tertiary">
+        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-13 text-text-tertiary">
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-border px-1 font-mono">↑</kbd>
-            <kbd className="rounded border border-border px-1 font-mono">↓</kbd>{t("navigate")}</span>
+            <kbd className="rounded border border-border px-1 font-mono">↓</kbd>{translateUi("navigate")}</span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-border px-1 font-mono">↵</kbd>{t("open")}</span>
+            <kbd className="rounded border border-border px-1 font-mono">↵</kbd>{translateUi("open")}</span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-border px-1 font-mono">{t("esc")}</kbd>{t("close")}</span>
+            <kbd className="rounded border border-border px-1 font-mono">{translateUi("esc")}</kbd>{translateUi("close")}</span>
         </div>
       </div>
     </div>

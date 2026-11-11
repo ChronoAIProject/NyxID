@@ -43,6 +43,14 @@ impl LocalLago {
 
 #[async_trait]
 impl LagoApi for LocalLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        self.check()?;
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -178,6 +186,7 @@ async fn fixture(label: &str) -> Fixture {
     }).await.unwrap();
     let config = Arc::new(AppConfig {
         billing_enabled: true,
+        billing_allocations_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
         ..crate::test_utils::test_app_config()
@@ -301,7 +310,7 @@ async fn wait_for_evidence(time: DateTime<Utc>) {
     // Production accepts no more than one second of observation clock skew.
     // Leave half that allowance as test scheduling headroom, never alter data clocks.
     if let Ok(delay) = (time - Utc::now() - Duration::milliseconds(500)).to_std() {
-        assert!(delay.as_secs() < 10);
+        assert!(delay.as_secs() < 60);
         tokio::time::sleep(delay).await;
     }
 }
@@ -1077,9 +1086,10 @@ async fn accepted_old_and_new_versions_coexist_through_renewal_settlement_and_la
 async fn fractional_windows_finalize_atomically_once_and_drop_the_final_fraction() {
     let f = fixture("runtime_fractional_windows").await;
     let base = Utc::now();
-    let boundary = base + Duration::seconds(3);
-    let end = boundary + Duration::milliseconds(600);
-    let ready_at = boundary - Duration::milliseconds(600);
+    // Keep the fractional carry while leaving time for admission on loaded runners.
+    let boundary = base + Duration::seconds(30) + Duration::milliseconds(600);
+    let end = boundary + Duration::seconds(30);
+    let stop = boundary + Duration::milliseconds(600) - Duration::nanoseconds(1);
     let (w, _, _) = start(
         &f,
         &Uuid::new_v4().to_string(),
@@ -1087,6 +1097,12 @@ async fn fractional_windows_finalize_atomically_once_and_drop_the_final_fraction
         boundary,
     )
     .await;
+    let whole_seconds = (boundary - Utc::now() - Duration::milliseconds(600)).num_seconds();
+    assert!(
+        whole_seconds > 0,
+        "initial admission exhausted the test window"
+    );
+    let ready_at = boundary - Duration::seconds(whole_seconds) - Duration::milliseconds(600);
     wait_for_evidence(ready_at).await;
     ready(&f, &w.run_id, 1, ready_at).await;
     let next = f
@@ -1141,20 +1157,30 @@ async fn fractional_windows_finalize_atomically_once_and_drop_the_final_fraction
             .is_none()
     );
     assert_eq!(finalize(&f, &w.run_id).await.len(), 1);
-    assert_eq!(run(&f, &w.run_id).await.cumulative_seconds, 0);
+    let first = run(&f, &w.run_id).await;
+    assert_eq!(
+        first.cumulative_covered_ns,
+        whole_seconds * SECOND_NS + 600_000_000
+    );
+    assert_eq!(first.cumulative_seconds, whole_seconds);
     assert!(finalize(&f, &w.run_id).await.is_empty());
     settle(&f, &w.run_id).await;
-    let stop = end - Duration::nanoseconds(1);
     wait_for_evidence(stop).await;
     stopped(&f, &w.run_id, 1, stop).await;
     assert_eq!(finalize(&f, &w.run_id).await.len(), 1);
     settle(&f, &w.run_id).await;
     let saved = run(&f, &w.run_id).await;
-    assert_eq!(saved.cumulative_covered_ns, 1_199_999_999);
-    assert_eq!(saved.cumulative_seconds, 1);
+    assert_eq!(
+        saved.cumulative_covered_ns,
+        whole_seconds * SECOND_NS + 1_199_999_999
+    );
+    assert_eq!(saved.cumulative_seconds, whole_seconds + 1);
     assert_eq!(
         wallet(&f).await.pending_lago_debits,
-        f.rate.credits_per_second
+        f.rate
+            .credits_per_second
+            .checked_mul(whole_seconds + 1)
+            .unwrap()
     );
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
     tx!(
@@ -1846,3 +1872,66 @@ async fn runtime_profile_rate_binding_rejects_foreign_quote_before_writes() {
 
 #[path = "profile_binding_tests.rs"]
 mod profile_binding;
+
+#[tokio::test]
+async fn runtime_preflight_wallet_seconds_use_gross_per_second_price() {
+    let f = fixture("machine_preflight_gst").await;
+    let mut config = super::super::taxes::zero_config();
+    config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":"9"}]);
+    let profile =
+        super::super::taxes::resolve_config(&f.owner, "local-subscription", &config).unwrap();
+    f.db.collection::<crate::models::billing_tax_profile::BillingTaxProfile>(
+        crate::models::billing_tax_profile::COLLECTION_NAME,
+    )
+    .insert_one(profile)
+    .await
+    .unwrap();
+    let funds = f
+        .billing
+        .runtime_funds_estimate(&f.owner, &f.rate)
+        .await
+        .unwrap();
+    let gross = super::super::taxes::gross_ceiling(f.rate.credits_per_second, "9".parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        funds.estimated_seconds,
+        (Credits::from_whole(10).pico() / gross.pico()).to_string()
+    );
+    assert_eq!(funds.estimated_seconds, "229357");
+    assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    let now = bson::DateTime::now();
+    f.db.collection::<Document>("credit_grants").insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(), "batch_id":"batch", "recipient_user_id":&f.owner,
+        "target_kind":"selected_users", "amount_credits":1_i64,
+        "amount":Credits::from_whole(1), "remaining":Credits::from_whole(1), "reserved":Credits::ZERO,
+        "scope":{"all_services":true,"service_ids":[],"service_slugs":[]}, "status":"active",
+        "issued_ledgered_at":now, "granted_by":"admin", "terminal_amount":Credits::ZERO,
+        "created_at":now,"updated_at":now,
+    }).await.unwrap();
+    let funds = f
+        .billing
+        .runtime_funds_estimate(&f.owner, &f.rate)
+        .await
+        .unwrap();
+    // The extra grant buys 25,000 untaxed seconds, independently of the wallet.
+    assert_eq!(funds.estimated_seconds, "254357");
+    f.db.collection::<Document>(WALLETS)
+        .update_one(
+            doc! {"owner_id":&f.owner},
+            doc! {"$set":{"balance_credits":Credits::ZERO}},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    f.lago.available.store(false, Ordering::SeqCst);
+    let funds = f
+        .billing
+        .runtime_funds_estimate(&f.owner, &f.rate)
+        .await
+        .unwrap();
+    assert_eq!(funds.estimated_seconds, "25000");
+    f.db.drop().await.unwrap();
+}

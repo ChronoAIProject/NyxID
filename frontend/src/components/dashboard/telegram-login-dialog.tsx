@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useCallback, useMemo } from "react";
 import type { ProviderConfig } from "@/types/api";
 import type { TelegramLoginData } from "@/types/api";
@@ -19,12 +20,6 @@ import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
 import { telegramLoginDataSchema } from "@/schemas/providers";
 
-declare global {
-  interface Window {
-    onTelegramAuth?: (user: TelegramLoginData) => void;
-  }
-}
-
 type FlowStep = "loading" | "ready" | "submitting" | "success" | "error";
 
 interface TelegramLoginDialogProps {
@@ -36,7 +31,7 @@ export function TelegramLoginDialog({
   provider,
   onClose,
 }: TelegramLoginDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const widgetContainerRef = useRef<HTMLDivElement>(null);
   const scriptRef = useRef<HTMLScriptElement | null>(null);
 
@@ -44,6 +39,7 @@ export function TelegramLoginDialog({
     provider.id,
   );
   const connectMutation = useConnectTelegramWidget();
+  const { mutate, reset } = connectMutation;
 
   // Derive step from query/mutation state instead of useState
   const step: FlowStep = useMemo(() => {
@@ -80,23 +76,41 @@ export function TelegramLoginDialog({
     (user: TelegramLoginData) => {
       const result = telegramLoginDataSchema.safeParse(user);
       if (!result.success) {
-        connectMutation.reset();
+        reset();
         return;
       }
-      connectMutation.mutate({ providerId: provider.id, data: result.data });
+      mutate({ providerId: provider.id, data: result.data });
     },
-    [connectMutation, provider.id],
+    [mutate, reset, provider.id],
   );
 
   useEffect(() => {
     if (!config || !widgetContainerRef.current) return;
 
-    // Set up global callback for the Telegram widget
-    window.onTelegramAuth = handleTelegramAuth;
-
     // Clear previous widget content
     const container = widgetContainerRef.current;
     container.innerHTML = "";
+    let accepted = false;
+
+    // Telegram's data-onauth string callback uses eval. Receive the same
+    // widget protocol directly, binding both the origin and this iframe.
+    const onMessage = (event: MessageEvent) => {
+      const iframe = container.querySelector<HTMLIFrameElement>("iframe");
+      if (accepted || event.origin !== "https://oauth.telegram.org" || !iframe?.contentWindow
+        || event.source !== iframe.contentWindow || typeof event.data !== "string"
+        || event.data.length > 16_384) return;
+      try {
+        const message: unknown = JSON.parse(event.data);
+        if (!message || typeof message !== "object" || !("event" in message)
+          || message.event !== "auth_user" || !("auth_data" in message)) return;
+        const result = telegramLoginDataSchema.safeParse(message.auth_data);
+        if (result.success) {
+          accepted = true;
+          handleTelegramAuth(result.data);
+        }
+      } catch { /* Ignore unrelated or malformed widget messages. */ }
+    };
+    window.addEventListener("message", onMessage);
 
     // Create and append the Telegram Login Widget script
     const script = document.createElement("script");
@@ -104,12 +118,12 @@ export function TelegramLoginDialog({
     script.async = true;
     script.setAttribute("data-telegram-login", config.bot_username);
     script.setAttribute("data-size", "large");
-    script.setAttribute("data-onauth", "onTelegramAuth(user)");
     container.appendChild(script);
     scriptRef.current = script;
 
     return () => {
-      delete window.onTelegramAuth;
+      window.removeEventListener("message", onMessage);
+      container.querySelector("iframe")?.remove();
       if (scriptRef.current?.parentNode) {
         scriptRef.current.parentNode.removeChild(scriptRef.current);
         scriptRef.current = null;
@@ -121,14 +135,14 @@ export function TelegramLoginDialog({
     <Dialog open onOpenChange={onClose}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Login with ")}{provider.name}</DialogTitle>
+          <DialogTitle>{translateUi("Login with ")}{provider.name}</DialogTitle>
           <DialogDescription>
-            {step === "loading" && "Loading Telegram login..."}
+            {step === "loading" && translateUi("Loading Telegram login...")}
             {step === "ready" &&
               "Click the Telegram button below to verify your identity."}
             {step === "submitting" && "Verifying your Telegram identity..."}
             {step === "success" &&
-              t("Successfully connected to {{name}}.", { name: provider.name })}
+              translateUi("Successfully connected to {{name}}.", { name: provider.name })}
             {step === "error" && "An error occurred during the connection."}
           </DialogDescription>
         </DialogHeader>
@@ -136,7 +150,7 @@ export function TelegramLoginDialog({
         {step === "loading" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">{t("Loading Telegram login widget...")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Loading Telegram login widget...")}</p>
           </div>
         )}
 
@@ -144,10 +158,10 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-4 py-4">
               <div ref={widgetContainerRef} className="flex justify-center" />
-              <p className="text-xs text-muted-foreground text-center">{t("A Telegram popup will open. Sign in and confirm to connect your account.")}</p>
+              <p className="text-13 text-muted-foreground text-center">{translateUi("A Telegram popup will open. Sign in and confirm to connect your account.")}</p>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={onClose}>{translateUi("Cancel")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -155,7 +169,7 @@ export function TelegramLoginDialog({
         {step === "submitting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">{t("Verifying your Telegram identity...")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Verifying your Telegram identity...")}</p>
           </div>
         )}
 
@@ -163,10 +177,10 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-success" />
-              <p className="text-12 text-muted-foreground text-center">{t("Your Telegram account has been connected successfully.")}</p>
+              <p className="text-14 text-muted-foreground text-center">{translateUi("Your Telegram account has been connected successfully.")}</p>
             </div>
             <DialogFooter>
-              <Button variant="primary" type="button" onClick={onClose}>{t("Done")}</Button>
+              <Button variant="primary" type="button" onClick={onClose}>{translateUi("Done")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -175,12 +189,12 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <AlertCircle className="h-8 w-8 text-destructive" />
-              <p className="text-12 text-destructive text-center">
+              <p className="text-14 text-destructive text-center">
                 {errorMessage}
               </p>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>{t("Close")}</Button>
+              <Button type="button" variant="outline" onClick={onClose}>{translateUi("Close")}</Button>
             </DialogFooter>
           </div>
         )}

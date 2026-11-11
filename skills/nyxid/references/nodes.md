@@ -40,7 +40,7 @@ For confidential shared infrastructure, keep user login on the admin's laptop an
 
 | Machine | Runs |
 |---|---|
-| Laptop | `nyxid login`, `nyxid node register-token --org`, `nyxid keys create --service-slug ... --node-id ...`, all node management ops (`rotate-token`, `transfer`, `delete`, manage bindings) |
+| Laptop | `nyxid login`, `nyxid node register-token --org`, `nyxid service add <catalog-slug> --slug <slug> --via-node <node-id> --org <org-id>`, all node management ops (`rotate-token`, `transfer`, `delete`, manage bindings) |
 | VM | `nyxid node register --token`, `nyxid node credentials add` (purely local), `nyxid node start` / daemon. Never `nyxid login` on the VM. |
 
 The node's local credential store is keyed by service slug (`config.toml: credentials[<slug>]`). The binding to a NyxID `UserService` is established by matching slugs. Both ends must agree on the slug; no user identity passes through the VM.
@@ -49,7 +49,7 @@ Fresh shared-box checklist:
 
 1. Admin on laptop: `nyxid node register-token --org <ID|SLUG|NAME>` -> copy the `nyx_nreg_...` token.
 2. Operator on VM: `nyxid node register --token nyx_nreg_... --url wss://...` -> token is consumed, node receives its own `nyx_nauth_...` stored in the OS keychain or local secret backend.
-3. Admin on laptop: `nyxid keys create --service-slug <slug> --node-id <node-id>` -> creates the org-owned `UserService` routing through the node.
+3. Admin on laptop: `nyxid service add <catalog-slug> --slug <slug> --via-node <node-id> --org <org-id>` -> creates the org-owned `UserService` routing through the node.
 4. Operator on VM: `nyxid node credentials add <slug> --header X-API-Key` (interactive secret prompt) -> credential stored locally, encrypted.
 5. Operator on VM: `nyxid node start` (or `nyxid node daemon install` + `start`).
 6. Optional: Admin on laptop: `nyxid node transfer <node-id> --to <org-id>` if the node was registered to a person owner first.

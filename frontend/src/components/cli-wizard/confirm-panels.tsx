@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 // Per-kind wizard panels. Each panel owns the "confirm action" step
 // (review prefill, maybe tweak a field, click "Do it"), then hands a
 // DisplayOnce-ready secret back to the parent page via `onSecret`.
@@ -55,18 +56,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { WizardHeading } from "./wizard-heading";
 
 // ── api-key-create panel ────────────────────────────────────────────
 
 interface ApiKeyCreateResponse {
   readonly id: string;
   readonly full_key: string;
+  readonly expires_at?: string | null;
 }
 
 export interface ApiKeyCreateSuccess {
   readonly kind: "api-key-create";
   readonly api_key_id: string;
   readonly full_key: string;
+  readonly expires_at?: string | null;
 }
 
 interface ApiKeyCreateConfirmProps {
@@ -107,17 +111,8 @@ function initialAccessScope(prefill: ApiKeyCreatePrefill): AccessScopeState {
       .filter(Boolean),
   );
 
-  // Default to "Allow all" when the CLI didn't pass an explicit
-  // allowed_*_csv. Presence of a CSV is what tells us the user wants
-  // a scoped key (matches `nyxid api-key create --allowed-services
-  // a,b,c` CLI semantics). The raw `prefill.allow_all_*` flag from
-  // the CLI's ApiKeyCreatePrefill struct defaults to `false` in Rust,
-  // so we can't trust it as "user explicitly unticked" — we have to
-  // infer from the CSV presence instead.
-  const allowAllServices =
-    prefill.allow_all_services ||
-    (!servicesCsv && !prefill.allow_auto_connected_services);
-  const allowAllNodes = !nodesCsv;
+  const allowAllServices = prefill.allow_all_services ?? false;
+  const allowAllNodes = prefill.allow_all_nodes ?? false;
 
   return {
     allowAllServices,
@@ -134,7 +129,7 @@ export function ApiKeyCreateConfirm({
   onSuccess,
   onCancel,
 }: ApiKeyCreateConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [name, setName] = useState(prefill.name ?? "");
   const [platform, setPlatform] = useState(prefill.platform ?? "");
   const [nameValid, setNameValid] = useState(false);
@@ -150,6 +145,11 @@ export function ApiKeyCreateConfirm({
   // (wizard.js:1938-2040) so org admins who run the command without
   // the flag can still switch ownership in the browser.
   const [ownerId, setOwnerId] = useState(prefill.org_id ?? "");
+  const [lifetime, setLifetime] = useState(() => {
+    if (prefill.never_expires && (prefill.expires_in_days ?? 0) > 0) return "conflict";
+    if (prefill.never_expires || prefill.expires_in_days === 0) return "never";
+    return prefill.expires_in_days == null ? "default" : String(prefill.expires_in_days);
+  });
   const orgs = useOrgs();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,14 +175,13 @@ export function ApiKeyCreateConfirm({
       if (!access.allowAllNodes) {
         body.allowed_node_ids = Array.from(access.selectedNodeIds);
       }
-      // Match the terminal path's convention (`cli/src/commands/api_key.rs`):
-      // a positive `expires_in_days` becomes an RFC-3339 `expires_at`; a
-      // value of `0` means "no expiry" and is omitted so the backend
-      // stores null (not an already-expired key).
-      if (prefill.expires_in_days != null && prefill.expires_in_days > 0) {
-        const expiry = new Date();
-        expiry.setDate(expiry.getDate() + prefill.expires_in_days);
-        body.expires_at = expiry.toISOString();
+      if (lifetime === "conflict") {
+        throw new Error("Choose either an expiry date or no expiry");
+      }
+      if (lifetime === "never") {
+        body.never_expires = true;
+      } else if (lifetime !== "default") {
+        body.expires_at = new Date(Date.now() + Number(lifetime) * 86400000).toISOString();
       }
 
       await reservePairingAction(pairingId);
@@ -193,6 +192,7 @@ export function ApiKeyCreateConfirm({
         kind: "api-key-create",
         api_key_id: res.id,
         full_key: res.full_key,
+        ...(res.expires_at !== undefined ? { expires_at: res.expires_at } : {}),
       });
     } catch (e) {
       setError(errorMessage(e));
@@ -204,112 +204,129 @@ export function ApiKeyCreateConfirm({
   const submitDisabled = loading || !nameValid || scopes.size === 0;
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2 border-b border-border/60 pb-6">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Create an API key")}</h2>
-        <p className="text-13 leading-relaxed text-muted-foreground">{t("Review the details your CLI sent and confirm to mint the key.")}</p>
-      </div>
+    <div className="flex flex-col gap-4">
+      <WizardHeading title={translateUi("Create an API key")}>{translateUi("Review the details your CLI sent and confirm to mint the key.")}</WizardHeading>
       <div className="flex flex-col gap-5">
-        <div className="grid gap-5 sm:grid-cols-2">
-          <NameInput
-            id="pair-api-key-name"
-            label={t("Name")}
-            schema={apiKeyNameSchema}
-            value={name}
-            onChange={setName}
-            onValidityChange={setNameValid}
-            placeholder={t("e.g. coding-agent")}
-            hint={t("A short label so you can find this key in `nyxid api-key list`.")}
-            autoFocus
-          />
-          <div className="flex min-w-0 flex-col gap-2">
-            <div className="flex h-4 items-center gap-1.5">
-              <Label htmlFor="pair-api-key-platform" className="text-12 text-foreground">{t("Platform")}</Label>
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label={t("About platform tags")}
-                      className="text-muted-foreground transition-colors duration-300 hover:text-foreground"
-                    >
-                      <Info className="h-3.5 w-3.5" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    side="right"
-                    align="start"
-                    sideOffset={8}
-                    className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
+        <div className="grid items-start gap-5 sm:grid-cols-2">
+        <NameInput
+          id="pair-api-key-name"
+          label={translateUi("Name")}
+          schema={apiKeyNameSchema}
+          value={name}
+          onChange={setName}
+          onValidityChange={setNameValid}
+          placeholder={translateUi("e.g. coding-agent")}
+          hint={translateUi("A short label so you can find this key in `nyxid api-key list`.")}
+          autoFocus
+        />
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-1.5">
+            <Label htmlFor="pair-api-key-platform">{translateUi("Platform")}</Label>
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={translateUi("About platform tags")}
+                    className="text-muted-foreground transition-colors duration-300 hover:text-foreground"
                   >
-                    <div className="flex flex-col gap-4">
-                      <p>
-                        <span className="font-medium text-foreground">{t("Platform")}</span>{" "}{t("tags the key with the AI agent that will use it.")}</p>
-                      <p className="text-muted-foreground">{t("It controls three things: audit attribution (logs show which agent made each proxy request), per- agent rate-limit buckets, and dashboard filtering on the API Keys page.")}</p>
-                      <p className="text-muted-foreground">{t("Values are a fixed allowlist —")}{" "}
-                        <code>claude-code</code>, <code>cursor</code>,{" "}
-                        <code>codex</code>, <code>openclaw</code>,{" "}
-                        <code>generic</code>{t(". Custom strings are rejected by the backend.")}</p>
-                      <p className="text-muted-foreground">{t("Leave as ")}<code>{t("— none —")}</code>{t(" if you don't want the tag.")}</p>
-                    </div>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-            <Select
-              value={platform === "" ? "__none__" : platform}
-              onValueChange={(v) => {
-                setPlatform(v === "__none__" ? "" : v);
-              }}
-            >
-              <SelectTrigger
-                id="pair-api-key-platform"
-                className="h-10 rounded-md border-border bg-background/30 text-13 focus-visible:border-primary"
-              >
-                <SelectValue placeholder={t("— none —")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">{t("— none —")}</SelectItem>
-                {PLATFORMS.map((p) => (
-                  <SelectItem key={p} value={p}>
-                    <span className="inline-flex items-center gap-2">
-                      <PlatformIcon platform={p} size="2xs" />
-                      <span>{p}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs leading-relaxed text-muted-foreground">{t("Tags the key for audit attribution + per-agent rate limits.")}</p>
+                    <Info className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent
+                  side="right"
+                  align="start"
+                  sideOffset={8}
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13"
+                >
+                  <div className="flex flex-col gap-4">
+                    <p>
+                      <span className="font-medium text-foreground">{translateUi("Platform")}</span>{" "}{translateUi("tags the key with the AI agent that will use it.")}</p>
+                    <p className="text-muted-foreground">{translateUi("It controls three things: audit attribution (logs show which agent made each proxy request), per- agent rate-limit buckets, and dashboard filtering on the API Keys page.")}</p>
+                    <p className="text-muted-foreground">{translateUi("Values are a fixed allowlist —")}{" "}
+                      <code>claude-code</code>, <code>cursor</code>,{" "}
+                      <code>codex</code>, <code>openclaw</code>,{" "}
+                      <code>generic</code>. Custom strings are rejected
+                      by the backend.
+                    </p>
+                    <p className="text-muted-foreground">{translateUi("Leave as ")}<code>— none —</code>{translateUi(" if you don't want the tag.")}</p>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           </div>
+          <Select
+            value={platform === "" ? "__none__" : platform}
+            onValueChange={(v) => {
+              setPlatform(v === "__none__" ? "" : v);
+            }}
+          >
+            <SelectTrigger id="pair-api-key-platform">
+              <SelectValue placeholder={translateUi("— none —")} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">{translateUi("— none —")}</SelectItem>
+              {PLATFORMS.map((p) => (
+                <SelectItem key={p} value={p}>
+                  <span className="inline-flex items-center gap-2">
+                    <PlatformIcon platform={p} size="2xs" />
+                    <span>{p}</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-13 text-muted-foreground">{translateUi("Tags the key for audit attribution + per-agent rate limits.")}</p>
+        </div>
         </div>
         {(orgs.data?.length ?? 0) > 0 ? (
-          <Field label={t("Owner")} htmlFor="pair-api-key-owner">
+          <Field label={translateUi("Owner")} htmlFor="pair-api-key-owner">
             <select
               id="pair-api-key-owner"
               value={ownerId}
               onChange={(e) => {
                 setOwnerId(e.target.value);
+                setLifetime("default");
                 setAccess((current) => ({
                   ...current,
                   selectedServiceIds: new Set(),
                   selectedNodeIds: new Set(),
                   allowAutoConnectedServices: false,
+                  allowAllServices: false,
+                  allowAllNodes: false,
                 }));
               }}
-              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
+              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-15 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
             >
-              <option value="">{t("Personal (your account)")}</option>
+              <option value="">{translateUi("Personal (your account)")}</option>
               {orgs.data
                 ?.filter((org) => org.your_role === "admin")
                 .map((org) => (
-                  <option key={org.id} value={org.id}>{t("Org · ")}{org.display_name ?? org.id}
+                  <option key={org.id} value={org.id}>{translateUi("Org · ")}{org.display_name ?? org.id}
                   </option>
                 ))}
             </select>
-            <p className="mt-1 text-xs text-muted-foreground">{t("Org-owned keys authenticate as the org; every admin of the selected org can rotate or delete them.")}</p>
+            <p className="mt-1 text-13 text-muted-foreground">{translateUi("Org-owned keys authenticate as the org; every admin of the selected org can rotate or delete them.")}</p>
           </Field>
         ) : null}
+        <Field label={translateUi("Key expiry")} htmlFor="pair-api-key-expiry">
+          <select id="pair-api-key-expiry" value={lifetime}
+            onChange={(event) => setLifetime(event.target.value)}
+            className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-15 text-foreground">
+            <option value="default">{translateUi("90 days (default)")}</option>
+            {["7", "30", "90", "365"].map((days) => <option key={days} value={days}>{days}{translateUi(" days")}</option>)}
+            {prefill.expires_in_days != null && prefill.expires_in_days > 0 &&
+              ![7, 30, 90, 365].includes(prefill.expires_in_days)
+              ? <option value={String(prefill.expires_in_days)}>{prefill.expires_in_days}{translateUi(" days")}</option> : null}
+            <option value="never">{translateUi("No expiry")}</option>
+            {lifetime === "conflict" ? <option value="conflict">{translateUi("Conflicting prefill; select a lifetime")}</option> : null}
+          </select>
+          <p className="text-14 text-muted-foreground">{translateUi("Key expiry: ")}{lifetime === "never" ? translateUi("No expiry (explicitly selected)")
+              : lifetime === "default" ? translateUi("90 days (default)")
+              : lifetime === "conflict" ? translateUi("Choose either an expiry date or no expiry")
+              : translateUi("{{value1}} days", { value1: lifetime })}.
+          </p>
+        </Field>
         <ScopePicker value={scopes} onChange={setScopes} />
         <AccessScopeCard
           value={access}
@@ -318,18 +335,10 @@ export function ApiKeyCreateConfirm({
         />
       </div>
       {error ? <ErrorLine message={error} /> : null}
-      <div className="flex flex-wrap items-center justify-end gap-3 border-t border-border/60 pt-5">
-        {onCancel ? (
-          <Button
-            variant="ghost"
-            onClick={onCancel}
-            className="mr-auto h-10 px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
-          >
-            {t("Cancel and return to terminal")}
-          </Button>
-        ) : null}
+      <div className="flex items-center justify-end gap-3 border-t border-border/60 pt-5">
+        {onCancel ? <Button variant="ghost" onClick={onCancel} disabled={loading}>{translateUi("Cancel")}</Button> : null}
         <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-          {loading ? t("Creating...") : t("Create Key")}
+          {loading ? translateUi("Creating...") : translateUi("Create Key")}
         </Button>
       </div>
     </div>
@@ -362,7 +371,7 @@ export function ApiKeyRotateConfirm({
   pairingId,
   onSuccess,
 }: ApiKeyRotateConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -391,13 +400,10 @@ export function ApiKeyRotateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate API key")}</h2>
-        <p className="text-12 text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" will issue a new key and immediately revoke the previous one.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Rotate API key")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" will issue a new key and immediately revoke the previous one.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading}>
-        {loading ? t("Rotating...") : t("Rotate key")}
+        {loading ? translateUi("Rotating...") : translateUi("Rotate key")}
       </Button>
     </div>
   );
@@ -438,7 +444,7 @@ export function NodeRegisterConfirm({
   pairingId,
   onSuccess,
 }: NodeRegisterConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [name, setName] = useState(prefill.name ?? "");
   const [nameValid, setNameValid] = useState(true); // empty is valid (we fall back to default)
   const [loading, setLoading] = useState(false);
@@ -471,25 +477,22 @@ export function NodeRegisterConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Generate node registration token")}</h2>
-        <p className="text-12 text-muted-foreground">{t("Use this token with ")}<code>nyxid node register</code>{t(" to connect a new node.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Generate node registration token")}>{translateUi("Use this token with ")}<code>nyxid node register</code>{translateUi(" to connect a new node.")}</WizardHeading>
       <NameInput
         id="pair-node-name"
-        label={t("Node name (optional)")}
+        label={translateUi("Node name (optional)")}
         schema={nodeNameSchema}
         value={name}
         onChange={setName}
         onValidityChange={setNameValid}
         placeholder={DEFAULT_NODE_NAME}
-        hint={t("Lowercase letters, digits, hyphens only (max 64). Leave blank for `{{name}}`.", { name: DEFAULT_NODE_NAME })}
+        hint={translateUi("Lowercase letters, digits, hyphens only (max 64). Leave blank for `{{value1}}`.", { value1: DEFAULT_NODE_NAME })}
         optional
         autoFocus
       />
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading || !nameValid}>
-        {loading ? t("Generating...") : t("Generate token")}
+        {loading ? translateUi("Generating...") : translateUi("Generate token")}
       </Button>
     </div>
   );
@@ -520,7 +523,7 @@ export function NodeRotateConfirm({
   pairingId,
   onSuccess,
 }: NodeRotateConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -549,13 +552,10 @@ export function NodeRotateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate node token")}</h2>
-        <p className="text-12 text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" issues a new auth token + signing secret and revokes the previous pair.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Rotate node token")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" issues a new auth token + signing secret and revokes the previous pair.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading}>
-        {loading ? t("Rotating...") : t("Rotate token")}
+        {loading ? translateUi("Rotating...") : translateUi("Rotate token")}
       </Button>
     </div>
   );
@@ -587,7 +587,7 @@ export function ServiceAccountCreateConfirm({
   pairingId,
   onSuccess,
 }: ServiceAccountCreateConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const form = useAppForm({
     resolver: zodResolver(createServiceAccountSchema),
     defaultValues: {
@@ -660,72 +660,69 @@ export function ServiceAccountCreateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Create a service account")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Service accounts authenticate via the OAuth client_credentials flow. The client_secret is shown once, on the next screen.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Create a service account")}>{translateUi("Service accounts authenticate via the OAuth client_credentials flow. The client_secret is shown once, on the next screen.")}</WizardHeading>
       <div className="flex flex-col gap-4">
-        <Field label={t("Name")} htmlFor="pair-sa-name">
+        <Field label={translateUi("Name")} htmlFor="pair-sa-name">
           <Input
             id="pair-sa-name"
             value={name}
             onChange={(e) => {
               form.setValue("name", e.target.value);
             }}
-            placeholder={t("e.g. ci-deploys")}
+            placeholder={translateUi("e.g. ci-deploys")}
             autoFocus
           />
         </Field>
-        <Field label={t("Allowed scopes")} htmlFor="pair-sa-scopes">
+        <Field label={translateUi("Allowed scopes")} htmlFor="pair-sa-scopes">
           <ServiceAccountScopePicker id="pair-sa-scopes" value={scopes}
             onChange={(value) => form.setValue("allowed_scopes", value)}
             ownerId={ownerId || currentUser?.id || ""} />
         </Field>
-        <Field label={t("Description (optional)")} htmlFor="pair-sa-desc">
+        <Field label={translateUi("Description (optional)")} htmlFor="pair-sa-desc">
           <Input
             id="pair-sa-desc"
             value={description}
             onChange={(e) => {
               form.setValue("description", e.target.value);
             }}
-            placeholder={t("What this account is for")}
+            placeholder={translateUi("What this account is for")}
           />
         </Field>
-        <Field label={t("Role IDs (optional, comma-separated)")} htmlFor="pair-sa-roles">
+        <Field label={translateUi("Role IDs (optional, comma-separated)")} htmlFor="pair-sa-roles">
           <Input
             id="pair-sa-roles"
             value={roleIds}
             onChange={(e) => {
               form.setValue("role_ids", e.target.value);
             }}
-            placeholder={"role-id-1,role-id-2"}
+            placeholder="role-id-1,role-id-2"
           />
         </Field>
         {(orgs.data?.length ?? 0) > 0 ? (
-          <Field label={t("Owner")} htmlFor="pair-sa-owner">
+          <Field label={translateUi("Owner")} htmlFor="pair-sa-owner">
             <select
               id="pair-sa-owner"
               value={ownerId}
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-15 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
-              <option value="">{t("Personal (your admin account)")}</option>
+              <option value="">{translateUi("Personal (your admin account)")}</option>
               {orgs.data?.map((org) => (
-                <option key={org.id} value={org.id}>{t("Org · ")}{org.display_name ?? org.id}
+                <option key={org.id} value={org.id}>{translateUi("Org · ")}{org.display_name ?? org.id}
                 </option>
               ))}
             </select>
           </Field>
         ) : null}
       </div>
-      {!currentUser && identity.isPending && <p role="status">{t("Loading your account…")}</p>}
-      {!currentUser && identity.isError && <div role="alert"><ErrorLine message={identity.error.message} /><Button variant="outline" onClick={() => void identity.refetch()}>{t("Retry account")}</Button></div>}
-      {Object.entries(form.formState.errors).map(([field, value]) => <ErrorLine key={field} message={value.message ?? t("Invalid value")} />)}
+      {!currentUser && identity.isPending && <p role="status">{translateUi("Loading your account…")}</p>}
+      {!currentUser && identity.isError && <div role="alert"><ErrorLine message={identity.error.message} /><Button variant="outline" onClick={() => void identity.refetch()}>{translateUi("Retry account")}</Button></div>}
+      {Object.entries(form.formState.errors).map(([field, value]) => <ErrorLine key={field} message={value.message ?? translateUi("Invalid value")} />)}
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? t("Creating...") : t("Create Service Account")}
+        {loading ? translateUi("Creating...") : translateUi("Create Service Account")}
       </Button>
     </div>
   );
@@ -756,7 +753,7 @@ export function ServiceAccountRotateSecretConfirm({
   pairingId,
   onSuccess,
 }: ServiceAccountRotateSecretConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -785,13 +782,10 @@ export function ServiceAccountRotateSecretConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate service account secret")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" immediately revokes all existing access tokens issued under this service account and mints a new client_secret.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Rotate service account secret")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" immediately revokes all existing access tokens issued under this service account and mints a new client_secret.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={loading}>
-        {loading ? t("Rotating...") : t("Rotate secret")}
+        {loading ? translateUi("Rotating...") : translateUi("Rotate secret")}
       </Button>
     </div>
   );
@@ -821,7 +815,7 @@ export function DeveloperAppCreateConfirm({
   pairingId,
   onSuccess,
 }: DeveloperAppCreateConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [name, setName] = useState(prefill.name ?? "");
   // Mutable list — each row gets a unique key so React doesn't
   // trample values when a row is removed mid-edit.
@@ -931,24 +925,21 @@ export function DeveloperAppCreateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Create a developer OAuth app")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Confidential client — the client_secret is shown once on the next screen. Use it to sign Sign-in-with-NyxID requests from your downstream product.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Create a developer OAuth app")}>{translateUi("Confidential client — the client_secret is shown once on the next screen. Use it to sign Sign-in-with-NyxID requests from your downstream product.")}</WizardHeading>
       <div className="flex flex-col gap-4">
-        <Field label={t("App name")} htmlFor="pair-app-name">
+        <Field label={translateUi("App name")} htmlFor="pair-app-name">
           <Input
             id="pair-app-name"
             value={name}
             onChange={(e) => {
               setName(e.target.value);
             }}
-            placeholder={t("e.g. Acme Web")}
+            placeholder={translateUi("e.g. Acme Web")}
             autoFocus
           />
         </Field>
         <div className="flex flex-col gap-1.5">
-          <Label>{t("Redirect URIs")}</Label>
+          <Label>{translateUi("Redirect URIs")}</Label>
           <div className="flex flex-col gap-2">
             {redirectUris.map((uri, idx) => (
               <div key={idx} className="flex items-center gap-2">
@@ -967,7 +958,7 @@ export function DeveloperAppCreateConfirm({
                   onClick={() => {
                     removeUri(idx);
                   }}
-                  aria-label={t("Remove redirect URI")}
+                  aria-label={translateUi("Remove redirect URI")}
                   disabled={redirectUris.length === 1 && uri.trim().length === 0}
                 >
                   <Trash2 className="h-4 w-4" />
@@ -981,34 +972,34 @@ export function DeveloperAppCreateConfirm({
               onClick={addUri}
               className="self-start"
             >
-              <Plus className="mr-1 h-3 w-3" />{t(" Add redirect URI")}</Button>
+              <Plus className="mr-1 h-3 w-3" />{translateUi(" Add redirect URI")}</Button>
           </div>
         </div>
-        <Field label={t("Allowed scopes")} htmlFor="pair-app-scopes">
+        <Field label={translateUi("Allowed scopes")} htmlFor="pair-app-scopes">
           <Input
             id="pair-app-scopes"
             value={allowedScopes}
             onChange={(e) => {
               setAllowedScopes(e.target.value);
             }}
-            placeholder={"openid profile email"}
+            placeholder="openid profile email"
           />
-          <p className="text-xs text-muted-foreground">{t("Space-separated.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Space-separated.")}</p>
         </Field>
-        <Field label={t("Delegation scopes (optional)")} htmlFor="pair-app-delegation">
+        <Field label={translateUi("Delegation scopes (optional)")} htmlFor="pair-app-delegation">
           <Input
             id="pair-app-delegation"
             value={delegationScopes}
             onChange={(e) => {
               setDelegationScopes(e.target.value);
             }}
-            placeholder={t("(blank disables token exchange)")}
+            placeholder={translateUi("(blank disables token exchange)")}
           />
         </Field>
         <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
           <div className="flex flex-col gap-0.5">
-            <Label htmlFor="pair-app-broker">{t("Broker capability")}</Label>
-            <p className="text-xs text-muted-foreground">{t("Allow this app to broker downstream credentials.")}</p>
+            <Label htmlFor="pair-app-broker">{translateUi("Broker capability")}</Label>
+            <p className="text-13 text-muted-foreground">{translateUi("Allow this app to broker downstream credentials.")}</p>
           </div>
           <Switch
             id="pair-app-broker"
@@ -1019,18 +1010,18 @@ export function DeveloperAppCreateConfirm({
           />
         </div>
         {(orgs.data?.length ?? 0) > 0 ? (
-          <Field label={t("Owner")} htmlFor="pair-app-owner">
+          <Field label={translateUi("Owner")} htmlFor="pair-app-owner">
             <select
               id="pair-app-owner"
               value={ownerId}
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-15 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
-              <option value="">{t("Personal")}</option>
+              <option value="">{translateUi("Personal")}</option>
               {orgs.data?.map((org) => (
-                <option key={org.id} value={org.id}>{t("Org · ")}{org.display_name ?? org.id}
+                <option key={org.id} value={org.id}>{translateUi("Org · ")}{org.display_name ?? org.id}
                 </option>
               ))}
             </select>
@@ -1039,7 +1030,7 @@ export function DeveloperAppCreateConfirm({
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? t("Creating...") : t("Create app")}
+        {loading ? translateUi("Creating...") : translateUi("Create app")}
       </Button>
     </div>
   );
@@ -1069,7 +1060,7 @@ export function DeveloperAppRotateSecretConfirm({
   pairingId,
   onSuccess,
 }: DeveloperAppRotateSecretConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1097,13 +1088,10 @@ export function DeveloperAppRotateSecretConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate developer app secret")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" mints a new client_secret. Update any deployments using the previous value immediately.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Rotate developer app secret")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" mints a new client_secret. Update any deployments using the previous value immediately.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={loading}>
-        {loading ? t("Rotating...") : t("Rotate secret")}
+        {loading ? translateUi("Rotating...") : translateUi("Rotate secret")}
       </Button>
     </div>
   );
@@ -1149,7 +1137,7 @@ export function MfaSetupConfirm({
   pairingId,
   onSuccess,
 }: MfaSetupConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   // Phase: "init" before reserve+setup, "ready" after secret is in
   // hand and we're waiting on the user's TOTP code, "confirming"
   // while /mfa/confirm is in flight.
@@ -1228,10 +1216,7 @@ export function MfaSetupConfirm({
   if (phase === "init") {
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1">
-          <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Setting up MFA")}</h2>
-          <p className="text-sm text-muted-foreground">{t("Generating a TOTP secret on the server…")}</p>
-        </div>
+        <WizardHeading title={translateUi("Setting up MFA")}>{translateUi("Generating a TOTP secret on the server…")}</WizardHeading>
         {error ? <ErrorLine message={error} /> : null}
       </div>
     );
@@ -1239,27 +1224,24 @@ export function MfaSetupConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Add MFA to your account")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Scan this QR with your authenticator app (1Password, Authy, Google Authenticator). Then enter the 6-digit code it shows to verify and finish enrollment.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Add MFA to your account")}>{translateUi("Scan this QR with your authenticator app (1Password, Authy, Google Authenticator). Then enter the 6-digit code it shows to verify and finish enrollment.")}</WizardHeading>
 
       {qrDataUrl ? (
         <div className="flex justify-center rounded-md border border-border bg-white p-4 dark:bg-muted/30">
           <img
             src={qrDataUrl}
-            alt={t("MFA enrollment QR code")}
+            alt={translateUi("MFA enrollment QR code")}
             className="h-60 w-60"
           />
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">{t("Couldn't render the QR code. Use the otpauth URL below instead.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Couldn't render the QR code. Use the otpauth URL below instead.")}</p>
       )}
 
       <div className="flex flex-col gap-1.5">
-        <Label>{t("Or enter the secret manually")}</Label>
+        <Label>{translateUi("Or enter the secret manually")}</Label>
         <div className="flex items-center gap-2">
-          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm">
+          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-14">
             {secretRevealed ? secret : "•".repeat(Math.max(secret?.length ?? 12, 12))}
           </code>
           <Button
@@ -1270,16 +1252,16 @@ export function MfaSetupConfirm({
               setSecretRevealed((r) => !r);
             }}
           >
-            {secretRevealed ? t("Hide") : t("Reveal")}
+            {secretRevealed ? translateUi("Hide") : translateUi("Reveal")}
           </Button>
         </div>
         {qrUrl ? (
-          <p className="break-all text-11 text-muted-foreground">{t("otpauth URL: ")}<code className="font-mono">{qrUrl}</code>
+          <p className="break-all text-13 text-muted-foreground">{translateUi("otpauth URL: ")}<code className="font-mono">{qrUrl}</code>
           </p>
         ) : null}
       </div>
 
-      <Field label={t("6-digit code from your authenticator")} htmlFor="pair-mfa-code">
+      <Field label={translateUi("6-digit code from your authenticator")} htmlFor="pair-mfa-code">
         <Input
           id="pair-mfa-code"
           value={code}
@@ -1299,7 +1281,7 @@ export function MfaSetupConfirm({
         onClick={() => void submitConfirm()}
         disabled={phase === "confirming" || code.trim().length === 0}
       >
-        {phase === "confirming" ? t("Verifying...") : t("Verify and enable MFA")}
+        {phase === "confirming" ? translateUi("Verifying...") : translateUi("Verify and enable MFA")}
       </Button>
     </div>
   );
@@ -1316,6 +1298,7 @@ function Field({
   readonly htmlFor: string;
   readonly children: React.ReactNode;
 }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={htmlFor}>{label}</Label>
@@ -1325,10 +1308,10 @@ function Field({
 }
 
 function ErrorLine({ message }: { readonly message: string }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
-      {t(message)}
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
+      {translateUi(message)}
     </p>
   );
 }

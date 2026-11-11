@@ -51,6 +51,8 @@ crate::exact_credit_model! {
         #[serde(default)]
         pub target_group_ids: Vec<String>,
         pub scope: BillingServiceScope,
+        #[serde(default)]
+        pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub reason: Option<String>,
         pub is_active: bool,

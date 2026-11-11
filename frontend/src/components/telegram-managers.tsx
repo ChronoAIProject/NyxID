@@ -1,0 +1,136 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import {
+  useTelegramManagers,
+  useConfigureTelegramManager,
+  useClearTelegramManager,
+} from "@/hooks/use-telegram-managers";
+import { telegramManagerInputSchema } from "@/schemas/telegram-managers";
+import {
+  useAppForm,
+  Form,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormControl,
+  FormMessage,
+} from "@/components/ui/form";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { DetailSection } from "@/components/shared/detail-section";
+import { ErrorBanner } from "@/components/shared/error-banner";
+
+export function TelegramManagers() {
+  useUiTranslation();
+  const managers = useTelegramManagers();
+  const save = useConfigureTelegramManager();
+  const clear = useClearTelegramManager();
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [removing, setRemoving] = useState<string>();
+  const form = useAppForm({
+    resolver: zodResolver(telegramManagerInputSchema),
+    defaultValues: { token: "" },
+  });
+  return (
+    <DetailSection title={translateUi("Telegram managers")}>
+      <div className="space-y-4 p-4 text-14">
+        <p>{translateUi("Connect additional BotFather managers here. Enable bot management in BotFather for each one. Each manager has its own webhook and can use any shared help library.")}</p>
+        {managers.isPending && <p role="status">{translateUi("Loading Telegram managers…")}</p>}
+        {managers.error && (
+          <ErrorBanner
+            message={translateUi("Could not load Telegram managers.")}
+            onRetry={() => void managers.refetch()}
+          />
+        )}
+        {managers.data?.map((m) => (
+          <div
+            key={m.manager_bot_id}
+            className="space-y-2 rounded-lg border border-border p-3"
+          >
+            <p>
+              @{m.username} · {m.ready ? translateUi("Connected") : translateUi("Needs configuration")}
+              {m.legacy_default
+                ? translateUi(" · Default (managed in Platform Credentials)")
+                : ""}
+            </p>
+            {!m.legacy_default &&
+              (removing === m.manager_bot_id ? (
+                <div className="space-y-2">
+                  <p>{translateUi("Clear @")}{m.username}{translateUi("'s saved manager configuration? Delete its channel connection and managed children, and finish or cancel its creation requests first. This does not delete the bot from Telegram.")}</p>
+                  <Button
+                    variant="destructive"
+                    isLoading={clear.isPending}
+                    onClick={() =>
+                      clear.mutate(m.manager_bot_id, {
+                        onSuccess: () => setRemoving(undefined),
+                      })
+                    }
+                  >{translateUi("Clear @")}{m.username}
+                  </Button>
+                  <Button
+                    disabled={clear.isPending}
+                    onClick={() => {
+                      clear.reset();
+                      setRemoving(undefined);
+                    }}
+                  >{translateUi("Keep manager")}</Button>
+                </div>
+              ) : (
+                <Button
+                  onClick={() => {
+                    clear.reset();
+                    setRemoving(m.manager_bot_id);
+                  }}
+                >{translateUi("Review clearing @")}{m.username}
+                </Button>
+              ))}
+          </div>
+        ))}
+        {clear.error && <ErrorBanner message={clear.error.message} />}
+        <Form {...form}>
+          <form
+            className="space-y-3"
+            onSubmit={form.handleSubmit(({ token }) => {
+              form.reset();
+              setError("");
+              setNotice("");
+              save.mutate(token, {
+                onSuccess: (m) =>
+                  setNotice(
+                    `@${m.username} is connected. Add it as a Telegram channel with its token, then convert that channel below and choose its help library.`,
+                  ),
+                onError: (failure) => setError(failure.message),
+                onSettled: () => save.reset(),
+              });
+            })}
+          >
+            <FormField
+              control={form.control}
+              name="token"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{translateUi("Additional manager bot token")}</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      type="password"
+                      autoComplete="off"
+                      data-sensitive
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <Button type="submit" variant="primary" isLoading={save.isPending}>{translateUi("Connect manager")}</Button>
+            {error && <ErrorBanner message={error} />}
+          </form>
+        </Form>
+        {notice && <p role="status">{notice}</p>}
+      </div>
+    </DetailSection>
+  );
+}

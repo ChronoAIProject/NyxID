@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 /**
  * Context-aware footer for the shared wizard shell.
  *
@@ -17,25 +18,30 @@ export interface WizardFooterProps {
   readonly localOrigin?: string
 }
 
+// A short window shrinks the footer's gap; below 680px it is hidden so the
+// shell's chrome stays within 20% of the window.
+const FOOTER_CLASS =
+  "mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-14 text-muted-foreground short:mt-4 very-short:hidden"
+
 export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   if (context === "local") {
     return (
-      <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground">
-        <span>{t("Served locally from")}{" "}
-          <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs">
+      <footer className={FOOTER_CLASS}>
+        <span>{translateUi("Served locally from")}{" "}
+          <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-14">
             {localOrigin ?? window.location.host}
           </code>
         </span>
-        <span>{t("· Nothing leaves your machine")}</span>
+        <span>{translateUi("· Nothing leaves your machine")}</span>
       </footer>
     )
   }
 
   return (
-    <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground">
-      <span>{t("Pairing with a remote CLI")}</span>
-      <span>{t("· Secrets never travel back through the pairing channel")}</span>
+    <footer className={FOOTER_CLASS}>
+      <span>{translateUi("Pairing with a remote CLI")}</span>
+      <span>{translateUi("· Secrets never travel back through the pairing channel")}</span>
     </footer>
   )
 }

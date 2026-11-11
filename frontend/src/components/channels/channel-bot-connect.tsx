@@ -62,7 +62,7 @@ function ManagedBotConnect({
     <>
       {renderFields({ disabled: false })}
       {descriptor.managedOnly && !available && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           {managed.isLoading
             ? t("Loading account connection...")
             : managed.isError
@@ -87,7 +87,7 @@ function ManagedBotConnect({
               onToggle={(event) => setAdvanced(event.currentTarget.open)}
               className="border-t border-border pt-4"
             >
-              <summary className="cursor-pointer text-xs text-muted-foreground">
+              <summary className="cursor-pointer text-13 text-muted-foreground">
                 {descriptor.advancedLabel}
               </summary>
             </details>

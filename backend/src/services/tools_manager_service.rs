@@ -143,6 +143,7 @@ pub async fn commit_manager_update(
             actor: audit_actor.clone(),
             first_party_human: true,
             admin_required: false,
+            catalog_base_aliases: Vec::new(),
             catalog_base_url: "http://localhost:3001".into(),
         },
         fields,

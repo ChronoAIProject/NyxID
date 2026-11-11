@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -66,7 +66,7 @@ const PER_PAGE = 20;
 // separate component, since it is only used in this page. Extract to
 // components/dashboard/create-service-account-dialog.tsx if the file grows.
 export function AdminServiceAccountsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -149,11 +149,11 @@ export function AdminServiceAccountsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Service Accounts")}
-        description={t("Manage machine-to-machine service accounts for programmatic access.")}
+        title={translateUi("Service Accounts")}
+        description={translateUi("Manage machine-to-machine service accounts for programmatic access.")}
         actions={
           canWrite ? (
-            <AddCtaButton label={t("Create Service Account")} onClick={openCreateDialog} />
+            <AddCtaButton label={translateUi("Create Service Account")} onClick={openCreateDialog} />
           ) : null
         }
       />
@@ -162,13 +162,13 @@ export function AdminServiceAccountsPage() {
         <div className="relative max-w-sm flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder={t("Search by name...")}
+            placeholder={translateUi("Search by name...")}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="pl-9"
           />
         </div>
-        <Button type="submit" variant="outline" size="sm">{t("Search")}</Button>
+        <Button type="submit" variant="outline" size="sm">{translateUi("Search")}</Button>
         {search && (
           <Button
             type="button"
@@ -179,7 +179,7 @@ export function AdminServiceAccountsPage() {
               setSearch("");
               setPage(1);
             }}
-          >{t("Clear")}</Button>
+          >{translateUi("Clear")}</Button>
         )}
       </form>
 
@@ -193,19 +193,19 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("Failed to load service accounts")}</p>
-            <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("Failed to load service accounts")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
           </div>
         </div>
       ) : accounts.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No service accounts found")}</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">{translateUi("No service accounts found")}</p>
+            <p className="text-13 text-muted-foreground">
               {search
-                ? t("No service accounts match your search.")
-                : t("There are no service accounts to display.")}
+                ? translateUi("No service accounts match your search.")
+                : translateUi("There are no service accounts to display.")}
             </p>
           </div>
         </div>
@@ -237,17 +237,17 @@ export function AdminServiceAccountsPage() {
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{sa.name}</p>
-                    <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                    <p className="type-row-title truncate">{sa.name}</p>
+                    <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                       {sa.client_id}
                     </p>
                   </div>
                   <Badge variant={sa.is_active ? "success" : "destructive"}>
-                    {sa.is_active ? t("Active") : t("Inactive")}
+                    {sa.is_active ? translateUi("Active") : translateUi("Inactive")}
                   </Badge>
                 </div>
-                <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
-                  <span>{t("Created ")}{formatDate(sa.created_at)}</span>
+                <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
+                  <span>{translateUi("Created ")}{formatDate(sa.created_at)}</span>
                 </div>
               </div>
             ))}
@@ -258,12 +258,12 @@ export function AdminServiceAccountsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Name")}</TableHead>
-                  <TableHead>{t("Client ID")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{t("Scopes")}</TableHead>
-                  <TableHead>{t("Created")}</TableHead>
-                  <TableHead>{t("Last Used")}</TableHead>
+                  <TableHead>{translateUi("Name")}</TableHead>
+                  <TableHead>{translateUi("Client ID")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Scopes")}</TableHead>
+                  <TableHead>{translateUi("Created")}</TableHead>
+                  <TableHead>{translateUi("Last Used")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -289,17 +289,17 @@ export function AdminServiceAccountsPage() {
                       }
                     }}
                   >
-                    <TableCell className="font-medium">{sa.name}</TableCell>
-                    <TableCell className="font-mono text-xs">
+                    <TableCell className="font-normal">{sa.name}</TableCell>
+                    <TableCell className="font-mono text-14">
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
                       <Badge variant={sa.is_active ? "success" : "destructive"}>
-                        {sa.is_active ? t("Active") : t("Inactive")}
+                        {sa.is_active ? translateUi("Active") : translateUi("Inactive")}
                       </Badge>
                     </TableCell>
                     <TableCell
-                      className="max-w-[200px] truncate text-xs"
+                      className="max-w-[200px] truncate text-14"
                       title={sa.allowed_scopes}
                     >
                       {sa.allowed_scopes}
@@ -317,26 +317,26 @@ export function AdminServiceAccountsPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-11 text-text-tertiary">{t("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
-              {String(Math.min(page * PER_PAGE, total))}{t(" of ")}{String(total)}{" "}{t("service accounts")}</p>
+            <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
+              {String(Math.min(page * PER_PAGE, total))}{translateUi(" of ")}{String(total)}{" "}{translateUi("service accounts")}</p>
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
                 size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                aria-label={t("Previous page")}
+                aria-label={translateUi("Previous page")}
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-11 text-text-tertiary">{t("Page ")}{String(page)}{t(" of ")}{String(totalPages)}
+              <span className="text-13 text-text-tertiary">{translateUi("Page ")}{String(page)}{translateUi(" of ")}{String(totalPages)}
               </span>
               <Button
                 variant="outline"
                 size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
-                aria-label={t("Next page")}
+                aria-label={translateUi("Next page")}
               >
                 <ChevronRight className="h-3 w-3" />
               </Button>
@@ -349,8 +349,8 @@ export function AdminServiceAccountsPage() {
       <Dialog open={createOpen} onOpenChange={closeCreateDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Create Service Account")}</DialogTitle>
-            <DialogDescription>{t("Create a new machine-to-machine service account for programmatic API access.")}</DialogDescription>
+            <DialogTitle>{translateUi("Create Service Account")}</DialogTitle>
+            <DialogDescription>{translateUi("Create a new machine-to-machine service account for programmatic API access.")}</DialogDescription>
           </DialogHeader>
 
           {createdResult ? (
@@ -358,15 +358,15 @@ export function AdminServiceAccountsPage() {
               <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-sm text-amber-700 dark:text-amber-400">{t("Save these credentials now. The client secret cannot be retrieved later.")}</p>
+                  <p className="text-14 text-amber-700 dark:text-amber-400">{translateUi("Save these credentials now. The client secret cannot be retrieved later.")}</p>
                 </div>
               </div>
 
               <div className="space-y-3">
                 <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Client ID")}</p>
+                  <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Client ID")}</p>
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono">
+                    <code className="flex-1 rounded bg-muted px-2 py-1 text-14 font-mono">
                       {createdResult.client_id}
                     </code>
                     <Button
@@ -376,7 +376,7 @@ export function AdminServiceAccountsPage() {
                       onClick={() =>
                         void copyToClipboard(createdResult.client_id).then(
                           () => toast.success(translateUi("Client ID copied")),
-                          () => toast.error(translateUi("Failed to copy")),
+                          () => toast.error(translateErrorMessage("Failed to copy")),
                         )
                       }
                     >
@@ -386,9 +386,9 @@ export function AdminServiceAccountsPage() {
                 </div>
 
                 <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Client Secret")}</p>
+                  <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Client Secret")}</p>
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono break-all">
+                    <code className="flex-1 rounded bg-muted px-2 py-1 text-14 font-mono break-all">
                       {createdResult.client_secret}
                     </code>
                     <Button
@@ -398,7 +398,7 @@ export function AdminServiceAccountsPage() {
                       onClick={() =>
                         void copyToClipboard(createdResult.client_secret).then(
                           () => toast.success(translateUi("Client secret copied")),
-                          () => toast.error(translateUi("Failed to copy")),
+                          () => toast.error(translateErrorMessage("Failed to copy")),
                         )
                       }
                     >
@@ -409,7 +409,7 @@ export function AdminServiceAccountsPage() {
               </div>
 
               <DialogFooter>
-                <Button onClick={closeCreateDialog}>{t("Done")}</Button>
+                <Button onClick={closeCreateDialog}>{translateUi("Done")}</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -425,9 +425,9 @@ export function AdminServiceAccountsPage() {
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Name")}</FormLabel>
+                      <FormLabel>{translateUi("Name")}</FormLabel>
                       <FormControl>
-                        <Input placeholder={t("e.g. CI/CD Pipeline")} {...field} />
+                        <Input placeholder={translateUi("e.g. CI/CD Pipeline")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -438,9 +438,9 @@ export function AdminServiceAccountsPage() {
                   name="description"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Description")}</FormLabel>
+                      <FormLabel>{translateUi("Description")}</FormLabel>
                       <FormControl>
-                        <Input placeholder={t("Optional description")} {...field} />
+                        <Input placeholder={translateUi("Optional description")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -451,7 +451,7 @@ export function AdminServiceAccountsPage() {
                   name="allowed_scopes"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Allowed Scopes")}</FormLabel>
+                      <FormLabel>{translateUi("Allowed Scopes")}</FormLabel>
                       <FormControl>
                         <ServiceAccountScopePicker ownerId={currentUser?.id ?? ""} {...field} />
                       </FormControl>
@@ -464,9 +464,9 @@ export function AdminServiceAccountsPage() {
                   name="role_ids"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Role IDs (comma-separated, optional)")}</FormLabel>
+                      <FormLabel>{translateUi("Role IDs (comma-separated, optional)")}</FormLabel>
                       <FormControl>
-                        <Input placeholder={t("Optional")} {...field} />
+                        <Input placeholder={translateUi("Optional")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -477,11 +477,11 @@ export function AdminServiceAccountsPage() {
                   name="rate_limit_override"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Rate Limit Override (optional)")}</FormLabel>
+                      <FormLabel>{translateUi("Rate Limit Override (optional)")}</FormLabel>
                       <FormControl>
                         <Input
                           type="number"
-                          placeholder={t("Requests per second")}
+                          placeholder={translateUi("Requests per second")}
                           {...field}
                         />
                       </FormControl>
@@ -494,8 +494,8 @@ export function AdminServiceAccountsPage() {
                     type="button"
                     variant="outline"
                     onClick={closeCreateDialog}
-                  >{t("Cancel")}</Button>
-                  <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{t("Create")}</Button>
+                  >{translateUi("Cancel")}</Button>
+                  <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{translateUi("Create")}</Button>
                 </DialogFooter>
               </form>
             </Form>

@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { VoiceInferenceFields } from "./voice-inference-fields";
 import { BillingLaneFields } from "./billing-lane-fields";
 import { EffectiveBillingSummary } from "@/components/admin-billing/effective-billing";
@@ -37,7 +38,7 @@ export function PlatformServiceFields({
   readonly service?: DownstreamService;
   readonly credentialSupported?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const form = useFormContext<SharedServiceFormData>();
   // Register the composite value so removing the last rule still marks it dirty.
   const { field: policyField } = useController({
@@ -62,8 +63,8 @@ export function PlatformServiceFields({
     <div className="space-y-5">
       {service?.id && <EffectiveBillingSummary serviceId={service.id} />}
       <section className="space-y-3">
-        <h3 className="text-13 font-semibold">{t("Inference")}</h3>
-        <Label htmlFor="inference-protocol">{t("Wire protocol")}</Label>
+        <h3 className="type-card-title">{translateUi("Inference")}</h3>
+        <Label htmlFor="inference-protocol">{translateUi("Wire protocol")}</Label>
         <Select
           value={inference?.wire_protocol ?? "none"}
           onValueChange={(value) =>
@@ -93,7 +94,7 @@ export function PlatformServiceFields({
               "openai_completions",
             ].map((value) => (
               <SelectItem key={value} value={value}>
-                {value === "none" ? t("Not an inference service") : value}
+                {value === "none" ? translateUi("Not an inference service") : value}
               </SelectItem>
             ))}
           </SelectContent>
@@ -102,12 +103,12 @@ export function PlatformServiceFields({
           (["model_list", "realtime"] as const).map((field) => (
             <div
               key={field}
-              className="flex items-center justify-between text-xs"
+              className="flex items-center justify-between text-13"
             >
               <Label htmlFor={`inference-${field}`}>
                 {field === "model_list"
-                  ? t("Model list at /models")
-                  : t("Realtime WebSocket at /realtime")}
+                  ? translateUi("Model list at /models")
+                  : translateUi("Realtime WebSocket at /realtime")}
               </Label>
               <Switch
                 id={`inference-${field}`}
@@ -146,12 +147,12 @@ export function PlatformServiceFields({
       </section>
       {credentialSupported && (
         <section className="space-y-3">
-          <h3 className="text-13 font-semibold">{t("Platform key")}</h3>
+          <h3 className="type-card-title">{translateUi("Platform key")}</h3>
           {!form.watch("platform_key") && service?.legacy_public_master && (
-            <p className="text-xs text-muted-foreground">{t("Enabled, public (implicit)")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Enabled, public (implicit)")}</p>
           )}
-          <p className="text-xs text-muted-foreground">{t("Offer a server-held credential to authorized users. Organization grants include members who can proxy services.")}</p>
-          <p className="text-xs text-muted-foreground">{t("Shared credential: ")}{serviceCredentialStatus(service)}
+          <p className="text-13 text-muted-foreground">{translateUi("Offer a server-held credential to authorized users. Organization grants include members who can proxy services.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Shared credential: ")}{serviceCredentialStatus(service)}
           </p>
           <FormField
             control={form.control}
@@ -160,8 +161,8 @@ export function PlatformServiceFields({
               <FormItem>
                 <FormLabel>
                   {service
-                    ? t("Replace platform credential")
-                    : t("Shared platform credential")}
+                    ? translateUi("Replace platform credential")
+                    : translateUi("Shared platform credential")}
                 </FormLabel>
                 <FormControl>
                   <Input
@@ -171,8 +172,8 @@ export function PlatformServiceFields({
                     autoComplete="new-password"
                     placeholder={
                       service
-                        ? t("Leave blank to keep the current credential")
-                        : t("Enter a shared credential, or leave blank to configure later")
+                        ? translateUi("Leave blank to keep the current credential")
+                        : translateUi("Enter a shared credential, or leave blank to configure later")
                     }
                   />
                 </FormControl>
@@ -181,14 +182,14 @@ export function PlatformServiceFields({
             )}
           />
           <div className="flex items-center justify-between">
-            <Label htmlFor="platform-key-enabled">{t("Enable platform key")}</Label>
+            <Label htmlFor="platform-key-enabled">{translateUi("Enable platform key")}</Label>
             <Switch
               id="platform-key-enabled"
               checked={platform.enabled}
               onCheckedChange={(enabled) => setPlatform({ enabled })}
             />
           </div>
-          <Label htmlFor="platform-key-audience">{t("Audience")}</Label>
+          <Label htmlFor="platform-key-audience">{translateUi("Audience")}</Label>
           <Select
             value={platform.audience}
             onValueChange={(audience) =>
@@ -201,8 +202,8 @@ export function PlatformServiceFields({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="public">{t("All authenticated users")}</SelectItem>
-              <SelectItem value="restricted">{t("Selected people and organizations")}</SelectItem>
+              <SelectItem value="public">{translateUi("All authenticated users")}</SelectItem>
+              <SelectItem value="restricted">{translateUi("Selected people and organizations")}</SelectItem>
             </SelectContent>
           </Select>
           {platform.audience === "restricted" && (
@@ -216,9 +217,9 @@ export function PlatformServiceFields({
         </section>
       )}
       <section className="space-y-3">
-        <h3 className="text-13 font-semibold">{t("Endpoint policy")}</h3>
-        <p className="text-xs text-muted-foreground">{t("These HTTP method and path rules apply to every binding of this service, including own keys, platform keys, and agents. An empty restricted list denies every operation.")}</p>
-        <Label htmlFor="endpoint-policy-enabled">{t("Restrict allowed endpoints")}</Label>
+        <h3 className="type-card-title">{translateUi("Endpoint policy")}</h3>
+        <p className="text-13 text-muted-foreground">{translateUi("These HTTP method and path rules apply to every binding of this service, including own keys, platform keys, and agents. An empty restricted list denies every operation.")}</p>
+        <Label htmlFor="endpoint-policy-enabled">{translateUi("Restrict allowed endpoints")}</Label>
         <Switch
           id="endpoint-policy-enabled"
           checked={policy != null}
@@ -245,7 +246,7 @@ export function PlatformServiceFields({
                   }
                 >
                   <SelectTrigger
-                    aria-label={t("Rule {{value}} method", { value: index + 1 })}
+                    aria-label={translateUi("Rule {{value1}} method", { value1: index + 1 })}
                     className="w-28"
                   >
                     <SelectValue />
@@ -274,7 +275,7 @@ export function PlatformServiceFields({
                       <FormControl>
                         <Input
                           {...field}
-                          aria-label={t("Rule {{value}} path", { value: index + 1 })}
+                          aria-label={translateUi("Rule {{value1}} path", { value1: index + 1 })}
                           placeholder="/messages/{id}"
                         />
                       </FormControl>
@@ -292,7 +293,7 @@ export function PlatformServiceFields({
                       { shouldDirty: true, shouldValidate: true },
                     )
                   }
-                >{t("Remove")}</Button>
+                >{translateUi("Remove")}</Button>
               </div>
             ))}
             <Button
@@ -311,7 +312,7 @@ export function PlatformServiceFields({
                   { shouldDirty: true, shouldValidate: true },
                 )
               }
-            >{t("Add endpoint rule")}</Button>
+            >{translateUi("Add endpoint rule")}</Button>
           </>
         )}
       </section>

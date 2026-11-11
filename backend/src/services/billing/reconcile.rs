@@ -60,6 +60,28 @@ pub enum LagoPushDecision {
 }
 
 impl BillingReconciler {
+    #[cfg(test)]
+    pub(crate) async fn compare_usage_for_test(&self) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        self.compare_finalized_usage(
+            self.lago.as_ref().expect("test Lago client").as_ref(),
+            &mut stats,
+        )
+        .await?;
+        Ok(stats)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn push_usage_for_test(&self) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        self.push_unacked(
+            self.lago.as_ref().expect("test Lago client").as_ref(),
+            &mut stats,
+        )
+        .await?;
+        Ok(stats)
+    }
+
     pub fn new(
         db: mongodb::Database,
         lago: Option<Arc<dyn LagoApi>>,
@@ -72,6 +94,20 @@ impl BillingReconciler {
         if !super::exact_migration::ready(&self.db).await? {
             return Ok(ReconcileStats::default());
         }
+        // Benefit-only estimates can spill into wallet funding at settlement.
+        // Refresh before recovery: pending component/voice recovery may return
+        // early on a missing profile and must not starve its own refresh.
+        if self.config.billing_enabled
+            && let Some(lago) = &self.lago
+        {
+            super::taxes::reconcile(
+                &self.db,
+                lago.as_ref(),
+                self.config.billing_rate_cache_ttl_secs,
+            )
+            .await?;
+        }
+        crate::services::platform_model_execution::recover(&self.db).await?;
         let mut stats = ReconcileStats::default();
         match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
             Ok(count) => stats.abandoned += count,
@@ -125,9 +161,41 @@ impl BillingReconciler {
             &self.config.lago_plan_code,
         )
         .await?;
+        match super::model_tariffs::retry_pending(
+            &self.db,
+            lago.as_ref(),
+            &self.config.lago_plan_code,
+        )
+        .await
+        {
+            Ok(n) => stats.service_price_syncs += n,
+            Err(error) => tracing::warn!(
+                error_code = error.error_code(),
+                "Model tariff synchronization will retry"
+            ),
+        }
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
+        // CMA configuration work must not prevent ordinary usage emission or
+        // tax/balance refresh. Pending/failed cards remain durable retry work;
+        // an ambiguous timeout retains the sync lease until its expiry.
+        match runtime_billing.retry_sandbox_rate_cards().await {
+            Ok(synced) => stats.service_price_syncs += synced,
+            Err(error) => tracing::warn!(
+                plan_code = %self.config.lago_plan_code,
+                error_code = error.error_code(),
+                "CMA rate synchronization failed; retaining retry work and continuing billing reconciliation"
+            ),
+        }
         stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
+        // Price synchronization invalidates affected profiles. Refresh those
+        // within this pass; admissions also refresh individually on demand.
+        super::taxes::reconcile(
+            &self.db,
+            lago.as_ref(),
+            self.config.billing_rate_cache_ttl_secs,
+        )
+        .await?;
         self.push_unacked(lago.as_ref(), &mut stats).await?;
         self.compare_finalized_usage(lago.as_ref(), &mut stats)
             .await?;
@@ -317,17 +385,18 @@ impl BillingReconciler {
             // Runtime contracts keep their accepted rate even after retirement.
             // Emit to the subscription verified on that plan, without a second
             // mutable wallet lookup or the ordinary service cache.
-            let verified_subscription = match super::machine_runtime::verify_usage_provider_rate(
-                &self.db, lago, &row,
-            )
-            .await
-            {
+            let binding = if super::sandbox_runtime::METRICS.contains(&row.metric) {
+                super::sandbox_runtime::verify_usage_provider_rate(&self.db, lago, &row).await
+            } else {
+                super::machine_runtime::verify_usage_provider_rate(&self.db, lago, &row).await
+            };
+            let verified_subscription = match binding {
                 Ok(binding) => binding,
                 Err(_) => {
                     bump_attempt(
                         &self.db,
                         &row.id,
-                        "Machine runtime billing provider binding verification will retry",
+                        "Runtime billing provider binding verification will retry",
                     )
                     .await?;
                     stats.retried += 1;
@@ -639,6 +708,10 @@ fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[path = "reconcile_cma_tests.rs"]
+mod cma_tests;
+
+#[cfg(test)]
 mod tests {
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
@@ -661,9 +734,10 @@ mod tests {
     /// `if !self.config.billing_enabled { return }` gate in `run_once`).
     /// Tests that exercise the Lago push/ack/retry/dead-letter path must run
     /// with billing enabled so the reconciler reaches `push_unacked`.
-    fn billing_enabled_config() -> crate::config::AppConfig {
+    pub(super) fn billing_enabled_config() -> crate::config::AppConfig {
         crate::config::AppConfig {
             billing_enabled: true,
+            billing_allocations_enabled: false,
             ..test_app_config()
         }
     }
@@ -725,9 +799,11 @@ mod tests {
         }
     }
 
-    fn finalized_row(transaction_id: &str) -> UsageMeterRow {
+    pub(super) fn finalized_row(transaction_id: &str) -> UsageMeterRow {
         let now = Utc::now() - Duration::seconds(120);
         UsageMeterRow {
+            model_tariff: None,
+            org_channel_guest: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: transaction_id.to_string(),
@@ -738,6 +814,7 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: "actor-1".to_string(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some("service-1".to_string()),
             service_slug: Some("service-one".to_string()),
@@ -746,6 +823,7 @@ mod tests {
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,
@@ -1295,7 +1373,7 @@ mod tests {
         assert!(saved.expires_at.is_none());
         assert_eq!(
             saved.last_error.as_deref(),
-            Some("Machine runtime billing provider binding verification will retry")
+            Some("Runtime billing provider binding verification will retry")
         );
         assert!(
             rows.find_one(doc! { "_id": &service.id })

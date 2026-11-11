@@ -86,6 +86,7 @@ mod tests {
             status: NodeStatus::Online,
             auth_token_hash: "hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: String::new(),
             last_heartbeat_at: None,
             connected_at: None,

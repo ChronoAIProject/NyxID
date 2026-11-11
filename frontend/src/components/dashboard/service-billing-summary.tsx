@@ -136,7 +136,7 @@ export function ServiceBillingSummary({
             type="button"
             aria-label={t("Show billing for {{serviceName}}", { serviceName: serviceName })}
             aria-description={notBillable ? "Not billable by NyxID" : undefined}
-            className="flex min-h-6 w-fit min-w-0 max-w-full flex-col justify-center rounded-sm text-left text-xs leading-snug focus-visible:outline-2 focus-visible:outline-ring"
+            className="flex min-h-6 w-fit min-w-0 max-w-full flex-col justify-center rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => {
               const first =
                 rows.find((row) => row.category === "platform") ?? rows[0];

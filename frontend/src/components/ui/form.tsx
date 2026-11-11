@@ -1,4 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import type * as LabelPrimitive from "@radix-ui/react-label";
 import { Slot } from "@radix-ui/react-slot";
@@ -85,7 +87,7 @@ function useAppForm<
  * Must be rendered inside `<Form {...form}>`.
  */
 function FormSubmitErrors({ className }: { readonly className?: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   // useFormState subscribes independently of the parent page's formState
   // reads, so this re-renders even if the host never touches errors.
   const { submitCount, errors } = useFormState();
@@ -94,9 +96,7 @@ function FormSubmitErrors({ className }: { readonly className?: string }) {
   const first = firstNestedErrorMessage(Object.fromEntries(fieldErrors));
   const count = fieldErrors.length;
   return (
-    <p role="alert" className={cn("text-xs text-destructive", className)}>
-      {t("Cannot save — {{count}} fields need attention.", { count })}
-      {first && <> {t(first)}</>}
+    <p role="alert" className={cn(`${TEXT_STYLES.validationError} text-destructive unthemed:text-xs`, className)}>{translateUi("Cannot save — ")}{count} {count === 1 ? translateUi("field needs") : translateUi("fields need")}{" "}{translateUi("attention")}{first ? `: ${translateUi(first)}` : "."}
     </p>
   );
 }
@@ -118,6 +118,7 @@ const FormField = <
 >({
   ...props
 }: ControllerProps<TFieldValues, TName>) => {
+  useUiTranslation();
   const contextValue = React.useMemo(
     () => ({ name: props.name }),
     [props.name],
@@ -220,7 +221,7 @@ const FormDescription = React.forwardRef<
     <p
       ref={ref}
       id={formDescriptionId}
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn(`${TEXT_STYLES.secondary} text-muted-foreground unthemed:text-sm`, className)}
       {...props}
     />
   );
@@ -245,7 +246,7 @@ const FormMessage = React.forwardRef<
     <p
       ref={ref}
       id={formMessageId}
-      className={cn("text-sm font-medium text-destructive", className)}
+      className={cn(`${TEXT_STYLES.validationError} text-destructive unthemed:text-sm`, className)}
       {...props}
     >
       {body}

@@ -42,6 +42,8 @@ pub struct McpSessionRecord {
     #[serde(default)]
     pub session_fallback_allowed: bool,
     #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
     pub notification_sequence: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -65,8 +67,10 @@ pub struct McpSessionSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpSessionAccess {
     pub user_id: String,
+    pub created_at: DateTime<Utc>,
     pub proxy_authorized: bool,
     pub session_fallback_allowed: bool,
+    pub parent_session_id: Option<String>,
 }
 
 pub struct McpSession {
@@ -77,6 +81,7 @@ pub struct McpSession {
     pub activated_service_ids: HashSet<String>,
     pub proxy_authorized: bool,
     pub session_fallback_allowed: bool,
+    pub parent_session_id: Option<String>,
     pub notification_sequence: i64,
     pub notification_tx: Option<mpsc::Sender<serde_json::Value>>,
 }
@@ -168,11 +173,11 @@ impl McpSessionStore {
             .collect();
         let active_auth_sessions: Vec<mongodb::bson::Document> = db
             .collection::<mongodb::bson::Document>("sessions")
-            .find(doc! {
+            .find(crate::services::session_authority::authenticated(doc! {
                 "user_id": { "$in": user_ids.iter().copied().collect::<Vec<_>>() },
                 "revoked": false,
                 "expires_at": { "$gt": now },
-            })
+            }))
             .await?
             .try_collect()
             .await?;
@@ -221,8 +226,24 @@ impl McpSessionStore {
         proxy_authorized: bool,
         session_fallback_allowed: bool,
     ) -> Result<Option<String>, mongodb::error::Error> {
+        self.create_with_parent_session(user_id, proxy_authorized, session_fallback_allowed, None)
+            .await
+    }
+
+    pub async fn create_with_parent_session(
+        &self,
+        user_id: &str,
+        proxy_authorized: bool,
+        session_fallback_allowed: bool,
+        parent_session_id: Option<&str>,
+    ) -> Result<Option<String>, mongodb::error::Error> {
         if self.db.is_none() {
-            return Ok(self.create_in_memory(user_id, proxy_authorized, session_fallback_allowed));
+            return Ok(self.create_in_memory(
+                user_id,
+                proxy_authorized,
+                session_fallback_allowed,
+                parent_session_id,
+            ));
         }
 
         // Admission can conflict with another replica before reclamation starts.
@@ -230,7 +251,12 @@ impl McpSessionStore {
         // commit result must not create a second session.
         for attempt in 0..SESSION_CREATE_ATTEMPTS {
             match self
-                .create_durable_session(user_id, proxy_authorized, session_fallback_allowed)
+                .create_durable_session(
+                    user_id,
+                    proxy_authorized,
+                    session_fallback_allowed,
+                    parent_session_id,
+                )
                 .await
             {
                 Err(error)
@@ -251,6 +277,7 @@ impl McpSessionStore {
         user_id: &str,
         proxy_authorized: bool,
         session_fallback_allowed: bool,
+        parent_session_id: Option<&str>,
     ) -> Result<Option<String>, mongodb::error::Error> {
         let db = self.db.as_ref().expect("durable session store");
 
@@ -266,6 +293,7 @@ impl McpSessionStore {
                 activated_service_ids: Vec::new(),
                 proxy_authorized,
                 session_fallback_allowed,
+                parent_session_id: parent_session_id.map(str::to_owned),
                 notification_sequence: 0,
                 created_at: now,
                 last_active_at: now,
@@ -322,8 +350,13 @@ impl McpSessionStore {
             self.hydrate(record);
             return Ok(Some(session_id));
         }
-        self.replace_oldest_idle_session(user_id, proxy_authorized, session_fallback_allowed)
-            .await
+        self.replace_oldest_idle_session(
+            user_id,
+            proxy_authorized,
+            session_fallback_allowed,
+            parent_session_id,
+        )
+        .await
     }
 
     /// At capacity, replace one idle session atomically with its admission slot.
@@ -334,6 +367,7 @@ impl McpSessionStore {
         user_id: &str,
         proxy_authorized: bool,
         session_fallback_allowed: bool,
+        parent_session_id: Option<&str>,
     ) -> Result<Option<String>, mongodb::error::Error> {
         let db = self.db.as_ref().expect("durable session store");
         let now = Utc::now();
@@ -378,6 +412,7 @@ impl McpSessionStore {
             activated_service_ids: Vec::new(),
             proxy_authorized,
             session_fallback_allowed,
+            parent_session_id: parent_session_id.map(str::to_owned),
             notification_sequence: 0,
             created_at: now,
             last_active_at: now,
@@ -406,8 +441,10 @@ impl McpSessionStore {
             .await?
             .map(|record| McpSessionAccess {
                 user_id: record.user_id,
+                created_at: record.created_at,
                 proxy_authorized: record.proxy_authorized,
                 session_fallback_allowed: record.session_fallback_allowed,
+                parent_session_id: record.parent_session_id.clone(),
             }))
     }
 
@@ -977,6 +1014,7 @@ impl McpSessionStore {
         user_id: &str,
         proxy_authorized: bool,
         session_fallback_allowed: bool,
+        parent_session_id: Option<&str>,
     ) -> Option<String> {
         let mut sessions = self
             .sessions
@@ -1013,6 +1051,7 @@ impl McpSessionStore {
                 activated_service_ids: HashSet::new(),
                 proxy_authorized,
                 session_fallback_allowed,
+                parent_session_id: parent_session_id.map(str::to_owned),
                 notification_sequence: 0,
                 notification_tx: Some(tx),
             },
@@ -1038,6 +1077,7 @@ impl McpSessionStore {
             session.activated_service_ids = record.activated_service_ids.into_iter().collect();
             session.proxy_authorized = record.proxy_authorized;
             session.session_fallback_allowed = record.session_fallback_allowed;
+            session.parent_session_id = record.parent_session_id.clone();
             session.notification_sequence = record.notification_sequence;
             return;
         }
@@ -1053,6 +1093,7 @@ impl McpSessionStore {
                 activated_service_ids: record.activated_service_ids.into_iter().collect(),
                 proxy_authorized: record.proxy_authorized,
                 session_fallback_allowed: record.session_fallback_allowed,
+                parent_session_id: record.parent_session_id.clone(),
                 notification_sequence: record.notification_sequence,
                 notification_tx: Some(tx),
             },
@@ -1077,6 +1118,7 @@ impl McpSessionStore {
                 activated_service_ids: session.activated_service_ids.iter().cloned().collect(),
                 proxy_authorized: session.proxy_authorized,
                 session_fallback_allowed: session.session_fallback_allowed,
+                parent_session_id: session.parent_session_id.clone(),
                 notification_sequence: session.notification_sequence,
                 created_at: session.created_at,
                 last_active_at: session.last_active,
@@ -1127,6 +1169,7 @@ mod tests {
             activated_service_ids: Vec::new(),
             proxy_authorized: true,
             session_fallback_allowed: true,
+            parent_session_id: None,
             notification_sequence: 0,
             created_at: now,
             last_active_at: now,
@@ -1440,6 +1483,34 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_never_uses_pending_challenges_as_login_authority() {
+        let db = crate::test_utils::connect_transaction_test_database("mcp_pending_denied").await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut persisted = record(&user_id);
+        persisted.session_fallback_allowed = true;
+        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .insert_one(&persisted)
+            .await
+            .unwrap();
+        let challenge = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&user_id,"revoked":false,
+        "purpose":"mfa_pending","expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(5))};
+        db.collection::<bson::Document>(crate::models::session::MFA_CHALLENGES)
+            .insert_one(challenge.clone())
+            .await
+            .unwrap();
+        let mut legacy = challenge;
+        legacy.remove("purpose");
+        legacy.insert("user_agent", "mfa_pending");
+        db.collection::<bson::Document>("sessions")
+            .insert_one(legacy)
+            .await
+            .unwrap();
+        let store = McpSessionStore::with_db(db);
+        assert_eq!(store.load_from_db().await.unwrap(), 0);
+        assert!(!store.validate(&persisted.id, &user_id).await.unwrap());
     }
 
     #[tokio::test]

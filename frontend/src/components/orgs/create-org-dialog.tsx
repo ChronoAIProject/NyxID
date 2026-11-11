@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -35,7 +36,7 @@ interface CreateOrgDialogProps {
 }
 
 export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const createMutation = useCreateOrg();
 
@@ -58,14 +59,14 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
   async function onSubmit(data: CreateOrgRequest) {
     try {
       const org = await createMutation.mutateAsync(data);
-      toast.success(translateUi("Organization \"{{value}}\" created", { value: org.display_name ?? "Untitled" }));
+      toast.success(translateUi(`Organization "${org.display_name ?? "Untitled"}" created`));
       handleOpenChange(false);
       void navigate({ to: "/orgs/$orgId", params: { orgId: org.id } });
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error(translateUi("Failed to create organization"));
+        toast.error(translateErrorMessage("Failed to create organization"));
       }
     }
   }
@@ -74,8 +75,8 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Create Organization")}</DialogTitle>
-          <DialogDescription>{t("Organizations let you share services and credentials with teammates. You become the first admin.")}</DialogDescription>
+          <DialogTitle>{translateUi("Create Organization")}</DialogTitle>
+          <DialogDescription>{translateUi("Organizations let you share services and credentials with teammates. You become the first admin.")}</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -88,9 +89,9 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
               name="display_name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Display name")}</FormLabel>
+                  <FormLabel>{translateUi("Display name")}</FormLabel>
                   <FormControl>
-                    <Input placeholder={t("Acme Inc.")} autoFocus {...field} />
+                    <Input placeholder={translateUi("Acme Inc.")} autoFocus {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -102,11 +103,11 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
               name="contact_email"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Contact email (optional)")}</FormLabel>
+                  <FormLabel>{translateUi("Contact email (optional)")}</FormLabel>
                   <FormControl>
                     <Input
                       type="email"
-                      placeholder={t("team@example.com")}
+                      placeholder={translateUi("team@example.com")}
                       {...field}
                     />
                   </FormControl>
@@ -120,7 +121,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
               name="avatar_url"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Avatar URL (optional)")}</FormLabel>
+                  <FormLabel>{translateUi("Avatar URL (optional)")}</FormLabel>
                   <FormControl>
                     <Input placeholder="https://..." {...field} />
                   </FormControl>
@@ -130,8 +131,8 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
             />
 
             {form.formState.errors.root && (
-              <p className="text-12 text-destructive">
-                {translateUi(form.formState.errors.root.message ?? "")}
+              <p className="text-14 text-destructive">
+                {form.formState.errors.root.message}
               </p>
             )}
 
@@ -141,13 +142,13 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
                 variant="outline"
                 onClick={() => handleOpenChange(false)}
                 disabled={createMutation.isPending}
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 type="submit"
                 isLoading={createMutation.isPending}
                 disabled={!form.watch("display_name").trim()}
-              >{t("Create Organization")}</Button>
+              >{translateUi("Create Organization")}</Button>
             </DialogFooter>
           </form>
         </Form>

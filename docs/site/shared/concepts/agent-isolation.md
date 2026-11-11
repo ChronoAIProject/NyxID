@@ -41,7 +41,7 @@ Every API key can carry its own rate limit override:
 - `rate_limit_per_second` — maximum requests per second for this key
 - `rate_limit_burst` — burst capacity
 
-When these are set, the key gets its own token-bucket limiter in-process, separate from the global per-IP limiter. When a key has no rate limit override, it shares the global limiter (unchanged behavior from before isolation was introduced). Idle per-key buckets are evicted after 120 seconds to prevent memory growth.
+When these are set, production enforcement uses a MongoDB-backed per-key token bucket shared across replicas, in addition to global/per-IP limits. Without an override, the global/per-IP limits still apply. Local test limiters and other process-local guards do not describe the production shared-bucket contract.
 
 ### Credential overrides
 

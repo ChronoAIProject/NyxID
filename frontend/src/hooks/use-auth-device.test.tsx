@@ -34,7 +34,7 @@ function wrapper({ children }: PropsWithChildren) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockCheckAuth.mockResolvedValue(undefined);
+  mockCheckAuth.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -258,8 +258,8 @@ describe("useWebAuthDeviceLogin", () => {
   it("does not finish a replaced request after checkAuth resolves", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
-    let finish!: () => void;
-    mockCheckAuth.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    let finish!: (value: boolean) => void;
+    mockCheckAuth.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve; }));
     mockPost.mockResolvedValueOnce(requestResponse).mockResolvedValueOnce({ ok: true });
     const { result } = renderHook(() => useWebAuthDeviceLogin());
     await act(async () => { result.current.start(); });
@@ -268,9 +268,28 @@ describe("useWebAuthDeviceLogin", () => {
     act(() => result.current.close());
     mockPost.mockResolvedValueOnce({ ...requestResponse, device_code: "nyx_adc_new" });
     await act(async () => { result.current.start(); });
-    await act(async () => { finish(); });
+    await act(async () => { finish(true); });
     expect(result.current.phase).toBe("pending");
     expect(result.current.request?.device_code).toBe("nyx_adc_new");
+  });
+
+  it("retries only profile restoration after delivery, beyond the former code expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse).mockResolvedValueOnce({ ok: true });
+    mockCheckAuth.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => { result.current.start(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.phase).toBe("restore_error");
+    expect(result.current.remainingSeconds).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(result.current.phase).toBe("restore_error");
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => { result.current.retryProfile(); });
+    expect(result.current.phase).toBe("success");
+    expect(mockCheckAuth).toHaveBeenCalledTimes(2);
+    expect(mockPost).toHaveBeenCalledTimes(2);
   });
 
   it("does not request on mount and starts only after explicit activation", async () => {
@@ -435,7 +454,7 @@ describe("useWebAuthDeviceLogin", () => {
     expect(mockPost).toHaveBeenCalledTimes(5);
   });
 
-  it("stops polling on denied and supports explicit regeneration", async () => {
+  it("treats old unverified approval delivery as terminal denial without a step-up prompt and supports regeneration", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
     mockPost.mockResolvedValueOnce(requestResponse);
@@ -458,6 +477,7 @@ describe("useWebAuthDeviceLogin", () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
     expect(result.current.phase).toBe("denied");
+    expect(result.current.error?.message).toBe("This login request was already denied.");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });

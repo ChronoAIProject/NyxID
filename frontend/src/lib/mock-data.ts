@@ -478,6 +478,7 @@ const MOCK_KEYS = [
     openapi_spec_url: null,
     credential_source: {
       type: "org" as const,
+      org_id: "org-0001",
       org_name: "ChronoAI",
       role: "member",
       allowed: true,
@@ -3103,7 +3104,7 @@ const MOCK_HANDLERS: MockHandler[] = [
       ? new URLSearchParams(window.location.search).get("mock") === "hosted"
         ? {
             ...MOCK_PUBLIC_CONFIG,
-            mcp_url: "https://nyx-api.chrono-ai.fun/mcp",
+            mcp_url: "https://api.nyxid.ai/mcp",
           }
         : MOCK_PUBLIC_CONFIG
       : undefined,
@@ -3162,6 +3163,8 @@ export function isMockMode(): boolean {
   return _mockLatched;
 }
 
+let mockAnalyticsConsent = { account_id: MOCK_USER.id, enabled: false, revision: "", changed_at: null as string | null };
+
 export function getMockResponse(
   endpoint: string,
   method = "GET",
@@ -3169,6 +3172,18 @@ export function getMockResponse(
 ): unknown | undefined {
   const [path = endpoint, query = ""] = endpoint.split("?", 2);
   const params = new URLSearchParams(query);
+  if (path === "/users/me/preferences/analytics") {
+    if (method === "GET") return { ...mockAnalyticsConsent };
+    if (method === "PUT") {
+      const request = body as { account_id?: string; enabled?: boolean } | undefined;
+      if (request?.account_id !== MOCK_USER.id || typeof request.enabled !== "boolean")
+        throw new ApiError(403, { error: "forbidden", error_code: 1000, message: "Analytics account changed" });
+      mockAnalyticsConsent = { account_id: MOCK_USER.id, enabled: request.enabled, revision: crypto.randomUUID(), changed_at: new Date().toISOString() };
+      return { ...mockAnalyticsConsent };
+    }
+  }
+  // Demo events never leave the local fixture.
+  if (path === "/users/me/analytics/events" && method === "POST") return null;
   const setup = mockSetupResponse(path, method, body);
   if (setup !== undefined) return setup;
   if (

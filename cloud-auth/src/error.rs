@@ -3,31 +3,31 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum CloudAuthError {
     #[error("invalid credential payload: {0}")]
-    InvalidCredential(String),
+    InvalidCredential(&'static str),
 
     #[error("signing failed: {0}")]
-    Signing(String),
-
-    #[error("token mint failed: {0}")]
-    TokenMint(String),
+    Signing(&'static str),
 
     #[error("network error: {0}")]
-    Network(String),
-
-    #[error("upstream returned {status}: {body}")]
-    UpstreamError { status: u16, body: String },
+    Network(&'static str),
 }
 
 pub type CloudAuthResult<T> = Result<T, CloudAuthError>;
 
 impl From<reqwest::Error> for CloudAuthError {
     fn from(err: reqwest::Error) -> Self {
-        CloudAuthError::Network(err.to_string())
+        CloudAuthError::Network(if err.is_timeout() {
+            "timeout"
+        } else if err.is_connect() {
+            "connection_failed"
+        } else {
+            "transport_failed"
+        })
     }
 }
 
 impl From<serde_json::Error> for CloudAuthError {
-    fn from(err: serde_json::Error) -> Self {
-        CloudAuthError::InvalidCredential(err.to_string())
+    fn from(_: serde_json::Error) -> Self {
+        CloudAuthError::InvalidCredential("malformed_json")
     }
 }

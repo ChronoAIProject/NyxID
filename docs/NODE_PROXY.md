@@ -73,6 +73,17 @@ Response:
 
 The registration token is shown **only once** and expires after the configured TTL (default: 1 hour). Copy it immediately.
 
+New registration tokens record both the chosen resource owner and the person
+who authorized registration. Admin role is verified at issuance, not
+redemption. Minting and redemption fence the live owner, issuer and organization
+lifecycle; redemption consumes the exact still-live capability.
+Demotion, removal or personal-account departure retires their pending
+registrations without deleting established organization nodes or another
+admin's attributed registrations. Legacy organization tokens without issuer
+attribution require reissuance; an admin departure also clears all pending
+unattributed tokens for that organization. Legacy direct personal tokens still
+require their owner to be active at redemption.
+
 ### Step 2: Connect the Node Agent
 
 Configure the node agent with the registration token:

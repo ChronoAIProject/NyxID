@@ -42,9 +42,11 @@ pub struct UserListQuery {
 pub struct AuditLogQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    pub include_total: Option<bool>,
     /// Legacy exact-match filters, predating the admin table controls.
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    pub turn_id: Option<String>,
     pub search: Option<String>,
     pub search_filters: Option<String>,
     pub custom_filters: Option<String>,
@@ -55,6 +57,29 @@ pub struct AuditLogQuery {
     pub created_from: Option<String>,
     pub created_to: Option<String>,
     pub sort: Option<String>,
+}
+
+impl AuditLogQuery {
+    fn list_params(&self) -> admin_audit_service::AdminAuditLogListParams<'_> {
+        admin_audit_service::AdminAuditLogListParams {
+            page: self.page.unwrap_or(1).max(1),
+            per_page: self.per_page.unwrap_or(50).clamp(1, 100),
+            include_total: self.include_total.unwrap_or(true),
+            search: self.search.as_deref(),
+            search_filters: self.search_filters.as_deref(),
+            custom_filters: self.custom_filters.as_deref(),
+            event_type: self.event_type.as_deref(),
+            status: self.status.as_deref(),
+            actor: self.actor.as_deref(),
+            user_id: self.user_id.as_deref(),
+            api_key_id: self.api_key_id.as_deref(),
+            turn_id: self.turn_id.as_deref(),
+            created_dates: self.created_dates.as_deref(),
+            created_from: self.created_from.as_deref(),
+            created_to: self.created_to.as_deref(),
+            sort: self.sort.as_deref().unwrap_or("-created_at"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,11 +149,22 @@ pub struct AuditLogItem {
 
 #[derive(Debug, Serialize)]
 pub struct AuditLogListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_turn_id: Option<String>,
     pub entries: Vec<AuditLogItem>,
-    pub total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    pub has_more: bool,
     pub page: u64,
     pub per_page: u64,
     pub filter_options: AuditLogFilterOptions,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogCountResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_turn_id: Option<String>,
+    pub total: u64,
 }
 
 /// Describes the audit table's controls to the client, so the UI never hardcodes
@@ -217,7 +253,7 @@ pub struct BillingLedgerVerifyResponse {
 
 // --- New request/response types for admin user management ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateUserRequest {
     pub email: String,
     pub password: String,
@@ -647,7 +683,8 @@ pub async fn set_user_status(
         auth_user.api_key_id.as_deref(),
         &tele,
         event,
-    );
+    )
+    .await;
 
     Ok(Json(StatusUpdateResponse {
         id: user_id,
@@ -669,11 +706,6 @@ pub async fn force_password_reset(
 
     let _token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
 
-    #[cfg(debug_assertions)]
-    if let Some(ref t) = _token {
-        tracing::debug!(token = %t, user_id = %user_id, "Admin-initiated password reset token (dev only)");
-    }
-
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -694,34 +726,360 @@ pub async fn delete_user(
     auth_user: AuthUser,
     _headers: HeaderMap,
     Path(user_id): Path<String>,
-) -> AppResult<Json<AdminActionResponse>> {
+) -> AppResult<Json<super::users::DeleteAccountResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = auth_user.user_id.to_string();
+    if actor == user_id {
+        return Err(AppError::ValidationError(
+            "Use personal account deletion to confirm its owner policy".into(),
+        ));
+    }
+    let job = crate::services::personal_erasure_service::accept(&state.db, &user_id, &actor, None)
+        .await?;
+    Ok(Json(
+        super::users::DeleteAccountResponse::from_job(&state.db, job).await?,
+    ))
+}
 
-    let admin_id = auth_user.user_id.to_string();
+/// Authenticated operator visibility survives removal of the source account.
+#[derive(Deserialize)]
+pub struct ErasureStatusQuery {
+    pub after: Option<String>,
+    pub nodes_after: Option<String>,
+}
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ErasureEffectResponse {
+    #[serde(rename = "_id")]
+    id: String,
+    kind: Option<String>,
+    source_id: Option<String>,
+    target_owner_id: Option<String>,
+    provider_config_id: Option<String>,
+    status: String,
+    reason: Option<String>,
+    retry_generation: i64,
+    last_reconciliation_request_digest: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+impl From<crate::services::personal_erasure_service::issuance::EffectMetadata>
+    for ErasureEffectResponse
+{
+    fn from(row: crate::services::personal_erasure_service::issuance::EffectMetadata) -> Self {
+        Self {
+            id: row.id,
+            kind: row.kind,
+            source_id: row.source_id,
+            target_owner_id: row.target_owner_id,
+            provider_config_id: row.provider_config_id,
+            status: row.status,
+            reason: row.reason,
+            retry_generation: row.retry_generation,
+            last_reconciliation_request_digest: row.last_reconciliation_request_digest,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct ErasureProgressResponse {
+    erasure: Option<super::users::DeleteAccountResponse>,
+    next_after: Option<String>,
+    effects: Vec<ErasureEffectResponse>,
+    node_drains: Vec<crate::services::personal_erasure_service::nodes::DrainMetadata>,
+    next_node_after: Option<String>,
+}
+pub async fn erasure_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(user): Path<String>,
+    Query(query): Query<ErasureStatusQuery>,
+) -> AppResult<Json<ErasureProgressResponse>> {
+    require_admin_or_operator(&state, &auth, "admin.users.erasure_status").await?;
+    let job = crate::services::personal_erasure_service::status(&state.db, &user).await?;
+    let effects = crate::services::personal_erasure_service::issuance::outcomes(
+        &state.db,
+        &user,
+        query.after.as_deref(),
+    )
+    .await?;
+    let next_after = if effects.len() == 64 {
+        effects.last().map(|row| row.id.clone())
+    } else {
+        None
+    };
+    let node_drains = crate::services::personal_erasure_service::nodes::pending(
+        &state.db,
+        &user,
+        query.nodes_after.as_deref(),
+    )
+    .await?;
+    let next_node_after =
+        (node_drains.len() == 64).then(|| node_drains.last().unwrap().node_id.clone());
+    let erasure = match job {
+        Some(job) => Some(super::users::DeleteAccountResponse::from_job(&state.db, job).await?),
+        None => None,
+    };
+    Ok(Json(ErasureProgressResponse {
+        erasure,
+        next_after,
+        node_drains,
+        next_node_after,
+        effects: effects
+            .into_iter()
+            .map(ErasureEffectResponse::from)
+            .collect(),
+    }))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErasureOperatorRequest {
+    pub node_fence: Option<crate::services::node_owner_service::NodeOwnerFence>,
+    pub effect_id: Option<String>,
+    pub expected_retry_generation: Option<i64>,
+    pub idempotency_key: Option<String>,
+    pub action: Option<String>,
+    pub evidence_reference: Option<String>,
+    pub reason: Option<String>,
+}
 
-    // Fetch user email before deletion for audit log
-    let target = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": &user_id })
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsDispatchQuery {
+    pub after: Option<String>,
+}
+#[derive(Serialize)]
+pub struct AnalyticsDispatchItem {
+    pub id: String,
+    pub status: String,
+    pub created_at: String,
+}
+#[derive(Serialize)]
+pub struct AnalyticsDispatchResponse {
+    pub generation: Option<String>,
+    pub consent_revision: Option<String>,
+    pub dispatches: Vec<AnalyticsDispatchItem>,
+    pub next_after: Option<String>,
+}
+/// Metadata needed to bind an active-account delivery repair. No event payload
+/// is retained in the journal or returned by this endpoint.
+pub async fn analytics_dispatches(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(user): Path<String>,
+    Query(query): Query<AnalyticsDispatchQuery>,
+) -> AppResult<Json<AnalyticsDispatchResponse>> {
+    require_admin_or_operator(&state, &auth, "admin.analytics.dispatches").await?;
+    use crate::services::analytics_dispatch_service::{ACCOUNTS, COLLECTION};
+    if query
+        .after
+        .as_ref()
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+    {
+        return Err(AppError::ValidationError("Invalid dispatch cursor".into()));
+    }
+    let db = crate::services::transaction_service::durable_database(&state.db);
+    let mut filter = doc! {"user_id":&user,"status":{"$in":["in_flight","uncertain"]}};
+    if let Some(after) = query.after {
+        filter.insert("_id", doc! {"$gt":after});
+    }
+    let mut rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(COLLECTION)
+        .find(filter)
+        .sort(doc! {"_id":1})
+        .limit(65)
         .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-    let target_email = target.email.clone();
-
-    admin_user_service::delete_user_cascade(&state.db, &admin_id, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.deleted",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "target_email": &target_email,
-        })),
-    );
-
+        .try_collect()
+        .await?;
+    let more = rows.len() > 64;
+    rows.truncate(64);
+    let next_after = if more {
+        rows.last()
+            .and_then(|row| row.get_str("_id").ok())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    let account = db
+        .collection::<bson::Document>(ACCOUNTS)
+        .find_one(doc! {"_id":&user})
+        .await?;
+    let owner = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id":&user})
+        .await?;
+    let dispatches = rows
+        .into_iter()
+        .map(|row| {
+            Ok(AnalyticsDispatchItem {
+                id: row
+                    .get_str("_id")
+                    .map_err(|_| AppError::Internal("Invalid dispatch identity".into()))?
+                    .to_owned(),
+                status: row
+                    .get_str("status")
+                    .map_err(|_| AppError::Internal("Invalid dispatch status".into()))?
+                    .to_owned(),
+                created_at: row
+                    .get_datetime("created_at")
+                    .map_err(|_| AppError::Internal("Invalid dispatch timestamp".into()))?
+                    .to_chrono()
+                    .to_rfc3339(),
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(Json(AnalyticsDispatchResponse {
+        generation: account
+            .as_ref()
+            .and_then(|row| row.get_str("generation").ok())
+            .map(str::to_owned),
+        consent_revision: owner.map(|row| row.profile_config.analytics.revision),
+        dispatches,
+        next_after,
+    }))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsDispatchRepair {
+    pub dispatch_id: String,
+    pub generation: String,
+    pub consent_revision: String,
+    pub outcome: crate::services::analytics_dispatch_service::VerifiedDelivery,
+    pub evidence_reference: String,
+}
+pub async fn reconcile_analytics_dispatch(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(user): Path<String>,
+    Json(body): Json<AnalyticsDispatchRepair>,
+) -> AppResult<Json<AdminActionResponse>> {
+    crate::handlers::admin_helpers::require_reconciliation_operator(&state, &auth).await?;
+    crate::services::analytics_dispatch_service::reconcile_active_dispatch(
+        &state.db,
+        &audit_service::AuditActor::from_auth_user(&auth),
+        &user,
+        crate::services::analytics_dispatch_service::DispatchRepair {
+            dispatch: &body.dispatch_id,
+            generation: &body.generation,
+            consent_revision: &body.consent_revision,
+            outcome: body.outcome,
+            evidence: &body.evidence_reference,
+        },
+    )
+    .await?;
+    Ok(Json(AdminActionResponse {message:"Verified delivery outcome recorded; provider processing drain remains independently required".into()}))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErasureDomainRetryRequest {
+    pub domain: String,
+    pub job_id: String,
+    pub expected_retry_generation: i64,
+    pub idempotency_key: String,
+}
+pub async fn erasure_retry(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(user): Path<String>,
+    Json(body): Json<ErasureDomainRetryRequest>,
+) -> AppResult<Json<AdminActionResponse>> {
+    crate::handlers::admin_helpers::require_reconciliation_operator(&state, &auth).await?;
+    crate::services::personal_erasure_service::retry_domain(
+        &state.db,
+        &auth.user_id.to_string(),
+        &user,
+        &crate::services::personal_erasure_service::DomainRetryRequest {
+            domain: body.domain,
+            job_id: body.job_id,
+            expected_retry_generation: body.expected_retry_generation,
+            idempotency_key: body.idempotency_key,
+        },
+    )
+    .await?;
     Ok(Json(AdminActionResponse {
-        message: "User deleted".to_string(),
+        message: "Erasure domain queued for evidence re-evaluation".into(),
+    }))
+}
+pub async fn erasure_reconcile(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(user): Path<String>,
+    Json(body): Json<ErasureOperatorRequest>,
+) -> AppResult<Json<AdminActionResponse>> {
+    crate::handlers::admin_helpers::require_reconciliation_operator(&state, &auth).await?;
+    let action = body
+        .action
+        .as_deref()
+        .ok_or_else(|| AppError::ValidationError("Reconciliation action is required".into()))?;
+    let evidence = body
+        .evidence_reference
+        .as_deref()
+        .ok_or_else(|| AppError::ValidationError("Evidence reference is required".into()))?;
+    if action == "attest_node_generation_retired" {
+        crate::services::personal_erasure_service::nodes::attest_generation_retired(
+            &state.db,
+            &auth.user_id.to_string(),
+            &user,
+            body.node_fence.as_ref().ok_or_else(|| {
+                AppError::ValidationError("Exact retained node fence is required".into())
+            })?,
+            evidence,
+        )
+        .await?;
+    } else if action == "attest_no_issuance" {
+        crate::services::personal_erasure_service::issuance::attest_no_issuance(
+            &state.db,
+            &auth.user_id.to_string(),
+            &user,
+            body.effect_id
+                .as_deref()
+                .ok_or_else(|| AppError::ValidationError("Attempt identity is required".into()))?,
+            evidence,
+        )
+        .await?;
+    } else if action == "attest_no_historical_destinations" {
+        crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+            &state.db,
+            &user,
+            &auth.user_id.to_string(),
+            evidence,
+            body.reason.as_deref().unwrap_or(""),
+        )
+        .await?;
+    } else {
+        crate::services::personal_erasure_service::provider::reconcile_effect(
+            &state.db,
+            &state.encryption_keys,
+            &auth.user_id.to_string(),
+            &user,
+            &crate::services::personal_erasure_service::provider::EffectReconciliationRequest {
+                effect_id: body
+                    .effect_id
+                    .as_ref()
+                    .ok_or_else(|| AppError::ValidationError("Effect identity is required".into()))?
+                    .clone(),
+                action: action.to_owned(),
+                evidence_reference: evidence.to_owned(),
+                expected_retry_generation: body.expected_retry_generation.ok_or_else(|| {
+                    AppError::ValidationError("Captured effect retry generation is required".into())
+                })?,
+                idempotency_key: body
+                    .idempotency_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AppError::ValidationError(
+                            "Effect reconciliation idempotency key is required".into(),
+                        )
+                    })?
+                    .clone(),
+            },
+        )
+        .await?;
+    }
+    Ok(Json(AdminActionResponse {
+        message: if matches!(action, "retry" | "retry_with_current_provider_config") {
+            "Reconciliation evidence recorded; completion will be re-evaluated. For a single-attempt revocation, any authorization granted since at the provider for this OAuth app will also be revoked."
+        } else { "Reconciliation evidence recorded; completion will be re-evaluated" }.into(),
     }))
 }
 
@@ -984,34 +1342,16 @@ pub async fn list_audit_log(
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
-    let sort = query.sort.as_deref().unwrap_or("-created_at");
 
     // Summarize the applied controls as an opaque marker list rather than the raw
     // values (which are PII-adjacent). `None` when nothing was applied.
     let filter_marker = audit_log_filter_marker(&query);
 
-    let ((entries, total), event_types) = tokio::try_join!(
-        admin_audit_service::list_entries(
-            &state.db,
-            admin_audit_service::AdminAuditLogListParams {
-                page,
-                per_page,
-                search: query.search.as_deref(),
-                search_filters: query.search_filters.as_deref(),
-                custom_filters: query.custom_filters.as_deref(),
-                event_type: query.event_type.as_deref(),
-                status: query.status.as_deref(),
-                actor: query.actor.as_deref(),
-                user_id: query.user_id.as_deref(),
-                api_key_id: query.api_key_id.as_deref(),
-                created_dates: query.created_dates.as_deref(),
-                created_from: query.created_from.as_deref(),
-                created_to: query.created_to.as_deref(),
-                sort,
-            },
-        ),
+    let (result, event_types) = tokio::try_join!(
+        admin_audit_service::list_entries(&state.db, query.list_params()),
         state.audit_event_types.get(&state.db)
     )?;
+    let entries = result.entries;
 
     // Enrichment is best-effort display data: a lookup failure downgrades the
     // page to unenriched entries (fields are Option and simply stay absent)
@@ -1065,14 +1405,39 @@ pub async fn list_audit_log(
         TelemetryEvent::AdminAuditLogViewed {
             filter: filter_marker,
         },
-    );
+    )
+    .await;
 
     Ok(Json(AuditLogListResponse {
+        applied_turn_id: query
+            .turn_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+            .map(|id| id.to_string()),
         entries: items,
-        total,
+        total: result.total,
+        has_more: result.has_more,
         page,
         per_page,
         filter_options: audit_log_filter_options(event_types),
+    }))
+}
+
+/// GET /api/v1/admin/audit-log/count
+pub async fn count_audit_log(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AuditLogQuery>,
+) -> AppResult<Json<AuditLogCountResponse>> {
+    require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
+    let total = admin_audit_service::count_entries(&state.db, query.list_params()).await?;
+    Ok(Json(AuditLogCountResponse {
+        total,
+        applied_turn_id: query
+            .turn_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+            .map(|id| id.to_string()),
     }))
 }
 
@@ -1081,6 +1446,7 @@ fn audit_log_filter_marker(query: &AuditLogQuery) -> Option<String> {
     let applied = [
         ("user_id", query.user_id.is_some()),
         ("api_key_id", query.api_key_id.is_some()),
+        ("turn_id", query.turn_id.is_some()),
         ("search", query.search.is_some()),
         ("search_filters", query.search_filters.is_some()),
         ("custom_filters", query.custom_filters.is_some()),
@@ -1139,6 +1505,10 @@ fn audit_log_filter_options(event_types: Vec<String>) -> AuditLogFilterOptions {
         search_fields: admin_audit_service::ADMIN_SEARCH_FIELDS
             .iter()
             .map(|(key, label)| AuditLogSearchField { key, label })
+            .chain(std::iter::once(AuditLogSearchField {
+                key: "turn_id_exact",
+                label: "Turn ID (exact)",
+            }))
             .collect(),
         fields: vec![
             AuditLogFilterField {
@@ -1516,7 +1886,7 @@ fn broker_settings_changed_fields(body: &UpdateBrokerSettingsRequest) -> Vec<&'s
 
 // --- OAuth Client Admin ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateOAuthClientRequest {
     pub name: String,
     pub redirect_uris: Vec<String>,
@@ -1577,7 +1947,7 @@ impl OAuthClientListQuery {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct OAuthClientResponse {
     pub id: String,
     pub client_name: String,
@@ -1996,7 +2366,8 @@ pub async fn create_oauth_client(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::AdminOauthClientRegistered,
-    );
+    )
+    .await;
 
     Ok(Json(oauth_client_response(
         client,
@@ -2236,6 +2607,16 @@ mod tests {
     use crate::models::user::{PlatformRole, User, UserType};
     use chrono::Utc;
 
+    #[test]
+    fn audit_log_totals_remain_enabled_unless_explicitly_deferred() {
+        assert!(AuditLogQuery::default().list_params().include_total);
+        let deferred = AuditLogQuery {
+            include_total: Some(false),
+            ..Default::default()
+        };
+        assert!(!deferred.list_params().include_total);
+    }
+
     fn lookup_with(id: &str, slug: &str, name: &str) -> ServiceLookup {
         let resolved = ResolvedService {
             name: name.to_string(),
@@ -2470,6 +2851,7 @@ mod tests {
     fn make_user(id: &str) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: id.to_string(),
             email: format!("{id}@example.com"),
             password_hash: Some("$argon2id$hash".to_string()),
@@ -2889,6 +3271,335 @@ mod operator_route_tests {
     }
 
     #[tokio::test]
+    async fn analytics_delivery_repair_requires_operator_and_current_scope() {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db =
+            crate::test_utils::connect_transaction_test_database("analytics_operator_repair").await;
+        let user = insert_user(&db, false, false).await;
+        let operator = insert_user(&db, false, true).await;
+        let consent = crate::services::analytics_consent_service::set(&db, &user, true)
+            .await
+            .unwrap();
+        // Repair starts from durable transport uncertainty; the separate
+        // bounded analytics admission path is not this permission test's setup.
+        let dispatch = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::services::analytics_dispatch_service::COLLECTION)
+            .insert_one(doc! {"_id":&dispatch,"user_id":&user,"status":"uncertain",
+            "created_at":bson::DateTime::now(),"settled_at":bson::DateTime::now()})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::services::analytics_dispatch_service::ACCOUNTS)
+            .insert_one(
+                doc! {"_id":&user,"generation":&dispatch,"updated_at":bson::DateTime::now()},
+            )
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let body = || AnalyticsDispatchRepair {
+            dispatch_id: dispatch.clone(),
+            generation: dispatch.clone(),
+            consent_revision: consent.revision.clone(),
+            outcome:
+                crate::services::analytics_dispatch_service::VerifiedDelivery::ProviderAccepted,
+            evidence_reference: "fixture://operator-verified-receipt".into(),
+        };
+        let rejected = reconcile_analytics_dispatch(
+            State(state.clone()),
+            test_auth_user(&user),
+            Path(user.clone()),
+            Json(body()),
+        )
+        .await;
+        assert!(matches!(rejected, Err(AppError::Forbidden(_))));
+        let scope = analytics_dispatches(
+            State(state.clone()),
+            test_auth_user(&operator),
+            Path(user.clone()),
+            Query(AnalyticsDispatchQuery { after: None }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(scope.generation.as_deref(), Some(dispatch.as_str()));
+        assert_eq!(scope.dispatches.len(), 1);
+        let response = reconcile_analytics_dispatch(
+            State(state),
+            test_auth_user(&operator),
+            Path(user.clone()),
+            Json(body()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            response.message,
+            "Verified delivery outcome recorded; provider processing drain remains independently required"
+        );
+        assert!(
+            !crate::services::analytics_dispatch_service::has_unsettled(&db, &user)
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::services::analytics_dispatch_service::needs_provider_drain(&db, &user)
+                .await
+                .unwrap()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_user_disconnect_effect_is_inspectable_and_reconcilable_without_erasure_job() {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db = crate::test_utils::connect_transaction_test_database("active_disconnect_operator")
+            .await;
+        let target = insert_user(&db, false, false).await;
+        let operator = insert_user(&db, false, true).await;
+        let state = test_app_state(db.clone());
+        let effect_id = Uuid::new_v4().to_string();
+        let context = crate::crypto::aes::RecordContext::new(
+            "personal_erasure_effects",
+            &effect_id,
+            &target,
+            &["capability_encrypted"],
+        )
+        .unwrap();
+        let capability = state.encryption_keys.encrypt_record(
+            br#"{"provider":null,"scope":"token","unavailable_family":"unattributed_oauth","expires_at":null,"client_id":null,"client_secret":null,"credential_user_id":null,"byo":false,"access_token":"synthetic-disconnect-obligation","refresh_token":null}"#,
+            &context).await.unwrap();
+        db.collection::<bson::Document>("personal_erasure_effects").insert_one(doc! {
+            "_id":&effect_id,"user_id":&target,"kind":"oauth_disconnect","status":"operator_action",
+            "reason":"oauth_provider_unknown_requires_external_reconciliation","context_version":3,
+            "capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:capability}
+        }).await.unwrap();
+        let inspected = erasure_status(
+            State(state.clone()),
+            test_auth_user(&operator),
+            Path(target.clone()),
+            Query(ErasureStatusQuery {
+                after: None,
+                nodes_after: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(inspected.erasure.is_none());
+        assert_eq!(inspected.effects.len(), 1);
+        assert_eq!(inspected.effects[0].id, effect_id);
+        assert_eq!(
+            inspected.effects[0].kind.as_deref(),
+            Some("oauth_disconnect")
+        );
+        let response = erasure_reconcile(
+            State(state.clone()),
+            test_auth_user(&operator),
+            Path(target.clone()),
+            Json(ErasureOperatorRequest {
+                node_fence: None,
+                effect_id: Some(effect_id.clone()),
+                expected_retry_generation: Some(0),
+                idempotency_key: Some(Uuid::new_v4().to_string()),
+                action: Some("record_external_revocation_confirmed".into()),
+                evidence_reference: Some("fixture://provider-console-receipt".into()),
+                reason: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!response.0.message.is_empty());
+        let effect = db
+            .collection::<bson::Document>("personal_erasure_effects")
+            .find_one(doc! {"_id":&effect_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(effect.get_str("status"), Ok("complete"));
+        assert!(!effect.contains_key("capability_encrypted"));
+        assert!(
+            db.collection::<bson::Document>("personal_erasure_jobs")
+                .find_one(doc! {"user_id":&target})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&target})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        db.collection::<bson::Document>("personal_erasure_revocation_receipts").insert_one(doc! {"_id":"receipt-metadata","user_id":&target,"kind":"oauth_revocation_receipt","confirmed":true}).await.unwrap();
+        let completed = erasure_status(
+            State(state),
+            test_auth_user(&operator),
+            Path(target.clone()),
+            Query(ErasureStatusQuery {
+                after: None,
+                nodes_after: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(completed.erasure.is_none());
+        assert_eq!(completed.effects.len(), 1);
+        assert_eq!(completed.effects[0].id, effect_id);
+        assert_eq!(completed.effects[0].status, "complete");
+        assert_eq!(
+            completed.effects[0].reason.as_deref(),
+            Some("external_revocation_confirmed")
+        );
+        assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"user_id":&operator,"event_type":"user.account.erasure_provider_reconciled"})
+            .await.unwrap(),1);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn operator_erasure_actions_audit_once_and_keep_retry_scope_idempotent() {
+        use crate::models::personal_erasure::{
+            DomainCheckpoint, DomainStatus, ErasureStatus, PersonalErasureJob,
+        };
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db =
+            crate::test_utils::connect_transaction_test_database("operator_erasure_actions").await;
+        let target = insert_user(&db, false, false).await;
+        let operator = insert_user(&db, false, true).await;
+        let now = chrono::Utc::now();
+        let job = PersonalErasureJob {
+            id: Uuid::new_v4().to_string(),
+            user_id: target.clone(),
+            requested_by: target.clone(),
+            owner_deletion_policy: None,
+            status: ErasureStatus::OperatorAction,
+            inventory_version: 1,
+            domains: vec![
+                DomainCheckpoint {
+                    domain: "local_inventory".into(),
+                    status: DomainStatus::OperatorAction,
+                    retry_generation: 0,
+                    last_retry_key_hash: None,
+                    last_retry_request_digest: None,
+                    consecutive_failures: 8,
+                    reason: Some("fixture_retry".into()),
+                    cursor: None,
+                    completed_at: None,
+                },
+                DomainCheckpoint {
+                    domain: "provider_credentials".into(),
+                    status: DomainStatus::OperatorAction,
+                    retry_generation: 0,
+                    last_retry_key_hash: None,
+                    last_retry_request_digest: None,
+                    consecutive_failures: 8,
+                    reason: Some("fixture_retry".into()),
+                    cursor: None,
+                    completed_at: None,
+                },
+            ],
+            lease_token: None,
+            lease_expires_at: None,
+            retry_at: None,
+            accepted_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        db.collection::<PersonalErasureJob>("personal_erasure_jobs")
+            .insert_one(&job)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let retry_key = Uuid::new_v4().to_string();
+        for _ in 0..2 {
+            let response = erasure_retry(
+                State(state.clone()),
+                test_auth_user(&operator),
+                Path(target.clone()),
+                Json(ErasureDomainRetryRequest {
+                    domain: "local_inventory".into(),
+                    job_id: job.id.clone(),
+                    expected_retry_generation: 0,
+                    idempotency_key: retry_key.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.0.message,
+                "Erasure domain queued for evidence re-evaluation"
+            );
+        }
+        let effect_id = Uuid::new_v4().to_string();
+        let context = crate::crypto::aes::RecordContext::new(
+            "personal_erasure_effects",
+            &effect_id,
+            &target,
+            &["capability_encrypted"],
+        )
+        .unwrap();
+        let capability = state.encryption_keys.encrypt_record(
+            br#"{"provider":null,"unavailable_family":"unattributed_oauth","expires_at":null,"client_id":null,"client_secret":null,"credential_user_id":null,"byo":false,"access_token":"synthetic-retained-token","refresh_token":null}"#,
+            &context).await.unwrap();
+        db.collection::<bson::Document>("personal_erasure_effects").insert_one(doc! {
+            "_id":&effect_id,"user_id":&target,"kind":"oauth_token_revocation","status":"operator_action",
+            "reason":"oauth_provider_unknown_requires_external_reconciliation","context_version":3,
+            "capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:capability}
+        }).await.unwrap();
+        let key = Uuid::new_v4().to_string();
+        for _ in 0..2 {
+            let response = erasure_reconcile(
+                State(state.clone()),
+                test_auth_user(&operator),
+                Path(target.clone()),
+                Json(ErasureOperatorRequest {
+                    node_fence: None,
+                    effect_id: Some(effect_id.clone()),
+                    expected_retry_generation: Some(0),
+                    idempotency_key: Some(key.clone()),
+                    action: Some("record_external_revocation_confirmed".into()),
+                    evidence_reference: Some("fixture://external-revocation".into()),
+                    reason: None,
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(!response.0.message.is_empty());
+        }
+        let audit = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        for event in [
+            "user.account.erasure_domain_retry",
+            "user.account.erasure_provider_reconciled",
+        ] {
+            assert_eq!(
+                audit
+                    .count_documents(doc! {"user_id":&operator,"event_type":event})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            audit
+                .count_documents(doc! {"user_id":&operator,"event_type":"admin.read.by_operator"})
+                .await
+                .unwrap(),
+            0
+        );
+        let resolved = db
+            .collection::<bson::Document>("personal_erasure_effects")
+            .find_one(doc! {"_id":effect_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.get_str("status"), Ok("complete"));
+        assert!(!resolved.contains_key("capability_encrypted"));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn operator_can_list_users() {
         let Some(db) = connect_test_database("admin_route_operator_read").await else {
             eprintln!("skipping operator_can_list_users: no local MongoDB available");
@@ -2913,6 +3624,60 @@ mod operator_route_tests {
             result.0.users.iter().any(|u| u.id == operator_id),
             "operator should see at least their own row in the list"
         );
+    }
+
+    #[tokio::test]
+    async fn audit_log_count_enforces_admin_or_operator_and_uses_exact_filters() {
+        let db = connect_test_database("audit_count_access")
+            .await
+            .expect("MongoDB required");
+        let operator = insert_user(&db, false, true).await;
+        let admin = insert_user(&db, true, false).await;
+        let ordinary = insert_user(&db, false, false).await;
+        db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .insert_many([
+                doc! { "_id": "match", "event_type": "login", "user_id": &ordinary },
+                doc! { "_id": "other", "event_type": "login", "user_id": &admin },
+            ])
+            .await
+            .unwrap();
+        let turn = uuid::Uuid::new_v4().to_string();
+        crate::services::admin_audit_service::ensure_turn_trace_index(&db)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":"match"},
+                doc! {"$set":{"event_data.turn_id":&turn}},
+            )
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for actor in [&operator, &admin] {
+            let result = count_audit_log(
+                State(state.clone()),
+                test_auth_user(actor),
+                Query(AuditLogQuery {
+                    user_id: Some(ordinary.clone()),
+                    turn_id: Some(turn.clone()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.0.total, 1);
+        }
+        let denied = count_audit_log(
+            State(state),
+            test_auth_user(&ordinary),
+            Query(AuditLogQuery {
+                turn_id: Some(turn),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::Forbidden(_))));
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -2959,7 +3724,7 @@ mod operator_route_tests {
             HeaderMap::new(),
             Json(CreateUserRequest {
                 email: "newbie@example.com".to_string(),
-                password: "password123".to_string(),
+                password: crate::crypto::token::generate_random_token(),
                 display_name: None,
                 role: "user".to_string(),
             }),
@@ -3721,5 +4486,25 @@ mod operator_route_tests {
         .await
         .expect_err("runtime override should reject non-admin broker app provisioning");
         assert!(matches!(err, AppError::Forbidden(_)));
+    }
+}
+
+impl std::fmt::Debug for CreateUserRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateUserRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for CreateOAuthClientRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateOAuthClientRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for OAuthClientResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthClientResponse")
+            .finish_non_exhaustive()
     }
 }

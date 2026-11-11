@@ -82,3 +82,12 @@ describe("Agent Key login schemas", () => {
     expect(effectivePermissions("services:write")).toBe("read");
   });
 });
+
+it("keeps ordinary selections old-shaped and distinguishes explicit nonexpiry from omission", () => {
+  const ordinary = newKeySelection({ name: "finite", scopes: ["read"], expires_at: null });
+  expect(ordinary.success).toBe(true);
+  expect(ordinary.data).not.toHaveProperty("never_expires");
+  expect(newKeySelection({ name: "explicit", scopes: ["read"], expires_at: null, never_expires: true }).data)
+    .toMatchObject({ never_expires: true, expires_at: null });
+  expect(newKeySelection({ name: "invalid", scopes: ["read"], expires_at: "2099-01-01", never_expires: true }).success).toBe(false);
+});

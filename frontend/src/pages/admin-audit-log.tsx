@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useAdminAuditLog } from "@/hooks/use-admin";
@@ -48,6 +49,7 @@ import {
   ADMIN_AUDIT_LOG_PER_PAGE_OPTIONS,
   ADMIN_AUDIT_LOG_SORTS,
   adminAuditLogCustomFilterPatch,
+  adminAuditLogExactFieldParam,
   adminAuditLogFilterPatch,
   getAdminAuditLogCustomValues,
   getAdminAuditLogFilterFields,
@@ -57,6 +59,7 @@ import {
   getAppliedAdminAuditLogFilters,
   isAdminAuditLogDateFilterValid,
   normalizeAdminAuditLogSearch,
+  normalizeAuditTurnId,
   parseAdminAuditLogSearchFilters,
   updateAdminAuditLogSearchFilters,
 } from "@/lib/admin-audit-log";
@@ -86,7 +89,7 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
     field: "created_at",
     get label() { return translateUi("Created"); },
     defaultWidth: 190,
-    cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
+    cellClassName: "whitespace-nowrap text-14 text-muted-foreground",
   },
   {
     field: "event_type",
@@ -119,13 +122,13 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
     field: "api_key_id",
     get label() { return translateUi("API Key ID"); },
     defaultWidth: 300,
-    cellClassName: "font-mono text-11 text-muted-foreground",
+    cellClassName: "font-mono text-13 text-muted-foreground",
   },
   {
     field: "ip_address",
     get label() { return translateUi("IP"); },
     defaultWidth: 150,
-    cellClassName: "font-mono text-11",
+    cellClassName: "font-mono text-13",
   },
   {
     field: "user_agent",
@@ -209,7 +212,7 @@ function statusVariant(
 }
 
 export function AdminAuditLogPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const routeSearch = useSearch({
     strict: false,
@@ -227,14 +230,19 @@ export function AdminAuditLogPage() {
     cellProps: columnCellProps,
   } = useDataTableColumns(AUDIT_LOG_COLUMNS, COLUMN_PREFERENCES_KEY);
   const appliedSearch = routeSearch.search ?? "";
+  const searchRoute = [
+    routeSearch.search,
+    routeSearch.search_filters,
+    routeSearch.user_id,
+    routeSearch.api_key_id,
+    routeSearch.turn_id,
+  ].join("\u0000");
   const [searchDraft, setSearchDraft] = useState("");
   const [selectedSearchField, setSelectedSearchField] =
     useState<AdminAuditLogSearchFieldKey | null>(null);
   const [editingSearch, setEditingSearch] =
     useState<AuditLogSearchEditTarget | null>(null);
-  const previousSearchRouteRef = useRef(
-    `${routeSearch.search ?? ""}\u0000${routeSearch.search_filters ?? ""}`,
-  );
+  const previousSearchRouteRef = useRef(searchRoute);
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [selectedFilterKey, setSelectedFilterKey] =
     useState<AdminAuditLogFilterKey>("event_type");
@@ -243,6 +251,9 @@ export function AdminAuditLogPage() {
   const listParams: AdminAuditLogListParams = {
     page: routeSearch.page ?? 1,
     per_page: routeSearch.per_page ?? ADMIN_AUDIT_LOG_DEFAULT_PER_PAGE,
+    user_id: routeSearch.user_id,
+    api_key_id: routeSearch.api_key_id,
+    turn_id: routeSearch.turn_id,
     search: routeSearch.search,
     search_filters: routeSearch.search_filters,
     custom_filters: routeSearch.custom_filters,
@@ -255,15 +266,33 @@ export function AdminAuditLogPage() {
     sort: routeSearch.sort ?? DEFAULT_SORT,
   };
 
-  const { data, isLoading, isFetching, isPlaceholderData, error, refetch } =
-    useAdminAuditLog(listParams);
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isPlaceholderData,
+    error,
+    refetch,
+    total: fetchedTotal,
+    totalError,
+    refetchTotal,
+  } = useAdminAuditLog(listParams);
 
   const entries = data?.entries ?? [];
-  const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / listParams.per_page));
+  const total = data?.total ?? fetchedTotal;
+  const totalPages =
+    total === undefined
+      ? undefined
+      : Math.max(1, Math.ceil(total / listParams.per_page));
   const displayedPage = data?.page ?? listParams.page;
   const displayedPerPage = data?.per_page ?? listParams.per_page;
-  const displayedTotalPages = Math.max(1, Math.ceil(total / displayedPerPage));
+  const displayedTotalPages =
+    total === undefined
+      ? undefined
+      : Math.max(1, Math.ceil(total / displayedPerPage));
+  const hasMore =
+    data?.has_more ??
+    (displayedTotalPages !== undefined && displayedPage < displayedTotalPages);
   const filterOptions = data?.filter_options;
   const filterFields = getAdminAuditLogFilterFields(filterOptions);
   const searchFields = getAdminAuditLogSearchFields(filterOptions);
@@ -304,28 +333,42 @@ export function AdminAuditLogPage() {
   );
 
   useEffect(() => {
-    if (!isPlaceholderData && total > 0 && listParams.page > totalPages) {
+    if (
+      !isPlaceholderData &&
+      entries.length === 0 &&
+      total !== undefined &&
+      total > 0 &&
+      totalPages !== undefined &&
+      listParams.page > totalPages
+    ) {
       updateListSearch({ page: totalPages }, true);
     }
-  }, [isPlaceholderData, listParams.page, total, totalPages, updateListSearch]);
+  }, [
+    isPlaceholderData,
+    entries.length,
+    listParams.page,
+    total,
+    totalPages,
+    updateListSearch,
+  ]);
 
   useEffect(() => {
-    const nextRoute = `${routeSearch.search ?? ""}\u0000${
-      routeSearch.search_filters ?? ""
-    }`;
-    if (nextRoute === previousSearchRouteRef.current) return;
-    previousSearchRouteRef.current = nextRoute;
+    if (searchRoute === previousSearchRouteRef.current) return;
+    previousSearchRouteRef.current = searchRoute;
     const resetTimer = window.setTimeout(() => {
       setSearchDraft("");
       setEditingSearch(null);
     }, 0);
     return () => window.clearTimeout(resetTimer);
-  }, [routeSearch.search, routeSearch.search_filters]);
+  }, [searchRoute]);
 
   function clearSearchAndFilters() {
     updateListSearch({
       page: undefined,
       search: undefined,
+      user_id: undefined,
+      api_key_id: undefined,
+      turn_id: undefined,
       search_filters: undefined,
       custom_filters: undefined,
       event_type: undefined,
@@ -354,6 +397,15 @@ export function AdminAuditLogPage() {
     value: string,
     navigate = true,
   ): string | undefined {
+    const exactParam = adminAuditLogExactFieldParam(field);
+    if (exactParam) {
+      if (navigate) {
+        updateListSearch({ page: undefined, [exactParam]: undefined });
+        if (editingSearch?.kind === "field" && editingSearch.field === field)
+          cancelSearchDraft();
+      }
+      return listParams.search_filters;
+    }
     const current = parseAdminAuditLogSearchFilters(listParams.search_filters);
     const values =
       current
@@ -385,27 +437,46 @@ export function AdminAuditLogPage() {
 
     let nextLegacySearch = listParams.search;
     let nextScopedSearch = listParams.search_filters;
+    let exactPatch: Partial<AdminAuditLogSearchState> = {};
+    const selectedExactParam =
+      selectedSearchField && adminAuditLogExactFieldParam(selectedSearchField);
     if (editingSearch?.kind === "all") {
       nextLegacySearch = undefined;
     } else if (editingSearch?.kind === "field") {
-      const current = parseAdminAuditLogSearchFilters(nextScopedSearch);
-      const remaining =
-        current
-          ?.find((group) => group.field === editingSearch.field)
-          ?.values.filter(
-            (value) =>
-              value.toLocaleLowerCase() !==
-              editingSearch.value.toLocaleLowerCase(),
-          ) ?? [];
-      nextScopedSearch = updateAdminAuditLogSearchFilters(
-        nextScopedSearch,
-        editingSearch.field,
-        remaining.length > 0 ? remaining : undefined,
-      );
+      const exactParam = adminAuditLogExactFieldParam(editingSearch.field);
+      if (exactParam) {
+        exactPatch = { [exactParam]: undefined };
+      } else {
+        const current = parseAdminAuditLogSearchFilters(nextScopedSearch);
+        const remaining =
+          current
+            ?.find((group) => group.field === editingSearch.field)
+            ?.values.filter(
+              (value) =>
+                value.toLocaleLowerCase() !==
+                editingSearch.value.toLocaleLowerCase(),
+            ) ?? [];
+        nextScopedSearch = updateAdminAuditLogSearchFilters(
+          nextScopedSearch,
+          editingSearch.field,
+          remaining.length > 0 ? remaining : undefined,
+        );
+      }
     }
 
     if (selectedSearchField === null) {
       nextLegacySearch = term;
+    } else if (selectedExactParam) {
+      if ([...term].length > 256) {
+        toast.error(translateErrorMessage("Search values must be 256 characters or fewer"));
+        return;
+      }
+      const exactTerm = selectedExactParam === "turn_id" ? normalizeAuditTurnId(term) : term;
+      if (!exactTerm) {
+        toast.error(translateErrorMessage("Enter a complete turn ID"));
+        return;
+      }
+      exactPatch = { ...exactPatch, [selectedExactParam]: exactTerm };
     } else {
       const current = parseAdminAuditLogSearchFilters(nextScopedSearch) ?? [];
       const values =
@@ -421,13 +492,14 @@ export function AdminAuditLogPage() {
         nextValues,
       );
       if (!encoded) {
-        toast.error(translateUi("Search supports up to 8 values per field and 32 overall"));
+        toast.error(translateErrorMessage("Search supports up to 8 values per field and 32 overall"));
         return;
       }
       nextScopedSearch = encoded;
     }
 
     updateListSearch({
+      ...exactPatch,
       page: undefined,
       search: nextLegacySearch,
       search_filters: nextScopedSearch,
@@ -518,10 +590,10 @@ export function AdminAuditLogPage() {
       case "event_type":
         return (
           <div className="min-w-0">
-            <span className="line-clamp-2 break-words text-sm font-medium text-foreground" title={entry.event_type}>{entry.event_type}</span>
+            <span className="line-clamp-2 break-words type-row-title text-foreground" title={entry.event_type}>{entry.event_type}</span>
             {entry.event_type === "service_change_recorded" && typeof entry.event_data?.service_id === "string"
               && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(entry.event_data.service_id)
-              && <button type="button" className="mt-1 text-xs text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>{t("View service history")}</button>}
+              && <button type="button" className="mt-1 type-row-title text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>{translateUi("View service history")}</button>}
           </div>
         );
       case "service": {
@@ -530,7 +602,7 @@ export function AdminAuditLogPage() {
           <div className="min-w-0">
             {service.name && (
               <p
-                className="truncate text-sm font-medium text-foreground"
+                className="truncate type-row-title text-foreground"
                 title={service.name}
               >
                 {service.name}
@@ -538,7 +610,7 @@ export function AdminAuditLogPage() {
             )}
             {service.slug && (
               <p
-                className="truncate font-mono text-11 text-muted-foreground"
+                className="truncate font-mono text-13 text-muted-foreground"
                 title={service.slug}
               >
                 {service.slug}
@@ -582,14 +654,14 @@ export function AdminAuditLogPage() {
           <div className="min-w-0">
             {name && (
               <p
-                className="truncate text-sm font-medium text-foreground"
+                className="truncate type-row-title text-foreground"
                 title={name}
               >
                 {name}
               </p>
             )}
             <p
-              className="truncate font-mono text-11 text-muted-foreground"
+              className="truncate font-mono text-13 text-muted-foreground"
               title={entry.user_id}
             >
               {entry.user_id}
@@ -625,13 +697,13 @@ export function AdminAuditLogPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Audit Log")}
-        description={t("Search, filter, and sort audit activity across users and agent API keys.")}
+        title={translateUi("Audit Log")}
+        description={translateUi("Search, filter, and sort audit activity across users and agent API keys.")}
       />
 
       <section
         className="m-0 overflow-hidden rounded-lg border border-border/60 bg-card"
-        aria-label={t("Audit log")}
+        aria-label={translateUi("Audit log")}
       >
         <DataTableControls
           search={
@@ -673,13 +745,13 @@ export function AdminAuditLogPage() {
               <div
                 role="status"
                 aria-live="polite"
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                className="flex items-center gap-1.5 text-13 text-muted-foreground"
               >
                 <Loader2
                   className="h-3.5 w-3.5 animate-spin"
                   aria-hidden="true"
                 />
-                <span>{t("Updating results")}</span>
+                <span>{translateUi("Updating results")}</span>
               </div>
             ) : null
           }
@@ -705,11 +777,11 @@ export function AdminAuditLogPage() {
         {error && data && (
           <div
             role="alert"
-            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between"
+            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-14 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>{t("Results may be out of date because the refresh failed.")}</span>
+              <span>{translateUi("Results may be out of date because the refresh failed.")}</span>
             </div>
             <Button
               type="button"
@@ -717,7 +789,7 @@ export function AdminAuditLogPage() {
               size="sm"
               disabled={isFetching}
               onClick={() => void refetch()}
-            >{t("Retry")}</Button>
+            >{translateUi("Retry")}</Button>
           </div>
         )}
 
@@ -727,7 +799,7 @@ export function AdminAuditLogPage() {
             role="status"
             aria-live="polite"
             aria-label={
-              isLoading ? t("Loading audit log") : t("Updating audit log")
+              isLoading ? translateUi("Loading audit log") : translateUi("Updating audit log")
             }
           >
             {Array.from({ length: 6 }).map((_, i) => (
@@ -746,27 +818,27 @@ export function AdminAuditLogPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="text-sm font-medium text-destructive">{t("Failed to load audit log")}</p>
+            <p className="type-row-title text-destructive">{translateUi("Failed to load audit log")}</p>
             <Button
               type="button"
               variant="outline"
               size="sm"
               onClick={() => void refetch()}
-            >{t("Retry")}</Button>
+            >{translateUi("Retry")}</Button>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
             <ClipboardList className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="text-sm font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 {hasActiveFilters
-                  ? t("No events match these filters")
-                  : t("No audit events")}
+                  ? translateUi("No events match these filters")
+                  : translateUi("No audit events")}
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {hasActiveFilters
-                  ? t("Adjust or clear the current filters.")
-                  : t("Audit activity will appear here.")}
+                  ? translateUi("Adjust or clear the current filters.")
+                  : translateUi("Audit activity will appear here.")}
               </p>
               {hasActiveFilters && (
                 <Button
@@ -775,7 +847,7 @@ export function AdminAuditLogPage() {
                   size="sm"
                   className="mt-3"
                   onClick={clearSearchAndFilters}
-                >{t("Clear search and filters")}</Button>
+                >{translateUi("Clear search and filters")}</Button>
               )}
             </div>
           </div>
@@ -840,9 +912,27 @@ export function AdminAuditLogPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-11 text-text-tertiary">{t("Showing ")}{String((displayedPage - 1) * displayedPerPage + 1)}-
-                {String(Math.min(displayedPage * displayedPerPage, total))}{t(" of")}{" "}
-                {String(total)}{t(" events")}</p>
+              <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((displayedPage - 1) * displayedPerPage + 1)}-
+                {String(
+                  (displayedPage - 1) * displayedPerPage + entries.length,
+                )}
+                {total === undefined
+                  ? translateUi(" events")
+                  : translateUi(" of {{value1}} events", { value1: String(total) })}
+                {total === undefined && (
+                  <span role="status" className="ml-2">
+                    {totalError ? translateUi("Total unavailable.") : translateUi("Counting total…")}
+                    {totalError && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void refetchTotal()}
+                      >{translateUi("Retry total")}</Button>
+                    )}
+                  </span>
+                )}
+              </p>
               <div className="flex flex-wrap items-center gap-2">
                 {!isDefaultColumnLayout && (
                   <Button
@@ -851,7 +941,7 @@ export function AdminAuditLogPage() {
                     size="sm"
                     onClick={resetColumnLayout}
                   >
-                    <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{t("Reset columns")}</Button>
+                    <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{translateUi("Reset columns")}</Button>
                 )}
                 <Select
                   value={String(listParams.per_page)}
@@ -867,7 +957,7 @@ export function AdminAuditLogPage() {
                   }
                 >
                   <SelectTrigger
-                    aria-label={t("Rows per page")}
+                    aria-label={translateUi("Rows per page")}
                     className="w-[112px]"
                   >
                     <SelectValue />
@@ -875,7 +965,7 @@ export function AdminAuditLogPage() {
                   <SelectContent>
                     {ADMIN_AUDIT_LOG_PER_PAGE_OPTIONS.map((rows) => (
                       <SelectItem key={rows} value={String(rows)}>
-                        {String(rows)}{t(" rows")}</SelectItem>
+                        {String(rows)}{translateUi(" rows")}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -888,20 +978,25 @@ export function AdminAuditLogPage() {
                   onClick={() =>
                     updateListSearch({ page: Math.max(1, listParams.page - 1) })
                   }
-                  aria-label={t("Previous page")}
+                  aria-label={translateUi("Previous page")}
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-11 text-text-tertiary">{t("Page ")}{String(displayedPage)}{t(" of ")}{String(displayedTotalPages)}
+                <span className="min-w-[84px] text-center text-13 text-text-tertiary">{translateUi("Page ")}{String(displayedPage)}
+                  {displayedTotalPages === undefined
+                    ? ""
+                    : translateUi(" of {{value1}}", { value1: String(displayedTotalPages) })}
                 </span>
                 <Button
                   type="button"
                   variant="outline"
                   size="icon"
                   className="h-11 w-11 md:h-8 md:w-8"
-                  disabled={listParams.page >= totalPages || isFetching}
-                  onClick={() => updateListSearch({ page: listParams.page + 1 })}
-                  aria-label={t("Next page")}
+                  disabled={!hasMore || isFetching}
+                  onClick={() =>
+                    updateListSearch({ page: listParams.page + 1 })
+                  }
+                  aria-label={translateUi("Next page")}
                 >
                   <ChevronRight />
                 </Button>
@@ -915,6 +1010,6 @@ export function AdminAuditLogPage() {
 }
 
 function EmptyCell() {
+  useUiTranslation();
   return <span className="text-muted-foreground">--</span>;
 }
-

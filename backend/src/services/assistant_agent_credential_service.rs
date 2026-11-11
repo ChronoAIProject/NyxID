@@ -25,7 +25,21 @@ use crate::{
 /// access; specialist threads carry exactly their agent's grants.
 #[derive(Clone, Debug)]
 pub enum KeyAuthority {
+    OrgChannelGuest(
+        AgentGrants,
+        crate::models::agent_operation_scope::OperationScopes,
+        String,
+    ),
+    ModelSetup(String),
     Orchestrator,
+    /// Server-only wrapper: group restrictions are part of final authority,
+    /// never a second widen-then-narrow mutation on every continuation.
+    Collaboration(Box<KeyAuthority>, String),
+    Shared(
+        AgentGrants,
+        crate::models::agent_operation_scope::OperationScopes,
+        String,
+    ),
     Subagent(
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
@@ -34,6 +48,14 @@ pub enum KeyAuthority {
 }
 
 impl KeyAuthority {
+    pub fn is_shared(&self) -> bool {
+        match self {
+            Self::Shared(..) => true,
+            Self::Collaboration(inner, _) => inner.is_shared(),
+            _ => false,
+        }
+    }
+
     pub fn for_agent(agent: &AssistantAgent) -> Self {
         match agent.kind {
             AgentKind::Nyxbot => Self::Orchestrator,
@@ -49,6 +71,30 @@ impl KeyAuthority {
     /// rotated or hand-edited key converges back to its conversation's authority.
     pub fn key_fields(&self) -> bson::Document {
         match self {
+            Self::Collaboration(inner, group) => {
+                let mut fields = inner.key_fields();
+                fields.insert("assistant_group_id", group);
+                fields.insert("allow_all_nodes", false);
+                fields.insert("allowed_node_ids", bson::Array::new());
+                fields.insert("scopes", ASSISTANT_SCOPES);
+                fields
+            }
+            Self::ModelSetup(owner) => doc! {
+                "assistant_agent_owner_id":owner,"assistant_operation_scopes":bson::Document::new(),
+                "allow_all_services":false,"allow_all_nodes":false,"allow_auto_connected_services":false,
+                "allowed_service_ids":[],"allowed_platform_service_ids":[],"allowed_node_ids":[],"scopes":ASSISTANT_SCOPES,
+            },
+            Self::Shared(grants, scopes, owner) | Self::OrgChannelGuest(grants, scopes, owner) => {
+                doc! {
+                    "assistant_agent_owner_id": owner,
+                    "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
+                    "allow_all_services": false, "allow_all_nodes": false,
+                    "allowed_node_ids": [], "allow_auto_connected_services": false,
+                    "allowed_service_ids": &grants.service_ids,
+                    "allowed_platform_service_ids": &grants.platform_service_ids,
+                    "scopes": ASSISTANT_SCOPES,
+                }
+            }
             Self::Orchestrator => doc! {
                 "assistant_agent_owner_id": bson::Bson::Null,
                 "assistant_operation_scopes": bson::Document::new(),
@@ -124,6 +170,7 @@ pub(crate) async fn authority_with_access(
         )
         .await?;
     }
+    super::assistant_group_service::fence_member_thread(db, conversation, session).await?;
     let Some(agent_id) = conversation.agent_id.as_deref() else {
         return Ok(KeyAuthority::Orchestrator);
     };
@@ -134,6 +181,52 @@ pub(crate) async fn authority_with_access(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    if conversation.collaboration.is_some() {
+        return Box::pin(super::collaboration_group_service::runtime::key_authority(
+            db,
+            conversation,
+            session,
+        ))
+        .await;
+    }
+    let channel = if let Some(origin) = super::org_channel_service::origin(conversation) {
+        let access = Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            origin,
+            &conversation.user_id,
+            &agent.id,
+            true,
+        ))
+        .await?;
+        Some(super::org_agent_service::RequestAccess::from_channel(db, access).await?)
+    } else {
+        None
+    };
+    let snapshot = channel.as_ref().or(snapshot);
+    let resolved = if snapshot.is_none() {
+        super::org_agent_service::resolve_agent_access(db, &conversation.user_id, &agent).await?
+    } else {
+        None
+    };
+    let snapshot = snapshot.or(resolved.as_ref());
+    if let Some(access) = snapshot.filter(|s| s.channel().is_some()) {
+        access.check_conversation(conversation)?;
+    }
+    if let Some(shared) = snapshot.and_then(|a| a.shared()) {
+        snapshot
+            .expect("shared snapshot")
+            .check_conversation(conversation)?;
+        super::shared_agent_service::fence(db, shared, session).await?;
+        super::assistant_group_service::fence_shared_group(db, conversation, session).await?;
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &conversation.id, "user_id": &conversation.user_id},
+                doc! {"$set": {"shared_agent_thread": true}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     if agent.user_id != conversation.user_id && conversation.group_id.is_some() {
         let access = match snapshot {
             Some(access) if access.matches(&conversation.user_id, &agent.user_id) => access.clone(),
@@ -169,6 +262,7 @@ pub(crate) async fn authority_with_access(
     }
     if agent.user_id != conversation.user_id
         && (conversation.guest_turn || conversation.channel.is_some())
+        && !snapshot.is_some_and(|s| s.channel().is_some())
     {
         return Err(AppError::Forbidden(
             "Organization agents require a private member thread".into(),
@@ -178,6 +272,25 @@ pub(crate) async fn authority_with_access(
         || AppError::Conflict("This agent was destroyed; its threads are read-only".into());
     if agent.destroyed_at.is_some() {
         return Err(destroyed());
+    }
+    if conversation.guest_model_setup {
+        if conversation.guest_turn || conversation.shared_agent_thread {
+            return Err(AppError::Forbidden(
+                "Visitor setup authority changed".into(),
+            ));
+        }
+        let mut live = filter.clone();
+        live.insert("destroyed_at", bson::Bson::Null);
+        if agents
+            .update_one(live, doc! {"$inc":{"thread_fence":1_i64}})
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(destroyed());
+        }
+        return Ok(KeyAuthority::ModelSetup(agent.user_id.clone()));
     }
     if agent.kind == AgentKind::Nyxbot {
         return Ok(KeyAuthority::Orchestrator);
@@ -193,6 +306,34 @@ pub(crate) async fn authority_with_access(
         .session(&mut *session)
         .await?
         .ok_or_else(destroyed)?;
+    if let Some(shared) = snapshot.and_then(|a| a.shared()) {
+        let mut grants = agent.grants.clone();
+        grants.account_read = false;
+        grants.service_ids.retain(|id| shared.level(id).is_some());
+        grants
+            .platform_service_ids
+            .retain(|id| shared.level(id).is_some());
+        return Ok(KeyAuthority::Shared(
+            grants,
+            shared.operation_scopes(),
+            agent.user_id.clone(),
+        ));
+    }
+    if let Some(channel) = snapshot
+        .and_then(|s| s.channel())
+        .filter(|c| c.execution().guest)
+    {
+        let mut grants = agent.grants.clone();
+        grants.account_read = false;
+        grants.platform_service_ids.clear();
+        let policy = channel.delegated_services();
+        grants.service_ids.retain(|id| policy.contains(id));
+        return Ok(KeyAuthority::OrgChannelGuest(
+            grants,
+            agent.operation_scopes.clone(),
+            agent.user_id.clone(),
+        ));
+    }
     Ok(KeyAuthority::for_agent(&agent))
 }
 
@@ -331,25 +472,43 @@ pub async fn adopt_rotated_key(
 ) -> AppResult<bool> {
     let collection = db.collection::<bson::Document>(CREDENTIALS);
     let filter = doc! {"user_id": user_id, "api_key_id": predecessor_id};
-    let exists = collection
+    let stored = collection
         .find_one(filter.clone())
-        .projection(doc! {"_id": 1})
         .session(&mut *session)
         .await
-        .map_err(|_| unavailable())?
-        .is_some();
-    if exists {
+        .map_err(|_| unavailable())?;
+    let exists = stored.is_some();
+    if let Some(stored) = stored {
+        let mut row: AssistantAgentCredential =
+            bson::from_document(stored.clone()).map_err(|_| unavailable())?;
+        row.api_key_id = successor_id.to_owned();
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .update_many(
+                doc! { "_id": { "$in": [predecessor_id, successor_id] }, "user_id": user_id },
+                doc! { "$set": { "assistant_usage": true } },
+            )
+            .session(&mut *session)
+            .await?;
         require_ordinary_key(db, user_id, predecessor_id, Some(&mut *session)).await?;
         require_ordinary_key(db, user_id, successor_id, Some(&mut *session)).await?;
-        let ciphertext = keys
-            .encrypt(successor_key.as_bytes())
-            .await
-            .map_err(|_| unavailable())?;
-        collection
+        let ciphertext = super::assistant_record_service::encrypt_credential(
+            keys,
+            &row,
+            successor_key.as_bytes(),
+        )
+        .await?;
+        super::credential_record_service::mark_version(
+            &mut row.secret_context_versions,
+            keys,
+            "key_ciphertext",
+        );
+        let filter = super::record_storage::exact_document_predicate(&stored);
+        let updated = collection
             .update_one(
                 filter,
                 doc! {"$set": {
                     "api_key_id": successor_id,
+                    "secret_context_versions":bson::to_bson(&row.secret_context_versions).map_err(|_|unavailable())?,
                     "key_ciphertext": bson::Binary {
                         subtype: bson::spec::BinarySubtype::Generic,
                         bytes: ciphertext,
@@ -360,6 +519,11 @@ pub async fn adopt_rotated_key(
             .session(&mut *session)
             .await
             .map_err(|_| unavailable())?;
+        if updated.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Assistant credential changed during rotation".into(),
+            ));
+        }
     }
     clear_key_bindings(db, user_id, predecessor_id, Some(session)).await?;
     Ok(exists)
@@ -391,6 +555,81 @@ pub async fn exists(db: &Database, user_id: &str) -> AppResult<bool> {
         .is_some())
 }
 
+/// A generation boundary must not invalidate another family's pending work.
+/// Called only for invocation-controlled transitions, within admission's txn.
+pub(crate) async fn require_invocation_boundary_clear(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let checks = [
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"$or":[
+                {"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},
+                {"status":"allowed","kind":{"$in":["action","skills"]},"expires_at":{"$gt":bson::DateTime::now()}},
+                {"skill_notification_pending":true}
+            ]},
+        ),
+        (
+            crate::models::async_service_operation::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"state":{"$in":["submitting","waiting","cancelling","ready","queued"]}},
+        ),
+        (
+            crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"status":{"$in":["pending","claimed"]}},
+        ),
+        (
+            crate::models::machine_job::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"state":"running"},
+        ),
+    ];
+    for (collection, filter) in checks {
+        if db
+            .collection::<bson::Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .session(&mut *session)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict(
+                "Conversation has pending work from an earlier credential generation; finish or cancel it, or choose a new conversation".into(),
+            ));
+        }
+    }
+    // Authored drafts can reuse expired cards. Their durable claims and cards
+    // retain source credentials until publication is finished or discarded.
+    use crate::models::assistant_agent_learning as learning;
+    for (collection, filter, proposal_field) in [
+        (
+            learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+            doc! {"claim.conversation_id":conversation},
+            "claim.proposal_id",
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"authored_skill.proposal_id":{"$exists":true}},
+            "authored_skill.proposal_id",
+        ),
+    ] {
+        let mut cursor = db.collection::<bson::Document>(collection).aggregate([
+            doc! {"$match":filter},
+            doc! {"$lookup":{"from":learning::PROPOSALS_COLLECTION_NAME,"localField":proposal_field,"foreignField":"_id","as":"proposal"}},
+            doc! {"$match":{"proposal.owner_id":owner,"proposal.status":{"$in":["pending","publishing","published_unpinned","publication_failed"]}}},
+            doc! {"$limit":1},
+            doc! {"$project":{"_id":1}},
+        ]).session(&mut *session).await?;
+        if cursor.next(&mut *session).await.transpose()?.is_some() {
+            return Err(AppError::Conflict(
+                "Conversation has an unfinished skill draft from an earlier credential generation; finish or discard it, or choose a new conversation".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Called inside the turn transaction: the conversation, key and ciphertext
 /// become durable together. Touching the key fences concurrent revocation.
 pub async fn load_or_provision_in_session(
@@ -401,6 +640,7 @@ pub async fn load_or_provision_in_session(
     authority: &KeyAuthority,
     session: &mut ClientSession,
 ) -> AppResult<AssistantCredential> {
+    super::erasure_admission::fence_in_session(db, user_id, session).await?;
     let old = db
         .collection::<AssistantAgentCredential>(CREDENTIALS)
         .find_one(doc! {"user_id": user_id, "conversation_id": conversation_id})
@@ -411,14 +651,23 @@ pub async fn load_or_provision_in_session(
     if let Some(old) = old {
         require_ordinary_key(db, user_id, &old.api_key_id, Some(&mut *session)).await?;
         let raw = decrypt(keys, &old).await?;
-        let valid = db
+        let current = db
             .collection::<ApiKey>(KEYS)
             .find_one(valid_key_filter(user_id, &old.api_key_id, &raw))
             .session(&mut *session)
-            .await?
-            .is_some();
-        if valid {
-            let mut fields = authority.key_fields();
+            .await?;
+        if let Some(current) = current {
+            // A continuation must not invalidate a reviewed effect merely by
+            // reapplying identical authority. Compare the already-loaded key;
+            // actual changes still go through the security mutation helper.
+            // The last-used write below still fences concurrent revocation in
+            // this transaction, even when the authority itself is unchanged.
+            let current = bson::to_document(&current).map_err(|_| unavailable())?;
+            let mut fields: bson::Document = authority
+                .key_fields()
+                .into_iter()
+                .filter(|(field, value)| current.get(field).unwrap_or(&bson::Bson::Null) != value)
+                .collect();
             fields.insert("last_used_at", bson::DateTime::now());
             mutations::update_one(
                 db,
@@ -475,7 +724,9 @@ pub async fn load_or_provision_in_session(
         None,
         &name,
         ASSISTANT_SCOPES,
-        None,
+        super::api_key_validation::NewKeyExpiry::NeverExpires(
+            super::api_key_validation::NonExpiringReason::ManagedConversation,
+        ),
         None,
         Some(&[]),
         Some(&[]),
@@ -493,17 +744,33 @@ pub async fn load_or_provision_in_session(
     )
     .await?;
     apply_authority(db, user_id, &created.id, authority, session).await?;
+    db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &created.id, "user_id": user_id },
+            doc! { "$set": { "assistant_usage": true } },
+        )
+        .session(&mut *session)
+        .await?;
     let raw = Zeroizing::new(created.full_key);
     let now = Utc::now();
-    let row = AssistantAgentCredential {
+    let mut row = AssistantAgentCredential {
+        collaboration: false,
+        secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         user_id: user_id.into(),
         conversation_id: conversation_id.into(),
         api_key_id: created.id.clone(),
-        key_ciphertext: encrypt_runtime_key(keys, &raw).await?,
+        key_ciphertext: Vec::new(),
         created_at: now,
         last_used_at: now,
     };
+    row.key_ciphertext =
+        super::assistant_record_service::encrypt_credential(keys, &row, raw.as_bytes()).await?;
+    super::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "key_ciphertext",
+    );
     db.collection::<AssistantAgentCredential>(CREDENTIALS)
         .insert_one(row)
         .session(&mut *session)
@@ -757,35 +1024,65 @@ async fn decrypt(
     keys: &EncryptionKeys,
     row: &AssistantAgentCredential,
 ) -> AppResult<Zeroizing<String>> {
-    decrypt_runtime_key(keys, &row.key_ciphertext).await
+    super::assistant_record_service::decrypt_credential(keys, row).await
 }
 
-pub(crate) async fn encrypt_runtime_key(
-    keys: &EncryptionKeys,
-    raw: &Zeroizing<String>,
-) -> AppResult<Vec<u8>> {
-    keys.encrypt(raw.as_bytes())
-        .await
-        .map_err(|_| unavailable())
-}
-
-pub(crate) async fn decrypt_runtime_key(
-    keys: &EncryptionKeys,
-    ciphertext: &[u8],
-) -> AppResult<Zeroizing<String>> {
-    let bytes = Zeroizing::new(keys.decrypt(ciphertext).await.map_err(|_| unavailable())?);
-    let raw = std::str::from_utf8(&bytes).map_err(|_| unavailable())?;
-    Ok(Zeroizing::new(raw.to_owned()))
-}
-
-/// Metadata and deletion never provision a key as a side effect. Models select
-/// the most recently used valid conversation credential, skipping revoked rows.
+/// Account metadata never borrows a hidden execution lane or provisions a key.
+/// Prefer the owner's NyxBot home, then the most recently used ordinary thread.
 pub async fn load_existing(
     db: &Database,
     keys: &EncryptionKeys,
     user_id: &str,
 ) -> AppResult<Option<AssistantCredential>> {
-    load_existing_filtered(db, keys, user_id, doc! {"user_id": user_id}).await
+    let filter = doc! {"user_id": user_id, "collaboration": {"$ne": true}};
+    let home = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one(doc! {"user_id": user_id, "kind": "nyxbot", "destroyed_at": null})
+        .await?
+        .and_then(|agent| agent.home_conversation_id);
+    if let Some(home) = home {
+        let mut home_filter = filter.clone();
+        home_filter.insert("conversation_id", home);
+        if let Some(key) = load_existing_filtered(db, keys, user_id, home_filter, true).await? {
+            return Ok(Some(key));
+        }
+    }
+    load_existing_filtered(db, keys, user_id, filter, true).await
+}
+
+/// Metadata-only checks: turn-specific loads retain their existing authority path.
+async fn ordinary_private_thread(
+    db: &Database,
+    user_id: &str,
+    credential: &AssistantAgentCredential,
+) -> AppResult<bool> {
+    let row = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one(doc! {
+            "_id": &credential.conversation_id, "user_id": user_id,
+            "credential_api_key_id": &credential.api_key_id,
+            "collaboration": null, "group_id": null, "group_request_id": null,
+            "shared_agent_thread": {"$ne": true}, "guest_turn": {"$ne": true},
+            "guest_model_setup": {"$ne": true}, "automation_thread": {"$ne": true},
+            "voice_parent_conversation_id": null,
+            "channel": null, "platform_thread": null,
+            "platform_cleanup_pending": {"$ne": true},
+            "active_turn.stop_requested": {"$ne": true},
+            "$or": [{"agent_owner_id": null}, {"agent_owner_id": user_id}],
+        })
+        .projection(doc! {"agent_id": 1})
+        .await?;
+    let Some(row) = row else { return Ok(false) };
+    match row.get("agent_id") {
+        None | Some(bson::Bson::Null) => Ok(true), // Legacy private NyxBot thread.
+        Some(bson::Bson::String(id)) => Ok(db
+            .collection::<bson::Document>(AGENTS)
+            .find_one(doc! {"_id": id, "user_id": user_id, "destroyed_at": null})
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some()),
+        _ => Ok(false),
+    }
 }
 
 pub async fn load_for_conversation(
@@ -799,6 +1096,7 @@ pub async fn load_for_conversation(
         keys,
         user_id,
         doc! {"user_id": user_id, "conversation_id": conversation_id},
+        false,
     )
     .await
 }
@@ -808,6 +1106,7 @@ async fn load_existing_filtered(
     keys: &EncryptionKeys,
     user_id: &str,
     filter: bson::Document,
+    ordinary_private: bool,
 ) -> AppResult<Option<AssistantCredential>> {
     let mut cursor = db
         .collection::<AssistantAgentCredential>(CREDENTIALS)
@@ -816,6 +1115,9 @@ async fn load_existing_filtered(
         .await
         .map_err(|_| unavailable())?;
     while let Some(row) = cursor.try_next().await.map_err(|_| unavailable())? {
+        if ordinary_private && !ordinary_private_thread(db, user_id, &row).await? {
+            continue;
+        }
         require_ordinary_key(db, user_id, &row.api_key_id, None).await?;
         let raw = decrypt(keys, &row).await?;
         if db
@@ -1122,11 +1424,13 @@ mod tests {
         assert_eq!(stored.user_id, owner);
         assert_ne!(stored.key_ciphertext, a.raw_key.as_bytes());
         assert_eq!(
-            state
-                .encryption_keys
-                .decrypt(&stored.key_ciphertext)
-                .await
-                .unwrap(),
+            super::super::assistant_record_service::decrypt_credential(
+                &state.encryption_keys,
+                &stored
+            )
+            .await
+            .unwrap()
+            .as_bytes(),
             a.raw_key.as_bytes()
         );
         assert!(!format!("{stored:?} {a:?}").contains(a.raw_key.as_str()));
@@ -1182,6 +1486,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unchanged_turn_authority_preserves_security_fence_but_changes_invalidate() {
+        let (state, owner, row) = fixture("nyxa_authority_noop").await;
+        let db = &state.db;
+        let original = key_service::get_api_key(db, &owner, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        let fence = |id: String| async move {
+            db.collection::<bson::Document>(KEYS)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i64("machine_external_fence")
+                .unwrap_or(0)
+        };
+        let original_fence = fence(row.credential_api_key_id.clone()).await;
+        load_or_provision(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap();
+        let same = key_service::get_api_key(db, &owner, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            fence(row.credential_api_key_id.clone()).await,
+            original_fence
+        );
+        assert!(same.state_version > original.state_version);
+
+        mutations::update_one(
+            db,
+            doc! {"_id": &row.credential_api_key_id},
+            doc! {"$set": {"allow_all_services": false}},
+            None,
+        )
+        .await
+        .unwrap();
+        let changed_fence = fence(row.credential_api_key_id.clone()).await;
+        assert!(changed_fence > original_fence);
+        load_or_provision(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap();
+        let restored = key_service::get_api_key(db, &owner, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        assert!(restored.allow_all_services);
+        assert!(fence(row.credential_api_key_id.clone()).await > changed_fence);
+    }
+
+    #[tokio::test]
     async fn existing_conversation_keys_converge_to_their_role_authority() {
         let (state, owner, row) = fixture("nyxa_restore_nodes").await;
         let db = &state.db;
@@ -1215,6 +1568,7 @@ mod tests {
                 description: "Read things".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,
@@ -1337,7 +1691,7 @@ mod tests {
         load_or_provision(db, &state.encryption_keys, &owner, &row.id)
             .await
             .unwrap();
-        crate::services::admin_user_service::delete_user_cascade(db, "admin", &owner)
+        crate::test_utils::accept_and_process_admin_erasure(db, "admin", &owner)
             .await
             .unwrap();
         for collection in [
@@ -1427,10 +1781,293 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_provision_rotate_and_read_support_staging_then_strict_contextual_storage() {
+        for staged in [true, false] {
+            let (mut state, owner, _) = fixture("assistant_credential_cutover").await;
+            let mut keys = crate::test_utils::test_encryption_keys();
+            keys.set_contextual_record_writes(!staged);
+            state.encryption_keys = std::sync::Arc::new(keys);
+            let thread = new_chat(&state, &owner).await;
+            let before =
+                load_for_conversation(&state.db, &state.encryption_keys, &owner, &thread.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let raw = state
+                .db
+                .collection::<bson::Document>(CREDENTIALS)
+                .find_one(doc! {"conversation_id":&thread.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                super::super::record_field_service::stored_versions(&raw)
+                    .unwrap()
+                    .contains_key("key_ciphertext"),
+                !staged
+            );
+            // Migration is enabled only after the reader-compatible writer
+            // cutover. Keep the initial staged write/read assertion above.
+            let mut migration_keys = crate::test_utils::test_encryption_keys();
+            migration_keys.set_contextual_record_writes(true);
+            super::super::assistant_record_service::migrate_credential_snapshot(
+                &state.db,
+                &migration_keys,
+                &raw,
+            )
+            .await
+            .unwrap();
+            let mut strict = crate::test_utils::test_encryption_keys();
+            strict.set_contextual_record_writes(true);
+            strict.set_allow_legacy_record_reads(false);
+            state.encryption_keys = std::sync::Arc::new(strict);
+            let current =
+                load_for_conversation(&state.db, &state.encryption_keys, &owner, &thread.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(before.raw_key.as_str(), current.raw_key.as_str());
+            let successor = key_service::rotate_api_key(
+                &state.db,
+                &state.encryption_keys,
+                &owner,
+                &before.api_key_id,
+            )
+            .await
+            .unwrap();
+            assert!(successor.full_key.is_empty());
+            let rotated = load_or_provision(&state.db, &state.encryption_keys, &owner, &thread.id)
+                .await
+                .unwrap();
+            assert_eq!(rotated.api_key_id, successor.id);
+            assert_ne!(rotated.raw_key.as_str(), before.raw_key.as_str());
+            for key_id in [&before.api_key_id, &successor.id] {
+                let key = state
+                    .db
+                    .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                    .find_one(doc! {"_id": key_id, "user_id": &owner})
+                    .projection(doc! {"assistant_usage": 1})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(key.get_bool("assistant_usage"), Ok(true));
+            }
+            let raw = state
+                .db
+                .collection::<bson::Document>(CREDENTIALS)
+                .find_one(doc! {"conversation_id":&thread.id})
+                .await
+                .unwrap()
+                .unwrap();
+            super::super::assistant_record_service::verify_current_credential(
+                &state.db,
+                &state.encryption_keys,
+                &raw,
+            )
+            .await
+            .unwrap();
+            state.db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn models_prefer_home_and_skip_hidden_or_foreign_threads_without_provisioning() {
+        let (state, owner, first) = fixture("nyxa_metadata_private").await;
+        let db = &state.db;
+        let second = new_chat(&state, &owner).await;
+        db.collection::<AssistantAgentCredential>(CREDENTIALS).update_one(
+            doc! {"conversation_id": &second.id},
+            doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(1))}},
+        ).await.unwrap();
+        // The home wins even though another ordinary thread was used later.
+        assert_eq!(
+            load_existing(db, &state.encryption_keys, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .api_key_id,
+            first.credential_api_key_id
+        );
+        db.collection::<AssistantAgent>(AGENTS)
+            .update_one(
+                doc! {"_id": &first.agent_id},
+                doc! {"$set": {"home_conversation_id": null}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_existing(db, &state.encryption_keys, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .api_key_id,
+            second.credential_api_key_id
+        );
+
+        // The credential marker alone is sufficient, including rolling rows.
+        db.collection::<AssistantAgentCredential>(CREDENTIALS)
+            .update_one(
+                doc! {"conversation_id": &second.id},
+                doc! {"$set": {"collaboration": true}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_existing(db, &state.encryption_keys, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .api_key_id,
+            first.credential_api_key_id
+        );
+        db.collection::<AssistantAgentCredential>(CREDENTIALS)
+            .update_one(
+                doc! {"conversation_id": &second.id},
+                doc! {"$unset": {"collaboration": ""}},
+            )
+            .await
+            .unwrap();
+        let original = db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .find_one(doc! {"_id": &second.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for hidden in [
+            doc! {"group_id": "crew"},
+            doc! {"group_id": "org-group", "agent_owner_id": "org"},
+            doc! {"collaboration": {"version": 1}},
+            doc! {"shared_agent_thread": true},
+            doc! {"agent_owner_id": "someone-else"},
+            doc! {"guest_turn": true},
+            doc! {"guest_model_setup": true},
+            doc! {"automation_thread": true},
+            doc! {"voice_parent_conversation_id": "call"},
+            doc! {"platform_thread": {"platform": "telegram"}},
+            doc! {"channel": {"bot_id": "bot"}},
+            doc! {"active_turn.stop_requested": true},
+            doc! {"agent_id": "missing-agent"},
+            doc! {"credential_api_key_id": "replaced-key"},
+        ] {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(doc! {"_id": &second.id}, doc! {"$set": hidden.clone()})
+                .await
+                .unwrap();
+            assert_eq!(
+                load_existing(db, &state.encryption_keys, &owner)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .api_key_id,
+                first.credential_api_key_id,
+                "hidden lane: {hidden:?}"
+            );
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .replace_one(doc! {"_id": &second.id}, original.clone())
+                .await
+                .unwrap();
+        }
+        // An invocation can run in an ordinary home. Its persistent turn gate
+        // does not prohibit metadata discovery after that invocation settles.
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &second.id},
+                doc! {"$set": {"invocation_controlled": true, "active_turn": null}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_existing(db, &state.encryption_keys, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .api_key_id,
+            second.credential_api_key_id
+        );
+        // Legacy rows without agent markers remain eligible.
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(doc! {"_id": &second.id}, doc! {"$unset": {"agent_id": ""}})
+            .await
+            .unwrap();
+        assert_eq!(
+            load_existing(db, &state.encryption_keys, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .api_key_id,
+            second.credential_api_key_id
+        );
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .replace_one(doc! {"_id": &second.id}, original)
+            .await
+            .unwrap();
+        // Ownership and destruction are checked on the live agent too, even
+        // when the thread's denormalized markers are missing.
+        for change in [
+            doc! {"user_id": "foreign-owner"},
+            doc! {"destroyed_at": bson::DateTime::now()},
+        ] {
+            db.collection::<AssistantAgent>(AGENTS)
+                .update_one(doc! {"_id": &first.agent_id}, doc! {"$set": change})
+                .await
+                .unwrap();
+            assert!(
+                load_existing(db, &state.encryption_keys, &owner)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            db.collection::<AssistantAgent>(AGENTS)
+                .update_one(
+                    doc! {"_id": &first.agent_id},
+                    doc! {"$set": {"user_id": &owner, "destroyed_at": null}},
+                )
+                .await
+                .unwrap();
+        }
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_many(
+                doc! {"user_id": &owner},
+                vec![doc! {"$set": {"group_id": {"$concat": ["crew-", "$_id"]}}}],
+            )
+            .await
+            .unwrap();
+        assert!(
+            load_existing(db, &state.encryption_keys, &owner)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.collection::<ApiKey>(KEYS)
+                .count_documents(doc! {"user_id": &owner})
+                .await
+                .unwrap(),
+            2
+        );
+        // Group-specific credential loading is unchanged.
+        assert!(
+            load_for_conversation(db, &state.encryption_keys, &owner, &second.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn models_select_latest_valid_credential_and_conversation_delete_revokes_only_its_key() {
         let (state, owner, first) = fixture("nyxa_latest_delete").await;
         let db = &state.db;
         let second = new_chat(&state, &owner).await;
+        // Exercise the recency fallback when no home is selected.
+        db.collection::<AssistantAgent>(AGENTS)
+            .update_one(
+                doc! {"_id": &first.agent_id},
+                doc! {"$set": {"home_conversation_id": null}},
+            )
+            .await
+            .unwrap();
         db.collection::<AssistantAgentCredential>(CREDENTIALS).update_one(doc! {"conversation_id": &second.id},
             doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(1))}}).await.unwrap();
         assert_eq!(

@@ -430,6 +430,7 @@ export function useCreateProvider() {
       readonly client_id?: string;
       readonly client_secret?: string;
       readonly supports_pkce?: boolean;
+      readonly authorization_nonce_required?: boolean;
       readonly device_code_url?: string;
       readonly device_token_url?: string;
       readonly device_verification_url?: string;
@@ -467,6 +468,7 @@ export function useUpdateProvider(providerId: string) {
       readonly client_id?: string;
       readonly client_secret?: string;
       readonly supports_pkce?: boolean;
+      readonly authorization_nonce_required?: boolean;
       readonly device_code_url?: string;
       readonly device_token_url?: string;
       readonly device_verification_url?: string;

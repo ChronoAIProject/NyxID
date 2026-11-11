@@ -1,24 +1,28 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useAuthStore } from "@/stores/auth-store";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MachineGrantEditor } from "./machine-grant-editor";
 import { ErrorBanner } from "./error-banner";
 import { machineGrantUnavailable, prepareMachineConsent } from "@/hooks/use-machine-grants";
 import { readMachineConsentScope } from "@/schemas/machine-grants";
 
 /** Selections are saved by the human endpoint and replaced by its signed token. */
-export function MachineGrantConsent({ consentRequest, onPrepared, disabled = false, allowedServiceIds }: {
+export function MachineGrantConsent({ consentRequest, onPrepared, onSelectionRequired, disabled = false, allowedServiceIds }: {
   readonly consentRequest: string;
   readonly onPrepared: (token: string | null) => void;
+  readonly onSelectionRequired?: (required: boolean) => void;
   readonly disabled?: boolean;
   readonly allowedServiceIds?: readonly string[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
+  const selectionRevision = useRef(0);
   const [reviewedOwner] = useState(ownerId);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
-  useEffect(() => { if (ownerId !== reviewedOwner) onPrepared(null); }, [ownerId, reviewedOwner, onPrepared]);
+  useEffect(() => { if (ownerId !== reviewedOwner) { selectionRevision.current++; onPrepared(null); } }, [ownerId, reviewedOwner, onPrepared]);
+  const [hasSelection, setHasSelection] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [prepared, setPrepared] = useState(false);
@@ -31,20 +35,23 @@ export function MachineGrantConsent({ consentRequest, onPrepared, disabled = fal
     return () => window.clearTimeout(timer);
   }, [approvedExpiry, onPrepared]);
   return <section aria-labelledby="machine-consent-heading" className="space-y-4 border-t border-border py-5">
-    <h2 id="machine-consent-heading" className="text-15 font-semibold">{t("Machine access")}</h2>
-    <p className="break-all text-11 text-muted-foreground">{t("Protected OAuth client: ")}{signed?.clientId ?? t("Unavailable")}</p>
-    <p className="text-12 text-muted-foreground">{t("Choose the Machines this OAuth client may use. Save the selection before allowing access; the server binds it to this one-time consent request. Machine access does not allow purchases, top-ups, pause, resume or deletion.")}</p>
-    {!requestValid ? <ErrorBanner message={t("The protected Machine consent request is missing or expired. Restart authorization from the application.")} /> : <MachineGrantEditor allowedServiceIds={allowedServiceIds} disabled={disabled} submitting={pending} submitLabel={t("Save Machine selection")} onSelectionChange={() => { onPrepared(null); setPrepared(false); setApprovedExpiry(undefined); }} onSubmit={async (selection) => {
+    <h2 id="machine-consent-heading" className="type-card-title">{translateUi("Machine access (optional)")}</h2>
+    <p className="break-all text-13 text-muted-foreground">{translateUi("Protected OAuth client: ")}{signed?.clientId ?? translateUi("Unavailable")}</p>
+    <p className="text-14 text-muted-foreground">{translateUi("Leave all Machines unselected to allow the other permissions without Machine access. To share Machines, save the selection before allowing access; the server binds it to this one-time consent request. Machine access does not allow purchases, top-ups, pause, resume or deletion.")}</p>
+    {!hasSelection && <p role="status" className="text-14 text-muted-foreground">{translateUi("No Machines will be shared. You can allow access without saving a Machine selection.")}</p>}
+    {!requestValid ? <ErrorBanner message={translateUi("The protected Machine consent request is missing or expired. Restart authorization from the application.")} /> : <MachineGrantEditor optional allowedServiceIds={allowedServiceIds} disabled={disabled} submitting={pending} submitLabel={translateUi("Save Machine selection")} onSelectionChange={(selected) => { selectionRevision.current++; setHasSelection(selected); onSelectionRequired?.(selected); onPrepared(null); setPrepared(false); setApprovedExpiry(undefined); setError(undefined); }} onSubmit={async (selection) => {
+      const revision = ++selectionRevision.current;
       setError(undefined); onPrepared(null); setPrepared(false); setPending(true);
       try {
         const token = await prepareMachineConsent(consentRequest, selection);
+        if (revision !== selectionRevision.current) return;
         const returned = readMachineConsentScope(token);
         if (!returned || returned.clientId !== signed?.clientId || !returned.scope.split(/\s+/).includes("machine") || returned.expiresAt <= Date.now()) throw new Error("The protected Machine selection could not be verified for this request. Restart authorization.");
         onPrepared(token); setPrepared(true); setApprovedExpiry(returned.expiresAt);
-      } catch (err) { setError(machineGrantUnavailable(err) ? "Machine consent is not available on this server yet. Approval is blocked; return to the application or try again after server integration." : err instanceof Error ? err.message : "Could not save the protected Machine selection."); }
+      } catch (err) { if (revision !== selectionRevision.current) return; setError(machineGrantUnavailable(err) ? "Machine consent is not available on this server yet. Clear the Machine selection to allow other permissions, or try saving it again later." : err instanceof Error ? err.message : "Could not save the protected Machine selection."); }
       finally { setPending(false); }
     }} />}
-    {prepared && <p role="status" className="text-12 text-success">{t("Machine selection saved. Review the remaining permissions and allow access below.")}</p>}
+    {prepared && <p role="status" className="text-14 text-success">{translateUi("Machine selection saved. Review the remaining permissions and allow access below.")}</p>}
     {error && <ErrorBanner message={error} />}
   </section>;
 }

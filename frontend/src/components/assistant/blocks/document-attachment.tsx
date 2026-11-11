@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ApiError } from "@/lib/api-client";
 import { useState } from "react";
 import { Download, FileText } from "lucide-react";
@@ -11,7 +12,7 @@ export function DocumentAttachment({
 }: {
   readonly attachment: ChatImage;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -41,18 +42,18 @@ export function DocumentAttachment({
         type="button"
         onClick={() => void download()}
         disabled={busy}
-        className="flex max-w-full items-center gap-2 rounded-lg border border-hairline bg-card px-3 py-2 text-xs disabled:opacity-50"
+        className="flex max-w-full items-center gap-2 rounded-lg border border-hairline bg-card px-3 py-2 text-13 disabled:opacity-50"
       >
         <FileText className="h-4 w-4 shrink-0" />
         <span className="truncate">{attachment.label}</span>
         <Download
           className="h-3 w-3 shrink-0 text-muted-foreground"
-          aria-label={busy ? t("Downloading") : t("Download")}
+          aria-label={busy ? translateUi("Downloading") : translateUi("Download")}
         />
       </button>
       {error && (
-        <p role="status" className="text-xs text-muted-foreground">
-          {expired ? t("Attachment expired per retention policy. Upload it again to continue.") : t("Attachment unavailable or expired. Upload it again.")}
+        <p role="status" className="text-13 text-muted-foreground">
+          {expired ? translateUi("Attachment expired per retention policy. Upload it again to continue.") : translateUi("Attachment unavailable or expired. Upload it again.")}
         </p>
       )}
     </div>

@@ -24,6 +24,23 @@ use serde::Deserialize;
 use crate::errors::{AppError, AppResult};
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 
+pub(crate) async fn ensure_turn_trace_index(db: &mongodb::Database) -> mongodb::error::Result<()> {
+    db.collection::<Document>(AUDIT_LOG)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"event_data.turn_id": 1, "created_at": 1, "_id": 1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .name("audit_log_turn_trace".to_owned())
+                        .partial_filter_expression(doc! {"event_data.turn_id": {"$type": "string"}})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
 /// HTTP status buckets offered by the `status` filter. `none` covers rows whose
 /// `event_data` carries no `response_status` at all (most non-proxy events).
 pub const ADMIN_STATUS_FILTERS: &[&str] = &["2xx", "3xx", "4xx", "5xx", "none"];
@@ -109,6 +126,7 @@ pub const ADMIN_EVENT_TYPE_OPTION_LIMIT: usize = 200;
 pub struct AdminAuditLogListParams<'a> {
     pub page: u64,
     pub per_page: u64,
+    pub include_total: bool,
     pub search: Option<&'a str>,
     pub search_filters: Option<&'a str>,
     pub custom_filters: Option<&'a str>,
@@ -119,17 +137,53 @@ pub struct AdminAuditLogListParams<'a> {
     pub user_id: Option<&'a str>,
     /// Legacy exact-match param, kept for existing API clients.
     pub api_key_id: Option<&'a str>,
+    pub turn_id: Option<&'a str>,
     pub created_dates: Option<&'a str>,
     pub created_from: Option<&'a str>,
     pub created_to: Option<&'a str>,
     pub sort: &'a str,
 }
 
+pub struct AdminAuditLogPage {
+    pub entries: Vec<AuditLog>,
+    pub total: Option<u64>,
+    pub has_more: bool,
+}
+
+pub async fn count_entries(
+    db: &mongodb::Database,
+    params: AdminAuditLogListParams<'_>,
+) -> AppResult<u64> {
+    let filter = admin_audit_filter(&params)?;
+    count_filtered_entries(db, &params, &filter).await
+}
+
+async fn count_filtered_entries(
+    db: &mongodb::Database,
+    params: &AdminAuditLogListParams<'_>,
+    filter: &Document,
+) -> AppResult<u64> {
+    let collection = db.collection::<AuditLog>(AUDIT_LOG);
+    Ok(if filter.is_empty() {
+        collection.estimated_document_count().await?
+    } else {
+        collection
+            .count_documents(filter.clone())
+            .with_options(
+                mongodb::options::CountOptions::builder()
+                    .hint(admin_count_hint(params, filter))
+                    .max_time(params.turn_id.map(|_| Duration::from_secs(3)))
+                    .build(),
+            )
+            .await?
+    })
+}
+
 /// List audit entries using bounded, server-side admin-table controls.
 pub async fn list_entries(
     db: &mongodb::Database,
     params: AdminAuditLogListParams<'_>,
-) -> AppResult<(Vec<AuditLog>, u64)> {
+) -> AppResult<AdminAuditLogPage> {
     if params.page == 0 || !(1..=100).contains(&params.per_page) {
         return Err(AppError::ValidationError(
             "page must be at least 1 and per_page must be between 1 and 100".to_string(),
@@ -141,11 +195,16 @@ pub async fn list_entries(
         .checked_sub(1)
         .and_then(|page| page.checked_mul(params.per_page))
         .ok_or_else(|| AppError::ValidationError("page is too large".to_string()))?;
+    if params.turn_id.is_some() && offset.saturating_add(params.per_page) > 10_000 {
+        return Err(AppError::ValidationError(
+            "Turn trace page exceeds the 10000-row window".into(),
+        ));
+    }
     let filter = admin_audit_filter(&params)?;
     let sort = admin_audit_sort(params.sort)?;
     let collection = db.collection::<AuditLog>(AUDIT_LOG);
-    let count_hint = admin_count_hint(&params, &filter);
     let page_hint = admin_page_hint(&params, &filter);
+    let include_total = params.include_total || filter.is_empty();
 
     let limit = i64::try_from(params.per_page)
         .map_err(|_| AppError::ValidationError("per_page is too large".to_string()))?;
@@ -153,21 +212,11 @@ pub async fn list_entries(
         return Err(AppError::ValidationError("page is too large".to_string()));
     }
 
-    // The unfiltered total uses collection metadata (exact except briefly after
-    // an unclean shutdown), avoiding a count scan proportional to log size.
-    // Every non-empty filter retains an exact count, including substring search.
     let count = async {
-        if filter.is_empty() {
-            collection.estimated_document_count().await
+        if include_total {
+            count_filtered_entries(db, &params, &filter).await.map(Some)
         } else {
-            collection
-                .count_documents(filter.clone())
-                .with_options(
-                    mongodb::options::CountOptions::builder()
-                        .hint(count_hint)
-                        .build(),
-                )
-                .await
+            Ok(None)
         }
     };
     let page = async {
@@ -176,18 +225,30 @@ pub async fn list_entries(
             .with_options(
                 mongodb::options::FindOptions::builder()
                     .hint(page_hint)
+                    .max_time(params.turn_id.map(|_| Duration::from_secs(3)))
                     .build(),
             )
             .sort(sort)
             .skip(offset)
-            .limit(limit)
+            .limit(limit + i64::from(!include_total))
             .await?
             .try_collect::<Vec<AuditLog>>()
             .await
+            .map_err(AppError::from)
     };
-    let (total, entries) = tokio::try_join!(count, page)?;
+    let (total, mut entries) = tokio::try_join!(count, page)?;
+    let has_more = match total {
+        Some(total) => offset + (entries.len() as u64) < total,
+        None => entries.len() as u64 > params.per_page,
+    };
+    let total = total.or_else(|| (offset == 0 && !has_more).then_some(entries.len() as u64));
+    entries.truncate(params.per_page as usize);
 
-    Ok((entries, total))
+    Ok(AdminAuditLogPage {
+        entries,
+        total,
+        has_more,
+    })
 }
 
 // An unanchored contains OR can choose seven FULL index scans for an exact
@@ -204,6 +265,9 @@ pub(super) fn admin_count_hint(
     params: &AdminAuditLogListParams<'_>,
     filter: &Document,
 ) -> Option<Hint> {
+    if params.turn_id.is_some() {
+        return Some(Hint::Name("audit_log_turn_trace".into()));
+    }
     if global_search_only(params, filter) {
         Some(Hint::Keys(doc! { "$natural": 1 }))
     } else {
@@ -215,6 +279,9 @@ pub(super) fn admin_page_hint(
     params: &AdminAuditLogListParams<'_>,
     filter: &Document,
 ) -> Option<Hint> {
+    if params.turn_id.is_some() {
+        return Some(Hint::Name("audit_log_turn_trace".into()));
+    }
     global_search_only(params, filter).then(|| {
         let key = params.sort.trim_start_matches('-');
         let key = if key == "status" {
@@ -276,6 +343,17 @@ pub async fn distinct_event_types(db: &mongodb::Database) -> AppResult<Vec<Strin
 
 pub(super) fn admin_audit_filter(params: &AdminAuditLogListParams<'_>) -> AppResult<Document> {
     let mut clauses = Vec::new();
+    if let Some(raw) = params.turn_id {
+        let raw = raw.trim();
+        let id = if matches!(raw.len(), 32 | 36) {
+            uuid::Uuid::parse_str(raw).ok()
+        } else {
+            None
+        }
+        .filter(|id| id.get_version_num() == 4 && id.get_variant() == uuid::Variant::RFC4122)
+        .ok_or_else(|| AppError::ValidationError("turn_id must be a turn UUID".into()))?;
+        clauses.push(doc! {"event_data.turn_id": id.to_string()});
+    }
 
     if let Some(search) = params
         .search
@@ -829,6 +907,7 @@ mod tests {
         AdminAuditLogListParams {
             page: 1,
             per_page: 25,
+            include_total: true,
             search: None,
             search_filters: None,
             custom_filters: None,
@@ -837,6 +916,7 @@ mod tests {
             actor: None,
             user_id: None,
             api_key_id: None,
+            turn_id: None,
             created_dates: None,
             created_from: None,
             created_to: None,
@@ -845,8 +925,199 @@ mod tests {
     }
 
     #[test]
+    fn exact_turn_filter_is_canonical_and_invalid_never_broadens() {
+        let id = uuid::Uuid::new_v4();
+        let compact = id.simple().to_string().to_uppercase();
+        let mut p = params();
+        p.turn_id = Some(&compact);
+        assert_eq!(
+            admin_audit_filter(&p).unwrap(),
+            doc! {"event_data.turn_id": id.to_string()}
+        );
+        for bad in [
+            "",
+            " ",
+            "partial",
+            ".*",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            p.turn_id = Some(bad);
+            assert!(admin_audit_filter(&p).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_trace_filter_count_and_partial_index_agree() {
+        let db = crate::test_utils::connect_test_database("turn_trace_audit_index")
+            .await
+            .expect("MongoDB required");
+        ensure_turn_trace_index(&db).await.unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let collection = db.collection::<Document>(AUDIT_LOG);
+        let at = bson::DateTime::now();
+        collection
+            .insert_many((0..200).map(|i| {
+                doc! {
+                    "_id": format!("entry-{i:03}"), "event_type": "fixture", "created_at": at,
+                    "event_data": if i < 3 { doc! {"turn_id": &id} } else { doc! {"legacy": true} }
+                }
+            }))
+            .await
+            .unwrap();
+        let mut p = params();
+        p.turn_id = Some(&id);
+        p.per_page = 2;
+        let page = list_entries(&db, p).await.unwrap();
+        assert_eq!(page.total, Some(3));
+        assert!(page.has_more);
+        assert_eq!(page.entries.len(), 2);
+        let mut p = params();
+        p.turn_id = Some(&id);
+        assert_eq!(count_entries(&db, p).await.unwrap(), 3);
+        let explain = db.run_command(doc! {"explain": {"find":AUDIT_LOG,
+            "filter":{"event_data.turn_id":&id},"sort":{"created_at":-1,"_id":-1},"hint":"audit_log_turn_trace"},
+            "verbosity":"executionStats"}).await.unwrap();
+        let stats = explain.get_document("executionStats").unwrap();
+        assert_eq!(stats.get_i32("nReturned").unwrap(), 3);
+        assert!(stats.get_i32("totalDocsExamined").unwrap() <= 3);
+        assert!(
+            format!("{:?}", explain.get_document("queryPlanner").unwrap())
+                .contains("audit_log_turn_trace")
+        );
+        for (page, per_page) in [(1000, 50), (5001, 2), (143, 70)] {
+            let mut p = params();
+            p.turn_id = Some(&id);
+            p.page = page;
+            p.per_page = per_page;
+            assert!(list_entries(&db, p).await.is_err());
+        }
+        let mut p = params();
+        p.turn_id = Some(&id);
+        p.page = 5000;
+        p.per_page = 2;
+        assert!(list_entries(&db, p).await.unwrap().entries.is_empty());
+        db.drop().await.unwrap();
+    }
+
+    #[test]
     fn empty_controls_produce_an_empty_filter() {
         assert_eq!(admin_audit_filter(&params()).expect("filter"), doc! {});
+    }
+
+    #[tokio::test]
+    async fn deferred_total_reads_only_a_page_and_preserves_exact_counts() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+        let recorded = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command);
+            }
+        });
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "audit_deferred_count",
+            handler,
+        )
+        .await
+        .expect("MongoDB required");
+        let collection = db.collection::<Document>(AUDIT_LOG);
+        collection
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "created_at": 1, "_id": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .name("audit_log_sort_created_at".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let at = bson::DateTime::now();
+        collection
+            .insert_many(["a", "b", "c"].map(|id| {
+                doc! {
+                    "_id": id, "event_type": "needle", "created_at": at,
+                }
+            }))
+            .await
+            .unwrap();
+        commands.lock().unwrap().clear();
+
+        let mut p = params();
+        p.per_page = 1;
+        p.search = Some("needle");
+        p.include_total = false;
+        let first = list_entries(&db, p).await.unwrap();
+        assert_eq!(first.total, None);
+        assert!(first.has_more);
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c"]
+        );
+        {
+            let commands = commands.lock().unwrap();
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command.get_str("find") == Ok(AUDIT_LOG))
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.contains_key("aggregate")
+                        || command.contains_key("count"))
+            );
+            let find = commands
+                .iter()
+                .find(|command| command.get_str("find") == Ok(AUDIT_LOG))
+                .unwrap();
+            assert_eq!(find.get_i64("limit").unwrap(), 2);
+        }
+
+        for (page, expected, has_more) in [
+            (2, Some("b"), true),
+            (3, Some("a"), false),
+            (4, None, false),
+        ] {
+            let mut p = params();
+            p.page = page;
+            p.per_page = 1;
+            p.search = Some("needle");
+            p.include_total = false;
+            let result = list_entries(&db, p).await.unwrap();
+            assert_eq!(result.entries.first().map(|row| row.id.as_str()), expected);
+            assert_eq!(result.has_more, has_more);
+        }
+        let mut p = params();
+        p.search = Some("needle");
+        let counted = list_entries(&db, p).await.unwrap();
+        assert_eq!(counted.total, Some(3));
+        assert!(!counted.has_more);
+
+        let mut p = params();
+        p.search = Some("needle");
+        assert_eq!(count_entries(&db, p).await.unwrap(), 3);
+
+        for search in [None, Some("needle"), Some("no-match")] {
+            let mut p = params();
+            p.search = search;
+            p.include_total = false;
+            let result = list_entries(&db, p).await.unwrap();
+            assert_eq!(
+                result.total,
+                Some(if search == Some("no-match") { 0 } else { 3 })
+            );
+            assert!(!result.has_more);
+        }
+        db.drop().await.unwrap();
     }
 
     #[test]
@@ -919,7 +1190,9 @@ mod tests {
                         assert!(index_names.contains(&name), "missing index: {name}");
                     }
                 }
-                let (rows, total) = list_entries(&db, p).await.unwrap();
+                let result = list_entries(&db, p).await.unwrap();
+                let rows = result.entries;
+                let total = result.total.unwrap();
                 if search.is_none() {
                     assert_eq!(total, collection_count, "metadata count for {sort}");
                     assert_eq!(rows.len(), collection_count as usize);

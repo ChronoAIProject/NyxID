@@ -44,8 +44,10 @@ services:
       # unique HOSTNAME. The private listener is reachable only on this network.
       INTERNAL_BIND_ADDR: 0.0.0.0:3002
       INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS: 5
+      NYXID_SERVER_TUF_STATE_DIR: /var/lib/nyxid/tuf
     volumes:
       - ./keys:/app/keys:ro
+      - backend_tuf:/var/lib/nyxid/tuf
     depends_on:
       mongodb-init:
         condition: service_completed_successfully
@@ -63,5 +65,10 @@ services:
       - "127.0.0.1:3000:8080"
     environment:
       BACKEND_URL: http://backend:3001
+      NYXID_PUBLIC_ORIGIN: ${FRONTEND_URL:-http://localhost:3000}
+      NYXID_BROWSER_CONNECT_ORIGINS: ${NYXID_BROWSER_CONNECT_ORIGINS:-}
     depends_on:
       - backend
+
+volumes:
+  backend_tuf:

@@ -71,15 +71,15 @@ pub struct TriggerResponse {
 #[derive(Serialize)]
 pub struct CreateTriggerResponse {
     pub trigger: TriggerResponse,
-    pub secret: Option<String>,
-    pub delivery_signing_secret: Option<String>,
+    pub secret: Option<zeroize::Zeroizing<String>>,
+    pub delivery_signing_secret: Option<zeroize::Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct UpdateTriggerResponse {
     pub trigger: TriggerResponse,
-    pub delivery_signing_secret: Option<String>,
+    pub delivery_signing_secret: Option<zeroize::Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
@@ -91,15 +91,21 @@ pub struct ListTriggersResponse {
 #[derive(Serialize)]
 pub struct RotateTriggerSecretResponse {
     pub trigger: TriggerResponse,
-    pub secret: String,
+    pub secret: zeroize::Zeroizing<String>,
 }
 
 #[derive(Serialize)]
 pub struct RotateTriggerDeliverySecretResponse {
     pub trigger: TriggerResponse,
-    pub delivery_signing_secret: String,
+    pub delivery_signing_secret: zeroize::Zeroizing<String>,
     pub key_id: String,
 }
+crate::errors::redacted_debug!(
+    CreateTriggerResponse,
+    UpdateTriggerResponse,
+    RotateTriggerSecretResponse,
+    RotateTriggerDeliverySecretResponse
+);
 
 #[derive(Debug, Deserialize)]
 pub struct ListTriggerDeliveriesQuery {
@@ -622,17 +628,45 @@ pub struct RunsQuery {
 
 #[derive(Serialize)]
 pub struct RunResponse {
+    pub execution_outcome: Option<crate::models::trigger_run::RunOutcome>,
+    pub notification_delivery: Option<NotificationDeliveryResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator_deadline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_cancel: Option<bool>,
     pub id: String,
     pub scheduled_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub outcome: crate::models::trigger_run::RunOutcome,
     pub reason: Option<String>,
+    pub failure_reason: Option<RunFailureReasonResponse>,
     pub thread_id: Option<String>,
     pub duration_ms: Option<i64>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
     pub missed: Option<MissedResponse>,
+}
+
+#[derive(Serialize)]
+pub struct NotificationDeliveryResponse {
+    pub state: String,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub attempts: u32,
+    pub http_status: Option<u16>,
+    pub retry_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunFailureReasonResponse {
+    pub source: String,
+    pub stage: String,
+    pub code: String,
+    pub http_status: Option<u16>,
+    pub nyxid_error_code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -644,12 +678,42 @@ pub struct MissedResponse {
 
 pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunResponse {
     RunResponse {
+        execution_outcome: run.execution_outcome,
+        notification_delivery: run.notification_delivery.map(|delivery| {
+            NotificationDeliveryResponse {
+                message: delivery.reason.as_deref().map(|code| {
+                    crate::services::notification_service::automation::message(code).to_owned()
+                }),
+                state: delivery.state,
+                reason: delivery.reason,
+                attempts: delivery.attempts,
+                http_status: delivery.http_status,
+                retry_at: delivery.retry_at.map(|at| at.to_rfc3339()),
+            }
+        }),
+        coordinator_deadline: run.coordinator.as_ref().map(|c| c.deadline.to_rfc3339()),
+        wait_kind: run.coordinator.as_ref().and_then(|c| c.wait_kind.clone()),
+        can_cancel: run.coordinator.as_ref().map(|c| {
+            c.protocol == 2
+                && matches!(
+                    run.outcome,
+                    crate::models::trigger_run::RunOutcome::Started
+                        | crate::models::trigger_run::RunOutcome::Waiting
+                )
+        }),
         id: run.id,
         scheduled_at: run.scheduled_at.to_rfc3339(),
         started_at: run.started_at.map(|t| t.to_rfc3339()),
         finished_at: run.finished_at.map(|t| t.to_rfc3339()),
         outcome: run.outcome,
         reason: run.reason,
+        failure_reason: run.failure_reason.map(|reason| RunFailureReasonResponse {
+            source: reason.source,
+            stage: reason.stage,
+            code: reason.code,
+            http_status: reason.http_status,
+            nyxid_error_code: reason.nyxid_error_code,
+        }),
         thread_id: run.thread_id,
         duration_ms: run.duration_ms,
         attempts: run.attempts,
@@ -757,6 +821,28 @@ pub async fn setup(
     }))
 }
 
+pub async fn cancel_run(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, run_id)): Path<(String, String)>,
+) -> AppResult<Json<RunResponse>> {
+    require_first_party_human(&auth)?;
+    let run = schedules::continuation::cancel(
+        &state.db,
+        &auth.user_id.to_string(),
+        &id,
+        &run_id,
+        "cancelled",
+        &state.config.frontend_url,
+    )
+    .await?;
+    let targets =
+        schedules::continuation::owned_targets(&state.db, &auth.user_id.to_string(), &id, &run_id)
+            .await?;
+    super::trigger_scheduler::cancel_transports(&state, &targets).await?;
+    Ok(Json(run_response(run)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,6 +866,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Trigger>(TRIGGERS)
             .insert_one(Trigger {
+                secret_context_versions: Default::default(),
                 source: Default::default(),
                 setup_watch_id: None,
                 schedule: None,
@@ -807,6 +894,7 @@ mod tests {
             .unwrap();
         db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
             .insert_one(TriggerDeliveryRecord {
+                secret_context_versions: Default::default(),
                 id: "record-id".to_string(),
                 trigger_id: trigger_id.clone(),
                 user_id: owner.clone(),

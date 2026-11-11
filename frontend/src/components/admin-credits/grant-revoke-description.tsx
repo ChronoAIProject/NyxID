@@ -1,5 +1,7 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-import { credits } from "@/lib/billing-display";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { exactCredits, formatExactCredits } from "@/lib/credits";
 import type { CreditGrant } from "@/schemas/billing-credits";
 import { DialogDescription } from "@/components/ui/dialog";
 
@@ -8,21 +10,32 @@ export function GrantRevokeDescription({
 }: {
   readonly grant: CreditGrant;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <DialogDescription className="space-y-2">
-      <span className="block">{t("Revoke the remaining")}{" "}
-        {formatCredits(grant.remaining ?? grant.remaining_micros)}{t(" for")}{" "}
+      <span className="block">{translateUi("Reclaim the unused part of the remaining")}{" "}
+        {formatCredits(
+          exactCredits(grant.remaining, grant.remaining_micros) ?? "0",
+        )}{" "}{translateUi("for")}{" "}
         {grant.recipient_display_name ||
           grant.recipient_email ||
-          t("this recipient")}{t("? This cannot be undone.")}</span>
+          translateUi("this recipient")}{translateUi("? Held requests finish first; only the final unused remainder is reclaimed. Other allocations and purchased credits are unaffected. This cannot be undone.")}</span>
+      <span className="block break-all text-13">{translateUi("Allocation ")}{grant.id}{translateUi(" · created")}{" "}
+        {new Date(grant.created_at).toLocaleString(getFormattingLocale())}
+      </span>
       {grant.schedule_id ? (
-        <span className="block">{t("This revocation affects this period only. Pausing the schedule stops future disbursements.")}</span>
+        <span className="block">{translateUi("Schedule ")}{grant.schedule_id}
+          {grant.period_start
+            ? translateUi(" · period starting {{value1}}", { value1: new Date(grant.period_start).toLocaleString(getFormattingLocale()) })
+            : ""}
+          . This reclaim affects this allocation only. Pausing the schedule
+          stops future issuance.
+        </span>
       ) : null}
     </DialogDescription>
   );
 }
 
-function formatCredits(value: string | number) {
-  return translateUi("{{value}} credits", { value: credits(value) });
+function formatCredits(value: string) {
+  return `${formatExactCredits(value, 12)} credits`;
 }

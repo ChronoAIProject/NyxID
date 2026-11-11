@@ -1,11 +1,24 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label, FieldHelp } from "@/components/ui/label";
+import { describeChanges, changeList, recordChanges } from "@/lib/grouped-form-changes";
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedDisclosure,
+} from "@/components/ui/grouped-list";
+import { SHARED_LEGACY_WARNING } from "@/schemas/machines";
+import { MachineSeparationSupport } from "@/components/shared/machine-isolation";
+import type { MachineContextSelection } from "@/schemas/machine-access";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDetail } from "@/components/ui/grouped-detail";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import {
@@ -13,39 +26,162 @@ import {
   useRequestMachineContext,
   useSetMachineAccess,
 } from "@/hooks/use-machine-access";
-import { machineSelectionSchema, SEPARATED_SETUP_NOTE, type MachineAccess, type MachineSelection } from "@/schemas/machine-access";
+import { machineSelectionSchema, type MachineAccess, type MachineSelection } from "@/schemas/machine-access";
 const labels = { shell: "Shell commands", files: "File tools", browser: "Secure browser", computer: "Full computer control", developer_browser: "Developer browser" } as const;
+const descriptions: Record<keyof typeof labels, string> = {
+  shell: "Run commands as the machine’s OS user",
+  files: "Read and write files",
+  browser: "Saved logins stay here; browser-only access avoids desktop authority",
+  computer: "Operate applications through their UI",
+  developer_browser: "Run JavaScript in a separate browser",
+};
 
-export function MachineCapabilities({ agentId, disabled = false }: { readonly agentId: string; readonly disabled?: boolean }) {
-  const { t } = useUiTranslation();
+export function MachineCapabilities({
+  agentId,
+  disabled = false,
+}: {
+  readonly agentId: string;
+  readonly disabled?: boolean;
+}) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   const contextsEnabled = useFeature(FEATURE_FLAG.MACHINE_CONTEXTS);
-  const query = useMachineAccess(agentId, (enabled || contextsEnabled) && !disabled);
+  const query = useMachineAccess(agentId, !disabled);
   if (!enabled && !contextsEnabled && !query.data?.length) return null;
-  return <section aria-label={t("Machine capabilities")} className="space-y-3">
-    <p className="text-12 text-muted-foreground">{t("Choose what this agent can do on each machine. With capability editing enabled, newly selected machines start with all permissions off. Existing legacy access stays until edited. Saving changes cancels this agent’s current work on that machine.")}</p>
-    {!enabled ? <p role="status" className="text-12 text-muted-foreground">{t("Capability editing is not enabled yet. Existing restrictions still apply.")}</p> : null}
-    {query.error ? <p role="alert" className="text-12 text-destructive">{t("Could not load machine capabilities.")}</p> : null}
-    {query.data?.map(machine => <MachineCapabilityForm key={`${machine.node_id}:${machine.revision}`} machine={machine} agentId={agentId} disabled={disabled || !enabled} contextEnabled={contextsEnabled} />)}
-  </section>;
+  return (
+    <section aria-label={translateUi("Machine capabilities")} className="space-y-6">
+      <GroupedList
+        title={translateUi("Machine access")}
+        footer={
+          <>
+            <p>{translateUi("Choose what this agent can do on each machine. With capability editing enabled, newly selected machines start with all permissions off. Existing legacy access stays until edited. Saving changes cancels this agent’s current work on that machine.")}</p>
+            {!enabled ? (
+              <p role="status">{translateUi("Capability editing is not enabled yet. Existing restrictions still apply.")}</p>
+            ) : null}
+            {query.error ? (
+              <p role="alert" className="text-destructive">{translateUi("Could not refresh machine capabilities. Displayed status may be out of date.")}</p>
+            ) : null}
+            {query.data?.some(
+              (machine) =>
+                machine.revocation_pending || machine.delivery_pending,
+            ) ? (
+              <p>{translateUi("Status refreshes for up to one minute while this page is active. Use Refresh machine status for a later check.")}</p>
+            ) : null}
+          </>
+        }
+      >
+        {query.data?.map((machine) => (
+          <MachineCapabilityPage
+            key={machine.node_id}
+            machine={machine}
+            agentId={agentId}
+            disabled={disabled}
+            capabilityEditing={enabled}
+            contextEnabled={contextsEnabled}
+          />
+        ))}
+        {!query.data?.length ? (
+          <GroupedRow
+            title={
+              query.isPending
+                ? translateUi("Loading machine access…")
+                : translateUi("No machines assigned")
+            }
+          />
+        ) : null}
+        <GroupedRow asChild interactive>
+          <button
+            type="button"
+            disabled={query.isFetching || disabled}
+            onClick={() => void query.refetch()}
+          >{translateUi("Refresh machine status")}</button>
+        </GroupedRow>
+      </GroupedList>
+    </section>
+  );
 }
-export function MachineCapabilityForm({ machine, agentId, disabled = false, contextEnabled = false }: { readonly machine: MachineAccess; readonly agentId: string; readonly disabled?: boolean; readonly contextEnabled?: boolean }) {
-  const { t } = useUiTranslation();
+
+function MachineCapabilityPage(
+  props: React.ComponentProps<typeof MachineCapabilityForm>,
+) {
+  useUiTranslation();
+  const [open, setOpen] = useState(false);
+  const machine = props.machine;
+  const needsSelection = machine.selection_required === true || machine.mode === "selection_required";
+  const searchId = `machine-detail-${machine.node_id}`;
+  useDrawerSearchEntries([{ id: searchId, title: machine.name, breadcrumb: "Access › Machine access",
+    keywords: `${needsSelection ? "Needs owner selection" : machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy access"} ${Object.keys(labels).map((key) => labels[key as keyof typeof labels]).join(" ")}`,
+    pages: [searchId], reveal: () => setOpen(true),
+  }]);
+  return (
+    <>
+      <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
+        <span className="block">{machine.name}</span>
+        <span className="block type-secondary text-text-tertiary">
+          {needsSelection
+            ? translateUi("Needs owner selection")
+            : machine.mode === "separated"
+              ? translateUi("Separate workspace and browser")
+              : translateUi("Shared legacy access")}
+        </span>
+      </GroupedDisclosure>
+      <GroupedDetail
+        searchPage={searchId}
+        open={open}
+        title={machine.name}
+        info="Review this agent’s workspace separation and allowed tools on this machine. Machine support and permissions still apply."
+        onReveal={() => setOpen(true)}
+        backLabel={translateUi("Back to Access")}
+        onBack={() => setOpen(false)}
+      >
+        <MachineCapabilityForm key={machine.revision} {...props} />
+      </GroupedDetail>
+    </>
+  );
+}
+
+function humanReason(value: string | null | undefined, fallback: string) {
+  if (!value) return fallback;
+  const text = value.replace(/^[a-z][a-z0-9_]+:\s*/, "");
+  return /^[a-z0-9_]+$/.test(text) ? fallback : text;
+}
+
+export function MachineCapabilityForm({
+  machine,
+  agentId,
+  disabled = false,
+  capabilityEditing = true,
+  contextEnabled = false,
+  onSaveError,
+  onSaveSuccess,
+}: {
+  readonly machine: MachineAccess;
+  readonly agentId: string;
+  readonly disabled?: boolean;
+  readonly capabilityEditing?: boolean;
+  readonly contextEnabled?: boolean;
+  readonly onSaveError?: () => void;
+  readonly onSaveSuccess?: () => void;
+}) {
+  useUiTranslation();
   const mutation = useSetMachineAccess(agentId);
   const contextMutation = useRequestMachineContext(agentId);
   const [error, setError] = useState<string>();
   const [contextRequested, setContextRequested] = useState(false);
+  const [legacyAccepted, setLegacyAccepted] = useState(false);
+  const needsSelection = machine.selection_required === true || machine.mode === "selection_required";
+  const separationAvailable = machine.separated?.available === true && !machine.separated.reason;
   const form = useAppForm<MachineSelection>({ resolver: zodResolver(machineSelectionSchema), defaultValues: {
     expected_revision: machine.revision, capabilities: machine.capabilities, saved_login_ids: machine.saved_login_ids,
   } });
   const caps = form.watch("capabilities");
-  const requestContext = async () => {
+  const requestContext = async (mode: MachineContextSelection["mode"] = "separated") => {
     setError(undefined);
     try {
       await contextMutation.mutateAsync({
         node: machine.node_id,
         selection: {
-          mode: "separated",
+          mode,
           expected_revision: machine.revision,
           capabilities: machine.capabilities,
           saved_login_ids: machine.saved_login_ids ?? [],
@@ -53,48 +189,195 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false, cont
       });
       setContextRequested(true);
     } catch {
-      setError("Could not request a separate workspace. Reload if access changed.");
+      setError("Could not request this machine selection. Reload if access changed; automatic and required need current confirmed support.");
     }
   };
-  return <form className="space-y-3 rounded-lg border p-4" aria-label={t("{{name}} capabilities", { name: machine.name })} onSubmit={form.handleSubmit(async selection => {
+  const save = form.handleSubmit(async (selection) => {
     setError(undefined);
-    try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); }
-    catch { setError("Could not save capabilities. Reload if access changed."); }
-  })}>
-    <div className="flex flex-wrap items-center gap-2"><span className="text-13 font-medium">{machine.name}</span><Badge variant="secondary">{machine.mode === "separated" ? t("Separate workspace and browser") : t("Shared legacy")}</Badge></div>
-    <p className="text-12 text-muted-foreground">{machine.mode === "separated" ? t("This agent has its own workspace and browser profiles. Full isolation requires a separate machine container or VM per agent.") : t("Workspace and browser sessions are shared with other agents on this machine.")}</p>
-    <p role="status" className="text-12 text-muted-foreground">{machine.execution_note ?? (machine.mode === "separated"
-      ? machine.separated?.available
-        ? t("Granted commands and file tools use this agent’s separated workspace. No shared fallback.")
-        : t("This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through an owner action card; no automatic shared fallback.")
-      : t("Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions."))}</p>
-    {!machine.separated?.available ? <div className="space-y-1 text-12 text-muted-foreground">
-      <p>{machine.separated_setup_note ?? SEPARATED_SETUP_NOTE}</p>
-      {machine.separated?.reason ? <details><summary className="cursor-pointer">{t("Separate workspace diagnostics")}</summary><p>{machine.separated.reason}</p></details> : null}
-    </div> : null}
-    {machine.revocation_pending ? <p role="status" className="text-12 text-muted-foreground">{t("Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.")}</p> : null}
-    {!machine.can_edit ? <p role="status" className="text-12">{t("Only the machine owner or an organization admin can edit this access.")}</p> : null}
-    {!machine.protocol_v2 ? <p role="status" className="text-12">{t("Update this machine before changing capabilities. Its existing access continues.")}</p> : null}
-    {contextEnabled && machine.mode !== "separated" && machine.can_edit ? (
-      machine.separated?.available ? (
-        <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-3">
-          <p className="text-12">{t("Give this agent a separate workspace and browser through an owner-approved Assistant card.")}</p>
-          <Button type="button" size="sm" variant="secondary" disabled={contextMutation.isPending} onClick={() => void requestContext()}>{t("Separate workspace and browser for this agent")}</Button>
-          {contextRequested || contextMutation.isSuccess ? <p role="status">{t("Owner approval requested in the NyxBot Assistant thread.")}</p> : null}
-        </div>
-      ) : null
-    ) : null}
-    <fieldset disabled={disabled || !machine.can_edit || !machine.protocol_v2 || mutation.isPending} className="grid gap-2 sm:grid-cols-2">
-      <legend className="sr-only">{t("Allowed capabilities")}</legend>
-      {(Object.keys(labels) as Array<keyof typeof labels>).map(key => <label key={key} className="flex items-center gap-2 text-12">
-        <Checkbox checked={caps[key]} disabled={!machine.ceiling[key] || ((key === "computer" || key === "developer_browser") && !caps.browser)} onCheckedChange={value => {
-          form.setValue(`capabilities.${key}`, value === true);
-          if (key === "browser" && value !== true) { form.setValue("capabilities.computer", false); form.setValue("capabilities.developer_browser", false); }
-        }} />{labels[key]}{!machine.ceiling[key] ? <span className="text-muted-foreground">{t("(off on node)")}</span> : null}
-      </label>)}
-    </fieldset>
-    <details className="text-12 text-muted-foreground"><summary className="cursor-pointer">{t("What these permissions mean")}</summary><p className="mt-2">{t("Shell commands can read and write anything their OS user can access, even with file tools off. Full computer control can operate applications through their UI. Browser-only access avoids desktop authority. Developer browser permits JavaScript evaluation in its separate browser; saved logins stay in the secure browser.")}</p></details>
-    {error ? <p role="alert" className="text-12 text-destructive">{translateUi(error)}</p> : null}
-    <Button type="submit" size="sm" disabled={disabled || !machine.can_edit || !machine.protocol_v2 || !form.formState.isDirty || mutation.isPending}>{t("Save capabilities")}</Button>
-  </form>;
+    try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); onSaveSuccess?.(); }
+    catch { setError("Could not save capabilities. Reload if access changed."); onSaveError?.(); }
+  });
+  const blocked =
+    disabled ||
+    !capabilityEditing ||
+    needsSelection ||
+    !machine.can_edit ||
+    !machine.protocol_v2;
+  return (
+    <form
+      className="space-y-6"
+      aria-label={translateUi("{{value1}} capabilities", { value1: machine.name })}
+      onSubmit={save}
+    >
+      <GroupedList
+        title={translateUi("Workspace and browser")}
+        footer={
+          <>
+            {needsSelection ? (
+              <p role="status" data-selection-reason={machine.selection_reason}>
+                {humanReason(
+                  machine.execution_note ?? machine.selection_reason,
+                  "Execution is blocked until the owner chooses a supported separation mode or explicitly approves shared legacy access. Open Assistant → Machines to review and approve the selection.",
+                )}
+              </p>
+            ) : (
+              <>
+                <p>
+                  {machine.mode === "separated"
+                    ? translateUi("This agent has its own workspace and browser profiles. Use a separate machine container or VM per agent for stronger separation; containers still share their host kernel.")
+                    : translateUi("Workspace and browser sessions are shared with other agents in shared legacy mode on this machine.")}
+                </p>
+                <p role="status">
+                  {humanReason(
+                    machine.execution_note,
+                    machine.mode === "separated"
+                      ? separationAvailable
+                        ? "Granted commands and file tools use this agent’s separated workspace. No shared fallback."
+                        : "This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through an owner action card; no automatic shared fallback."
+                      : "Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions.",
+                  )}
+                </p>
+              </>
+            )}
+            {machine.can_edit && machine.mode !== "shared_legacy" ? (
+              <p className="text-warning">{SHARED_LEGACY_WARNING}</p>
+            ) : null}
+            {contextRequested || contextMutation.isSuccess ? (
+              <p role="status">{translateUi("Owner approval requested in the NyxBot Assistant thread.")}</p>
+            ) : null}
+            <MachineSeparationSupport
+              support={machine.separated}
+              setupNote={machine.separated_setup_note}
+              humanOnly
+            />
+            {machine.quarantine_pending ? (
+              <p role="status" className="text-warning">{translateUi("Browser cleanup is pending. Reconnect the machine and refresh status. New browser work stays blocked until cleanup finishes.")}</p>
+            ) : null}
+            {machine.revocation_initialization_pending ? (
+              <p role="status">{translateUi("Checking when earlier commands will stop. Refresh status in a few seconds.")}</p>
+            ) : (machine.execution_revocation_pending ??
+              machine.revocation_pending) ? (
+              <p role="status">{translateUi("Earlier commands are stopping.")}{machine.revocation_expires_at
+                  ? translateUi(" They should stop by {{value1}}.", { value1: new Date(machine.revocation_expires_at).toLocaleString(getFormattingLocale()) })
+                  : translateUi(" Reconnect and refresh status to confirm they have stopped.")}{" "}{translateUi("Refresh status before starting new work.")}</p>
+            ) : machine.delivery_pending ? (
+              <p role="status">{translateUi("Earlier commands have stopped. Updated permissions still need machine acknowledgement. Reconnect the machine and refresh status.")}</p>
+            ) : null}
+            {machine.revocation_diagnostic ? (
+              <p role="status" className="text-warning">
+                {machine.revocation_diagnostic ===
+                "authority_timing_upgrade_required"
+                  ? translateUi("Update and reconnect this machine to confirm permission changes.")
+                  : translateUi("Recovery status needs administrator attention. Earlier commands are still marked as stopping; check machine diagnostics before continuing.")}
+              </p>
+            ) : null}
+            {!machine.can_edit ? (
+              <p role="status">{translateUi("Only the machine owner or an organization admin can edit this access.")}</p>
+            ) : null}
+            {!machine.protocol_v2 ? (
+              <p role="status">{translateUi("Update this machine before changing capabilities. Its existing access continues.")}</p>
+            ) : null}
+            {error ? (
+              <p role="alert" className="text-destructive">
+                {translateUi(error)}
+              </p>
+            ) : null}
+          </>
+        }
+      >
+        <GroupedRow
+          data-drawer-search-target={`machine-detail-${machine.node_id}`}
+          title={translateUi("Workspace")}
+          accessory={
+            needsSelection
+              ? "Needs owner selection"
+              : machine.mode === "separated"
+                ? "Separate workspace and browser"
+                : "Shared legacy"
+          }
+        />
+        {machine.can_edit && machine.mode !== "shared_legacy" ? (
+          <>
+            <GroupedRow asChild interactive>
+              <Label>
+                <span className="min-w-0 flex-1">{translateUi("I explicitly choose shared legacy access and acknowledge this warning.")}</span>
+                <Switch
+                  disabled={disabled || contextMutation.isPending}
+                  checked={legacyAccepted}
+                  onCheckedChange={(value) => setLegacyAccepted(value === true)}
+                />
+              </Label>
+            </GroupedRow>
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                disabled={
+                  disabled || !legacyAccepted || contextMutation.isPending
+                }
+                onClick={() => void requestContext("shared_legacy")}
+              >{translateUi("Request shared legacy owner approval")}</button>
+            </GroupedRow>
+          </>
+        ) : null}
+        {contextEnabled &&
+        machine.mode !== "separated" &&
+        machine.can_edit &&
+        separationAvailable ? (
+          <GroupedRow asChild interactive>
+            <button
+              type="button"
+              disabled={disabled || contextMutation.isPending}
+              onClick={() => void requestContext("separated")}
+            >{translateUi("Separate workspace and browser for this agent")}</button>
+          </GroupedRow>
+        ) : null}
+      </GroupedList>
+      <GroupedList
+        title={translateUi("Allowed capabilities")}
+        footer={translateUi("Shell commands can read and write anything their OS user can access, even with file tools off. Saving changes cancels this agent’s current work on this machine.")}
+      >
+        <fieldset disabled={blocked || mutation.isPending} className="min-w-0">
+          <Label asChild><legend className="sr-only">{translateUi("Allowed capabilities")}</legend></Label>
+          {(Object.keys(labels) as Array<keyof typeof labels>).map((key) => (
+            <GroupedRow key={key} asChild interactive>
+              <Label>
+                <span className="min-w-0 flex-1">
+                  {labels[key]}
+                  <FieldHelp className="block text-text-tertiary">
+                    {descriptions[key]}{!machine.ceiling[key] ? translateUi(" · Off on node") : ""}
+                  </FieldHelp>
+                </span>
+                <Checkbox
+                  aria-label={labels[key]}
+                  checked={caps[key]}
+                  disabled={
+                    !machine.ceiling[key] ||
+                    ((key === "computer" || key === "developer_browser") &&
+                      !caps.browser)
+                  }
+                  onCheckedChange={(value) => {
+                    form.setValue(`capabilities.${key}`, value === true);
+                    if (key === "browser" && value !== true) { form.setValue("capabilities.computer", false); form.setValue("capabilities.developer_browser", false); }
+                  }}
+                />
+              </Label>
+            </GroupedRow>
+          ))}
+        </fieldset>
+      </GroupedList>
+      <GroupedFormActions
+          changes={() => [...recordChanges(form.formState.defaultValues?.capabilities, form.getValues("capabilities"), (key) => labels[key as keyof typeof labels] ?? key), ...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "saved_login_ids", label: "Saved logins", list: changeList }])]}
+        label={translateUi("machine access")}
+        dirty={form.formState.isDirty}
+        pending={mutation.isPending}
+        disabled={blocked}
+        saveLabel={translateUi("Save capabilities")}
+        save={save}
+        discard={() => {
+          form.reset();
+          setError(undefined);
+        }}
+      />
+    </form>
+  );
 }

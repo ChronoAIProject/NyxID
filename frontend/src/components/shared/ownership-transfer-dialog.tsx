@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -54,7 +54,7 @@ export function OwnershipTransferDialog({
   readonly onClose: () => void;
   readonly onTransferred?: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const form = useAppForm<OwnershipTransferForm>({
     resolver: zodResolver(ownershipTransferSchema),
     defaultValues: { new_owner_user_id: "" },
@@ -100,7 +100,7 @@ export function OwnershipTransferDialog({
         expected_version: review.preview.version,
         request_id: review.requestId,
       });
-      toast.success(translateUi("Ownership of {{name}} transferred", { name: review.preview.name }));
+      toast.success(translateUi(`Ownership of ${review.preview.name} transferred`));
       onClose();
       onTransferred?.();
     } catch (cause) {
@@ -121,31 +121,31 @@ export function OwnershipTransferDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {review ? t("Review ownership transfer") : t("Transfer ownership")}
+            {review ? translateUi("Review ownership transfer") : translateUi("Transfer ownership")}
           </DialogTitle>
-          <DialogDescription>{t("Move ")}{resource.name}{t(" to a specific person or organization.")}</DialogDescription>
+          <DialogDescription>{translateUi("Move ")}{resource.name}{translateUi(" to a specific person or organization.")}</DialogDescription>
         </DialogHeader>
         {review ? (
-          <div className="space-y-4 text-sm">
+          <div className="space-y-4 text-14">
             <dl className="space-y-2 rounded-md border p-3">
-              <dt className="text-muted-foreground">{t("Current owner")}</dt>
+              <dt className="text-muted-foreground">{translateUi("Current owner")}</dt>
               <dd className="break-all">
                 {review.preview.previous_owner_name ??
                   review.preview.previous_owner_user_id}
                 {review.preview.previous_owner_name && (
-                  <span className="block text-xs text-muted-foreground">
+                  <span className="block text-13 text-muted-foreground">
                     {review.preview.previous_owner_user_id}
                   </span>
                 )}
               </dd>
-              <dt className="text-muted-foreground">{t("Destination")}{" "}
+              <dt className="text-muted-foreground">{translateUi("Destination")}{" "}
                 {review.preview.destination_type === "org"
-                  ? t("organization")
-                  : t("person")}
+                  ? translateUi("organization")
+                  : translateUi("person")}
               </dt>
               <dd>
                 {review.preview.destination_name}
-                <span className="block break-all text-xs text-muted-foreground">
+                <span className="block break-all text-13 text-muted-foreground">
                   {review.preview.new_owner_user_id}
                 </span>
               </dd>
@@ -157,14 +157,14 @@ export function OwnershipTransferDialog({
             </ul>
             {kind === "channel_bot" && (
               <p>
-                {review.preview.routes_to_retire}{t(" routes will be permanently retired.")}</p>
+                {review.preview.routes_to_retire}{translateUi(" routes will be permanently retired.")}</p>
             )}
             {review.preview.blockers.length > 0 && (
               <div
                 role="alert"
                 className="rounded-md border border-destructive p-3 text-destructive"
               >
-                <p className="font-medium">{t("This resource cannot be transferred")}</p>
+                <p className="font-medium">{translateUi("This resource cannot be transferred")}</p>
                 <ul className="mt-2 list-disc space-y-2 pl-5">
                   {review.preview.blockers.map((blocker) => (
                     <li key={blocker}>{blocker}</li>
@@ -180,7 +180,7 @@ export function OwnershipTransferDialog({
             className="space-y-4"
           >
             <div className="space-y-2">
-              <Label htmlFor="destination-type">{t("Destination type")}</Label>
+              <Label htmlFor="destination-type">{translateUi("Destination type")}</Label>
               <Select
                 value={ownerType}
                 disabled={pending}
@@ -194,13 +194,13 @@ export function OwnershipTransferDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="org">{t("Organization")}</SelectItem>
-                  <SelectItem value="person">{t("Person")}</SelectItem>
+                  <SelectItem value="org">{translateUi("Organization")}</SelectItem>
+                  <SelectItem value="person">{translateUi("Person")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="destination-owner">{t("Destination owner")}</Label>
+              <Label htmlFor="destination-owner">{translateUi("Destination owner")}</Label>
               <OwnerSelect
                 kind={kind}
                 resourceId={resource.id}
@@ -216,15 +216,15 @@ export function OwnershipTransferDialog({
                 }}
               />
               {form.formState.errors.new_owner_user_id && (
-                <p role="alert" className="text-sm text-destructive">
-                  {translateUi(form.formState.errors.new_owner_user_id.message ?? "")}
+                <p role="alert" className="text-14 text-destructive">
+                  {form.formState.errors.new_owner_user_id.message}
                 </p>
               )}
             </div>
           </form>
         )}
         {error && (
-          <p role="alert" className="text-sm text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {translateUi(error)}
           </p>
         )}
@@ -240,7 +240,7 @@ export function OwnershipTransferDialog({
               } else onClose();
             }}
           >
-            {review ? t("Back") : t("Cancel")}
+            {review ? translateUi("Back") : translateUi("Cancel")}
           </Button>
           {review ? (
             <Button
@@ -248,7 +248,7 @@ export function OwnershipTransferDialog({
               disabled={pending || review.preview.blockers.length > 0}
               onClick={() => void confirm()}
             >
-              {pending ? t("Transferring…") : t("Confirm transfer")}
+              {pending ? translateUi("Transferring…") : translateUi("Confirm transfer")}
             </Button>
           ) : (
             <Button
@@ -256,7 +256,7 @@ export function OwnershipTransferDialog({
               form="ownership-transfer"
               disabled={pending || !selectedId}
             >
-              {pending ? t("Preparing…") : t("Review transfer")}
+              {pending ? translateUi("Preparing…") : translateUi("Review transfer")}
             </Button>
           )}
         </DialogFooter>

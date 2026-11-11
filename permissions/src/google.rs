@@ -59,6 +59,14 @@ pub enum JsonShape {
         minimum: i64,
         maximum: i64,
     },
+    /// Finite JSON numbers, bounded inclusively. Precision uses serde_json's
+    /// canonical decimal text, expanded from exponent notation and with trailing
+    /// fractional zeros removed; integer-valued floats therefore have scale zero.
+    Number {
+        minimum: i64,
+        maximum: i64,
+        max_fraction_digits: u8,
+    },
     Boolean,
     Exact {
         value: Value,
@@ -104,6 +112,13 @@ impl JsonShape {
             Self::Integer { minimum, maximum } if minimum > maximum => {
                 return Err(Error::Policy("invalid integer bounds"));
             }
+            Self::Number {
+                minimum,
+                maximum,
+                max_fraction_digits,
+            } if minimum > maximum || *max_fraction_digits > 12 => {
+                return Err(Error::Policy("invalid number bounds or fraction limit"));
+            }
             Self::OneOf { values } if values.is_empty() || values.len() > 100 => {
                 return Err(Error::Policy("one_of requires 1–100 values"));
             }
@@ -132,6 +147,11 @@ impl JsonShape {
             Self::Integer { minimum, maximum } => value
                 .as_i64()
                 .is_some_and(|n| (*minimum..=*maximum).contains(&n)),
+            Self::Number {
+                minimum,
+                maximum,
+                max_fraction_digits,
+            } => crate::values::number_in_bounds(value, *minimum, *maximum, *max_fraction_digits),
             Self::Boolean => value.is_boolean(),
             Self::Exact { value: expected } => value == expected,
             Self::OneOf { values } => values.contains(value),

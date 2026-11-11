@@ -522,7 +522,7 @@ it("explains real provider groups with null inference without guessing a provide
   const { rerender } = render(<Harness />);
   fireEvent.click(screen.getByRole("button", { name: "How discovery order works" }));
   expect(
-    within(screen.getByRole("tooltip")).getByText("Provider gateway routing is separate from this discovery order."),
+    within(screen.getByRole("tooltip")).getByText("NyxBot model routing follows eligible connections in this order. Service Pools keep their configured strategy."),
   ).toBeVisible();
   state.inventory = state.inventory.map((key) => ({
     ...key,
@@ -531,7 +531,7 @@ it("explains real provider groups with null inference without guessing a provide
   }));
   rerender(<Harness />);
   expect(
-    within(screen.getByRole("tooltip")).getByText("Provider gateway routing is separate from this discovery order."),
+    within(screen.getByRole("tooltip")).getByText("NyxBot model routing follows eligible connections in this order. Service Pools keep their configured strategy."),
   ).toBeVisible();
   expect(screen.queryByText("/api/v1/llm/admin-renamed-catalog")).toBeNull();
 });

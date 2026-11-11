@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState, useEffect } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -52,10 +53,10 @@ function servicesSummary(key: ApiKey): string {
   const count = key.allowed_service_ids?.length ?? 0;
   if (key.allow_auto_connected_services)
     return count
-      ? translateUi("{{count}} selected + all platform services", { count })
+      ? `${String(count)} selected + all platform services`
       : translateUi("All platform services");
   if (count === 0) return "—";
-  return translateUi(count === 1 ? "{{count}} service" : "{{count}} services", { count });
+  return `${String(count)} service${count === 1 ? "" : "s"}`;
 }
 
 function scopeBadgeVariant(scope: string): "info" | "warning" {
@@ -67,7 +68,7 @@ export function ApiKeyTable({
 }: {
   readonly viewMode?: "grid" | "table";
 } = {}) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const { data: allApiKeys, isLoading } = useAllAdminedApiKeys();
   const [showAssistantKeys, setShowAssistantKeys] = useState(false);
@@ -93,7 +94,7 @@ export function ApiKeyTable({
       toast.success(translateUi("API key revoked successfully"));
       setDeleteTarget(null);
     } catch {
-      toast.error(translateUi("Failed to revoke API key"));
+      toast.error(translateErrorMessage("Failed to revoke API key"));
     }
   }
 
@@ -103,7 +104,7 @@ export function ApiKeyTable({
       setNewKeyValue(result.full_key);
       toast.success(translateUi("API key rotated successfully"));
     } catch {
-      toast.error(translateUi("Failed to rotate API key"));
+      toast.error(translateErrorMessage("Failed to rotate API key"));
     }
   }
 
@@ -113,7 +114,7 @@ export function ApiKeyTable({
       await copyToClipboard(newKeyValue);
       setCopied(true);
     } catch {
-      toast.error(translateUi("Failed to copy to clipboard"));
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -132,8 +133,8 @@ export function ApiKeyTable({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <CogsIcon className="h-64 w-64 text-muted-foreground/30" />
         <div className="space-y-1">
-          <p className="text-12 font-medium text-muted-foreground">{t("No API keys yet")}</p>
-          <p className="text-xs text-muted-foreground">{t("Create one to get started.")}</p>
+          <p className="type-row-title text-muted-foreground">{translateUi("No API keys yet")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Create one to get started.")}</p>
         </div>
       </div>
     );
@@ -145,7 +146,7 @@ export function ApiKeyTable({
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="icon" className="h-7 w-7">
             <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
-            <span className="sr-only">{t("Actions for ")}{key.name}</span>
+            <span className="sr-only">{translateUi("Actions for ")}{key.name}</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
@@ -153,13 +154,13 @@ export function ApiKeyTable({
             onClick={() => void handleRotate(key)}
             disabled={!key.is_active}
           >
-            <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />{t("Rotate")}</DropdownMenuItem>
+            <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />{translateUi("Rotate")}</DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => setDeleteTarget(key)}
             className="text-destructive focus:text-destructive"
             disabled={!key.is_active}
           >
-            <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />{t("Revoke")}</DropdownMenuItem>
+            <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />{translateUi("Revoke")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     );
@@ -186,14 +187,14 @@ export function ApiKeyTable({
                 <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
                   <div className="flex items-start justify-between gap-2 pr-8">
                     <div className="min-w-0">
-                      <p className="truncate text-12 font-medium text-foreground">{key.name}</p>
-                      <code className="text-11 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+                      <p className="truncate type-row-title text-foreground">{key.name}</p>
+                      <code className="text-14 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1">
                     {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
                     {key.platform === "nyxid-assistant" && (
-                      <span className="text-10 text-text-tertiary">{t("System-managed by the NyxID assistant")}</span>
+                      <span className="text-12 text-text-tertiary">{translateUi("System-managed by the NyxID assistant")}</span>
                     )}
                     {scopesList.map((scope) => (
                       <Badge key={scope} variant={scopeBadgeVariant(scope)}>
@@ -201,11 +202,11 @@ export function ApiKeyTable({
                       </Badge>
                     ))}
                   </div>
-                  <div className="mt-auto flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                  <div className="mt-auto flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                     <span>{ownerLabel}</span>
                     <span>{servicesSummary(key)}</span>
-                    <span>{key.bindings_count > 0 ? t("{{count}} bindings", { count: key.bindings_count }) : t("No bindings")}</span>
-                    <span>{key.last_used_at ? t("Used {{value}}", { value: formatRelativeTime(key.last_used_at) }) : t("Never used")}</span>
+                    <span>{key.bindings_count > 0 ? translateUi("{{value1}} binding{{value2}}", { value1: String(key.bindings_count), value2: key.bindings_count === 1 ? "" : "s" }) : translateUi("No bindings")}</span>
+                    <span>{key.last_used_at ? translateUi("Used {{value1}}", { value1: formatRelativeTime(key.last_used_at) }) : translateUi("Never used")}</span>
                   </div>
                 </CardContent>
               </Card>
@@ -236,12 +237,12 @@ export function ApiKeyTable({
               <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                 {renderActions(key)}
               </div>
-              <p className="pr-10 text-13 font-semibold text-foreground truncate">{key.name}</p>
-              <code className="text-11 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+              <p className="pr-10 type-card-title text-foreground truncate">{key.name}</p>
+              <code className="text-14 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
               <div className="mt-2 flex flex-wrap gap-1">
                 {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
                 {key.platform === "nyxid-assistant" && (
-                  <span className="text-10 text-text-tertiary">{t("System-managed by the NyxID assistant")}</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("System-managed by the NyxID assistant")}</span>
                 )}
                 {scopesList.map((scope) => (
                   <Badge key={scope} variant={scopeBadgeVariant(scope)}>
@@ -249,10 +250,10 @@ export function ApiKeyTable({
                   </Badge>
                 ))}
               </div>
-              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-                <span>{isOrg ? source.org_name : t("Personal")}</span>
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
+                <span>{isOrg ? source.org_name : translateUi("Personal")}</span>
                 <span>{servicesSummary(key)}</span>
-                <span>{key.last_used_at ? t("Used {{value}}", { value: formatRelativeTime(key.last_used_at) }) : t("Never used")}</span>
+                <span>{key.last_used_at ? translateUi("Used {{value1}}", { value1: formatRelativeTime(key.last_used_at) }) : translateUi("Never used")}</span>
               </div>
             </div>
           );
@@ -264,14 +265,14 @@ export function ApiKeyTable({
         <Table>
           <TableHeader>
             <TableRow className="border-border/50 hover:bg-transparent">
-              <TableHead className="w-[22%]">{t("Name")}</TableHead>
-              <TableHead className="w-[14%]">{t("Key")}</TableHead>
-              <TableHead className="w-[12%]">{t("Platform")}</TableHead>
-              <TableHead className="w-[14%]">{t("Scopes")}</TableHead>
-              <TableHead className="w-[10%]">{t("Services")}</TableHead>
-              <TableHead className="w-[10%]">{t("Bindings")}</TableHead>
-              <TableHead className="w-[14%]">{t("Last Used")}</TableHead>
-              <TableHead className="w-10">{t("Actions")}</TableHead>
+              <TableHead className="w-[22%]">{translateUi("Name")}</TableHead>
+              <TableHead className="w-[14%]">{translateUi("Key")}</TableHead>
+              <TableHead className="w-[12%]">{translateUi("Platform")}</TableHead>
+              <TableHead className="w-[14%]">{translateUi("Scopes")}</TableHead>
+              <TableHead className="w-[10%]">{translateUi("Services")}</TableHead>
+              <TableHead className="w-[10%]">{translateUi("Bindings")}</TableHead>
+              <TableHead className="w-[14%]">{translateUi("Last Used")}</TableHead>
+              <TableHead className="w-10">{translateUi("Actions")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -290,13 +291,13 @@ export function ApiKeyTable({
                     <p className="truncate font-medium text-foreground">
                       {key.name}
                     </p>
-                    <p className="truncate text-11 text-text-tertiary mt-0.5">
+                    <p className="truncate text-13 text-text-tertiary mt-0.5">
                       {isOrg ? (
                         <span className="inline-flex items-center gap-1">
                           <OrgAvatar
                             avatarUrl={source.avatar_url ?? null}
                             displayName={source.org_name}
-                            className="h-3.5 w-3.5 text-[0.5rem]"
+                            className="h-3.5 w-3.5 text-12"
                           />
                           {ownerLabel}
                         </span>
@@ -307,7 +308,7 @@ export function ApiKeyTable({
                   </TableCell>
 
                   <TableCell>
-                    <code className="font-mono text-11 text-muted-foreground">
+                    <code className="font-mono text-14 text-muted-foreground">
                       {key.key_prefix}••••••••
                     </code>
                   </TableCell>
@@ -317,7 +318,7 @@ export function ApiKeyTable({
                       <>
                         <Badge variant="secondary">{key.platform}</Badge>
                         {key.platform === "nyxid-assistant" && (
-                          <span className="ml-2 text-10 text-text-tertiary">{t("System-managed by the NyxID assistant")}</span>
+                          <span className="ml-2 text-12 text-text-tertiary">{translateUi("System-managed by the NyxID assistant")}</span>
                         )}
                       </>
                     ) : (
@@ -345,7 +346,7 @@ export function ApiKeyTable({
 
                   <TableCell className="text-muted-foreground">
                     {key.bindings_count > 0
-                      ? t("{{count}} bindings", { count: key.bindings_count })
+                      ? translateUi("{{value1}} binding{{value2}}", { value1: String(key.bindings_count), value2: key.bindings_count === 1 ? "" : "s" })
                       : <span className="text-text-tertiary">—</span>}
                   </TableCell>
 
@@ -355,7 +356,7 @@ export function ApiKeyTable({
                         ? formatRelativeTime(key.last_used_at)
                         : <span className="text-text-tertiary">—</span>}
                     </p>
-                    <p className="text-10 text-text-tertiary mt-0.5">{t("Created ")}{formatDate(key.created_at)}
+                    <p className="text-12 text-text-tertiary mt-0.5">{translateUi("Created ")}{formatDate(key.created_at)}
                     </p>
                   </TableCell>
 
@@ -379,10 +380,10 @@ export function ApiKeyTable({
           checked={showAssistantKeys}
           onCheckedChange={setShowAssistantKeys}
         />
-        <Label htmlFor="show-assistant-chat-keys">{t("Show assistant chat keys")}</Label>
+        <Label htmlFor="show-assistant-chat-keys">{translateUi("Show assistant chat keys")}</Label>
       </div>
       {apiKeys.length ? (viewMode === "grid" ? gridView : tableView) : (
-        <p className="py-8 text-center text-12 text-muted-foreground">{t("Assistant chat keys are hidden. Turn on the toggle to view them.")}</p>
+        <p className="py-8 text-center text-14 text-muted-foreground">{translateUi("Assistant chat keys are hidden. Turn on the toggle to view them.")}</p>
       )}
 
       <Dialog
@@ -393,16 +394,16 @@ export function ApiKeyTable({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Revoke API Key")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to revoke \"")}{deleteTarget?.name}{t("\"? This action cannot be undone and any applications using this key will stop working.")}</DialogDescription>
+            <DialogTitle>{translateUi("Revoke API Key")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to revoke \"")}{deleteTarget?.name}{translateUi("\"? This action cannot be undone and any applications using this key will stop working.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Revoke Key")}</Button>
+            >{translateUi("Revoke Key")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -418,18 +419,18 @@ export function ApiKeyTable({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("New API Key")}</DialogTitle>
-            <DialogDescription>{t("Copy your new API key now. You will not be able to see it again.")}</DialogDescription>
+            <DialogTitle>{translateUi("New API Key")}</DialogTitle>
+            <DialogDescription>{translateUi("Copy your new API key now. You will not be able to see it again.")}</DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
-            <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all select-all">
+            <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-14 break-all select-all">
               {newKeyValue}
             </code>
             <Button
               variant="outline"
               size="icon"
               onClick={() => void handleCopyKey()}
-              aria-label={t("Copy API key to clipboard")}
+              aria-label={translateUi("Copy API key to clipboard")}
             >
               {copied ? (
                 <Check className="h-4 w-4 text-success" aria-hidden="true" />
@@ -445,7 +446,7 @@ export function ApiKeyTable({
                 setNewKeyValue(null);
                 setCopied(false);
               }}
-            >{t("Done")}</Button>
+            >{translateUi("Done")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

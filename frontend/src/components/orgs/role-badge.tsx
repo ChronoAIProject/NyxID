@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Badge } from "@/components/ui/badge";
 import type { OrgRole } from "@/schemas/orgs";
@@ -19,6 +20,7 @@ const ROLE_LABEL: Record<string, string> = {
  * they adapt to light/dark themes.
  */
 export function RoleBadge({ role, className }: RoleBadgeProps) {
+  useUiTranslation();
   const label = ROLE_LABEL[role] ?? role;
   if (!label) return null;
 

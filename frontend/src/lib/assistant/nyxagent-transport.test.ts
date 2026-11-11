@@ -1,4 +1,10 @@
 import { createElement } from "react";
+import { capture } from "@/lib/telemetry";
+
+vi.mock("@/lib/telemetry", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/telemetry")>(),
+  capture: vi.fn(),
+}));
 import { render, screen } from "@testing-library/react";
 import { ChatMessageList } from "@/components/assistant/chat-message";
 import { nyxAgentHistorySchema } from "@/schemas/assistant-nyxagent";
@@ -19,11 +25,12 @@ const afterReset = "2026-09-17T00:00:02Z";
 
 it.each([
   ["turn_lost", "interrupted"], ["assistant_unavailable", "could not complete"],
+  ["guest_model_route_required", "can't answer right now"],
   ["internal_error", "NyxBot hit an internal error on this turn. Check which actions completed before retrying."],
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
   ["stale_response", "context changed"], ["context_unavailable", "could not be restored"],
-  ["some_upstream_code", "could not complete"],
+  ["some_upstream_code", "could not complete"], ["queue_timeout", "was not started"],
 ])("maps %s to actionable copy", (code, text) => {
   expect(storedError(code)).toContain(text);
 });
@@ -43,7 +50,7 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
 });
 
-it.each([["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat."], ["user_reset", "You reset the working context."]])("explains reset reason %s", (reason, text) => {
+it.each([["guest_media_turn", "The assistant context was refreshed to keep guest attachments limited to their own turn."], ["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat."], ["user_reset", "You reset the working context."]])("explains reset reason %s", (reason, text) => {
   expect(contextResetCopy(reason)).toBe(text);
   expect(contextResetCopy(reason)).not.toContain("decided cards were preserved");
 });
@@ -68,6 +75,7 @@ function conversation(key = id): NyxAgentConversation {
 
 function history(): NyxAgentHistory {
   return {
+    cma_operations: [],
     conversation: conversation(),
     messages: [
       {
@@ -167,6 +175,7 @@ function stream(): Response {
 }
 
 beforeEach(() => {
+  vi.mocked(capture).mockReset();
   transitionAssistantIdentity(null);
   transitionAssistantIdentity("owner");
 });
@@ -178,6 +187,65 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("keeps CMA status independent of the completed reply, refreshes it, and restores it after reload", async () => {
+    const page = history();
+    page.cma_operations = [{
+      id: "watch-1", turn_id: "turn", kind: "cma_response", operation_id: "resp_agt_test_1",
+      agent_id: "agt_test", idempotency_key: "request-1", status: "in_progress", phase: null,
+      state: "waiting", reason: null, monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+      cma_url: "https://bot.chrono-ai.fun/agents/agt_test",
+    }];
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const reply = transport.session(id).messages.find((message) => message.id === "a");
+    expect(reply?.status).toBe("complete");
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("in_progress");
+    await transport.history(id);
+    expect(transport.session(id).messages.find((message) => message.id === "a")).toBe(reply);
+    // The latest page no longer contains the original reply, but the thread's
+    // operation snapshot must still settle its preview card independently.
+    page.messages = [];
+    page.cma_operations[0] = { ...page.cma_operations[0]!, state: "delivered", reason: "completed", status: "completed" };
+    await transport.history(id);
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("completed");
+    expect(transport.session(id).messages.find((message) => message.id === "a")).toBe(reply);
+    const restored = new NyxAgentTransport();
+    await restored.history(id);
+    expect(restored.session(id).messages).toHaveLength(0);
+    expect(restored.session(id).cmaOperations).toEqual(page.cma_operations);
+    page.cma_operations = [];
+    await transport.history(id);
+    expect(transport.session(id).cmaOperations).toEqual([]);
+    const ordinary = new NyxAgentTransport();
+    await ordinary.history(id);
+    expect(ordinary.session(id).cmaOperations).toEqual([]);
+  });
+  it("does not let a late older page overwrite a newer CMA snapshot", async () => {
+    const page = history();
+    const pending = {
+      id: "watch-race", turn_id: "turn", kind: "cma_response" as const,
+      operation_id: "rsp-race", agent_id: "agt_test", idempotency_key: "request-race",
+      status: "in_progress", phase: null, state: "waiting", reason: null,
+      monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+    };
+    page.cma_operations = [pending];
+    let finishOlder!: (response: Response) => void;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.includes("before_seq=")
+      ? new Promise<Response>((resolve) => { finishOlder = resolve; })
+      : json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const older = transport.history(id, 2);
+    page.cma_operations = [{ ...pending, status: "completed", state: "delivered", reason: "completed" }];
+    await transport.history(id);
+    const oldPage = history();
+    oldPage.cma_operations = [pending];
+    finishOlder(json(oldPage));
+    await older;
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("completed");
+  });
+
   it("keeps stopped replies visibly stopped with a cancellation code", async () => {
     globalThis.__nyxidAssistantHttpMock = () =>
       json({
@@ -693,6 +761,7 @@ describe("NyxAgent server-backed transport", () => {
             label: "lobby-camera__snapshot",
             origin: "tool",
             image_input: "unavailable",
+            image_input_reason: "image_input_unsupported",
           },
         ],
       };
@@ -729,6 +798,7 @@ describe("NyxAgent server-backed transport", () => {
         label: "lobby-camera__snapshot",
         origin: "tool",
         imageInput: "unavailable",
+        imageInputReason: "image_input_unsupported",
       },
     ]);
     await transport.stop(id);
@@ -816,6 +886,7 @@ describe("NyxAgent server-backed transport", () => {
         activities: [],
         attachments: [],
       };
+      page.messages = page.messages.filter((message) => message.role !== "assistant");
       return endpoint.includes(`/conversations/${id}`)
         ? json(page)
         : json({ conversations: [page.conversation], next_cursor: null });
@@ -834,6 +905,9 @@ describe("NyxAgent server-backed transport", () => {
         1,
       );
       expect(requests.some((path) => path.endsWith("/stop"))).toBe(false);
+      expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+        error_code: "NYXBOT_STREAM_TIMEOUT", engine: "nyxagent", stage: "stream", http_status: 200,
+      }) });
     } finally {
       vi.useRealTimers();
     }
@@ -1176,7 +1250,6 @@ describe("NyxBot agents", () => {
     });
     await vi.waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toEqual({
-      model: "nyxagent/chat",
       agent_id: RESEARCHER.id,
       text: "Hello",
     });
@@ -1485,17 +1558,175 @@ it("tracks a failed live stream through polling and clears interruption on settl
     return json(page);
   };
   const transport = new NyxAgentTransport();
-  await transport.history(id);
-  // send refuses a known active turn, so let admission establish it first.
-  active = false;
-  await transport.history(id);
-  active = true;
+  // Let this unique turn's admission establish activity; a settled turn ID
+  // cannot be reused by a later send.
   await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow(/interrupted/);
   await transport.history(id);
   expect(transport.session(id).messages.find((message) => message.status === "streaming")?.turnStatus?.interrupted).toBe(true);
   active = false;
   await transport.history(id);
   expect(transport.session(id).messages.some((message) => message.turnStatus?.interrupted)).toBe(false);
+});
+
+it("restores partial text after reload and ignores older checkpoint polls", async () => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  page.conversation.active_turn = { turn_id: "running", started_at: start, activities: [], attachments: [],
+    reply: { message_id: "reply", block_id: "text", cursor: 10, text: "Already written 界" } };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const first = transport.session(id).messages.at(-1)!;
+  expect(first).toMatchObject({ content: "Already written 界", status: "streaming", timestamp: Date.parse(start) });
+  page.conversation.active_turn.reply = { message_id: "reply", block_id: "text", cursor: 8, text: "Already" };
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.content).toBe("Already written 界");
+});
+
+it("adopts a new thread from its response header when initial stream events are lost", async () => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [],
+    reply: { message_id: "reply", block_id: "text", cursor: 4, text: "Recovered from the checkpoint" } };
+  let reader!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(controller) { reader = controller; } }), { headers: { "X-NyxID-Conversation-Id": id } })
+    : json(page);
+  const adopt = vi.fn();
+  const transport = new NyxAgentTransport();
+  const sending = transport.send(undefined, "hello", adopt);
+  const interrupted = expect(sending).rejects.toThrow("interrupted");
+  try {
+    await vi.waitFor(() => expect(transport.session(id).messages.at(-1)).toMatchObject({
+      content: "Recovered from the checkpoint", status: "streaming",
+      turnStatus: { startedAt: start },
+    }));
+  } finally {
+    reader.close();
+    await interrupted;
+  }
+  expect(adopt).toHaveBeenCalledExactlyOnceWith(id);
+  expect(transport.session(id).messages.at(-1)).toMatchObject({ content: "Recovered from the checkpoint", status: "streaming" });
+});
+
+it("keeps text received after the latest saved checkpoint when the reader disconnects", async () => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(sseBytes(runningStatus,
+          { event: "message.started", message_id: "reply", role: "assistant" },
+          { event: "block.started", message_id: "reply", block_id: "text", index: 0, block: { type: "text", block_id: "text", text: "" } },
+          { event: "block.delta", block_id: "text", text: "Keep these words" }));
+        controller.close();
+      } })) : json(page);
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "hello", vi.fn())).rejects.toThrow("interrupted");
+  expect(transport.session(id).messages.at(-1)?.content).toBe("Keep these words");
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.content).toBe("Keep these words");
+});
+
+it("repairs missed text and block events from a checkpoint without duplicating delayed deltas", async () => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { controller = value; } })) : json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  const emit = (event: Record<string, unknown>, cursor: number) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, cursor })}\n\n`));
+  emit(runningStatus, 1);
+  emit({ event: "block.delta", block_id: "text", text: "missed start" }, 4);
+  emit({ ...runningStatus, engine_accepted: true }, 8);
+  await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("turn"));
+  page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [],
+    reply: { message_id: "reply", block_id: "text", cursor: 7, text: "Recovered 界" } };
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.content).toBe("Recovered 界");
+  emit({ event: "block.delta", block_id: "text", text: "duplicate" }, 6);
+  emit({ event: "block.delta", block_id: "text", text: " continues" }, 9);
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)?.content).toBe("Recovered 界 continues"));
+  emit({ event: "turn.completed", turn_id: "turn", status: "completed", error: null }, 10);
+  page.conversation.active_turn = null;
+  controller.close();
+  await sending;
+});
+
+it("shows a durable completed reply and releases a stalled stream without resending", async () => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const cancelled = vi.fn();
+  const posts = vi.fn();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (!endpoint.endsWith("/turns")) return json(page);
+    posts();
+    return new Response(new ReadableStream({ start(value) { controller = value; }, cancel: cancelled }));
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  controller.enqueue(sseBytes(runningStatus, { event: "message.started", message_id: "reply", role: "assistant" }));
+  await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("turn"));
+  page.messages.push({ ...history().messages[1]!, id: "reply", text: "The full durable answer" });
+  await transport.history(id);
+  await sending;
+  expect(transport.session(id).messages.at(-1)).toMatchObject({ content: "The full durable answer", status: "complete" });
+  expect(transport.isRunning(id)).toBe(false);
+  expect(cancelled).toHaveBeenCalledOnce();
+  expect(posts).toHaveBeenCalledOnce();
+});
+
+it("keeps reading text while a context-reset history request is pending", async () => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  let resolveHistory!: (response: Response) => void;
+  let deferred = false;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { controller = value; } }))
+    : deferred ? new Promise<Response>((resolve) => { resolveHistory = resolve; }) : json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  deferred = true;
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  controller.enqueue(sseBytes(runningStatus,
+    { event: "turn.notice", code: "context_reset", message: "Reset" },
+    { event: "message.started", message_id: "reply", role: "assistant" },
+    { event: "block.started", message_id: "reply", block_id: "text", index: 0, block: { type: "text", block_id: "text", text: "" } },
+    { event: "block.delta", block_id: "text", text: "Text is flowing" },
+  ));
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)?.content).toBe("Text is flowing"));
+  expect(resolveHistory).toBeDefined();
+  deferred = false;
+  resolveHistory(json(page));
+  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event: "turn.completed", cursor: 6, turn_id: "turn", status: "completed", error: null })}\n\n`));
+  controller.close();
+  await sending;
+});
+
+it("does not restore an active turn from a history request older than settlement", async () => {
+  const active = history();
+  active.messages = active.messages.slice(0, 1);
+  active.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+  let resolveOld!: (response: Response) => void;
+  let calls = 0;
+  globalThis.__nyxidAssistantHttpMock = () => ++calls === 1
+    ? new Promise<Response>((resolve) => { resolveOld = resolve; }) : json(history());
+  const transport = new NyxAgentTransport();
+  const old = transport.history(id);
+  await vi.waitFor(() => expect(resolveOld).toBeDefined());
+  await transport.history(id);
+  resolveOld(json(active));
+  await old;
+  expect(transport.getActiveTurnId(id)).toBeUndefined();
+  expect(transport.session(id).messages.at(-1)?.content).toBe("Answer 界");
 });
 
 it.each([null, undefined])("parses backend failures with status %s through active polling, settlement and reload", async (status) => {
@@ -1653,8 +1884,11 @@ describe("send admission", () => {
   async function sendFailure(turns: () => Response | Promise<Response>): Promise<unknown> {
     globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
       if (endpoint.endsWith("/turns")) return turns();
+      const page = history();
+      page.messages = page.messages.slice(0, 1);
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
       return endpoint.includes(`/conversations/${id}`)
-        ? json(history())
+        ? json(page)
         : json({ conversations: [], next_cursor: null });
     };
     return new NyxAgentTransport()
@@ -1830,6 +2064,24 @@ it("sends the chosen draft model only for a new thread and never changes the nex
   expect(bodies[1]).toEqual({ conversation_id: id, text: "Continue" });
 });
 
+it("inherits a specialist's configured profile unless the owner explicitly selects a model", async () => {
+  const transport = new NyxAgentTransport();
+  const bodies: unknown[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) {
+      bodies.push(JSON.parse(String(init.body)));
+      return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  const agent = { id: "specialist-id", kind: "specialist" as const, name: "faq", destroyed: false };
+  await transport.send(undefined, "Use your default", vi.fn(), undefined, { agent });
+  expect(bodies[0]).toEqual({ agent_id: agent.id, text: "Use your default" });
+  await transport.send(undefined, "Use this model", vi.fn(), undefined, { agent, model: "nyxagent/research" });
+  expect(bodies[1]).toEqual({ agent_id: agent.id, model: "nyxagent/research", text: "Use this model" });
+});
+
 it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {
   const transport = new NyxAgentTransport();
   const card = "11111111-1111-4111-8111-111111111111";
@@ -1871,6 +2123,46 @@ it("carries upstream code from history to the diagnostic view", async () => {
   const transport = new NyxAgentTransport();
   await transport.history(id);
   expect(transport.session(id).messages[1]?.errorDetail?.upstreamCode).toBe("turn_failed");
+});
+
+it.each([
+  ["insufficient_credits", "Add credits in Billing & Usage"],
+  ["wallet_suspended", "Your billing wallet is suspended"],
+  ["plan_entitlement_required", "Your plan does not include this service"],
+  ["billing_not_configured", "Billing setup is incomplete"],
+  ["billing_provider_unavailable", "billing service is unavailable"],
+])("keeps the billing cause %s visible in the live terminal and after reload", async (code, copy) => {
+  const page = history();
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? chunked(sseBytes(
+        runningStatus,
+        { event: "message.started", message_id: "live-billing-reply", role: "assistant" },
+        { event: "turn.completed", turn_id: "turn", status: "failed", error: {
+          code, message: "Generic upstream failure", upstream_error_code: "nyxid_error", stage: "stream", http_status: 502,
+        } },
+      ))
+    : json(page);
+  await transport.history(id);
+  const views: import("@/lib/assistant/chat-types").ChatMessage[] = [];
+  const unsubscribe = transport.subscribe(() => {
+    const tail = transport.session(id).messages.at(-1);
+    if (tail) views.push(tail);
+  });
+  await transport.send(id, "hello", vi.fn());
+  unsubscribe();
+  expect(views.some((view) => view.status === "error" && view.errorCode === code && view.error?.includes(copy))).toBe(true);
+  page.messages[1] = { ...page.messages[1]!, text: "", status: "failed", error_code: code,
+    upstream_error_code: "nyxid_error", error_detail: {
+      stage: "stream", http_status: 502, upstream_request_id: null, response_id: null, continuations: 0, turn_id: "turn", occurred_at: start,
+    } };
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  const message = reloaded.session(id).messages[1];
+  expect(message).toMatchObject({ status: "error", errorCode: code, errorDetail: { upstreamCode: "nyxid_error" } });
+  expect(message?.error).toContain(copy);
+  render(createElement(ChatMessageList, { session: reloaded.session(id), bottomInset: 0 }));
+  expect(screen.getByRole("alert")).toHaveTextContent(copy);
 });
 
 it("exposes live upstream diagnostics and capacity status before history refresh", async () => {
@@ -1978,6 +2270,31 @@ it("never restores the pending acknowledgement from a poll that arrives after li
 });
 
 
+it("shows a queued turn as queued until it runs", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { controller = value; } }), { headers: { "content-type": "text/event-stream" } })
+    : json(history());
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  const emit = (event: Record<string, unknown>, cursor: number) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, cursor })}\n\n`));
+  emit({ ...runningStatus, status: "waiting", queued: true, waiting_for_capacity: true,
+    capacity_wait_started_at: start, capacity_wait_deadline: "2026-09-17T00:10:00Z" }, 1);
+  emit({ event: "message.started", message_id: "live-reply", role: "assistant" }, 2);
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)).toMatchObject({
+    queued: true, waitingForCapacity: true, capacityWaitStartedAt: start, capacityWaitDeadline: "2026-09-17T00:10:00Z",
+  }));
+  emit({ ...runningStatus, status: "running", waiting_for_capacity: false }, 3);
+  await vi.waitFor(() => expect(transport.getConversation(id)?.active_turn?.queued).toBe(false));
+  expect(transport.session(id).messages.at(-1)?.queued).toBeFalsy();
+  expect(transport.session(id).messages.at(-1)?.waitingForCapacity).toBeFalsy();
+  emit({ event: "turn.completed", turn_id: "turn", status: "completed", error: null }, 4);
+  controller.close();
+  await sending;
+});
+
 it("describes a busy session separately from platform capacity", () => {
   expect(storedError("session_busy", 120_000)).toBe("The assistant session is busy. Try again shortly.");
   expect(storedError("capacity_exceeded", 120_000)).toContain("at capacity right now (waited 2 minutes)");
@@ -2024,4 +2341,420 @@ it("starts new turn status without the previous turn's activity or wait clock", 
   page = history();
   controller.close();
   await sending;
+});
+
+function creationReceipt(turn: string | null, status: "pending" | "allowed" | "denied" = "allowed") {
+  return {
+    id: "12345678-1234-4123-8123-123456789012", kind: "action" as const, status,
+    summary: "Review the draft", decider: "user" as const, decided_by: "user" as const,
+    reason: null, service_slug: null, service_name: null, tool_name: "draft_agent_skill",
+    created_at: reset, decided_at: afterReset, expires_at: afterReset, creation_turn_id: turn,
+  };
+}
+it("folds settled decisions into the exact assistant event turn even when the initiating user is older", async () => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3, created_at: "2026-09-17T00:00:05Z" });
+  const receipt = creationReceipt("event-turn");
+  page.acknowledgements = [receipt];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  // No standalone row: the decision rides on its reply's turn summary.
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer"]);
+  const first = transport.session(id).messages.at(-1)!.decisions;
+  expect(first?.map((row) => row.id)).toEqual([receipt.id]);
+  // An unchanged refresh keeps the folded rows by reference.
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)!.decisions).toBe(first);
+  // A decision-state change is reflected on the same reply.
+  page.acknowledgements = [{ ...receipt, status: "denied" }];
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer"]);
+  expect(transport.session(id).messages.at(-1)!.decisions?.[0]?.status).toBe("denied");
+});
+it("keeps a pending card as its own row beside the reply it was raised in", async () => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3, created_at: "2026-09-17T00:00:05Z" });
+  const card = { ...creationReceipt("event-turn"), status: "pending" as const, decided_by: null, decided_at: null };
+  page.acknowledgements = [card];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toContain(`nyxagent-acknowledgement:${card.id}`);
+  expect(transport.session(id).messages.find((m) => m.id === "event-answer")?.decisions).toBeUndefined();
+});
+it("folds an automatic receipt into the live assistant placeholder then the settled answer", async () => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  page.conversation.active_turn = { turn_id: "event-turn", started_at: afterReset, activities: [], attachments: [] };
+  const receipt = creationReceipt("event-turn");
+  page.acknowledgements = [receipt];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  let messages = transport.session(id).messages;
+  expect(messages.map((m) => m.id)).toEqual(["u", "a", "event-turn-assistant"]);
+  expect(messages.at(-1)!.decisions?.map((row) => row.id)).toEqual([receipt.id]);
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3 });
+  await transport.history(id);
+  messages = transport.session(id).messages;
+  expect(messages.map((m) => m.id)).toEqual(["u", "a", "event-answer"]);
+  expect(messages.at(-1)!.decisions?.map((row) => row.id)).toEqual([receipt.id]);
+});
+it.each([null, "unloaded-turn"])("keeps a linked receipt with %s anchor standalone and deduplicated", async (turn) => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  const receipt = creationReceipt(turn);
+  page.acknowledgements = [receipt];
+  page.messages = [page.messages[1]!];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id, undefined, receipt.id);
+  await transport.history(id, undefined, receipt.id);
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual([`nyxagent-acknowledgement:${receipt.id}`, "a"]);
+});
+
+
+describe("Nyxbot native error telemetry", () => {
+  it.each([[403, "NYXBOT_HTTP_FORBIDDEN"], [500, "NYXBOT_HTTP_SERVER_ERROR"]])(
+    "reports HTTP %s once with the server trace and no private text", async (status, code) => {
+      const trace = "76dd13d5-e7cf-4c63-a33b-26036d2a495d";
+      globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+        ? new Response(JSON.stringify({ error_code: 1000, message: "private server diagnostic" }), {
+            status, headers: { "X-NyxID-Trace-Id": trace },
+          })
+        : json(history());
+      await expect(new NyxAgentTransport().send(id, "private prompt", vi.fn())).rejects.toThrow();
+      expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+        error_code: code, engine: "nyxagent", stage: "request", http_status: status,
+        trace_id: trace, conversation_id: id, upstream_error_code: 1000,
+      }) });
+      expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain("private");
+    },
+  );
+
+  it.each(["model_interrupted", "cancelled", null])("records live failure %s without recounting it on reload", async (code) => {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+      ? chunked(sseBytes(runningStatus, { event: "turn.completed", turn_id: "turn", status: "failed",
+          error: code ? { code, message: "private runtime detail" } : null }))
+      : json(history());
+    const transport = new NyxAgentTransport();
+    await transport.send(id, "private prompt", vi.fn());
+    await transport.history(id);
+    expect(capture).toHaveBeenCalledTimes(code === "cancelled" ? 0 : 1);
+    if (code !== "cancelled") expect(capture).toHaveBeenCalledWith({ name: "nyxbot.error", props: expect.objectContaining({
+      error_code: "NYXBOT_RUN_ERROR", engine: "nyxagent", stage: "stream", http_status: 200,
+      upstream_error_code: code ?? "other", turn_id: "turn",
+    }) });
+    expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain("private");
+  });
+
+  it("reports an admission deadline once and never replays the submitted turn", async () => {
+    vi.useFakeTimers();
+    let turns = 0;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) { turns++; return new Promise<Response>(() => undefined); }
+      return json(history());
+    };
+    try {
+      const pending = new NyxAgentTransport().send(id, "Question", vi.fn());
+      const rejected = expect(pending).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(45_001);
+      await rejected;
+      expect(turns).toBe(1);
+      expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+        error_code: "NYXBOT_START_TIMEOUT", engine: "nyxagent", stage: "request",
+      }) });
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+// Value: protects=live failed history outcomes emit once even when the reader is aborted;
+// fails_when=history settlement is mistaken for user cancellation; why_new=SSE terminal fixtures do not cover history;
+// seam=none; no_claim=live network or PostHog delivery.
+it.each(["model_interrupted", null, "cancelled"])("reports history-recovered live failure %s without recounting reload", async (code) => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  let reader!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { reader = value; } })) : json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "Question", vi.fn());
+  await vi.waitFor(() => expect(reader).toBeDefined());
+  reader.enqueue(sseBytes(runningStatus, { event: "message.started", message_id: "recovered", role: "assistant" }));
+  await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("turn"));
+  page.messages.push({ ...history().messages[1]!, id: "recovered", status: "failed", error_code: code });
+  await transport.history(id);
+  await sending;
+  await transport.history(id);
+  expect(capture).toHaveBeenCalledTimes(code === "cancelled" ? 0 : 1);
+  if (code !== "cancelled") expect(capture).toHaveBeenCalledWith({ name: "nyxbot.error", props: expect.objectContaining({
+    error_code: "NYXBOT_RUN_ERROR", upstream_error_code: code ?? "other", engine: "nyxagent", stage: "stream",
+  }) });
+});
+
+
+it.each([
+  { source: "nyxid", stage: "model_proxy", code: "api_key_scope_forbidden", http_status: 403, nyxid_error_code: 9000 },
+  { source: "nyxagent", stage: "stream", code: "turn_failed", http_status: null, nyxid_error_code: null },
+])("keeps sanitized failure metadata live and after reload ($source)", async (failure) => {
+  const page = history();
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? chunked(sseBytes(runningStatus,
+        { event: "message.started", message_id: "failure-reply", role: "assistant" },
+        { event: "turn.completed", turn_id: "turn", status: "failed",
+          turn_metadata: { failure_reason: failure },
+          error: { code: "assistant_unavailable", message: "fixed copy", upstream_error_code: "turn_failed", stage: "stream" } },
+      ))
+    : json(page);
+  await transport.history(id);
+  const views: import("@/lib/assistant/chat-types").ChatMessage[] = [];
+  const unsubscribe = transport.subscribe(() => {
+    const tail = transport.session(id).messages.at(-1);
+    if (tail) views.push(tail);
+  });
+  await transport.send(id, "hello", vi.fn());
+  unsubscribe();
+  expect(views.some((view) => view.errorDetail?.failureReason?.code === failure.code)).toBe(true);
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "assistant_unavailable",
+    turn_metadata: { failure_reason: failure }, upstream_error_code: "turn_failed",
+    error_detail: { stage: "stream", http_status: 200, upstream_request_id: null, response_id: null,
+      continuations: 0, turn_id: "turn", occurred_at: start } };
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages[1]?.errorDetail?.failureReason).toEqual(failure);
+});
+
+it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "handle_present", "future_reason", "connection_not_platform", "route_mismatch", "unknown_field"])("does not invent an owner notice for %s", (reason) => {
+  expect(storedError("guest_model_route_required", undefined, reason)).toBe("This assistant can't answer right now. Please try again later.");
+});
+it.each(["model_route_unavailable", "model_connection_unavailable", "credits_unavailable", "setup_timeout", "setup_capacity"])("renders setup failure wording for %s", (reason) => {
+  expect(storedError("guest_model_route_required", undefined, reason)).toBe("Visitor setup could not finish. The owner has been notified. Please try again later.");
+});
+
+
+it("carries the server action outcome from failed history to the message view", async () => {
+  const page = history();
+  const outcome = {
+    summary: "These actions completed before the reply failed.", complete: true,
+    actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+    retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+  };
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "first_byte_timeout", action_outcome: outcome };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.actionOutcome).toEqual(outcome);
+});
+it("2072 restores a pending card on reload and keeps its expired terminal card visible after polling", async () => {
+  const page = history();
+  const card = { ...creationReceipt(page.messages[1]!.turn_id), status: "pending" as const };
+  page.acknowledgements = [card];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const initial = new NyxAgentTransport();
+  await initial.history(id);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  const rowId = `nyxagent-acknowledgement:${card.id}`;
+  expect(reloaded.session(id).messages.map((m) => m.id)).toContain(rowId);
+  page.acknowledgements = [{ ...card, status: "expired" }];
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages.filter((m) => m.id === rowId)).toHaveLength(1);
+  expect(reloaded.session(id).messages.find((m) => m.id === page.messages[1]!.id)?.decisions).toBeUndefined();
+});
+it("2072 restores terminal proxy approvals without presenting them as a pending turn", async () => {
+  const page = history();
+  page.approval_history = [{ id: "proxy", status: "expired", review_path: "/assistant/approvals", service_slug: "google-sheets", service_name: "Google Sheets", summary: "Update ledger", approval_mode: "per_request", agent_key_prefix: "", created_at: start, expires_at: afterReset }];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toContain("nyxagent-approval:proxy");
+  expect(transport.isRunning(id)).toBe(false);
+});
+
+
+it("keeps safe memory reasons through active polling and settled history reload", async () => {
+  let active = true;
+  const activity = { id: "memory", label: "nyxid__remember", status: "error", started_at: start, ended_at: reset, failure: { kind: "tool_error", reason: "note_too_long" } };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page,
+      conversation: { ...page.conversation, active_turn: active ? { turn_id: "turn", started_at: start, activities: [activity], attachments: [] } : null },
+      messages: active ? page.messages.slice(0, 1) : [page.messages[0], { ...page.messages[1], activities: [activity] }],
+    });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
+  active = false;
+  await transport.history(id);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
+});
+
+it("does not report an interruption when the finally refresh proves settlement (#2316)", async () => {
+  let reads = 0;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event: "turn.status", conversation_id: id, turn_id: "turn", status: "running", cursor: 1 })}\n\n`));
+      controller.close();
+    } }));
+    const page = history();
+    if (++reads === 1) {
+      page.messages.pop();
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+    }
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "Question", vi.fn())).resolves.toBeUndefined();
+  expect(reads).toBe(2);
+  expect(transport.session(id).status).toBe("completed_text");
+});
+
+// The real send/history pipeline, with server snapshots advanced explicitly.
+describe("interruption reconciliation (#2316)", () => {
+  async function dropped(acknowledgements: NyxAgentHistory["acknowledgements"] = []) {
+    let page = history();
+    page.acknowledgements = acknowledgements;
+    page.messages.pop();
+    page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+    let posts = 0;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) {
+        posts++;
+        return new Response(`data: ${JSON.stringify({ event: "turn.status", conversation_id: id, turn_id: "turn", status: "waiting", cursor: 1 })}\n\n`);
+      }
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow("interrupted");
+    expect(transport.getInterruption(id)).toContain("may still be working");
+    return { transport, set: (next: NyxAgentHistory) => { page = next; }, posts: () => posts };
+  }
+
+  it.each([null, "assistant_unavailable", "cancelled", "queue_timeout", "turn_lost"])(
+    "reconciles a delayed history/live refresh to recorded outcome %s", async (code) => {
+      const x = await dropped();
+      const page = history();
+      page.messages[1] = { ...page.messages[1]!, status: code ? "failed" : "completed", error_code: code };
+      x.set(page);
+      await x.transport.history(id);
+      const reply = x.transport.session(id).messages.find((message) => message.id === "a")!;
+      expect(reply.status).toBe(code === "cancelled" ? "stopped" : code ? "error" : "complete");
+      expect(reply.errorCode).toBe(code);
+      if (code === "turn_lost") {
+        expect(x.transport.getInterruption(id)).toContain("check which actions completed");
+        expect(x.transport.getInterruption(id)).not.toContain("may still be working");
+      } else expect(x.transport.getInterruption(id)).toBeUndefined();
+      expect(x.transport.hasUnsettledInterruption(id)).toBe(false);
+      expect(x.posts()).toBe(1);
+      // Reload has no transient interruption, and retains the server outcome.
+      const reload = new NyxAgentTransport();
+      await reload.history(id);
+      expect(reload.getInterruption(id)).toBeUndefined();
+      expect(reload.session(id).messages.find((message) => message.id === "a")?.status).toBe(reply.status);
+    },
+  );
+
+  it("retains still-active and unknown outcomes, including an unrelated success", async () => {
+    const x = await dropped();
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    const page = history();
+    page.messages = []; // Idle alone is not proof of this request's outcome.
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    page.messages = history().messages.map((row) => ({ ...row, id: `other-${row.id}`, seq: row.seq + 10, turn_id: "other-turn" }));
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+  });
+
+  it("clears the old stream notice even while a different turn is running", async () => {
+    const x = await dropped();
+    const page = history();
+    page.conversation.active_turn = { turn_id: "other-turn", started_at: afterReset, activities: [], attachments: [] };
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.isRunning(id)).toBe(true);
+    expect(x.transport.getInterruption(id)).toBeUndefined();
+    expect(x.transport.session(id).messages.some((row) => row.turnStatus?.interrupted)).toBe(false);
+  });
+
+  it.each([null, "assistant_unavailable"])("reconciles an approval continuation on another stream (%s)", async (code) => {
+    const card = nyxAgentHistorySchema.parse({ ...history(), acknowledgements: [{
+      id: "33333333-3333-4333-8333-333333333333", creation_turn_id: "turn", kind: "action", status: "pending",
+      summary: "Publish skill", service_slug: null, service_name: null, tool_name: "nyxid__draft_agent_skill",
+      created_at: start, decided_at: null, expires_at: "2099-01-01T00:00:00Z",
+    }] }).acknowledgements[0]!;
+    const x = await dropped([card]);
+    expect(x.transport.session(id).messages.some((row) => row.turnStatus?.phase === "approval")).toBe(true);
+    const page = history();
+    page.messages = [];
+    page.acknowledgements = [card];
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    card.status = "allowed";
+    // An allowed receipt alone does not establish execution or settlement.
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    page.messages = history().messages.map((row) => ({ ...row, seq: row.seq + 10, id: `continuation-${row.id}`,
+      turn_id: "continuation", continuation_of: row.role === "user" ? card.id : undefined,
+      status: row.role === "assistant" && code ? "failed" : "completed", error_code: row.role === "assistant" ? code : null }));
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toBeUndefined();
+    expect(x.transport.session(id).messages.find((row) => row.id === "continuation-a")?.errorCode).toBe(code);
+    expect(x.posts()).toBe(1);
+  });
+
+  it("does not treat Stop acceptance as settlement; clears only at the cancelled reply", async () => {
+    const x = await dropped();
+    await x.transport.stop(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    const page = history();
+    page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "cancelled" };
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toBeUndefined();
+    expect(x.transport.session(id).status).toBe("stopped");
+  });
+});
+
+
+it("keeps a validated terminal event authoritative when trailing SSE is malformed and history is unavailable (#2316)", async () => {
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (!endpoint.endsWith("/turns")) throw new Error("History unavailable");
+    return new Response([
+      { event: "turn.status", conversation_id: id, turn_id: "turn", status: "running", cursor: 1 },
+      { event: "turn.completed", turn_id: "turn", status: "completed", error: null, cursor: 2 },
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: invalid trailing payload\n\n");
+  };
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "Question", vi.fn())).resolves.toBeUndefined();
+  expect(transport.getInterruption(id)).toBeUndefined();
+});
+
+
+it("cannot identify an interrupted send from another turn's checkpoint (#2316)", async () => {
+  let reads = 0;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    // Admitted, but no turn.status identifying this request was received.
+    if (endpoint.endsWith("/turns")) return new Response("");
+    const page = history();
+    page.messages = page.messages.map((row) => ({ ...row, turn_id: "other" }));
+    if (++reads === 1) {
+      page.messages.pop();
+      page.conversation.active_turn = { turn_id: "other", started_at: start, activities: [], attachments: [],
+        reply: { message_id: "a", block_id: "text", text: "Different reply", cursor: 2 } };
+    }
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow("interrupted");
+  expect(reads).toBe(2);
+  expect(transport.getInterruption(id)).toContain("may still be working");
 });

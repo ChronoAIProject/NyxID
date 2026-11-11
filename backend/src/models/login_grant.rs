@@ -19,6 +19,10 @@ pub struct NewKeyInput {
     #[serde(default)]
     pub allow_all_nodes: bool,
     pub expires_at: Option<String>,
+    /// Explicit authorization for a newly issued nonexpiring parent key.
+    /// False remains omitted for old-readable persisted login-code intents.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub never_expires: bool,
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
     pub platform: Option<String>,
@@ -41,4 +45,8 @@ pub enum Selection {
 pub struct ConnectionSnapshot {
     pub service_id: String,
     pub permission_snapshot: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

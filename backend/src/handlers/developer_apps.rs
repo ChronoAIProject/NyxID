@@ -85,7 +85,7 @@ async fn resolve_developer_app_read_owner(
 
 // ── Request / Response DTOs ──
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateDeveloperOAuthClientRequest {
     pub name: String,
     pub redirect_uris: Vec<String>,
@@ -108,7 +108,7 @@ pub struct CreateDeveloperOAuthClientRequest {
     pub default_service_catalog_slugs: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UpdateDeveloperOAuthClientRequest {
     pub name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
@@ -124,7 +124,7 @@ pub struct UpdateDeveloperOAuthClientRequest {
     pub default_service_catalog_slugs: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct DeveloperOAuthClientResponse {
     pub id: String,
     pub client_name: String,
@@ -190,7 +190,7 @@ pub struct DeveloperOAuthClientListResponse {
     pub clients: Vec<DeveloperOAuthClientResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct RotateDeveloperClientSecretResponse {
     pub id: String,
     pub client_secret: String,
@@ -416,7 +416,8 @@ pub(crate) async fn create_my_oauth_client_with_id(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::OauthClientRegistered,
-    );
+    )
+    .await;
 
     Ok(Json(to_response(client, raw_secret)))
 }
@@ -575,7 +576,8 @@ pub async fn rotate_my_oauth_client_secret(
             // Hash: raw UUID would be scrubbed to `[UUID_REDACTED]`.
             client_id: hash_short_id(&updated.id),
         },
-    );
+    )
+    .await;
 
     Ok(Json(RotateDeveloperClientSecretResponse {
         id: updated.id,
@@ -675,6 +677,34 @@ pub async fn delete_my_oauth_client(
     Ok(Json(
         serde_json::json!({ "message": "OAuth client deactivated" }),
     ))
+}
+
+impl std::fmt::Debug for CreateDeveloperOAuthClientRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateDeveloperOAuthClientRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for UpdateDeveloperOAuthClientRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateDeveloperOAuthClientRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for DeveloperOAuthClientResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeveloperOAuthClientResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RotateDeveloperClientSecretResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotateDeveloperClientSecretResponse")
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

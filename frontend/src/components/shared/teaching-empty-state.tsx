@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ComponentType, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
@@ -80,7 +81,7 @@ export function TeachingEmptyState({
   catalogJumpStarts,
   className,
 }: TeachingEmptyStateProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const ctaButton =
     "onClick" in primaryCta ? (
       // AddCtaButton renders <Button variant="primary" size="lg"> with a
@@ -109,15 +110,15 @@ export function TeachingEmptyState({
     >
       <Icon className={cn(iconClassName ?? DEFAULT_ICON_CLASS)} />
       <div className="space-y-1.5 max-w-md">
-        <p className="text-15 font-semibold text-foreground">{title}</p>
-        <p className="text-12 text-muted-foreground leading-relaxed">
+        <p className="type-card-title text-foreground">{title}</p>
+        <p className="text-14 text-muted-foreground">
           {description}
         </p>
       </div>
       {ctaButton}
       {jumpStarts.length > 0 ? (
         <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
-          <span className="text-11 text-muted-foreground">{t("Or start with:")}</span>
+          <span className="text-13 text-muted-foreground">{translateUi("Or start with:")}</span>
           {jumpStarts.map((j) => (
             <Button
               key={j.label}

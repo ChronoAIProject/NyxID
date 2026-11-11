@@ -1,20 +1,15 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
-import { useState, type ReactNode } from "react";
-import {
-  ChevronDown,
-  ExternalLink,
-  Info,
-  Plus,
-  WalletCards,
-} from "lucide-react";
-import type { BillingWalletResponse } from "@/schemas/billing";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { formatRelativeTime } from "@/lib/utils";
+import { ApiError } from "@/lib/api-client";
+import { Label } from "@/components/ui/label";
+import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
+import { useState } from "react";
+import { ExternalLink, Plus } from "lucide-react";
+import type { BillingWalletResponse } from "@/schemas/billing";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -35,8 +30,7 @@ import {
 const DEFAULT_TOP_UP_CREDITS = 100;
 const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
-interface BillingWalletCardProps {
-  readonly titleHelp?: ReactNode;
+interface BillingWalletActionsProps {
   readonly wallet: BillingWalletResponse | undefined;
   readonly loading: boolean;
   readonly unavailable: boolean;
@@ -45,6 +39,7 @@ interface BillingWalletCardProps {
   readonly onProvision: () => void;
   readonly provisioning: boolean;
   readonly billingReady: boolean;
+  readonly needsSubscription?: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
   readonly topUpPending: boolean;
   /** Controls the Add credits dialog when set (e.g. a top-up deep link). */
@@ -52,8 +47,8 @@ interface BillingWalletCardProps {
   readonly onTopUpOpenChange?: (open: boolean) => void;
 }
 
-export function BillingWalletCard({
-  titleHelp,
+/** Existing checkout and provisioning controls, shared by the balance summary. */
+export function BillingWalletActions({
   wallet,
   loading,
   unavailable,
@@ -62,166 +57,130 @@ export function BillingWalletCard({
   onProvision,
   provisioning,
   billingReady,
+  needsSubscription = false,
   onTopUp,
   topUpPending,
   topUpOpen,
   onTopUpOpenChange,
-}: BillingWalletCardProps) {
-  const { t } = useUiTranslation();
-  const [showBreakdown, setShowBreakdown] = useState(false);
-
-  if (loading) return <Skeleton className="h-[170px] w-full" />;
-  if (!wallet && unavailable) {
+}: BillingWalletActionsProps) {
+  useUiTranslation();
+  if (loading)
     return (
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle>{t("Wallet")}</CardTitle>
-            <p className="mt-1 text-12 text-muted-foreground">{t("No wallet provisioned.")}</p>
-          </div>
-          <WalletCards className="h-4 w-4 text-text-tertiary" />
-        </CardHeader>
-        <CardContent>
-          <Button
-            variant="primary"
-            disabled={!billingReady || provisioning}
-            isLoading={provisioning}
-            onClick={onProvision}
-          >
-            <ButtonIcon variant="primary">
-              <Plus className="h-3 w-3" />
-            </ButtonIcon>{t("Provision Wallet")}</Button>
-        </CardContent>
-      </Card>
+      <Skeleton aria-label={translateUi("Loading wallet actions")} className="h-8 w-28" />
     );
+  if (
+    error &&
+    (!wallet || (error instanceof ApiError && error.status === 403))
+  ) {
+    if (!unavailable)
+      return (
+        <ErrorBanner
+          message={errorMessage(error, "Failed to load billing wallet.")}
+          onRetry={onRetry}
+        />
+      );
   }
-  if (!wallet && error) {
+  if (!wallet && unavailable)
     return (
-      <ErrorBanner
-        message={errorMessage(error, "Failed to load billing wallet.")}
-        onRetry={onRetry}
-      />
+      <Button
+        variant="primary"
+        disabled={!billingReady || provisioning}
+        isLoading={provisioning}
+        onClick={onProvision}
+      >
+        <ButtonIcon variant="primary">
+          <Plus className="h-3 w-3" />
+        </ButtonIcon>{translateUi("Provision Wallet")}</Button>
     );
-  }
   if (!wallet) return null;
-
+  if (needsSubscription)
+    return (
+      <div className="max-w-sm space-y-2">
+        <p role="status" className="type-secondary text-muted-foreground">{translateUi("Finish setting up the organization subscription before adding credits or enabling guests.")}</p>
+        <Button
+          variant="primary"
+          onClick={onProvision}
+          disabled={!billingReady || provisioning}
+          isLoading={provisioning}
+        >{translateUi("Finish wallet setup")}</Button>
+      </div>
+    );
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <CardTitle className="flex items-center gap-1.5">{t("Wallet")}{titleHelp}
-        </CardTitle>
-        {wallet.suspended && <Badge variant="destructive">{t("Suspended")}</Badge>}
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-11 text-muted-foreground">{t("Available")}</span>
-              {!titleHelp && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label={t("What available credits means")}
-                      className="text-text-tertiary transition-colors hover:text-foreground"
-                    >
-                      <Info className="h-3 w-3" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    side="top"
-                    className="max-w-[260px] leading-relaxed"
-                  >{t("Credits spendable now after in-flight requests, unsettled usage, and purchased-credit expiry holds. 1 credit is 1 USD.")}</TooltipContent>
-                </Tooltip>
-              )}
-            </div>
-            <div className="mt-1 truncate text-28 font-semibold leading-tight">
-              {formatCredits(wallet.available ?? wallet.available_credits)}
-            </div>
-            <div className="mt-1 text-11 text-muted-foreground">{t("Updated ")}{formatRelativeTime(wallet.balance_synced_at)}
-            </div>
-            <button
-              type="button"
-              aria-expanded={showBreakdown}
-              aria-controls="wallet-breakdown"
-              className="mt-2 flex items-center gap-1 text-11 text-muted-foreground transition-colors hover:text-foreground"
-              onClick={() => setShowBreakdown((current) => !current)}
-            >
-              {showBreakdown ? t("Hide breakdown") : t("View breakdown")}
-              <ChevronDown
-                className={`h-3 w-3 transition-transform ${showBreakdown ? "rotate-180" : ""}`}
-              />
-            </button>
-          </div>
-          <AddCreditsDialog
-            billingReady={billingReady}
-            pending={topUpPending}
-            onTopUp={onTopUp}
-            open={topUpOpen}
-            onOpenChange={onTopUpOpenChange}
-          />
-        </div>
+    <AddCreditsDialog
+      billingReady={billingReady}
+      pending={topUpPending}
+      onTopUp={onTopUp}
+      open={topUpOpen}
+      onOpenChange={onTopUpOpenChange}
+    />
+  );
+}
 
-        {showBreakdown && (
-          <div id="wallet-breakdown">
-            <hr className="my-4 border-border" />
-            <p className="text-11 leading-relaxed text-muted-foreground">{t("Not all of your balance is spendable at any moment — requests in flight hold credits until they finish.")}</p>
-            <div className="mt-3 space-y-1.5">
-              <BreakdownRow
-                label={t("Balance")}
-                hint={t("Last provider-synced balance")}
-                value={formatCredits(wallet.balance ?? wallet.balance_credits)}
-              />
-              <BreakdownRow
-                label={t("Reserved")}
-                hint={t("Held for requests in flight")}
-                value={formatCredits(
-                  wallet.reserved ?? wallet.reserved_credits,
-                )}
-              />
-              <BreakdownRow
-                label={t("Pending")}
-                hint={t("Charged, awaiting provider sync")}
-                value={formatCredits(
-                  wallet.pending_debits ?? wallet.pending_lago_debits,
-                )}
-              />
-              {hasCredits(
-                wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
-              ) && (
-                <BreakdownRow
-                  label={t("Expiring")}
-                  hint={t("Held while expired purchases are removed")}
-                  value={formatCredits(
-                    wallet.pending_expiry ??
-                      wallet.pending_topup_expiry_credits,
-                  )}
-                />
-              )}
-              {hasCredits(
-                wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
-              ) && (
-                <BreakdownRow
-                  label={t("Overdraft")}
-                  hint={t("Extra capacity beyond your balance")}
-                  value={formatCredits(
-                    wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
-                  )}
-                />
-              )}
-            </div>
-            <hr className="my-3 border-border" />
-            <div className="flex items-center justify-between text-11 text-muted-foreground">
-              <span>{t("Plan")}</span>
-              <span className="text-foreground">
-                {labelize(wallet.plan_kind)}
-              </span>
-            </div>
-            <p className="mt-2 text-11 text-muted-foreground">{t("Available = Balance - Reserved - Pending - Expiring.")}</p>
-          </div>
+export function BillingWalletBreakdown({
+  wallet,
+}: {
+  wallet: BillingWalletResponse;
+}) {
+  useUiTranslation();
+  return (
+    <section aria-label={translateUi("Wallet breakdown")}>
+      <h3 className="type-secondary-strong">{translateUi("Wallet")}</h3>
+      <p className="mt-1 type-secondary text-muted-foreground">{translateUi("Updated ")}{formatRelativeTime(wallet.balance_synced_at)}
+      </p>
+      <div className="my-3">
+        <BreakdownRow
+          label={translateUi("Available")}
+          hint={translateUi("Wallet credits available now")}
+          value={formatCredits(wallet.available ?? wallet.available_credits)}
+        />
+      </div>
+      <p className="type-secondary text-muted-foreground">{translateUi("Not all of your balance is spendable at any moment — requests in flight hold credits until they finish.")}</p>
+      <div className="mt-3 space-y-1.5">
+        <BreakdownRow
+          label={translateUi("Balance")}
+          hint={translateUi("Last provider-synced balance")}
+          value={formatCredits(wallet.balance ?? wallet.balance_credits)}
+        />
+        <BreakdownRow
+          label={translateUi("Reserved")}
+          hint={translateUi("Held for requests in flight")}
+          value={formatCredits(wallet.reserved ?? wallet.reserved_credits)}
+        />
+        <BreakdownRow
+          label={translateUi("Pending")}
+          hint={translateUi("Charged, awaiting provider sync")}
+          value={formatCredits(
+            wallet.pending_debits ?? wallet.pending_lago_debits,
+          )}
+        />
+        {hasCredits(
+          wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
+        ) && (
+          <BreakdownRow
+            label={translateUi("Expiring")}
+            hint={translateUi("Held while expired purchases are removed")}
+            value={formatCredits(
+              wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
+            )}
+          />
         )}
-      </CardContent>
-    </Card>
+        {hasCredits(wallet.overdraft_cap ?? wallet.overdraft_cap_credits) && (
+          <BreakdownRow
+            label={translateUi("Overdraft")}
+            hint={translateUi("Extra capacity beyond your balance")}
+            value={formatCredits(
+              wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
+            )}
+          />
+        )}
+      </div>
+      <hr className="my-3 border-border" />
+      <div className="flex items-center justify-between type-secondary text-muted-foreground">
+        <span>{translateUi("Plan")}</span>
+        <span className="text-foreground">{labelize(wallet.plan_kind)}</span>
+      </div>
+      <p className="mt-2 type-secondary text-muted-foreground">{translateUi("Available = Balance - Reserved - Pending - Expiring.")}</p>
+    </section>
   );
 }
 
@@ -238,7 +197,7 @@ function AddCreditsDialog({
   readonly open?: boolean;
   readonly onOpenChange?: (open: boolean) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
   const setOpen = (next: boolean) => {
@@ -253,7 +212,7 @@ function AddCreditsDialog({
     <Button variant="primary" disabled={!billingReady || pending}>
       <ButtonIcon variant="primary">
         <Plus className="h-3 w-3" />
-      </ButtonIcon>{t("Add credits")}</Button>
+      </ButtonIcon>{translateUi("Add credits")}</Button>
   );
 
   if (!billingReady) {
@@ -262,7 +221,7 @@ function AddCreditsDialog({
         <TooltipTrigger asChild>
           <span tabIndex={0}>{trigger}</span>
         </TooltipTrigger>
-        <TooltipContent side="left">{t("Payments aren't enabled on this deployment yet.")}</TooltipContent>
+        <TooltipContent side="left">{translateUi("Payments aren't enabled on this deployment yet.")}</TooltipContent>
       </Tooltip>
     );
   }
@@ -272,12 +231,12 @@ function AddCreditsDialog({
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
-          <DialogTitle>{t("Add credits")}</DialogTitle>
-          <DialogDescription>{t("1 credit = 1 USD. Purchased credits expire one year after payment.")}</DialogDescription>
+          <DialogTitle>{translateUi("Add credits")}</DialogTitle>
+          <DialogDescription>{translateUi("1 credit = 1 USD. Purchased credits expire one year after payment.")}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <span className="text-12 font-medium">{t("Amount")}</span>
+            <span className="type-row-title">{translateUi("Amount")}</span>
             <div className="flex flex-wrap gap-2">
               {TOP_UP_PRESETS.map((preset) => (
                 <Button
@@ -293,7 +252,7 @@ function AddCreditsDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <label className="text-12 font-medium" htmlFor="topup-credits">{t("Or enter an amount")}</label>
+            <Label htmlFor="topup-credits">{translateUi("Or enter an amount")}</Label>
             <div className="flex items-center gap-3">
               <Input
                 id="topup-credits"
@@ -308,16 +267,16 @@ function AddCreditsDialog({
               />
               <span
                 id="topup-total"
-                className="shrink-0 text-13 text-muted-foreground"
+                className="min-w-0 break-all type-body tabular-nums text-muted-foreground"
               >
                 {formatUsd(amount)}
               </span>
             </div>
           </div>
-          <p className="text-11 leading-relaxed text-muted-foreground">{t("We'll hand you to Stripe to pay, then bring you back here. Credits land once the payment clears.")}</p>
+          <p className="type-secondary text-muted-foreground">{translateUi("We'll hand you to Stripe to pay, then bring you back here. Credits land once the payment clears.")}</p>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>{t("Cancel")}</Button>
+          <Button variant="outline" onClick={() => setOpen(false)}>{translateUi("Cancel")}</Button>
           <Button
             variant="primary"
             disabled={!billingReady || !amountValid || pending}
@@ -326,7 +285,7 @@ function AddCreditsDialog({
           >
             <ButtonIcon variant="primary">
               <ExternalLink className="h-3 w-3" />
-            </ButtonIcon>{t("Continue to payment")}</Button>
+            </ButtonIcon>{translateUi("Continue to payment")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -342,13 +301,16 @@ function BreakdownRow({
   readonly hint: string;
   readonly value: string;
 }) {
+  useUiTranslation();
   return (
-    <div className="flex items-baseline justify-between gap-3">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       <div className="min-w-0">
-        <div className="text-12">{label}</div>
-        <div className="text-11 text-muted-foreground">{hint}</div>
+        <div className="type-body">{label}</div>
+        <div className="type-secondary text-muted-foreground">{hint}</div>
       </div>
-      <div className="shrink-0 text-13 text-muted-foreground">{value}</div>
+      <div className="min-w-0 break-all type-body tabular-nums text-muted-foreground">
+        {value}
+      </div>
     </div>
   );
 }

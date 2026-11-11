@@ -1,0 +1,1110 @@
+{
+  "adapters": [
+    {
+      "adapter_id": "telegram",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message", "edit_message"],
+      "messaging": {
+        "reply_to": true,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": true,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://core.telegram.org/bots/api#setwebhook"
+      }
+    },
+    {
+      "adapter_id": "telegram-new",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message", "edit_message"],
+      "messaging": {
+        "reply_to": true,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": true,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://core.telegram.org/api/bots/managed-bots"
+      }
+    },
+    {
+      "adapter_id": "discord",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message", "edit_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": true
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": true,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://discord.com/developers/docs/interactions/receiving-and-responding"
+      }
+    },
+    {
+      "adapter_id": "lark",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message", "edit_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": true
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": true,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://open.larksuite.com/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case"
+      }
+    },
+    {
+      "adapter_id": "feishu",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message", "edit_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": true
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": true,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case"
+      }
+    },
+    {
+      "adapter_id": "slack",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message", "edit_message"],
+      "messaging": {
+        "reply_to": true,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": true
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": true,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://api.slack.com/apis/events-api"
+      }
+    },
+    {
+      "adapter_id": "whatsapp",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": true,
+        "initiated_send": true,
+        "inbound_media": ["image", "file", "audio", "video"],
+        "outbound_media": ["image", "file", "audio", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint"
+      }
+    },
+    {
+      "adapter_id": "x",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": true,
+        "inbound_media": ["image", "video"],
+        "outbound_media": ["image", "video"],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": true
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://docs.x.com/x-api/activity/introduction"
+      }
+    },
+    {
+      "adapter_id": "openclaw",
+      "contract_version": 1,
+      "operations": ["receive_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": false,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "unsupported"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": false,
+        "nyxbot_refresh": "unsupported",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": null
+      }
+    },
+    {
+      "adapter_id": "aurinko",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": true,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": true,
+          "thread_follow": true,
+          "thread_history": true,
+          "private_thread": true
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": false,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://docs.aurinko.io/unified-apis/webhooks-api"
+      }
+    },
+    {
+      "adapter_id": "telnyx.conversation_relay",
+      "contract_version": 1,
+      "operations": [
+        "receive_call",
+        "end_session",
+        "stream_reply",
+        "interrupt"
+      ],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": false,
+        "outbound_text": false,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "unsupported"
+      },
+      "calls": {
+        "inbound": true,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": true
+      },
+      "conversation": {
+        "final_transcripts": true,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": true,
+        "interruption": true,
+        "playback_evidence": "interrupted_prefix",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": 1800,
+        "max_frame_bytes": 16384,
+        "output_queue_capacity": 64
+      },
+      "usage": {
+        "units": ["voice_seconds"],
+        "evidence": "provider_terminal_duration_or_persisted_terminal_observation",
+        "configured_billing": true
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "connection",
+            "implemented": true,
+            "prerequisite": null
+          },
+          {
+            "kind": "platform",
+            "implemented": false,
+            "prerequisite": "provider_limit_unavailable"
+          }
+        ],
+        "credential_alternatives": ["connection", "platform"],
+        "required_resources": [
+          "account",
+          "number",
+          "application",
+          "scoped_specialist"
+        ],
+        "carrier": "telnyx",
+        "speech": "carrier_conversation_relay",
+        "agent": "nyxbot_specialist",
+        "documentation": "https://developers.telnyx.com/docs/voice/programmable-voice/conversation-relay"
+      }
+    },
+    {
+      "adapter_id": "telnyx.messaging",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": 1600,
+        "delivery": "provider_receipt"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": 64
+      },
+      "usage": {
+        "units": ["requests"],
+        "evidence": "provider_acceptance_receipt_or_authenticated_message_parts",
+        "configured_billing": true
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "connection",
+            "implemented": true,
+            "prerequisite": null
+          },
+          {
+            "kind": "platform",
+            "implemented": true,
+            "prerequisite": "allocated_resource_and_configured_billing"
+          }
+        ],
+        "credential_alternatives": ["connection", "platform"],
+        "required_resources": [
+          "account",
+          "number",
+          "application",
+          "scoped_specialist"
+        ],
+        "carrier": "telnyx",
+        "speech": "carrier_conversation_relay",
+        "agent": "nyxbot_specialist",
+        "documentation": "https://developers.telnyx.com/docs/messaging/messages/receiving-webhooks"
+      }
+    },
+    {
+      "adapter_id": "twilio.conversation_relay",
+      "contract_version": 1,
+      "operations": [
+        "receive_call",
+        "end_session",
+        "stream_reply",
+        "interrupt"
+      ],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": false,
+        "outbound_text": false,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "unsupported"
+      },
+      "calls": {
+        "inbound": true,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": true
+      },
+      "conversation": {
+        "final_transcripts": true,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": true,
+        "interruption": true,
+        "playback_evidence": "interrupted_prefix",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": 1800,
+        "max_frame_bytes": 16384,
+        "output_queue_capacity": 64
+      },
+      "usage": {
+        "units": ["voice_seconds"],
+        "evidence": "provider_terminal_duration_or_persisted_terminal_observation",
+        "configured_billing": true
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "connection",
+            "implemented": true,
+            "prerequisite": null
+          },
+          {
+            "kind": "platform",
+            "implemented": true,
+            "prerequisite": "allocated_resource_and_configured_billing"
+          }
+        ],
+        "credential_alternatives": ["connection", "platform"],
+        "required_resources": [
+          "account",
+          "number",
+          "application",
+          "scoped_specialist"
+        ],
+        "carrier": "twilio",
+        "speech": "carrier_conversation_relay",
+        "agent": "nyxbot_specialist",
+        "documentation": "https://www.twilio.com/docs/voice/conversationrelay/websocket-messages"
+      }
+    },
+    {
+      "adapter_id": "twilio.messaging",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": 1600,
+        "delivery": "provider_receipt"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": 64
+      },
+      "usage": {
+        "units": ["requests"],
+        "evidence": "provider_acceptance_receipt_or_authenticated_message_parts",
+        "configured_billing": true
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "connection",
+            "implemented": true,
+            "prerequisite": null
+          },
+          {
+            "kind": "platform",
+            "implemented": true,
+            "prerequisite": "allocated_resource_and_configured_billing"
+          }
+        ],
+        "credential_alternatives": ["connection", "platform"],
+        "required_resources": [
+          "account",
+          "number",
+          "application",
+          "scoped_specialist"
+        ],
+        "carrier": "twilio",
+        "speech": "carrier_conversation_relay",
+        "agent": "nyxbot_specialist",
+        "documentation": "https://www.twilio.com/docs/messaging/guides/webhook-request"
+      }
+    },
+    {
+      "adapter_id": "elevenlabs.custom_llm",
+      "contract_version": 1,
+      "operations": ["stream_reply", "end_session"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": false,
+        "outbound_text": false,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "unsupported"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": true
+      },
+      "conversation": {
+        "final_transcripts": true,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": true,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": false,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": 1800,
+        "max_frame_bytes": null,
+        "output_queue_capacity": 64
+      },
+      "usage": {
+        "units": [],
+        "evidence": "nyxagent_model_billed_independently",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "connection",
+            "implemented": true,
+            "prerequisite": null
+          },
+          {
+            "kind": "platform",
+            "implemented": false,
+            "prerequisite": "external_speech_billing_required"
+          }
+        ],
+        "credential_alternatives": ["connection", "platform"],
+        "required_resources": ["agent", "server_issued_session"],
+        "carrier": "external",
+        "speech": "elevenlabs",
+        "agent": "nyxbot_specialist",
+        "documentation": "https://elevenlabs.io/docs/eleven-agents/customization/llm/custom-llm"
+      }
+    }
+  ]
+}

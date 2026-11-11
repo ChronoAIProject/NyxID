@@ -75,8 +75,10 @@ pub struct IdentityConfig {
 }
 
 fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
-    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
-        || service.credential_binding.as_deref() == Some("platform")
+    if matches!(
+        service.source.as_deref(),
+        Some(AUTO_PROVISION_SOURCE | crate::services::voice::access::BOUND_SOURCE)
+    ) || service.credential_binding.as_deref() == Some("platform")
     {
         return Err(AppError::Forbidden(
             "Auto-connected services are platform managed and cannot be modified".to_string(),
@@ -91,6 +93,15 @@ pub fn ensure_service_fields_editable(
     service: &UserService,
     routing_fields: &[(&str, bool)],
 ) -> AppResult<()> {
+    if service.source.as_deref() == Some(crate::services::voice::access::BOUND_SOURCE) {
+        if let Some((field, _)) = routing_fields.iter().find(|(_, present)| *present) {
+            return Err(AppError::Forbidden(format!(
+                "Bot voice connections have a fixed binding; cannot change {field}"
+            )));
+        }
+        // Owners may disable/delete a connection normally. This is not auto-provisioned.
+        return Ok(());
+    }
     if service.credential_binding.as_deref() == Some("platform")
         && service.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
     {
@@ -147,7 +158,7 @@ pub async fn auto_connected_endpoint_ids(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
-            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .with_options(
             FindOptions::builder()
@@ -184,7 +195,7 @@ pub async fn ensure_user_managed_endpoint(
         .count_documents(doc! {
             "user_id": user_id,
             "endpoint_id": endpoint_id,
-            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .await?;
     if count > 0 {
@@ -1318,6 +1329,46 @@ pub async fn update_user_service(
     ws_frame_injections: Option<&[WsFrameInjection]>,
     admin_only: Option<bool>,
 ) -> AppResult<()> {
+    update_user_service_with_keys(
+        db,
+        None,
+        user_id,
+        actor_user_id,
+        service_id,
+        auth_method,
+        auth_key_name,
+        node_id,
+        node_priority,
+        is_active,
+        identity,
+        custom_user_agent,
+        default_request_headers,
+        ws_frame_injections,
+        admin_only,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_user_service_with_keys(
+    db: &mongodb::Database,
+    encryption_keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    node_priority: Option<i32>,
+    is_active: Option<bool>,
+    identity: Option<&IdentityConfig>,
+    custom_user_agent: Option<&str>,
+    default_request_headers: Option<
+        &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    >,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: Option<bool>,
+) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     super::ifttt_oauth_service::validate_key_route(
         db,
@@ -1531,42 +1582,41 @@ pub async fn update_user_service(
     // Validation is delegated to the shared module so admin + user paths
     // enforce the same denylist / length caps. NyxID#356.
     let mut audit_default_header_names: Option<Vec<String>> = None;
+    let mut header_source_filter = None;
     if let Some(drh) = default_request_headers {
-        match drh {
-            Some(list) => {
-                // Restore stored values for entries whose `value` was
-                // submitted as the redaction placeholder — otherwise a
-                // GET → editor → PUT round trip clobbers every
-                // sensitive value with the literal placeholder string.
-                // `current` was fetched at the top of this function.
-                let reconciled = crate::models::default_request_header::reconcile_with_stored(
-                    list.clone(),
-                    current.default_request_headers.as_deref(),
-                );
-                let normalized =
-                    crate::models::default_request_header::validate_headers(reconciled)?;
-                match normalized {
-                    Some(norm) => {
-                        audit_default_header_names =
-                            Some(norm.iter().map(|h| h.name.clone()).collect());
-                        let bson_val = bson::to_bson(&norm).map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to serialize default_request_headers: {e}"
-                            ))
-                        })?;
-                        set_doc.insert("default_request_headers", bson_val);
-                    }
-                    None => {
-                        audit_default_header_names = Some(Vec::new());
-                        set_doc.insert("default_request_headers", bson::Bson::Null);
-                    }
-                }
-            }
-            None => {
-                audit_default_header_names = Some(Vec::new());
-                set_doc.insert("default_request_headers", bson::Bson::Null);
-            }
-        }
+        header_source_filter = Some(
+            super::default_header_service::source_filter(
+                db,
+                COLLECTION_NAME,
+                service_id,
+                "user_id",
+                user_id,
+                current.default_request_headers.as_deref(),
+            )
+            .await?,
+        );
+        let prepared = super::default_header_service::prepare_update(
+            encryption_keys,
+            COLLECTION_NAME,
+            service_id,
+            user_id,
+            drh.clone().unwrap_or_default(),
+            current.default_request_headers.as_deref(),
+        )
+        .await?;
+        audit_default_header_names = Some(
+            prepared
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|header| header.name.clone())
+                .collect(),
+        );
+        set_doc.insert(
+            "default_request_headers",
+            bson::to_bson(&prepared)
+                .map_err(|_| AppError::Internal("Header storage encoding failed".into()))?,
+        );
     }
 
     if let Some(rules) = ws_frame_injections {
@@ -1578,17 +1628,24 @@ pub async fn update_user_service(
         );
     }
 
+    let update_filter =
+        header_source_filter.unwrap_or_else(|| doc! { "_id": service_id, "user_id": user_id });
     let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
-            doc! { "_id": service_id, "user_id": user_id },
+            update_filter,
             doc! {
                 "$set": set_doc,
                 "$inc": { "state_version": 1_i64 },
             },
-        )
-        .await?;
+        );
+    let result = result.await?;
 
     if result.matched_count == 0 {
+        if default_request_headers.is_some() {
+            return Err(AppError::Conflict(
+                "Default headers or owner changed; reload and retry".into(),
+            ));
+        }
         return Err(AppError::NotFound("User service not found".to_string()));
     }
 
@@ -1900,36 +1957,15 @@ pub async fn validate_update_inputs(
     // and over-length values before provisioning a credential downstream
     // of a header-only update that would otherwise fail.
     if let Some(Some(list)) = default_request_headers {
-        let reconciled = crate::models::default_request_header::reconcile_with_stored(
+        super::default_header_service::validate_edit(
             list.clone(),
             current.default_request_headers.as_deref(),
-        );
-        crate::models::default_request_header::validate_headers(reconciled)?;
+        )?;
     }
 
-    // Reject injection-param AND node_id changes on services whose
-    // backing key is `node_managed` — the credential lives entirely
-    // on the node agent, so the server can't re-push when the caller
-    // changes `auth_method` / `auth_key_name` / `endpoint_url` (target
-    // URL) or rebinds/clears `node_id`. Without this guard:
-    //   * `auth_method`/`auth_key_name`/`endpoint_url` edits would
-    //     leave the node serving the stale injection config with no
-    //     path back to sync (twenty-eighth-round Codex P1).
-    //   * `node_id` moves / clears skip the push path (no server-held
-    //     credential to send) but still trigger the post-commit
-    //     `credential_remove` on the old node — the only holder of the
-    //     secret — leaving the service unusable until the user
-    //     re-enters the credential on the new target
-    //     (thirty-third-round Codex P1).
-    // Users must instead run `nyxid node credentials add` on the node
-    // directly, or promote the record first.
-    //
-    // Exception: when the caller supplies a non-empty `credential` in the
-    // same request, `ensure_user_api_key_for_update` promotes the
-    // node_managed record to a server-held credential type and the
-    // subsequent push rewrites the new node's config with the fresh
-    // secret + injection params. Blocking here would make the combined
-    // migrate-and-update flow unusable (twenty-ninth-round Codex P2).
+    // Node-local credentials cannot be rewritten or moved without promotion.
+    // Endpoint-only edits are routing metadata, synchronized separately without
+    // sending a credential. Preserve the auth/node guard for combined edits.
     let node_id_actually_changes = match node_id {
         None => false,
         Some(new_raw) => {
@@ -1944,8 +1980,8 @@ pub async fn validate_update_inputs(
     };
     let changes_injection_params = auth_method.is_some()
         || auth_key_name.is_some()
-        || new_endpoint_url.is_some()
-        || node_id_actually_changes;
+        || node_id_actually_changes
+        || (new_endpoint_url.is_some() && node_id.is_some());
     let caller_is_promoting = credential.is_some_and(|c| !c.is_empty());
     if changes_injection_params
         && !caller_is_promoting
@@ -1955,11 +1991,7 @@ pub async fn validate_update_inputs(
         && ak.credential_type == "node_managed"
     {
         return Err(AppError::BadRequest(
-            "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
-                 node-managed service via `PUT /keys` without also supplying a \
-                 new `credential` to promote the key to a server-held record. \
-                 Either include `credential` in the same request, or run \
-                 `nyxid node credentials add <slug> …` on the node directly."
+            "Cannot change auth_method/auth_key_name/node_id on a node-managed service without a new credential to promote it to a server-held record. To keep the secret on the node, change only endpoint_url via PUT /keys/{id}, or run nyxid node credentials set-url --service <slug> --url <URL> on the node; change injection settings locally on the node."
                 .to_string(),
         ));
     }
@@ -2833,6 +2865,7 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -2858,6 +2891,7 @@ mod tests {
             asyncapi_spec_url: None,
             streaming_supported: false,
             ssh_config: Some(SshServiceConfig {
+                ca_context_version: None,
                 host: "10.0.0.1".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::ProxyOnly,
@@ -2903,6 +2937,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: None,
@@ -4137,6 +4172,7 @@ mod tests {
             .unwrap();
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -4218,6 +4254,7 @@ mod tests {
         public_catalog.id = uuid::Uuid::new_v4().to_string();
         public_catalog.slug = "cleanup-public".to_string();
         public_catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -4234,6 +4271,7 @@ mod tests {
         restricted_catalog.id = uuid::Uuid::new_v4().to_string();
         restricted_catalog.slug = "cleanup-restricted".to_string();
         restricted_catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![org_id.clone()],

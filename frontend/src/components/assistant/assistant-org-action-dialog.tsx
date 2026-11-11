@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { Building2, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -137,7 +137,7 @@ export function AssistantOrgActionDialog({
   params,
   onComplete,
 }: AssistantOrgActionDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [displayName, setDisplayName] = useState(
     textParam(params, "displayName"),
   );
@@ -377,14 +377,14 @@ export function AssistantOrgActionDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Building2 className="size-4" />
-            {resultId ? t("Organization change confirmed") : actionTitle(action)}
+            {resultId ? translateUi("Organization change confirmed") : actionTitle(action)}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? t("The canonical organization projection confirms the requested state.")
+              ? translateUi("The canonical organization projection confirms the requested state.")
               : destructive
-                ? t("This access change is destructive and must be confirmed every time.")
-                : t("NyxID applies this change in your signed-in browser session.")}
+                ? translateUi("This access change is destructive and must be confirmed every time.")
+                : translateUi("NyxID applies this change in your signed-in browser session.")}
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
@@ -392,7 +392,7 @@ export function AssistantOrgActionDialog({
             {(action === "create" || action === "update") && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="org-name">{t("Organization name")}</Label>
+                  <Label htmlFor="org-name">{translateUi("Organization name")}</Label>
                   <Input
                     id="org-name"
                     value={displayName}
@@ -401,7 +401,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-slug">{t("Slug")}</Label>
+                  <Label htmlFor="org-slug">{translateUi("Slug")}</Label>
                   <Input
                     id="org-slug"
                     value={slug}
@@ -410,7 +410,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-contact">{t("Contact email")}</Label>
+                  <Label htmlFor="org-contact">{translateUi("Contact email")}</Label>
                   <Input
                     id="org-contact"
                     value={contactEmail}
@@ -419,7 +419,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-avatar">{t("Avatar URL")}</Label>
+                  <Label htmlFor="org-avatar">{translateUi("Avatar URL")}</Label>
                   <Input
                     id="org-avatar"
                     value={avatarUrl}
@@ -432,7 +432,7 @@ export function AssistantOrgActionDialog({
             {action === "member_add" && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="org-user-id">{t("User ID")}</Label>
+                  <Label htmlFor="org-user-id">{translateUi("User ID")}</Label>
                   <Input
                     id="org-user-id"
                     value={userId}
@@ -440,7 +440,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-member-role">{t("Role")}</Label>
+                  <Label htmlFor="org-member-role">{translateUi("Role")}</Label>
                   <Select
                     value={role}
                     onValueChange={(value) => setRole(value as OrgRole)}
@@ -462,7 +462,7 @@ export function AssistantOrgActionDialog({
             {(action === "member_remove" ||
               action === "member_update_role") && (
               <div className="space-y-2">
-                <Label htmlFor="org-member-id">{t("Member ID")}</Label>
+                <Label htmlFor="org-member-id">{translateUi("Member ID")}</Label>
                 <Input
                   id="org-member-id"
                   value={memberId}
@@ -472,7 +472,7 @@ export function AssistantOrgActionDialog({
             )}
             {action === "member_update_role" && (
               <div className="space-y-2">
-                <Label htmlFor="org-role">{t("Role")}</Label>
+                <Label htmlFor="org-role">{translateUi("Role")}</Label>
                 <Select
                   value={role}
                   onValueChange={(value) => setRole(value as OrgRole)}
@@ -493,7 +493,7 @@ export function AssistantOrgActionDialog({
             {action === "invite" && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="invite-role">{t("Invite role")}</Label>
+                  <Label htmlFor="invite-role">{translateUi("Invite role")}</Label>
                   <Select
                     value={role}
                     onValueChange={(value) => setRole(value as OrgRole)}
@@ -511,7 +511,7 @@ export function AssistantOrgActionDialog({
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="invite-ttl">{t("Invite lifetime (hours)")}</Label>
+                  <Label htmlFor="invite-ttl">{translateUi("Invite lifetime (hours)")}</Label>
                   <Input
                     id="invite-ttl"
                     type="number"
@@ -526,11 +526,11 @@ export function AssistantOrgActionDialog({
             {(action === "member_add" || action === "invite") &&
             allowedServiceIds !== undefined ? (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium">{t("Allowed services")}</p>
-                <p className="break-all font-mono text-xs text-muted-foreground">
+                <p className="type-secondary-emphasis">{translateUi("Allowed services")}</p>
+                <p className="break-all font-mono text-13 text-muted-foreground">
                   {allowedServiceIds.length > 0
                     ? allowedServiceIds.join(", ")
-                    : t("No services")}
+                    : translateUi("No services")}
                 </p>
               </div>
             ) : null}
@@ -540,22 +540,22 @@ export function AssistantOrgActionDialog({
             action !== "member_remove" &&
             action !== "member_update_role" &&
             action !== "invite" ? (
-              <p className="font-mono text-xs text-muted-foreground">{orgId}</p>
+              <p className="font-mono text-13 text-muted-foreground">{orgId}</p>
             ) : null}
             {destructive && (
-              <label className="flex items-start gap-2 text-xs">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
                 />
                 <span className="flex items-center gap-1">
-                  <ShieldAlert className="size-3" />{t("I understand this access change is destructive.")}</span>
-              </label>
+                  <ShieldAlert className="size-3" />{translateUi("I understand this access change is destructive.")}</span>
+              </Label>
             )}
           </div>
         ) : null}
         {error ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -567,10 +567,10 @@ export function AssistantOrgActionDialog({
                 onComplete(resultId);
                 close();
               }}
-            >{t("Done")}</Button>
+            >{translateUi("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant={destructive ? "destructive" : "primary"}
@@ -578,7 +578,7 @@ export function AssistantOrgActionDialog({
                 disabled={pending || (destructive && !confirmed)}
                 onClick={() => void submit()}
               >
-                {destructive ? t("Confirm change") : t("Continue")}
+                {destructive ? translateUi("Confirm change") : translateUi("Continue")}
               </Button>
             </>
           )}

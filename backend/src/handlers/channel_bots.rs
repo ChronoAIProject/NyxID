@@ -193,6 +193,8 @@ pub struct ChannelBotItem {
     pub label: String,
     pub platform_bot_username: String,
     pub webhook_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_state: Option<String>,
     pub status: String,
     pub is_active: bool,
     pub created_at: String,
@@ -227,6 +229,8 @@ pub struct ChannelBotDetailResponse {
     pub platform_bot_id: String,
     pub platform_bot_username: String,
     pub webhook_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_state: Option<String>,
     pub status: String,
     pub is_active: bool,
     pub app_secret_configured: bool,
@@ -299,7 +303,19 @@ pub struct ChannelBotSubscriptionResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DiscordGatewayStatusResponse {
+    pub state: String,
+    pub reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChannelBotDiagnosticsResponse {
+    pub last_callback_challenge_at: Option<String>,
+    pub last_route_at: Option<String>,
+    pub last_route_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<DiscordGatewayStatusResponse>,
     pub last_inbound_at: Option<String>,
     pub last_inbound_source: Option<String>,
     pub last_outbound_at: Option<String>,
@@ -313,6 +329,8 @@ pub struct ChannelBotDiagnosticsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_intake: Option<crate::services::channel_bot_health::discord::Intake>,
     pub diagnostics: ChannelBotDiagnosticsResponse,
     pub id: String,
     pub platform: String,
@@ -357,9 +375,17 @@ pub async fn admin_list(
     .await?;
     let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
+    let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
     Ok(Json(
         bots.iter()
-            .map(|bot| health_for(bot, gateway.contains(&bot.id), false))
+            .map(|bot| {
+                health_with_intake(
+                    bot,
+                    gateway.contains(&bot.id),
+                    false,
+                    intake.get(&bot.id).cloned(),
+                )
+            })
             .collect(),
     ))
 }
@@ -373,7 +399,7 @@ pub async fn admin_health(
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&bot, gateway, false)))
+    Ok(Json(health_loaded(&state.db, &bot, gateway, false).await?))
 }
 
 /// GET /api/v1/admin/channel-bots/webhook-rejections
@@ -399,6 +425,17 @@ fn diagnostics_response(
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
+        last_callback_challenge_at: d.last_callback_challenge_at.map(|v| v.to_rfc3339()),
+        last_route_at: d.last_route_at.map(|v| v.to_rfc3339()),
+        last_route_result: d.last_route_result.clone(),
+        discord_gateway: d
+            .discord_gateway
+            .as_ref()
+            .map(|gateway| DiscordGatewayStatusResponse {
+                state: gateway.state.clone(),
+                reason: gateway.reason.clone(),
+                updated_at: gateway.updated_at.to_rfc3339(),
+            }),
         last_inbound_at: d.last_inbound_at.map(|v| v.to_rfc3339()),
         last_inbound_source: d.last_inbound_source.clone(),
         last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),
@@ -418,15 +455,45 @@ fn diagnostics_response(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn health_for(
     bot: &crate::models::channel_bot::ChannelBot,
     gateway: bool,
     can_write: bool,
 ) -> ChannelBotHealthResponse {
-    let facts =
+    health_with_intake(bot, gateway, can_write, None)
+}
+
+async fn health_loaded(
+    db: &mongodb::Database,
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+) -> AppResult<ChannelBotHealthResponse> {
+    let mut intake =
+        crate::services::channel_bot_health::discord::load(db, std::slice::from_ref(bot)).await?;
+    Ok(health_with_intake(
+        bot,
+        gateway,
+        can_write,
+        intake.remove(&bot.id),
+    ))
+}
+
+fn health_with_intake(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+    intake: Option<crate::services::channel_bot_health::discord::Intake>,
+) -> ChannelBotHealthResponse {
+    let mut facts =
         crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    if intake.is_some() {
+        facts.discord_intake = intake;
+    }
     let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
+        discord_intake: facts.discord_intake.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
         label: bot.label.clone(),
@@ -731,6 +798,16 @@ fn lark_permission_payload(
     (Some(url), Some(scope_strings))
 }
 
+fn discord_gateway_state(bot: &crate::models::channel_bot::ChannelBot) -> Option<String> {
+    if bot.platform != "discord" {
+        return None;
+    }
+    bot.diagnostics
+        .discord_gateway
+        .as_ref()
+        .map(|gateway| gateway.state.clone())
+}
+
 fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
     ChannelBotItem {
         credential_source: bot.credential_source.clone(),
@@ -739,6 +816,7 @@ fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
         label: bot.label.clone(),
         platform_bot_username: bot.platform_bot_username.clone(),
         webhook_registered: bot.webhook_registered,
+        gateway_state: discord_gateway_state(bot),
         status: bot.status.clone(),
         is_active: bot.is_active,
         created_at: bot.created_at.to_rfc3339(),
@@ -869,7 +947,7 @@ pub(crate) async fn create_bot_with_link(
             adapter,
             &bot_id,
             &owner_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await
         .map(|_| ())
@@ -882,6 +960,7 @@ pub(crate) async fn create_bot_with_link(
             &body.bot_token,
             &webhook_url,
             &webhook_secret,
+            &state.config,
         )
         .await
     };
@@ -905,7 +984,8 @@ pub(crate) async fn create_bot_with_link(
             TelemetryEvent::ChannelBotRegistered {
                 platform: body.platform.clone(),
             },
-        );
+        )
+        .await;
     }
 
     audit_service::log_for_user(
@@ -1118,6 +1198,7 @@ pub async fn update_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        gateway_state: discord_gateway_state(&updated),
         last_verification: crate::services::channel_verification_service::current(
             &state.db,
             adapter.as_ref(),
@@ -1217,6 +1298,7 @@ pub async fn get_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        gateway_state: discord_gateway_state(&bot),
         last_verification: crate::services::channel_verification_service::current(
             &state.db,
             adapter.as_ref(),
@@ -1290,7 +1372,8 @@ pub async fn delete_bot(
         TelemetryEvent::ChannelBotDeleted {
             platform: bot.platform.clone(),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -1344,7 +1427,9 @@ pub async fn health(
         .await?
         .can_write();
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&bot, gateway, can_write)))
+    Ok(Json(
+        health_loaded(&state.db, &bot, gateway, can_write).await?,
+    ))
 }
 
 /// POST /api/v1/channel-bots/{id}/resubscribe
@@ -1381,7 +1466,9 @@ pub async fn resubscribe(
     outcome?;
     let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&updated, gateway, true)))
+    Ok(Json(
+        health_loaded(&state.db, &updated, gateway, true).await?,
+    ))
 }
 
 pub(crate) async fn resubscribe_with_adapter(
@@ -1447,7 +1534,7 @@ pub(crate) async fn verify_bot_with_adapter(
             adapter,
             &bot.id,
             &bot.user_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await?;
         return Ok(Json(VerifyBotResponse {
@@ -1641,6 +1728,7 @@ pub(crate) async fn verify_bot_with_adapter(
         &bot_token,
         &webhook_url,
         &raw_secret,
+        &state.config,
     )
     .await;
 
@@ -1677,6 +1765,98 @@ pub(crate) async fn verify_bot_with_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_without_loaded_intake_preserves_legacy_recommendations() {
+        let mut bot = make_telegram_bot();
+        for platform in ["telegram", "discord"] {
+            bot.platform = platform.into();
+            let unloaded = serde_json::to_value(health_for(&bot, false, true)).unwrap();
+            assert!(unloaded.get("discord_intake").is_none());
+            assert_eq!(unloaded["recommended_action"], "none");
+            assert_eq!(unloaded["recommended_action_text"], "Healthy.");
+        }
+        let gateway = serde_json::to_value(health_for(&bot, true, false)).unwrap();
+        assert!(gateway.get("discord_intake").is_none());
+        assert_eq!(gateway["recommended_action"], "gateway");
+        assert_eq!(gateway["can_write"], false);
+    }
+
+    #[test]
+    fn list_gateway_state_is_discord_only_and_legacy_rows_omit_it() {
+        let mut bot = make_telegram_bot();
+        for platform in ["discord", "telegram", "x"] {
+            bot.platform = platform.into();
+            for state in [
+                "connected",
+                "connecting",
+                "disconnected",
+                "waiting_capacity",
+            ] {
+                bot.diagnostics.discord_gateway =
+                    Some(crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: state.into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    });
+                let value = serde_json::to_value(bot_to_item(&bot)).unwrap();
+                if platform == "discord" {
+                    assert_eq!(value["gateway_state"], state);
+                } else {
+                    assert!(value.get("gateway_state").is_none());
+                }
+                assert_eq!(value["webhook_registered"], false);
+            }
+            let mut legacy = bson::to_document(&bot).unwrap();
+            legacy.remove("diagnostics");
+            let legacy = bson::from_document(legacy).unwrap();
+            let value = serde_json::to_value(bot_to_item(&legacy)).unwrap();
+            assert!(value.get("gateway_state").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_gateway_state_matches_list_without_claiming_a_webhook() {
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        let db = connect_test_database("channel_bot_gateway_state")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (platform, gateway) in [
+            ("discord", Some("connected")),
+            ("discord", None),
+            ("telegram", Some("connected")),
+        ] {
+            let mut bot = make_telegram_bot();
+            bot.platform = platform.into();
+            bot.diagnostics.discord_gateway =
+                gateway.map(
+                    |state| crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: state.into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    },
+                );
+            db.collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .insert_one(&bot)
+            .await
+            .unwrap();
+            let Json(response) = get_bot(
+                State(state.clone()),
+                test_auth_user(&bot.user_id),
+                Path(bot.id.clone()),
+            )
+            .await
+            .unwrap();
+            let detail = serde_json::to_value(response).unwrap();
+            let item = serde_json::to_value(bot_to_item(&bot)).unwrap();
+            assert_eq!(detail.get("gateway_state"), item.get("gateway_state"));
+            assert_eq!(detail["webhook_registered"], false);
+        }
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn list_scope_query_accepts_all_and_user_and_rejects_unknown_scopes() {
@@ -1884,6 +2064,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -1961,6 +2142,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,

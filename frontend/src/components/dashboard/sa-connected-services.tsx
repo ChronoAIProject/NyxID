@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import {
   useSaConnections,
@@ -40,7 +40,7 @@ interface SaConnectedServicesProps {
 }
 
 export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: saConnections, isLoading: connectionsLoading } =
     useSaConnections(saId);
   const { data: allServices } = useServices();
@@ -80,7 +80,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
       if (err instanceof ApiError) {
         toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error(translateUi("Failed to connect service"));
+        toast.error(translateErrorMessage("Failed to connect service"));
       }
     }
   }
@@ -100,7 +100,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
           credential,
           credentialLabel: label,
         });
-        toast.success(translateUi("Connected to {{name}}", { name: service.name }));
+        toast.success(translateUi(`Connected to ${service.name}`));
       } else {
         await updateConnectionCredentialMutation.mutateAsync({
           saId,
@@ -139,14 +139,14 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
       if (err instanceof ApiError) {
         toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error(translateUi("Failed to disconnect service"));
+        toast.error(translateErrorMessage("Failed to disconnect service"));
       }
     }
   }
 
   return (
     <>
-      <DetailSection title={t("Connected Services")}>
+      <DetailSection title={translateUi("Connected Services")}>
         <div className="space-y-3 p-4">
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
@@ -155,19 +155,19 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Service")}</TableHead>
-                  <TableHead>{t("Category")}</TableHead>
-                  <TableHead>{t("Auth Type")}</TableHead>
-                  <TableHead>{t("Credential")}</TableHead>
-                  <TableHead>{t("Label")}</TableHead>
-                  <TableHead>{t("Connected")}</TableHead>
-                  <TableHead>{t("Actions")}</TableHead>
+                  <TableHead>{translateUi("Service")}</TableHead>
+                  <TableHead>{translateUi("Category")}</TableHead>
+                  <TableHead>{translateUi("Auth Type")}</TableHead>
+                  <TableHead>{translateUi("Credential")}</TableHead>
+                  <TableHead>{translateUi("Label")}</TableHead>
+                  <TableHead>{translateUi("Connected")}</TableHead>
+                  <TableHead>{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {saConnections.map((conn) => (
                   <TableRow key={conn.service_id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       {conn.service_name}
                     </TableCell>
                     <TableCell>
@@ -180,7 +180,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       <Badge
                         variant={conn.has_credential ? "success" : "secondary"}
                       >
-                        {conn.has_credential ? t("Stored") : t("None")}
+                        {conn.has_credential ? translateUi("Stored") : translateUi("None")}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -201,7 +201,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                               updateConnectionCredentialMutation.isPending
                             }
                           >
-                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>{t("Update")}</Button>
+                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>{translateUi("Update")}</Button>
                         )}
                         <Button
                           variant="ghost"
@@ -210,7 +210,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                           }
                           disabled={disconnectServiceMutation.isPending}
                         >
-                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{t("Disconnect")}</Button>
+                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{translateUi("Disconnect")}</Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -219,7 +219,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-12 text-muted-foreground">{t("No services connected to this service account.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("No services connected to this service account.")}</p>
         )}
 
         {availableServices.length > 0 && (
@@ -256,12 +256,12 @@ function ConnectServiceDropdown({
   readonly services: readonly DownstreamService[];
   readonly onSelect: (service: DownstreamService) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline">
-          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>{t("Connect Service")}</Button>
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>{translateUi("Connect Service")}</Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {services.map((s) => (
@@ -271,7 +271,7 @@ function ConnectServiceDropdown({
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />
             )}
-            <Badge variant="secondary" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-12">
               {s.service_category}
             </Badge>
           </DropdownMenuItem>

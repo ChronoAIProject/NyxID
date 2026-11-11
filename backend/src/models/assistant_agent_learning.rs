@@ -19,11 +19,16 @@ pub const AUTHORED_CLAIMS_COLLECTION_NAME: &str = "assistant_authored_draft_clai
 /// A generation's original review surface, retained across interrupted preparation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuthoredDraftClaim {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     pub proposal_id: String,
     pub conversation_id: String,
     pub api_key_id: String,
     pub turn_id: String,
     pub requested_turn_id: Option<String>,
+    /// Presentation only; never used to authorize or retry an action.
+    #[serde(default)]
+    pub creation_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
     /// Absent on claims written before the snapshot existed: unproven.
@@ -256,6 +261,8 @@ pub struct AssistantAgentLearningSkillRoot {
 /// the encrypted draft. A started write is never issued a second time.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LearningPublication {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     pub operation_id: String,
     pub name: String,
     pub version: String,

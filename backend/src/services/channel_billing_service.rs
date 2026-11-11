@@ -195,7 +195,11 @@ impl ChannelBilling {
         let owner = self
             .billing
             .owner_resolver()
-            .resolve_for_execution(&self.owner_id, &self.owner_id, X_CHANNEL_CREDENTIAL_CLASS)
+            .resolve_for_ordinary_execution(
+                &self.owner_id,
+                &self.owner_id,
+                X_CHANNEL_CREDENTIAL_CLASS,
+            )
             .await?;
         route.billing_owner_id = owner.owner_id;
         self.billing.open_required(&route).await
@@ -229,7 +233,21 @@ impl ChannelBilling {
             .await
     }
 
-    async fn received_event(&self, event_id: &str, operation: XChannelOperation) -> AppResult<()> {
+    fn received_event<'a>(
+        &'a self,
+        event_id: &'a str,
+        operation: XChannelOperation,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        // Keep the shared reservation/settlement future out of each inbound
+        // branch's state and construct it outside the inbound caller's poll frame.
+        Box::pin(self.received_event_inner(event_id, operation))
+    }
+
+    async fn received_event_inner(
+        &self,
+        event_id: &str,
+        operation: XChannelOperation,
+    ) -> AppResult<()> {
         if !self.billing.billing_enabled() {
             return Ok(());
         }
@@ -311,9 +329,13 @@ impl ChannelBilling {
             )
             .await?;
         self.billing.mark_forwarded(&meter).await?;
+        if let Err(error) = super::channel_platform::mark_provider_attempt().await {
+            // Admission was funded but no provider request was sent.
+            self.settle(&meter, 0).await?;
+            return Err(error);
+        }
         self.forwarded
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::channel_platform::mark_provider_attempt();
         let response = request
             .timeout(std::time::Duration::from_secs(20))
             .send()

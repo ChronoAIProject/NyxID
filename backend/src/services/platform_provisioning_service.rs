@@ -152,7 +152,7 @@ pub(crate) async fn fence_authority(
     let credentials = db
         .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
         .find_one(
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id,
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id,
             "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
         )
         .session(&mut *session)
@@ -615,6 +615,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
 
 pub(crate) async fn execute_step(state: &crate::AppState, job: &SetupStepJob) -> AppResult<()> {
     let service = super::telegram_new_service::TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -666,7 +667,7 @@ pub(crate) async fn execute_step(state: &crate::AppState, job: &SetupStepJob) ->
                 super::assistant_team_service::CreateRequest {
                     machines: None, logins: None, name: format!("public-{}", &job.setup_id[..8]),
                     description: "A client-owned public bot specialist. Public delivery uses only the reviewed setup publication and has no private connector or account access.".into(),
-                    display_name: None, persona: None,
+                    display_name: None, persona: None, voice_instructions: None,
                     targets: super::assistant_team_service::GrantTargets {service_ids: vec![], platform_service_ids: vec![], slugs: vec![], ids_by_request: Default::default()},
                     account_read: false, specialty: None, created_by: "user",
                 }).await?;
@@ -760,6 +761,8 @@ async fn rebuild_request(
         status,
         active: status != Status::Connected,
         revision: 1,
+        previous_challenge_hashes: Vec::new(),
+        username_seed: None,
         challenge_hash: super::telegram_new_service::hash(&hex::encode(rand::random::<[u8; 24]>())),
         telegram_user_id: Some(a.telegram_sender_id),
         telegram_bot_id: installation
@@ -773,6 +776,9 @@ async fn rebuild_request(
         manager_revision: Some(proof.child_revision),
         auto_connect: false,
         start_update_id: Some(proof.start_update_id),
+        creation_context: None,
+        prompt_delivery: None,
+        prompt_update_boundary: None,
         connection_attempts: 0,
         next_connection_attempt_at: None,
         connection_error: None,
@@ -837,7 +843,7 @@ pub(crate) async fn assess_owned_runtime(
         (crate::models::platform_binding::COLLECTION_NAME, binding),
         (
             crate::models::platform_credential::COLLECTION_NAME,
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
         ),
         (
             crate::models::telegram_bot_request::MANAGED_BOTS,
@@ -914,7 +920,7 @@ pub(crate) async fn fence_owned_runtime(
     if db
         .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
         .find_one(
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id,
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id,
             "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
         )
         .session(&mut *session)
@@ -989,7 +995,7 @@ mod tests {
         )
         .await
         .unwrap();
-        super::super::platform_binding_service::decide(
+        let confirmation = super::super::platform_binding_service::decide(
             &f.state.db,
             key,
             &f.owner,
@@ -999,6 +1005,8 @@ mod tests {
             false,
         )
         .await
+        .unwrap()
+        .confirmation_code
         .unwrap();
         let renewed = super::super::platform_binding_service::confirm_from_chat(
             &f.state.db,
@@ -1006,7 +1014,7 @@ mod tests {
             &f.profile,
             "700",
             "700",
-            &code,
+            &confirmation,
         )
         .await
         .unwrap();
@@ -1047,7 +1055,7 @@ mod tests {
             )
             .await
             .unwrap();
-            super::super::platform_binding_service::decide(
+            let confirmation = super::super::platform_binding_service::decide(
                 &f.state.db,
                 key,
                 &other,
@@ -1057,6 +1065,8 @@ mod tests {
                 true,
             )
             .await
+            .unwrap()
+            .confirmation_code
             .unwrap();
             super::super::platform_binding_service::confirm_from_chat(
                 &f.state.db,
@@ -1064,7 +1074,7 @@ mod tests {
                 &f.profile,
                 "700",
                 "700",
-                &code,
+                &confirmation,
             )
             .await
             .unwrap();
@@ -1169,6 +1179,7 @@ mod tests {
             description: "Reviewed public cafe".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -1271,6 +1282,32 @@ mod tests {
                 .unwrap()
                 .telegram_user_id,
             Some(700)
+        );
+        assert!(service.creation_link(&f.owner, &request.id).await.is_err());
+        let sent = f.server.received_requests().await.unwrap();
+        assert!(sent.iter().any(|request| {
+            request.url.path().ends_with("/sendMessage")
+                && request.body_json::<serde_json::Value>().unwrap()["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("update Telegram to the latest version"))
+        }));
+        let mut projection = service.get(&f.owner, &request.id).await.unwrap();
+        projection.auto_connect = true;
+        projection.creation_context =
+            Some(crate::models::telegram_bot_request::CreationContext::Standalone);
+        assert!(
+            !crate::handlers::telegram_new::projected_request(&f.state, projection)
+                .await
+                .unwrap()
+                .can_open_creation_form
+        );
+        assert!(
+            f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| { !String::from_utf8_lossy(&request.body).contains("/newbot/") })
         );
         f.state.db.drop().await.unwrap();
     }

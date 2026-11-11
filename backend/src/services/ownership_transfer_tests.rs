@@ -35,8 +35,9 @@ async fn owner_transfer(
     version: &str,
     request: &str,
 ) -> crate::errors::AppResult<crate::models::ownership_transfer::OwnershipTransfer> {
-    transfer(
+    transfer_with_keys(
         &f.db,
+        None,
         TransferCommand {
             actor,
             api_key_id: key,
@@ -407,6 +408,7 @@ struct Fixture {
 }
 
 async fn fixture(label: &str) -> Fixture {
+    test_utils::init_test_audit_chain_hmac_key();
     let db = test_utils::connect_transaction_test_database(label).await;
     role_service::seed_system_roles(&db).await.unwrap();
     let roles = role_service::get_platform_role_ids(&db).await.unwrap();
@@ -451,8 +453,10 @@ async fn move_resource(
     version: &str,
     request: &str,
 ) -> crate::errors::AppResult<crate::models::ownership_transfer::OwnershipTransfer> {
-    transfer(
+    let keys = test_utils::test_encryption_keys();
+    transfer_with_keys(
         &f.db,
+        Some(&keys),
         TransferCommand {
             actor: &f.admin,
             api_key_id: None,
@@ -662,11 +666,40 @@ async fn x_channel_onboarding_transfer_moves_one_live_credential_and_rotates_cal
     assert_eq!(moved_bot.connection_id.as_deref(), Some(key.id.as_str()));
     assert_eq!(moved_key.id, key.id);
     assert_eq!(moved_key.user_id, f.destination);
-    assert_eq!(moved_key.access_token_encrypted, key.access_token_encrypted);
-    assert_eq!(
-        moved_key.refresh_token_encrypted,
-        key.refresh_token_encrypted
+    let rebound = super::credential_record_service::CredentialRecord::key(&moved_key);
+    let old_context = super::credential_record_service::CredentialRecord::captured_key(
+        &moved_key.id,
+        &f.owner,
+        &moved_key.secret_context_versions,
     );
+    for (field, encrypted, expected) in [
+        (
+            "access_token_encrypted",
+            moved_key.access_token_encrypted.as_deref().unwrap(),
+            "live-x-access-token",
+        ),
+        (
+            "refresh_token_encrypted",
+            moved_key.refresh_token_encrypted.as_deref().unwrap(),
+            "rotating-x-refresh-token",
+        ),
+    ] {
+        assert_eq!(moved_key.secret_context_versions.get(field), Some(&3));
+        assert_eq!(
+            rebound
+                .text(&state.encryption_keys, field, encrypted)
+                .await
+                .unwrap()
+                .as_str(),
+            expected,
+        );
+        assert!(
+            old_context
+                .decrypt(&state.encryption_keys, field, encrypted)
+                .await
+                .is_err()
+        );
+    }
     assert_ne!(moved_key.connection_id, key.connection_id);
     assert_eq!(moved_key.connection_id, moved_key.source_id);
     assert_eq!(moved_key.credential_epoch, key.credential_epoch);
@@ -718,9 +751,25 @@ async fn x_channel_onboarding_transfer_moves_one_live_credential_and_rotates_cal
     .await
     .unwrap();
     assert_eq!(stale_refresh.user_id, f.destination);
+    let current = super::credential_record_service::CredentialRecord::key(&stale_refresh);
+    let old = super::credential_record_service::CredentialRecord::captured_key(
+        &stale_refresh.id,
+        &f.owner,
+        &stale_refresh.secret_context_versions,
+    );
+    let encrypted = stale_refresh.refresh_token_encrypted.as_deref().unwrap();
     assert_eq!(
-        stale_refresh.refresh_token_encrypted,
-        key.refresh_token_encrypted
+        current
+            .text(&state.encryption_keys, "refresh_token_encrypted", encrypted)
+            .await
+            .unwrap()
+            .as_str(),
+        "rotating-x-refresh-token"
+    );
+    assert!(
+        old.text(&state.encryption_keys, "refresh_token_encrypted", encrypted)
+            .await
+            .is_err()
     );
 
     let oauth = wiremock::MockServer::start().await;
@@ -2025,8 +2074,9 @@ async fn concurrent_registration_and_transfer_share_destination_capacity() {
     .unwrap();
     let request = Uuid::new_v4().to_string();
     let (moved, registered) = tokio::join!(
-        transfer(
+        transfer_with_keys(
             &f.db,
+            None,
             TransferCommand {
                 actor: &f.admin,
                 api_key_id: None,
@@ -2281,4 +2331,231 @@ async fn non_tool_receipt_replay_survives_inactive_and_deleted_resource() {
         receipt.id
     );
     f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn catalog_transfer_rebinds_sensitive_headers_without_changing_execution_authority() {
+    use crate::models::default_request_header::DefaultRequestHeader;
+    use crate::services::{default_header_service, execution_authority, proxy_service};
+    let mut f = fixture("ownership_contextual_headers").await;
+    let keys = test_utils::test_encryption_keys();
+    f.service.auth_method = "none".into();
+    f.service.requires_user_credential = false;
+    f.service.visibility = "public".into();
+    f.service.default_request_headers = default_header_service::encode(
+        Some(&keys),
+        SERVICES,
+        &f.service.id,
+        &f.owner,
+        vec![DefaultRequestHeader {
+            name: "X-Context-Secret".into(),
+            value: "transfer-secret-9cf26".to_owned().into(),
+            sensitive: true,
+            overridable: false,
+        }],
+    )
+    .await
+    .unwrap();
+    f.db.collection::<DownstreamService>(SERVICES)
+        .replace_one(doc! {"_id":&f.service.id}, &f.service)
+        .await
+        .unwrap();
+    let endpoint = test_utils::test_user_endpoint(
+        &Uuid::new_v4().to_string(),
+        &f.owner,
+        "Transfer consumer",
+        "https://upstream.example.test",
+        None,
+        Some(&f.service.id),
+    );
+    let consumer = test_utils::test_user_service(
+        &Uuid::new_v4().to_string(),
+        &f.owner,
+        "transfer-consumer",
+        &endpoint.id,
+        Some(&f.service.id),
+        None,
+    );
+    f.db.collection::<crate::models::user_endpoint::UserEndpoint>(
+        crate::models::user_endpoint::COLLECTION_NAME,
+    )
+    .insert_one(&endpoint)
+    .await
+    .unwrap();
+    f.db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+        .insert_one(&consumer)
+        .await
+        .unwrap();
+    let before = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+        &f.db,
+        &keys,
+        &f.owner,
+        &consumer.id,
+        Some(&consumer.slug),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let before_projection = execution_authority::build_projection(&before, None, vec![]);
+    let expected = (
+        execution_authority::digest(&before_projection),
+        execution_authority::legacy_digest(&before_projection),
+    );
+    let reviewed = preview(
+        &f.db,
+        &f.admin,
+        ResourceKind::Service,
+        &f.service.id,
+        &f.destination,
+        5,
+    )
+    .await
+    .unwrap();
+    transfer_with_keys(
+        &f.db,
+        Some(&keys),
+        TransferCommand {
+            actor: &f.admin,
+            api_key_id: None,
+            first_party_human: true,
+            kind: ResourceKind::Service,
+            resource_id: &f.service.id,
+            destination: &f.destination,
+            request_id: &Uuid::new_v4().to_string(),
+            expected_version: &reviewed.version,
+            capacity: 5,
+        },
+    )
+    .await
+    .unwrap();
+    let saved =
+        f.db.collection::<DownstreamService>(SERVICES)
+            .find_one(doc! {"_id":&f.service.id})
+            .await
+            .unwrap()
+            .unwrap();
+    let decoded = default_header_service::catalog(Some(&keys), &saved)
+        .await
+        .unwrap();
+    assert_eq!(decoded[0].value.as_str(), "transfer-secret-9cf26");
+    assert!(
+        default_header_service::decode(
+            Some(&keys),
+            SERVICES,
+            &saved.id,
+            &f.owner,
+            saved.default_request_headers.as_deref()
+        )
+        .await
+        .is_err()
+    );
+    assert_ne!(
+        f.service.default_request_headers.as_ref().unwrap()[0].value_encrypted,
+        saved.default_request_headers.as_ref().unwrap()[0].value_encrypted
+    );
+    let after = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+        &f.db,
+        &keys,
+        &f.owner,
+        &consumer.id,
+        Some(&consumer.slug),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let projection = execution_authority::build_projection(&after, None, vec![]);
+    assert_eq!(
+        expected,
+        (
+            execution_authority::digest(&projection),
+            execution_authority::legacy_digest(&projection)
+        )
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn catalog_master_transfer_rebinds_staged_and_strict_material() {
+    use crate::services::{catalog_credential_record_service as records, proxy_service};
+    for contextual in [false, true] {
+        let mut f = fixture(if contextual {
+            "transfer_master_strict"
+        } else {
+            "transfer_master_staged"
+        })
+        .await;
+        let mut keys = test_utils::test_encryption_keys();
+        keys.set_contextual_record_writes(contextual);
+        keys.set_allow_legacy_record_reads(!contextual);
+        f.service.auth_method = "bearer".into();
+        f.service.requires_user_credential = false;
+        f.service.service_category = "internal".into();
+        f.service.visibility = "public".into();
+        f.service.credential_encrypted = records::encrypt(
+            &keys,
+            &f.service.id,
+            &f.owner,
+            b"catalog-transfer-guarded-secret",
+        )
+        .await
+        .unwrap();
+        f.service.secret_context_versions = records::initial_versions(&keys, true);
+        f.db.collection::<DownstreamService>(SERVICES)
+            .replace_one(doc! {"_id":&f.service.id}, &f.service)
+            .await
+            .unwrap();
+        let reviewed = preview(
+            &f.db,
+            &f.admin,
+            ResourceKind::Service,
+            &f.service.id,
+            &f.destination,
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(reviewed.blockers.is_empty(), "{:?}", reviewed.blockers);
+        transfer_with_keys(
+            &f.db,
+            Some(&keys),
+            TransferCommand {
+                actor: &f.admin,
+                api_key_id: None,
+                first_party_human: true,
+                kind: ResourceKind::Service,
+                resource_id: &f.service.id,
+                destination: &f.destination,
+                request_id: &Uuid::new_v4().to_string(),
+                expected_version: &reviewed.version,
+                capacity: 5,
+            },
+        )
+        .await
+        .unwrap();
+        let saved =
+            f.db.collection::<DownstreamService>(SERVICES)
+                .find_one(doc! {"_id":&f.service.id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(saved.created_by, f.owner);
+        assert_eq!(saved.owner_user_id.as_deref(), Some(f.destination.as_str()));
+        let target = proxy_service::resolve_admin_proxy_target(&f.db, &keys, &saved.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            target.credential.as_str(),
+            "catalog-transfer-guarded-secret"
+        );
+        assert_eq!(
+            saved.secret_context_versions.get(records::FIELD),
+            contextual.then_some(&3)
+        );
+        if contextual {
+            let mut wrong_owner = saved.clone();
+            wrong_owner.owner_user_id = Some(f.owner.clone());
+            assert!(records::bytes(&keys, &wrong_owner).await.is_err());
+        }
+        f.db.drop().await.unwrap();
+    }
 }

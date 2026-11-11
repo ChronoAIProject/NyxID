@@ -1,0 +1,25 @@
+# Apply this manifest separately from the nyxid-machine kustomization: its
+# namespace transformer would move this Role/Binding out of kube-node-lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nyxid-machine-node-lease-read
+  namespace: kube-node-lease
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nyxid-machine-node-lease-read
+  namespace: kube-node-lease
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nyxid-machine-node-lease-read
+subjects:
+  - kind: ServiceAccount
+    name: nyxid-machine-manager
+    namespace: nyxid-machine

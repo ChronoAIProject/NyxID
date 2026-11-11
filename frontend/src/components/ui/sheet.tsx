@@ -1,4 +1,5 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import * as SheetPrimitive from "@radix-ui/react-dialog";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -48,13 +49,14 @@ const sheetVariants = cva(
 
 interface SheetContentProps
   extends React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content>,
-    VariantProps<typeof sheetVariants> {}
+    VariantProps<typeof sheetVariants> {
+  showCloseButton?: boolean;
+}
 
 const SheetContent = React.forwardRef<
   React.ComponentRef<typeof SheetPrimitive.Content>,
   SheetContentProps
->(({ side = "right", className, children, style, ...props }, ref) => {
-  const { t } = useUiTranslation();
+>(({ side = "right", className, children, style, showCloseButton = true, ...props }, ref) => {
   const layer = useOverlayLayer();
   return (
   <OverlayLayer layer={layer}>
@@ -67,10 +69,10 @@ const SheetContent = React.forwardRef<
       style={{ ...style, zIndex: layer }}
     >
       {children}
-      <SheetPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+      {showCloseButton && <SheetPrimitive.Close data-icon-button="" className="inline-flex min-h-control min-w-control items-center justify-center absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
         <X className="h-4 w-4" />
-        <span className="sr-only">{t("Close")}</span>
-      </SheetPrimitive.Close>
+        <span className="sr-only">{translateUi("Close")}</span>
+      </SheetPrimitive.Close>}
     </SheetPrimitive.Content>
   </SheetPortal>
   </OverlayLayer>
@@ -113,7 +115,7 @@ const SheetTitle = React.forwardRef<
   <SheetPrimitive.Title
     ref={ref}
     className={cn(
-      "text-lg font-semibold leading-none tracking-tight",
+      `${TEXT_STYLES.dialogTitle} unthemed:leading-none tracking-tight unthemed:text-lg`,
       className,
     )}
     {...props}
@@ -127,7 +129,7 @@ const SheetDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SheetPrimitive.Description
     ref={ref}
-    className={cn("text-sm text-muted-foreground", className)}
+    className={cn(`${TEXT_STYLES.body} text-muted-foreground unthemed:text-sm`, className)}
     {...props}
   />
 ));

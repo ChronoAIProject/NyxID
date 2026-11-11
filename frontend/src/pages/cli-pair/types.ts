@@ -136,6 +136,7 @@ export interface ApiKeyCreatePrefill {
   readonly platform?: string;
   readonly scopes?: string;
   readonly expires_in_days?: number;
+  readonly never_expires?: boolean;
   readonly allow_all_services?: boolean;
   readonly allow_auto_connected_services?: boolean;
   readonly allow_all_nodes?: boolean;

@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 // Reusable DisplayOnce panel: renders a one-time secret with a
 // copy-to-clipboard affordance, masks the secret until the user clicks
 // "Reveal", and owns the "I saved it" → complete-pairing button.
@@ -15,6 +16,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Check, Copy, Eye, EyeOff, Lock } from "lucide-react"
+import { WizardHeading } from "./wizard-heading"
 
 interface DisplayOnceProps {
   readonly title: string
@@ -43,30 +45,33 @@ export function DisplayOncePanel({
   onAcknowledge,
   isAcknowledging,
 }: DisplayOnceProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
-          <Lock className="h-4 w-4" />
-          <span className="text-12 font-medium">{t("Shown once — save it now")}</span>
-        </div>
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t(title)}</h2>
-        <p className="text-12 text-muted-foreground">{t(description)}</p>
-      </div>
+      <WizardHeading
+        title={translateUi(title)}
+        eyebrow={
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
+            <Lock className="h-4 w-4" />
+            <span className="type-row-title">{translateUi("Shown once — save it now")}</span>
+          </div>
+        }
+      >
+        {translateUi(description)}
+      </WizardHeading>
 
-      <SecretField label={t("Secret")} value={secret} />
+      <SecretField label={translateUi("Secret")} value={secret} />
       {secondarySecret ? (
-        <SecretField label={t(secondarySecret.label)} value={secondarySecret.value} />
+        <SecretField label={translateUi(secondarySecret.label)} value={secondarySecret.value} />
       ) : null}
 
       <div className="flex flex-col gap-2">
         <Button variant="primary" onClick={onAcknowledge} disabled={isAcknowledging} className="w-full">
-          {isAcknowledging ? t("Notifying CLI...") : t(ackButtonLabel)}
+          {isAcknowledging ? translateUi("Notifying CLI...") : ackButtonLabel}
         </Button>
-        <p className="text-xs text-muted-foreground">{t("This value will not be shown again. Confirm you have saved it before closing this tab.")}</p>
-        <p className="text-xs text-muted-foreground">
-          <strong>{t("Lost it?")}</strong>{t(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("This value will not be shown again. Confirm you have saved it before closing this tab.")}</p>
+        <p className="text-13 text-muted-foreground">
+          <strong>{translateUi("Lost it?")}</strong>{translateUi(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
       </div>
     </div>
   )
@@ -86,7 +91,7 @@ export function RecoveryCodesPanel({
   readonly codes: readonly string[]
   readonly onAcknowledged: () => void
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [revealed, setRevealed] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -104,8 +109,8 @@ export function RecoveryCodesPanel({
 
   function downloadTxt() {
     const header =
-      t("NyxID MFA recovery codes — store these securely.") + "\n" +
-      t("Each code can be used ONCE if you lose access to your authenticator.") + "\n\n"
+      "NyxID MFA recovery codes — store these securely.\n" +
+      "Each code can be used ONCE if you lose access to your authenticator.\n\n"
     const blob = new Blob([header + codes.join("\n") + "\n"], {
       type: "text/plain",
     })
@@ -121,19 +126,20 @@ export function RecoveryCodesPanel({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
-          <Lock className="h-4 w-4" />
-          <span className="text-sm font-medium">{t("Shown once — save them now")}</span>
-        </div>
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Save your recovery codes")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Each code is single-use and lets you sign in if you lose access to your authenticator. Store them in a password manager or print them. They are")}{" "}
-          <strong>{t("not")}</strong>{t(" shown again.")}</p>
-      </div>
+      <WizardHeading
+        title={translateUi("Save your recovery codes")}
+        eyebrow={
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
+            <Lock className="h-4 w-4" />
+            <span className="type-row-title">{translateUi("Shown once — save them now")}</span>
+          </div>
+        }
+      >{translateUi("Each code is single-use and lets you sign in if you lose access to your authenticator. Store them in a password manager or print them. They are")}{" "}
+        <strong>{translateUi("not")}</strong>{translateUi(" shown again.")}</WizardHeading>
 
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <Label>{t("Recovery codes")}</Label>
+          <Label>{translateUi("Recovery codes")}</Label>
           <Button
             type="button"
             variant="outline"
@@ -142,10 +148,10 @@ export function RecoveryCodesPanel({
               setRevealed((r) => !r)
             }}
           >
-            {revealed ? t("Hide") : t("Reveal")}
+            {revealed ? translateUi("Hide") : translateUi("Reveal")}
           </Button>
         </div>
-        <div className="grid grid-cols-1 gap-1.5 rounded-md border bg-muted/40 p-3 font-mono text-sm sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-1.5 rounded-md border bg-muted/40 p-3 font-mono text-14 sm:grid-cols-2">
           {codes.map((c, i) => (
             <code key={i} className="select-text">
               {revealed ? c : "•".repeat(Math.max(c.length, 12))}
@@ -161,25 +167,25 @@ export function RecoveryCodesPanel({
           onClick={() => void copyAll()}
           className="flex-1"
         >
-          {copied ? t("Copied!") : t("Copy all")}
+          {copied ? translateUi("Copied!") : translateUi("Copy all")}
         </Button>
         <Button
           type="button"
           variant="outline"
           onClick={downloadTxt}
           className="flex-1"
-        >{t("Download .txt")}</Button>
+        >{translateUi("Download .txt")}</Button>
       </div>
 
-      <Button onClick={onAcknowledged}>{t("I have saved them — close")}</Button>
-      <p className="text-xs text-muted-foreground">{t("After closing, these codes cannot be retrieved. Re-run")}{" "}
-        <code className="font-mono">nyxid mfa setup</code>{t(" to mint a new set if you didn't save them.")}</p>
+      <Button onClick={onAcknowledged}>{translateUi("I have saved them — close")}</Button>
+      <p className="text-13 text-muted-foreground">{translateUi("After closing, these codes cannot be retrieved. Re-run")}{" "}
+        <code className="font-mono">nyxid mfa setup</code>{translateUi(" to mint a new set if you didn't save them.")}</p>
     </div>
   )
 }
 
 function SecretField({ label, value }: { readonly label: string; readonly value: string }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [revealed, setRevealed] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -200,11 +206,11 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {t(label)}
-      </label>
+      <Label className="uppercase tracking-wide text-muted-foreground">
+        {translateUi(label)}
+      </Label>
       <div className="flex items-center gap-2">
-        <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-12">
+        <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-14">
           {revealed ? value : masked}
         </code>
         <Button
@@ -214,7 +220,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
           onClick={() => {
             setRevealed((r) => !r)
           }}
-          aria-label={revealed ? t("Hide") : t("Reveal")}
+          aria-label={revealed ? translateUi("Hide") : translateUi("Reveal")}
         >
           {revealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
         </Button>
@@ -223,7 +229,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
           variant="outline"
           size="icon"
           onClick={() => void handleCopy()}
-          aria-label={t("Copy to clipboard")}
+          aria-label={translateUi("Copy to clipboard")}
         >
           {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
         </Button>

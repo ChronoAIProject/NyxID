@@ -59,3 +59,46 @@ it("has a working retry control when key loading fails", () => {
   expect(refetch).toHaveBeenCalledOnce();
   expect(screen.getByRole("button", { name: "Add Route" })).toBeDisabled();
 });
+
+vi.mock("@/hooks/use-runtime-config", () => ({
+  useRuntimeConfig: () => ({ data: { api_base_url: "https://nyx.example" } }),
+}));
+vi.mock("@/hooks/use-channel-platforms", () => ({
+  useChannelPlatformViews: () => ({
+    getPlatform: (id: string) => ({ label: id === "discord" ? "Discord" : "Slack", webhookDocs: null }),
+  }),
+}));
+
+it("explains Gateway activation and optional Discord interactions without generic webhook directions", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "discord", status: "pending_webhook" } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("Finish Discord setup")).toBeInTheDocument();
+  expect(screen.getByText(/Ordinary chat arrives through the Gateway connection/)).toHaveTextContent("first authenticated message activates the bot");
+  expect(screen.getByText("Interactions Endpoint URL (optional)")).toBeInTheDocument();
+  expect(screen.getByText(/For slash commands\/components, paste this into Discord Developer Portal/)).toBeInTheDocument();
+  expect(screen.queryByText(/Event Subscriptions \/ webhook settings/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Finish webhook setup")).not.toBeInTheDocument();
+});
+
+it("keeps the existing webhook setup instructions for other platforms", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "slack", status: "pending_webhook" } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("Finish webhook setup")).toBeInTheDocument();
+  expect(screen.getByText(/Slack's Event Subscriptions \/ webhook settings/)).toBeInTheDocument();
+});
+
+it("distinguishes Lark's callback challenge from activation and uninspected scopes", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "lark", status: "pending_webhook", permission_setup_url: "https://example.com/permissions" } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("Finish Lark / Feishu setup")).toBeVisible();
+  expect(screen.getByText(/The URL challenge checks callback reachability only/)).toHaveTextContent("does not activate the bot or verify a member");
+  expect(screen.getByText(/Not inspected by NyxID/)).toBeVisible();
+});
+
+
+it("does not call legacy app credentials missing after a successful check", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "lark", status: "pending_webhook", app_secret_configured: false, last_verification: { status: "verified" } } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("App credentials verified. Callback and member verification are separate.")).toBeVisible();
+  expect(screen.queryByText(/If credentials are missing/)).not.toBeInTheDocument();
+});

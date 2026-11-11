@@ -1,9 +1,15 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
+import { DynamicTypeText } from "./DynamicTypeText";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
+import {
+  TOUCH_TARGET,
+  radius,
+  spacing,
+  typeScale,
+} from "../theme/designTokens";
 
 type PrimaryButtonProps = {
   label: string;
@@ -15,6 +21,7 @@ type PrimaryButtonProps = {
    */
   kind?: "primary" | "ghost" | "danger";
   disabled?: boolean;
+  refreshLabelOnFontScaleChange?: boolean;
 };
 
 export function PrimaryButton({
@@ -22,9 +29,11 @@ export function PrimaryButton({
   onPress,
   kind = "primary",
   disabled = false,
+  refreshLabelOnFontScaleChange = false,
 }: PrimaryButtonProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const Label = refreshLabelOnFontScaleChange ? DynamicTypeText : Text;
 
   if (kind === "primary") {
     return (
@@ -48,9 +57,9 @@ export function PrimaryButton({
             end={{ x: 1, y: 0 }}
             style={styles.gradientInner}
           >
-            <Text style={[styles.label, disabled && styles.labelDisabled]}>
+            <Label style={[styles.label, disabled && styles.labelDisabled]}>
               {label}
-            </Text>
+            </Label>
           </LinearGradient>
         )}
       </Pressable>
@@ -69,7 +78,7 @@ export function PrimaryButton({
         disabled && styles.disabled,
       ]}
     >
-      <Text
+      <Label
         style={[
           styles.label,
           kind === "ghost" && styles.ghostLabel,
@@ -78,7 +87,7 @@ export function PrimaryButton({
         ]}
       >
         {label}
-      </Text>
+      </Label>
     </Pressable>
   );
 }

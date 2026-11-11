@@ -1,4 +1,7 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import "./lib/zod-csp";
 /* eslint-disable react-refresh/only-export-components -- standalone entry exports a pure helper for focused tests. */
 
 /**
@@ -90,6 +93,7 @@ import { UpstreamErrorBanner } from "@/components/cli-wizard/upstream-error-bann
 import { Button } from "@/components/ui/button"
 import { NotFoundPage } from "@/components/shared/not-found-page"
 import { parseAiKeyPrefill } from "@/schemas/cli-wizard"
+import { WizardHeading } from "@/components/cli-wizard/wizard-heading"
 
 declare global {
   interface Window {
@@ -180,6 +184,7 @@ export function shouldShowUpstreamBanner(
 }
 
 function WizardApp() {
+  useUiTranslation();
   const [stage, setStage] = useState<ModeAPhase>({ phase: "claimed" })
   const [completeError, setCompleteError] = useState<string | null>(null)
   // ai-key sub-state: `false` → catalog grid (step 1 · pick a
@@ -293,7 +298,20 @@ function WizardApp() {
   }
 
   return (
-    <WizardShell context="local" step={step}>
+    <WizardShell
+      context="local"
+      step={step}
+      // Only the service catalog grid needs the wide card; every form,
+      // result and status page uses the connector/consent column.
+      narrow={
+        !(
+          bootstrap.flow === "ai-key" &&
+          stage.phase === "claimed" &&
+          !slugPicked &&
+          !bootstrap.prefill?.reconnect_key_id
+        )
+      }
+    >
       {shouldShowUpstreamBanner(stage.phase, upstreamError) ? (
         <UpstreamErrorBanner
           kind={upstreamError!}
@@ -419,6 +437,7 @@ export function ConfirmDispatcher({
   readonly onCancel: () => void
   readonly onSlugPicked: (slug: string) => void
 }) {
+  useUiTranslation();
   // Sentinel pairingId — Mode A has no pairing record, but the
   // confirm panels pass it through to `reservePairingAction` /
   // `withRewindOnError` which are intercepted as no-ops by
@@ -428,12 +447,14 @@ export function ConfirmDispatcher({
   switch (flow) {
     case "api-key-create":
       return (
-        <ApiKeyCreateConfirm
-          prefill={prefill as ApiKeyCreatePrefill}
-          pairingId={pairingId}
-          onSuccess={onSuccess}
-          onCancel={onCancel}
-        />
+        <div className="flex flex-col gap-4">
+          <ApiKeyCreateConfirm
+            prefill={prefill as ApiKeyCreatePrefill}
+            pairingId={pairingId}
+            onSuccess={onSuccess}
+            onCancel={onCancel}
+          />
+        </div>
       )
     case "api-key-rotate":
       return (
@@ -477,7 +498,8 @@ export function ConfirmDispatcher({
             onSuccess={onSuccess}
             onSlugPicked={onSlugPicked}
           />
-          <CancelLink onCancel={onCancel} />
+          {/* Centred under the action, like the connector page's Decline. */}
+          <CancelLink onCancel={onCancel} centered />
         </div>
       )
     case "service-account-create":
@@ -543,15 +565,18 @@ function SecretDispatcher({
   readonly completeError: string | null
   readonly onAck: () => void
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const isCompleting = completeError === null
   if (result.kind === "api-key-create") {
     return (
       <DisplayOncePanel
-        title={t("API key created")}
-        description={t("Save this key now — it won't be shown again.")}
+        title={translateUi("API key created")}
+        description={translateUi("Save this key now — it won't be shown again. {{value1}}", { value1: result.expires_at === undefined
+          ? "Refresh the key details to confirm its expiry."
+          : result.expires_at === null ? "This key has no expiry."
+          : `Expires ${new Date(result.expires_at).toLocaleString(getFormattingLocale())}.` })}
         secret={result.full_key}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={isCompleting && completeError === null && false}
       />
@@ -561,8 +586,8 @@ function SecretDispatcher({
     return (
       <ApiKeyRotationResult
         result={result}
-        description={t("The previous key is revoked. Save this new value now — it won't be shown again.")}
-        ackButtonLabel={t("I have saved this — close")}
+        description={translateUi("The previous key is revoked. Save this new value now — it won't be shown again.")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
       />
     )
@@ -570,10 +595,10 @@ function SecretDispatcher({
   if (result.kind === "node-register-token") {
     return (
       <DisplayOncePanel
-        title={t("Registration token generated")}
-        description={t("Use this with `nyxid node register`. Save it now — it won't be shown again.")}
+        title={translateUi("Registration token generated")}
+        description={translateUi("Use this with `nyxid node register`. Save it now — it won't be shown again.")}
         secret={result.token}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -582,14 +607,14 @@ function SecretDispatcher({
   if (result.kind === "node-rotate-token") {
     return (
       <DisplayOncePanel
-        title={t("Node tokens rotated")}
-        description={t("Update the node with `nyxid node rekey`. Save both values now — they won't be shown again.")}
+        title={translateUi("Node tokens rotated")}
+        description={translateUi("Update the node with `nyxid node rekey`. Save both values now — they won't be shown again.")}
         secret={result.auth_token}
         secondarySecret={{
           label: "Signing secret",
           value: result.signing_secret,
         }}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -598,11 +623,11 @@ function SecretDispatcher({
   if (result.kind === "service-account-create") {
     return (
       <DisplayOncePanel
-        title={t("Service account created")}
-        description={t("Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow.")}
+        title={translateUi("Service account created")}
+        description={translateUi("Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow.")}
         secret={result.client_secret}
         secondarySecret={{ label: "Client ID", value: result.client_id }}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -611,11 +636,11 @@ function SecretDispatcher({
   if (result.kind === "service-account-rotate-secret") {
     return (
       <DisplayOncePanel
-        title={t("Service account secret rotated")}
-        description={t("All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again.")}
+        title={translateUi("Service account secret rotated")}
+        description={translateUi("All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again.")}
         secret={result.client_secret}
         secondarySecret={{ label: "Client ID", value: result.client_id }}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -624,10 +649,10 @@ function SecretDispatcher({
   if (result.kind === "developer-app-create") {
     return (
       <DisplayOncePanel
-        title={t("Developer app created")}
-        description={t("Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests.")}
+        title={translateUi("Developer app created")}
+        description={translateUi("Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests.")}
         secret={result.client_secret}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -636,10 +661,10 @@ function SecretDispatcher({
   if (result.kind === "developer-app-rotate-secret") {
     return (
       <DisplayOncePanel
-        title={t("Developer app secret rotated")}
-        description={t("The previous client_secret no longer authenticates. Update any deployments using it.")}
+        title={translateUi("Developer app secret rotated")}
+        description={translateUi("The previous client_secret no longer authenticates. Update any deployments using it.")}
         secret={result.client_secret}
-        ackButtonLabel={t("I have saved this — close")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -652,7 +677,7 @@ function SecretDispatcher({
   }
   // ai-key uses `acking` phase instead of `secret`, so this is
   // unreachable — keep it exhaustive.
-  return <p className="text-sm text-destructive">{t("Unknown result kind.")}</p>
+  return <p className="text-14 text-destructive">{translateUi("Unknown result kind.")}</p>
 }
 
 function AckingPanel({
@@ -664,17 +689,16 @@ function AckingPanel({
   readonly completeError: string | null
   readonly onRetry: () => void
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Service added")}</h2>
-      <p className="text-sm text-muted-foreground">
-        <code className="font-mono text-xs">{result.slug}</code>{t(" is now connected. Check your terminal for the final summary.")}</p>
+      <WizardHeading title={translateUi("Service added")}>
+        <code className="font-mono text-14">{result.slug}</code>{translateUi(" is now connected. Check your terminal for the final summary.")}</WizardHeading>
       {completeError ? (
         <div className="flex flex-col gap-2">
-          <p className="text-sm text-destructive">{t("Couldn't notify CLI: ")}{completeError}
+          <p className="text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}
           </p>
-          <Button variant="outline" onClick={onRetry}>{t("Retry")}</Button>
+          <Button variant="outline" onClick={onRetry}>{translateUi("Retry")}</Button>
         </div>
       ) : null}
     </div>
@@ -682,25 +706,19 @@ function AckingPanel({
 }
 
 function DonePanel() {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Done")}</h2>
-        <p className="text-sm text-muted-foreground">{t("You can close this tab and return to your terminal.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Done")}>{translateUi("You can close this tab and return to your terminal.")}</WizardHeading>
     </div>
   )
 }
 
 function CancelledPanel() {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Cancelled")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Nothing was created. You can close this tab — your CLI should already be back at the prompt.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Cancelled")}>{translateUi("Nothing was created. You can close this tab — your CLI should already be back at the prompt.")}</WizardHeading>
     </div>
   )
 }
@@ -718,36 +736,41 @@ function CancelledPanel() {
  * success or failure.
  */
 function WizardLostPanel() {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Wizard interrupted")}</h2>
-        <p className="text-sm text-muted-foreground">{t("Lost contact with the ")}<code>nyxid</code>{t(" CLI. The CLI may have finished and exited successfully, or the connection was interrupted before the result reached this page.")}</p>
-        <p className="mt-2 text-sm text-muted-foreground">{t("Run ")}<code>nyxid status</code>{t(" in your terminal to see whether the service was created. If it’s missing, re-run the wizard command.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Wizard interrupted")}>
+        <p>{translateUi("Lost contact with the ")}<code>nyxid</code>{translateUi(" CLI. The CLI may have finished and exited successfully, or the connection was interrupted before the result reached this page.")}</p>
+        <p className="mt-2">{translateUi("Run ")}<code>nyxid status</code>{translateUi(" in your terminal to see whether the service was created. If it&rsquo;s missing, re-run the wizard command.")}</p>
+      </WizardHeading>
     </div>
   )
 }
 
-function CancelLink({ onCancel }: { readonly onCancel: () => void }) {
-  const { t } = useWizardTranslation();
+function CancelLink({
+  onCancel,
+  centered = false,
+}: {
+  readonly onCancel: () => void
+  readonly centered?: boolean
+}) {
+  useUiTranslation();
   return (
     <button
       type="button"
       onClick={onCancel}
-      className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-    >{t("Cancel and return to terminal")}</button>
+      className={`${centered ? "self-center" : "self-start"} text-13 text-muted-foreground underline underline-offset-2 hover:text-foreground`}
+    >{translateUi("Cancel and return to terminal")}</button>
   )
 }
 
 function NoBootstrapFallback() {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <NotFoundPage
-      title={t("Wizard not available here")}
+      title={translateUi("Wizard not available here")}
       description={
-        <>{t("This page is served by the ")}<code>nyxid</code>{t(" CLI’s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.")}</>
+        <>{translateUi("This page is served by the ")}<code>nyxid</code>{translateUi(" CLI&rsquo;s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.")}</>
       }
     />
   )

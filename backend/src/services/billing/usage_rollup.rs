@@ -107,6 +107,47 @@ pub fn tick_budget(watermark: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
 /// Unlike a partial missing-field index (unsupported by MongoDB), this index
 /// serves backfill and the live tail from the first deployment onward.
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "api_key_id": 1, "event_type": 1, "user_id": 1 })
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "credential_api_key_id": 1, "user_id": 1 })
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "rotation_predecessor_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("api_keys_rotation_predecessor_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! { "rotation_predecessor_id": { "$type": "string" } },
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    let view = mongodb::options::CreateCollectionOptions::builder()
+        .view_on(crate::models::api_key::COLLECTION_NAME.to_string())
+        .pipeline(vec![doc! { "$project": { "_id": 1, "user_id": 1, "rotation_predecessor_id": 1, "assistant_usage": 1 } }]).build();
+    if let Err(error) = db
+        .create_collection("usage_api_key_lineage")
+        .with_options(view)
+        .await
+        && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 48)
+    {
+        return Err(error);
+    }
     let meters = db.collection::<Document>(METERS);
     for (name, keys) in [
         (
@@ -507,9 +548,10 @@ async fn raw_increments(
         let mut partition_key = Document::new();
         // Keep replay identities stable across replicas. Exact connection is
         // additive partition metadata, like the API key, not a new bucket key.
-        for field in ["api_key", "acked", "user_service_id"] {
+        for field in ["api_key", "acked", "user_service_id", "assistant_source"] {
             if let Some(value) = key.remove(field)
-                && (field != "user_service_id" || !matches!(value, Bson::Null))
+                && (!["user_service_id", "assistant_source"].contains(&field)
+                    || !matches!(value, Bson::Null))
             {
                 partition_key.insert(field, value);
             }
@@ -540,7 +582,9 @@ async fn raw_increments(
         // Partition keys are encoded as hex BSON to be safe Mongo field names.
         // Values retain the exact original group shape, including missing ack.
         let mut partitions = Document::new();
-        if group.get_bool("billable").unwrap_or(false) {
+        if group.get_bool("billable").unwrap_or(false)
+            || partition_key.contains_key("assistant_source")
+        {
             let encoded = hex::encode(
                 bson::to_vec(&partition_key).map_err(|e| AppError::Internal(e.to_string()))?,
             );
@@ -735,7 +779,7 @@ fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRoll
         .collect()
 }
 
-fn legacy_measure(field: &str) -> String {
+pub(crate) fn legacy_measure(field: &str) -> String {
     if field == "legacy_grant_cost" {
         "legacy_grant".to_string()
     } else if money_measure(field) {
@@ -873,6 +917,9 @@ async fn apply_increments(
         display_key.insert(
             field,
             match field.as_str() {
+                "assistant_source" => {
+                    doc! { "$ifNull": ["$$part.v.key.assistant_source", null] }.into()
+                }
                 "api_key" => doc! { "$ifNull": ["$$part.v.key.api_key", null] }.into(),
                 "acked" => Bson::String("$$part.v.key.acked".into()),
                 _ => Bson::String(format!("${field}")),
@@ -892,7 +939,7 @@ async fn apply_increments(
     let mut accelerators = doc! {
         "single_display_key": { "$let": {
             "vars": { "part": { "$arrayElemAt": [{ "$objectToArray": "$cost_partitions" }, 0] } },
-            "in": { "$cond": [ { "$lte": [{ "$size": { "$objectToArray": "$cost_partitions" } }, 1] }, display_key, null ] },
+            "in": { "$cond": [ { "$or": [{ "$eq": [{ "$size": { "$objectToArray": "$cost_partitions" } }, 0] }, { "$eq": ["$$part.v.rows_folded", "$rows_folded"] }] }, display_key, null ] },
         } },
         "query_costs": &query_costs,
     };

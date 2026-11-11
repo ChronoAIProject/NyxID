@@ -42,13 +42,13 @@ nyxid update --version 0.4.0     # pin a specific release
 nyxid update --skills-only       # refresh AI skills only, skip the binary
 nyxid update --rollback          # point nyxid back at the previously retained version
 nyxid update --list-versions     # list installed prebuilt versions
-nyxid update --from-source       # compile + install via cargo (unsupported targets)
+nyxid update --from-source --version X.Y.Z  # build that release at its resolved commit
 ```
 
 - The updater retains the **3** most recent prebuilt versions so `--rollback` can revert a bad upgrade instantly.
-- `--from-source` runs `cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli --force --locked`; use it on targets without a compatible prebuilt binary, or as a contributor.
+- `--from-source` explicitly resolves the selected release to an immutable commit, builds with `cargo install --rev <commit> --locked`, checks the compiled version, and activates a marked local source build. It holds automatic upgrades until an attested prebuilt release is installed and the hold is resumed. Missing releases/assets never select default-branch source automatically.
 - On Linux arm64 source builds, the updater uses `CC=clang` when `clang` is available and otherwise reports the `CC=clang` workaround if it detects the `aws-lc-sys` `gcc#95189` compiler guard.
-- `--insecure-skip-verify` continues even if attestation verification fails — avoid it unless you understand the risk.
+- Attestation verification is mandatory. `--insecure-skip-verify` has been removed; manual and unattended prebuilt updates fail closed.
 - `--base-url` selects the NyxID instance to fetch skill content from (defaults to your saved login URL).
 
 ## ai-setup
@@ -111,8 +111,19 @@ nyxid mfa status
 ## session
 
 ```bash
-nyxid session list         # active sessions for your account
+nyxid session status       # current account session: rolling and absolute deadlines
+nyxid session list         # active sessions, with expiry warnings
+nyxid session status --output json
+nyxid session list --output json
+nyxid session refresh      # rotate tokens; cannot extend the absolute session cap
 ```
+
+Account sessions have a fixed 30-day cap even with active use. Refresh tokens
+roll for seven days by default, within that cap. Both status and list expose
+`refresh_expires_at`, `session_expires_at` and `expiry_warning`; unknown metadata
+is null. Text and JSON warn within three days of the absolute deadline. See
+[Account-session lifetime](/docs/cli/getting-started/authenticate#account-session-lifetime-and-unattended-work)
+for refusal codes and the `login --agent-key` unattended path.
 
 ## notification
 

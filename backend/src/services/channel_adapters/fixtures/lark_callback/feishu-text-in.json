@@ -1,0 +1,1 @@
+{"event":{"message":{"chat_id":"oc_receipts","chat_type":"p2p","content":"{\"text\":\"hello\"}","message_id":"om_receipt","message_type":"text"},"sender":{"sender_id":{"name":"Alice","open_id":"ou_owner"},"sender_type":"user"}},"header":{"event_id":"ev_receipt","event_type":"im.message.receive_v1"},"schema":"2.0"}

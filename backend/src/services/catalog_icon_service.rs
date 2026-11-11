@@ -23,6 +23,19 @@ pub fn asset_id<'a>(base_url: &str, value: &'a str) -> AppResult<&'a str> {
     Ok(id)
 }
 
+pub fn asset_id_with_aliases<'a>(
+    base: &str,
+    aliases: &[String],
+    value: &'a str,
+) -> AppResult<&'a str> {
+    for base in std::iter::once(base).chain(aliases.iter().map(String::as_str)) {
+        if let Ok(id) = asset_id(base, value) {
+            return Ok(id);
+        }
+    }
+    asset_id(base, value)
+}
+
 pub fn validate(svg: &str) -> AppResult<()> {
     let invalid = || {
         AppError::ValidationError("Use a static SVG with xmlns=\"http://www.w3.org/2000/svg\" and a viewBox; scripts, styles, external resources and animation are unsupported".into())
@@ -243,6 +256,25 @@ pub async fn require_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn domain_alias_catalog_icon_requires_an_explicit_origin_and_exact_path() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let base = "https://new.example";
+        let aliases = vec!["https://old.example".to_string()];
+        let url = format!("https://old.example/catalog-icons/{id}");
+        assert_eq!(asset_id_with_aliases(base, &aliases, &url).unwrap(), id);
+        assert!(asset_id_with_aliases(base, &[], &url).is_err());
+        assert!(
+            asset_id_with_aliases(
+                base,
+                &aliases,
+                &url.replace("old.example", "old.example.evil")
+            )
+            .is_err()
+        );
+        assert!(asset_id_with_aliases(base, &aliases, &format!("{url}?x")).is_err());
+    }
+
     #[test]
     fn asset_references_require_exact_origin_prefix_and_canonical_identity() {
         let id = uuid::Uuid::new_v4().to_string();

@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "npm run -ws build",
-    "test": "npm run -w @nyxids/oauth-core test",
+    "test": "npm run -w @nyxids/oauth-core test && npm run -w @nyxids/oauth-react test",
     "clean": "npm run -ws clean",
     "prepublish:all": "npm run -ws prepublishOnly"
   }

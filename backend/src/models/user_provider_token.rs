@@ -7,8 +7,12 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "user_provider_tokens";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserProviderToken {
+    /// Explicit field storage dispatch. Missing entries use the documented
+    /// legacy decoder only while trusted legacy reads remain enabled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -73,6 +77,17 @@ pub struct UserProviderToken {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for UserProviderToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserProviderToken")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("provider_config_id", &self.provider_config_id)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +100,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_oauth2_token() {
         let token = UserProviderToken {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -120,6 +136,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key_token() {
         let token = UserProviderToken {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),

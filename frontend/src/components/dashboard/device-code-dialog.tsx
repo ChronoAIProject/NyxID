@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { ProviderConfig, DeviceCodePollResponse } from "@/types/api";
 import {
@@ -34,7 +34,7 @@ interface DeviceCodeDialogProps {
 }
 
 export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [step, setStep] = useState<FlowStep>("requesting");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
@@ -221,13 +221,13 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
     <Dialog open onOpenChange={handleClose}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Connect to ")}{provider.name}</DialogTitle>
+          <DialogTitle>{translateUi("Connect to ")}{provider.name}</DialogTitle>
           <DialogDescription>
             {step === "requesting" && "Requesting authentication code..."}
             {step === "show_code" &&
               "Enter the code below on the authentication page to connect your account."}
             {step === "success" &&
-              t("Successfully connected to {{name}}.", { name: provider.name })}
+              translateUi("Successfully connected to {{name}}.", { name: provider.name })}
             {step === "error" && "An error occurred during the connection."}
           </DialogDescription>
         </DialogHeader>
@@ -235,7 +235,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
         {step === "requesting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">{t("Requesting code from ")}{provider.name}...
+            <p className="text-14 text-muted-foreground">{translateUi("Requesting code from ")}{provider.name}...
             </p>
           </div>
         )}
@@ -244,9 +244,9 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-5">
             {/* User code display */}
             <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{t("Your code")}</p>
+              <p className="type-secondary-emphasis uppercase tracking-wider text-muted-foreground">{translateUi("Your code")}</p>
               <div className="flex items-center gap-3">
-                <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
+                <code className="type-metric tracking-[0.3em] font-mono text-primary-text">
                   {userCode}
                 </code>
                 <Button
@@ -254,7 +254,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
                   variant="ghost"
                   onClick={handleCopyCode}
                   className="h-8 w-8 p-0"
-                  title={t("Copy code")}
+                  title={translateUi("Copy code")}
                 >
                   <Copy className="h-4 w-4" />
                 </Button>
@@ -269,32 +269,32 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>{t("Open ")}{provider.name}{t(" Authentication")}</a>
+                  <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>{translateUi("Open ")}{provider.name}{translateUi(" Authentication")}</a>
               </Button>
             </div>
 
             {/* Instructions */}
-            <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
+            <div className="rounded-lg bg-muted p-3 text-14 text-muted-foreground">
               <ol className="list-decimal list-inside space-y-1">
-                <li>{t("Click the link above to open the authentication page")}</li>
-                <li>{t("Enter the code shown above")}</li>
-                <li>{t("Sign in with your account")}</li>
+                <li>{translateUi("Click the link above to open the authentication page")}</li>
+                <li>{translateUi("Enter the code shown above")}</li>
+                <li>{translateUi("Sign in with your account")}</li>
               </ol>
             </div>
 
             {/* Polling status */}
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center justify-between text-13 text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                <span>{t("Waiting for authentication...")}</span>
+                <span>{translateUi("Waiting for authentication...")}</span>
               </div>
               {secondsRemaining > 0 && (
-                <span>{t("Expires in ")}{formatTime(secondsRemaining)}</span>
+                <span>{translateUi("Expires in ")}{formatTime(secondsRemaining)}</span>
               )}
             </div>
 
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={handleClose}>{translateUi("Cancel")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -303,10 +303,10 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-success" />
-              <p className="text-12 text-muted-foreground text-center">{t("Your ")}{provider.name}{t(" account has been connected successfully. Tokens are encrypted and stored securely.")}</p>
+              <p className="text-14 text-muted-foreground text-center">{translateUi("Your ")}{provider.name}{translateUi(" account has been connected successfully. Tokens are encrypted and stored securely.")}</p>
             </div>
             <DialogFooter>
-              <Button variant="primary" type="button" onClick={handleClose}>{t("Done")}</Button>
+              <Button variant="primary" type="button" onClick={handleClose}>{translateUi("Done")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -315,13 +315,13 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <AlertCircle className="h-8 w-8 text-destructive" />
-              <p className="text-12 text-destructive text-center">
+              <p className="text-14 text-destructive text-center">
                 {errorMessage}
               </p>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
-              <Button variant="primary" type="button" onClick={handleRetry}>{t("Try Again")}</Button>
+              <Button type="button" variant="outline" onClick={handleClose}>{translateUi("Cancel")}</Button>
+              <Button variant="primary" type="button" onClick={handleRetry}>{translateUi("Try Again")}</Button>
             </DialogFooter>
           </div>
         )}

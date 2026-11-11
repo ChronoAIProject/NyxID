@@ -116,11 +116,19 @@ async fn fixture_inner(distinct: bool) -> Fixture {
         super::platform_binding_service::begin(&state.db, key, &profile, "700", "700", 100)
             .await
             .unwrap();
-    super::platform_binding_service::decide(&state.db, key, &owner, &code, &code, true, false)
-        .await
-        .unwrap();
+    let confirmation =
+        super::platform_binding_service::decide(&state.db, key, &owner, &code, &code, true, false)
+            .await
+            .unwrap()
+            .confirmation_code
+            .unwrap();
     let binding = super::platform_binding_service::confirm_from_chat(
-        &state.db, key, &profile, "700", "700", &code,
+        &state.db,
+        key,
+        &profile,
+        "700",
+        "700",
+        &confirmation,
     )
     .await
     .unwrap();

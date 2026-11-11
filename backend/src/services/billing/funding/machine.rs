@@ -23,16 +23,23 @@ use crate::models::usage_meter::{
 
 use super::super::reservation::{BillingReservation, LayerReservation};
 
+/// Maximum prepaid runtime coverage admitted in one window.
+pub const MAX_RUNTIME_WINDOW_SECONDS: i64 = 300;
+
 /// Only empty allowance periods are prepared outside the caller's transaction.
 /// Every eligibility and balance decision is re-read before a hold is written.
-/// Fields are private so callers cannot change the owner or SKU after preparation.
+/// Private fields bind the owner, SKU, unit and finite quantity at preparation.
 #[derive(Clone, Debug)]
-pub struct MachineFundingCandidates {
+pub struct RuntimeFundingCandidates {
     owner_id: String,
     service_id: Option<String>,
     service_slug: String,
     periods: Vec<UsageAllowancePeriod>,
+    metric: BillingMetric,
+    maximum_quantity: i64,
 }
+
+pub type MachineFundingCandidates = RuntimeFundingCandidates;
 
 pub async fn prepare_machine_window_funding(
     db: &mongodb::Database,
@@ -41,6 +48,76 @@ pub async fn prepare_machine_window_funding(
     runtime_service_slug: &str,
     now: DateTime<Utc>,
 ) -> AppResult<MachineFundingCandidates> {
+    prepare_runtime_window_funding(
+        db,
+        owner_id,
+        runtime_service_id,
+        runtime_service_slug,
+        BillingMetric::MachineRunningSeconds,
+        MAX_RUNTIME_WINDOW_SECONDS,
+        now,
+    )
+    .await
+}
+
+/// Allocation units reuse the exact same allowances, grants and wallet holds.
+/// The lifecycle caller binds this finite quantity to its durable funded window.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_sandbox_window_funding(
+    db: &mongodb::Database,
+    owner_id: &str,
+    service_id: Option<&str>,
+    service_slug: &str,
+    metric: BillingMetric,
+    quantity_per_second: i64,
+    window_seconds: i64,
+    now: DateTime<Utc>,
+) -> AppResult<RuntimeFundingCandidates> {
+    let maximum_quantity = sandbox_window_quantity(metric, quantity_per_second, window_seconds)?;
+    prepare_runtime_window_funding(
+        db,
+        owner_id,
+        service_id,
+        service_slug,
+        metric,
+        maximum_quantity,
+        now,
+    )
+    .await
+}
+
+fn sandbox_window_quantity(
+    metric: BillingMetric,
+    quantity_per_second: i64,
+    seconds: i64,
+) -> AppResult<i64> {
+    if !matches!(
+        metric,
+        BillingMetric::SandboxCpuMillisSeconds
+            | BillingMetric::SandboxMemoryMibSeconds
+            | BillingMetric::SandboxDiskGibSeconds
+    ) || quantity_per_second <= 0
+        || !(1..=MAX_RUNTIME_WINDOW_SECONDS).contains(&seconds)
+    {
+        return Err(AppError::ValidationError(
+            "Invalid finite Sandbox funding allocation".into(),
+        ));
+    }
+    quantity_per_second
+        .checked_mul(seconds)
+        .ok_or_else(|| AppError::ValidationError("Sandbox funding quantity overflow".into()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_runtime_window_funding(
+    db: &mongodb::Database,
+    owner_id: &str,
+    runtime_service_id: Option<&str>,
+    runtime_service_slug: &str,
+    metric: BillingMetric,
+    maximum_quantity: i64,
+    now: DateTime<Utc>,
+) -> AppResult<RuntimeFundingCandidates> {
     if owner_id.is_empty() || runtime_service_slug.is_empty() {
         return Err(AppError::ValidationError(
             "Machine funding identity is required".into(),
@@ -52,7 +129,7 @@ pub async fn prepare_machine_window_funding(
         owner_id,
         runtime_service_id,
         Some(runtime_service_slug),
-        BillingMetric::MachineRunningSeconds,
+        metric,
     )
     .await?
     {
@@ -60,13 +137,76 @@ pub async fn prepare_machine_window_funding(
             super::super::allowances::ensure_current_period(db, &allowance, owner_id, now).await?,
         );
     }
+    for period in &periods {
+        if super::super::allowances::available_period_quantity(period) > 0
+            && let Some(lock) = &period.active_settlement
+        {
+            super::complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
+        }
+    }
+    for grant in super::super::grants::list_active_for_user(db, owner_id, now).await? {
+        if super::super::grants::service_scope_applies(
+            &grant.scope,
+            runtime_service_id,
+            Some(runtime_service_slug),
+        ) && super::super::service_limits::available_for_service(
+            &grant,
+            runtime_service_id,
+            Some(runtime_service_slug),
+        )? > Credits::ZERO
+            && let Some(lock) = &grant.active_settlement
+        {
+            super::complete_grant_lock(db, &grant.id, lock).await?;
+        }
+    }
     periods.sort_by(|left, right| super::expiry_order(left.period_end, right.period_end));
     Ok(MachineFundingCandidates {
         owner_id: owner_id.into(),
         service_id: runtime_service_id.map(str::to_owned),
         service_slug: runtime_service_slug.into(),
         periods,
+        metric,
+        maximum_quantity,
     })
+}
+
+impl RuntimeFundingCandidates {
+    /// Advisory outside-transaction check only. Admission reloads every benefit.
+    pub async fn benefits_cover(
+        &self,
+        db: &mongodb::Database,
+        seconds: i64,
+        rate: Credits,
+    ) -> AppResult<bool> {
+        let allowance = self.periods.iter().try_fold(0_i64, |sum, p| {
+            sum.checked_add(super::super::allowances::available_period_quantity(p))
+                .ok_or_else(|| AppError::Internal("Machine allowance overflow".into()))
+        })?;
+        let remaining = seconds.saturating_sub(allowance).max(0);
+        if remaining == 0 {
+            return Ok(true);
+        }
+        let mut needed = rate.checked_mul(remaining)?;
+        for grant in
+            super::super::grants::list_active_for_user(db, &self.owner_id, Utc::now()).await?
+        {
+            if super::super::grants::service_scope_applies(
+                &grant.scope,
+                self.service_id.as_deref(),
+                Some(&self.service_slug),
+            ) {
+                needed = needed.checked_sub(
+                    super::super::service_limits::available_for_service(
+                        &grant,
+                        self.service_id.as_deref(),
+                        Some(&self.service_slug),
+                    )?
+                    .min(needed),
+                )?;
+            }
+        }
+        Ok(needed == Credits::ZERO)
+    }
 }
 
 /// Reserve a single finite Machine window in a caller-owned transaction.
@@ -84,6 +224,26 @@ pub async fn reserve_machine_window_in_session(
     owner_id: &str,
     wallet_id: &str,
     candidates: &MachineFundingCandidates,
+    layer: LayerReservation,
+    now: DateTime<Utc>,
+) -> AppResult<BillingReservation> {
+    if candidates.metric != BillingMetric::MachineRunningSeconds {
+        return Err(AppError::ValidationError(
+            "Machine funding requires its own runtime metric".into(),
+        ));
+    }
+    reserve_runtime_window_in_session(db, session, owner_id, wallet_id, candidates, layer, now)
+        .await
+}
+
+/// Caller must atomically persist every returned hold with its usage/evidence row.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_runtime_window_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    owner_id: &str,
+    wallet_id: &str,
+    candidates: &RuntimeFundingCandidates,
     mut layer: LayerReservation,
     now: DateTime<Utc>,
 ) -> AppResult<BillingReservation> {
@@ -142,7 +302,7 @@ pub async fn reserve_machine_window_in_session(
             .find_one(doc! {
                 "_id": &candidate.allowance_id,
                 "is_active": true,
-                "metric": BillingMetric::MachineRunningSeconds.as_str(),
+                "metric": candidates.metric.as_str(),
                 "$and": [
                     { "$or": service_clauses.clone() },
                     { "$or": target_clauses.clone() },
@@ -173,10 +333,7 @@ pub async fn reserve_machine_window_in_session(
         else {
             continue;
         };
-        if period.active_settlement.is_some()
-            || period.period_start > now
-            || period.period_end.is_some_and(|end| end <= now)
-        {
+        if period.period_start > now || period.period_end.is_some_and(|end| end <= now) {
             continue;
         }
         // A definition can shrink after preparation; preserve existing holds but
@@ -193,6 +350,11 @@ pub async fn reserve_machine_window_in_session(
         let wanted = remaining.min(available);
         if wanted == 0 {
             continue;
+        }
+        if period.active_settlement.is_some() {
+            return Err(AppError::Conflict(
+                "Machine allowance settlement is completing; retry".into(),
+            ));
         }
         let changed = periods.update_one(doc! { "_id": &period.id }, doc! {
             "$inc": { "reserved_quantity": wanted },
@@ -225,7 +387,6 @@ pub async fn reserve_machine_window_in_session(
             "status": "active",
             "issued_ledgered_at": { "$type": "date" },
             "remaining": { "$gt": Credits::ZERO },
-            "active_settlement": Bson::Null,
             "$or": [
                 { "expires_at": Bson::Null },
                 { "expires_at": { "$gt": bson::DateTime::from_chrono(now) } },
@@ -249,22 +410,40 @@ pub async fn reserve_machine_window_in_session(
         if remaining_cost == Credits::ZERO {
             break;
         }
-        let wanted = remaining_cost.min(super::super::grants::available_grant(&grant)?);
+        if grant.revoke_requested_at.is_some() {
+            continue;
+        }
+        if super::super::service_limits::available_for_service(
+            &grant,
+            candidates.service_id.as_deref(),
+            Some(&candidates.service_slug),
+        )? <= Credits::ZERO
+        {
+            continue;
+        }
+        if grant.active_settlement.is_some() {
+            return Err(AppError::Conflict(
+                "Issued credit settlement is completing; retry".into(),
+            ));
+        }
+        let wanted = remaining_cost.min(super::super::service_limits::available_for_service(
+            &grant,
+            candidates.service_id.as_deref(),
+            Some(&candidates.service_slug),
+        )?);
         if wanted <= Credits::ZERO {
             continue;
         }
-        let mut filter = super::spendable_grant_filter(&grant.id, wanted, now);
+        let (mut filter, update, key) = super::super::service_limits::reservation_change(
+            &grant,
+            candidates.service_id.as_deref(),
+            Some(&candidates.service_slug),
+            wanted,
+            now,
+        )?;
         filter.insert("recipient_user_id", owner_id);
-        filter.insert("issued_ledgered_at", doc! { "$type": "date" });
-        filter.insert("active_settlement", Bson::Null);
         let changed = grants_collection
-            .update_one(
-                filter,
-                doc! {
-                    "$inc": { "reserved": wanted },
-                    "$set": { "updated_at": bson::DateTime::from_chrono(now) },
-                },
-            )
+            .update_one(filter, update)
             .session(&mut *session)
             .await?;
         if changed.modified_count != 1 {
@@ -275,22 +454,31 @@ pub async fn reserve_machine_window_in_session(
         layer.grant_reservations.push(GrantReservationAllocation {
             grant_id: grant.id,
             amount: wanted,
+            service_limit_key: key,
         });
         remaining_cost = remaining_cost.checked_sub(wanted)?;
     }
 
-    if remaining_cost > Credits::ZERO && wallet.available_credits()? < remaining_cost {
+    let gross = super::super::taxes::reserve_gross_in_session(
+        db,
+        session,
+        &wallet,
+        &mut layer,
+        remaining_cost,
+    )
+    .await?;
+    if gross > Credits::ZERO && wallet.available_credits()? < gross {
         return Err(AppError::InsufficientCredits);
     }
-    if remaining_cost > Credits::ZERO {
+    if gross > Credits::ZERO {
         // Checked before MongoDB arithmetic, so accepted values stay within the
         // same Decimal128 range as every other exact Billing path.
-        wallet.reserved_credits.checked_add(remaining_cost)?;
+        wallet.reserved_credits.checked_add(gross)?;
         let changed = wallets
             .update_one(
                 doc! { "_id": &wallet.id, "owner_id": owner_id },
                 doc! {
-                    "$inc": { "reserved_credits": remaining_cost },
+                    "$inc": { "reserved_credits": gross },
                     "$set": { "updated_at": bson::DateTime::from_chrono(now) },
                 },
             )
@@ -302,11 +490,11 @@ pub async fn reserve_machine_window_in_session(
             ));
         }
     }
-    layer.reserved_credits = remaining_cost;
+    layer.reserved_credits = gross;
     Ok(BillingReservation {
         owner_id: owner_id.into(),
         wallet_id: wallet.id,
-        total_reserved_credits: remaining_cost,
+        total_reserved_credits: gross,
         layers: vec![layer],
     })
 }
@@ -318,9 +506,10 @@ fn validate_layer(
 ) -> AppResult<()> {
     if owner_id != candidates.owner_id
         || layer.layer != BillingLayer::Platform
-        || layer.metric != BillingMetric::MachineRunningSeconds
+        || layer.metric != candidates.metric
+        || !layer.metric.is_runtime_allocation()
         || layer.estimated_quantity <= 0
-        || layer.estimated_quantity > super::super::machine_runtime::MAX_WINDOW_SECONDS
+        || layer.estimated_quantity > candidates.maximum_quantity
         || layer.lago_metric_code.is_empty()
         || super::super::amounts::rate_pico(
             layer.credits_per_unit_pico,
@@ -336,17 +525,17 @@ fn validate_layer(
     Ok(())
 }
 
-pub(super) fn is_machine_runtime(row: &crate::models::usage_meter::UsageMeterRow) -> bool {
-    row.metric == BillingMetric::MachineRunningSeconds
+pub(super) fn is_runtime_allocation(row: &crate::models::usage_meter::UsageMeterRow) -> bool {
+    row.metric.is_runtime_allocation()
 }
 
 /// Unknown-stop rows retain quantity=None. Only the runtime evidence transition
 /// is permitted to finalize them; generic metering-only or free-row semantics
 /// cannot release their liability. Capacity checks precede any funding mutation.
-pub(super) fn validate_machine_settlement(
+pub(super) fn validate_runtime_settlement(
     row: &crate::models::usage_meter::UsageMeterRow,
 ) -> AppResult<()> {
-    if !is_machine_runtime(row) {
+    if !is_runtime_allocation(row) {
         return Ok(());
     }
     let invalid = || {

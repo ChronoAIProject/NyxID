@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { useNodes } from "@/hooks/use-nodes";
@@ -48,7 +48,7 @@ export function NodeScopeCard({
   }[];
   readonly apiKeySource?: CredentialSource;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [allowAll, setAllowAll] = useState(allowAllNodes);
   const [selectedIds, setSelectedIds] =
@@ -99,9 +99,9 @@ export function NodeScopeCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <HardDrive className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">{t("Node Scope")}</CardTitle>
+          <CardTitle className="text-15">{translateUi("Node Scope")}</CardTitle>
         </div>
-        <CardDescription>{t("Which nodes this key can route through")}</CardDescription>
+        <CardDescription>{translateUi("Which nodes this key can route through")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {editing ? (
@@ -112,12 +112,12 @@ export function NodeScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-nodes" className="text-12">{t("Allow all nodes")}</Label>
+              <Label htmlFor="allow-all-nodes">{translateUi("Allow all nodes")}</Label>
             </div>
 
             {!allowAll && (
               <div className="space-y-2 rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">{t("Select allowed nodes:")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Select allowed nodes:")}</p>
                 {scopedNodes.length > 0 ? (
                   scopedNodes.map((n) => (
                     <div key={n.id} className="flex items-center gap-2">
@@ -126,13 +126,13 @@ export function NodeScopeCard({
                         checked={selectedIds.includes(n.id)}
                         onCheckedChange={() => toggleNode(n.id)}
                       />
-                      <Label htmlFor={`node-${n.id}`} className="text-xs">
+                      <Label htmlFor={`node-${n.id}`}>
                         {n.name}
                         <Badge
                           variant={
                             n.status === "online" ? "default" : "secondary"
                           }
-                          className="ml-1 text-10"
+                          className="ml-1 text-12"
                         >
                           {n.status}
                         </Badge>
@@ -140,7 +140,7 @@ export function NodeScopeCard({
                     </div>
                   ))
                 ) : (
-                  <p className="text-xs text-muted-foreground">{t("No nodes available for this key.")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("No nodes available for this key.")}</p>
                 )}
               </div>
             )}
@@ -150,25 +150,25 @@ export function NodeScopeCard({
                 variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending}
-              >{t("Save")}</Button>
-              <Button variant="outline" onClick={handleCancel}>{t("Cancel")}</Button>
+              >{translateUi("Save")}</Button>
+              <Button variant="outline" onClick={handleCancel}>{translateUi("Cancel")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex items-center justify-between">
             <div>
               {allowAllNodes ? (
-                <Badge variant="secondary">{t("All nodes")}</Badge>
+                <Badge variant="secondary">{translateUi("All nodes")}</Badge>
               ) : allowedNodes.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {allowedNodes.map((n) => (
-                    <Badge key={n.id} variant="secondary" className="text-xs">
+                    <Badge key={n.id} variant="secondary" className="text-12">
                       {n.name}
                     </Badge>
                   ))}
                 </div>
               ) : (
-                <Badge variant="secondary">{t("Direct only (no nodes)")}</Badge>
+                <Badge variant="secondary">{translateUi("Direct only (no nodes)")}</Badge>
               )}
             </div>
             <Button

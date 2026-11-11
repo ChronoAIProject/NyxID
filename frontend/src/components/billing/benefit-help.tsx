@@ -22,6 +22,7 @@ export function BenefitHelp({
     <Tooltip open={open} onOpenChange={setOpen} delayDuration={150}>
       <TooltipTrigger asChild>
         <button
+          data-icon-button=""
           type="button"
           className="benefit-help-trigger"
           aria-label={t("About {{value}}", { value: label.toLowerCase() })}

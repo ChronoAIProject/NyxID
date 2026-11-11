@@ -1,7 +1,9 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api-client";
 import { ImageOff } from "lucide-react";
+import { GeneratedAttachment } from "./generated-attachment";
 import { DocumentAttachment } from "./document-attachment";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
 import type { ChatImage } from "@/lib/assistant/chat-types";
@@ -12,14 +14,16 @@ import type { ChatImage } from "@/lib/assistant/chat-types";
  * owner-only attachment route never needs cookies or a public link.
  */
 export function ToolImage({ image }: { readonly image: ChatImage }) {
+  useUiTranslation();
+  if (image.origin === "generated_artifact" || (image.origin && !["tool", "user_upload"].includes(image.origin))) return <GeneratedAttachment attachment={image} />;
   if (image.expired) return <ExpiredAttachment />;
-  return image.contentType.startsWith("image/")
+  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(image.contentType)
     ? <RasterAttachment image={image} />
     : <DocumentAttachment attachment={image} />;
 }
 
 function RasterAttachment({ image }: { readonly image: ChatImage }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [url, setUrl] = useState<string>();
   const [failed, setFailed] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -54,16 +58,16 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
     return (
       <div
         role="status"
-        className="flex items-center gap-2 rounded-lg border border-hairline px-3 py-2 text-11 text-muted-foreground"
+        className="flex items-center gap-2 rounded-lg border border-hairline px-3 py-2 text-13 text-muted-foreground"
       >
-        <ImageOff className="h-3.5 w-3.5" aria-hidden="true" />{t("Image unavailable")}</div>
+        <ImageOff className="h-3.5 w-3.5" aria-hidden="true" />{translateUi("Image unavailable")}</div>
     );
   }
   if (!url) {
     return (
       <div
         role="status"
-        aria-label={t("Loading {{value}}", { value: alt.toLowerCase() })}
+        aria-label={translateUi("Loading {{value1}}", { value1: alt.toLowerCase() })}
         className="h-40 w-64 animate-pulse rounded-lg border border-hairline bg-overlay/35"
       />
     );
@@ -78,8 +82,12 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
         />
       </a>
       {image.imageInput === "unavailable" && (
-        <p role="status" className="max-w-sm text-xs text-muted-foreground">
-          {image.origin === "tool" ? t("The agent couldn't view this image.") : <>{t("Image received. This agent version cannot view it, or it exceeds its image limits. Ask your agent to save it to a machine, or try a smaller image.")}</>}
+        <p role="status" className="max-w-sm text-13 text-muted-foreground">
+          {image.imageInputReason === "model_text_only" || image.imageInputReason === "image_input_unsupported"
+            ? translateUi("This model can’t view images. Choose an image-capable model or describe the image in text.")
+            : image.imageInputReason === "guest_media_unavailable"
+              ? translateUi("This guest image was saved in this chat but was unavailable to the model in that turn.")
+            : image.origin === "tool" ? translateUi("The agent couldn't view this image.") : <>{translateUi("Image received. This agent version cannot view it, or it exceeds its image limits. Ask your agent to save it to a machine, or try a smaller image.")}</>}
         </p>
       )}
     </div>
@@ -87,6 +95,6 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
 }
 
 export function ExpiredAttachment() {
-  const { t } = useUiTranslation();
-  return <p role="status" className="rounded-lg border border-hairline px-3 py-2 text-xs text-muted-foreground">{t("Attachment expired per retention policy. Upload it again to continue.")}</p>;
+  useUiTranslation();
+  return <p role="status" className="rounded-lg border border-hairline px-3 py-2 text-13 text-muted-foreground">{translateUi("Attachment expired per retention policy. Upload it again to continue.")}</p>;
 }

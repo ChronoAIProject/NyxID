@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   DndContext,
@@ -119,6 +120,7 @@ function ConnectionMetadata({
   readonly connection: KeyInfo;
   readonly insight?: ServiceInsight;
 }) {
+  useUiTranslation();
   const editable = canEditConnection(key);
   const rows = [
     ["Created", formatDateTime(key.created_at)],
@@ -155,7 +157,7 @@ function ConnectionMetadata({
       : []),
   ];
   return (
-    <dl className="grid gap-x-6 gap-y-3 px-1 py-2 text-11 sm:grid-cols-2 lg:grid-cols-3">
+    <dl className="grid gap-x-6 gap-y-3 px-1 py-2 text-13 sm:grid-cols-2 lg:grid-cols-3">
       {rows.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <dt className="text-muted-foreground">{label}</dt>
@@ -178,9 +180,10 @@ function PanelSection({
   readonly title: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <section className="space-y-3 p-3" aria-label={title}>
-      <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+      <h4 className="inline-flex items-center gap-2 type-row-title">
         <Icon className="size-4 text-primary-text" aria-hidden="true" /> {title}
       </h4>
       {children}
@@ -217,7 +220,7 @@ export function ServiceConnectionTable({
   readonly externalOrderActions?: boolean;
   readonly savedOrder?: readonly string[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState<{
     id: string;
     view: "details" | "history" | InsightPanel;
@@ -312,17 +315,17 @@ export function ServiceConnectionTable({
   const table = (
     <TooltipProvider delayDuration={200}>
       <Table
-        aria-label={t("{{serviceName}} connections", { serviceName: serviceName })}
+        aria-label={translateUi("{{value1}} connections", { value1: serviceName })}
         className="min-w-[840px] table-fixed [&>tbody:last-child>tr:last-child]:border-0"
         containerClassName="overscroll-x-contain"
       >
         <TableHeader>
           <TableRow>
-            <TableHead scope="col" className="w-[22%]">{t("Connection / Slug")}</TableHead>
-            <TableHead scope="col" className="w-[17%]">{t("Owner / Credential")}</TableHead>
-            <TableHead scope="col" className="w-[22%]">{t("Access & requests")}</TableHead>
-            <TableHead scope="col" className="w-[19%]">{t("Billing & usage")}</TableHead>
-            <TableHead scope="col" className="w-[20%]">{t("Configuration")}</TableHead>
+            <TableHead scope="col" className="w-[22%]">{translateUi("Connection / Slug")}</TableHead>
+            <TableHead scope="col" className="w-[17%]">{translateUi("Owner / Credential")}</TableHead>
+            <TableHead scope="col" className="w-[22%]">{translateUi("Access & requests")}</TableHead>
+            <TableHead scope="col" className="w-[19%]">{translateUi("Billing & usage")}</TableHead>
+            <TableHead scope="col" className="w-[20%]">{translateUi("Configuration")}</TableHead>
           </TableRow>
         </TableHeader>
         {connections.map((key, rowIndex) => {
@@ -402,7 +405,7 @@ export function ServiceConnectionTable({
                   <div className="flex flex-wrap items-center gap-1.5">
                     {ordering && (
                       <ServiceOrderHandle
-                        label={t("{{label}} ({{slug}})", { label: key.label, slug: key.slug })}
+                        label={translateUi("{{label}} ({{slug}})", { label: key.label, slug: key.slug })}
                         disabled={ordering.busy || ordering.blocked}
                       />
                     )}
@@ -412,8 +415,8 @@ export function ServiceConnectionTable({
                       onClick={() => toggle(key.id, "details")}
                       aria-expanded={expanded && open.view === "details"}
                       aria-controls={panelId}
-                      aria-label={t("Details for {{label}} ({{owner}})", { label: key.label, owner: owner })}
-                      title={t("Show connection summary")}
+                      aria-label={translateUi("Details for {{value1}} ({{value2}})", { value1: key.label, value2: owner })}
+                      title={translateUi("Show connection summary")}
                     >
                       <ChevronDown
                         aria-hidden="true"
@@ -431,7 +434,7 @@ export function ServiceConnectionTable({
                       }
                       tabIndex={ordering ? -1 : undefined}
                       aria-disabled={ordering ? true : undefined}
-                      aria-label={t("View {{label}} connection details ({{owner}})", { label: key.label, owner: owner })}
+                      aria-label={translateUi("View {{value1}} connection details ({{value2}})", { value1: key.label, value2: owner })}
                       className="inline-flex min-w-28 flex-1 items-center gap-1 rounded-sm font-medium hover:text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                     >
                       <ServiceIcon
@@ -451,7 +454,7 @@ export function ServiceConnectionTable({
                       />
                     </Link>
                     {key.offering_kind === "tool" && (
-                      <Badge variant="secondary">{t("Tool · your key")}</Badge>
+                      <Badge variant="secondary">{translateUi("Tool · your key")}</Badge>
                     )}
                     <Badge
                       className="ml-auto shrink-0"
@@ -471,8 +474,8 @@ export function ServiceConnectionTable({
                       <Badge
                         className="shrink-0"
                         variant="accent"
-                        aria-label={t("Discovery preference {{value}} for {{value1}}", { value: ordering ? activeRanks.get(key.id) : key.preference_rank, value1: key.catalog_service_name ?? serviceName })}
-                      >{t("Discovery #")}{ordering
+                        aria-label={translateUi("Discovery preference {{value1}} for {{value2}}", { value1: ordering ? activeRanks.get(key.id) : key.preference_rank, value2: key.catalog_service_name ?? serviceName })}
+                      >{translateUi("Discovery #")}{ordering
                           ? activeRanks.get(key.id)
                           : key.preference_rank}
                       </Badge>
@@ -485,18 +488,18 @@ export function ServiceConnectionTable({
                       <Badge
                         className="mt-1"
                         variant="secondary"
-                        aria-label={t("Saved order position {{value}}; {{value1}}", { value: ordering ? rankedIds.indexOf(key.id) + 1 : key.preference_position, value1: key.is_active ? `${key.service_type.toUpperCase()} connections are not part of connected MCP discovery` : t("disabled connections are not listed to agents") })}
-                      >{t("Saved #")}{ordering
+                        aria-label={translateUi("Saved order position {{value1}}; {{value2}}", { value1: ordering ? rankedIds.indexOf(key.id) + 1 : key.preference_position, value2: key.is_active ? `${key.service_type.toUpperCase()} connections are not part of connected MCP discovery` : "disabled connections are not listed to agents" })}
+                      >{translateUi("Saved #")}{ordering
                           ? rankedIds.indexOf(key.id) + 1
                           : key.preference_position}{" "}
                         ·{" "}
                         {key.is_active
                           ? key.service_type.toUpperCase()
-                          : t("disabled")}
+                          : translateUi("disabled")}
                       </Badge>
                     )}
                   {ordering?.newIds.includes(key.id) && (
-                    <Badge variant="info">{t("New")}</Badge>
+                    <Badge variant="info">{translateUi("New")}</Badge>
                   )}
                   {ordering && (
                     <div className="mt-1 flex flex-wrap gap-1">
@@ -504,37 +507,37 @@ export function ServiceConnectionTable({
                         type="button"
                         size="sm"
                         variant="ghost"
-                        aria-label={t("Move {{label}} ({{slug}}) up", { label: key.label, slug: key.slug })}
+                        aria-label={translateUi("Move {{value1}} ({{value2}}) up", { value1: key.label, value2: key.slug })}
                         disabled={
                           ordering.busy || ordering.blocked || rowIndex === 0
                         }
                         onClick={() => move(key.id, -1)}
-                      >{t("Move up")}</Button>
+                      >{translateUi("Move up")}</Button>
                       <Button
                         type="button"
                         size="sm"
                         variant="ghost"
-                        aria-label={t("Move {{label}} ({{slug}}) down", { label: key.label, slug: key.slug })}
+                        aria-label={translateUi("Move {{value1}} ({{value2}}) down", { value1: key.label, value2: key.slug })}
                         disabled={
                           ordering.busy ||
                           ordering.blocked ||
                           rowIndex === ids.length - 1
                         }
                         onClick={() => move(key.id, 1)}
-                      >{t("Move down")}</Button>
+                      >{translateUi("Move down")}</Button>
                     </div>
                   )}
-                  <p className="mt-1 flex min-w-0 items-center gap-1 text-11 text-muted-foreground">
+                  <p className="mt-1 flex min-w-0 items-center gap-1 text-13 text-muted-foreground">
                     <code className="truncate" title={key.slug}>
                       {key.slug}
                     </code>
-                    <span className="shrink-0 text-10 uppercase tracking-wide">
+                    <span className="shrink-0 text-12 uppercase tracking-wide">
                       · {key.service_type}
-                      {key.streaming_supported ? t(" · Streaming") : ""}
-                      {key.websocket_supported ? t(" · WebSocket") : ""}
+                      {key.streaming_supported ? translateUi(" · Streaming") : ""}
+                      {key.websocket_supported ? translateUi(" · WebSocket") : ""}
                     </span>
                   </p>
-                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11 text-muted-foreground">
+                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-13 text-muted-foreground">
                     <span
                       title={
                         key.expires_at
@@ -542,10 +545,10 @@ export function ServiceConnectionTable({
                           : undefined
                       }
                     >
-                      {key.is_active ? t("Enabled") : t("Disabled")} ·{" "}
+                      {key.is_active ? translateUi("Enabled") : translateUi("Disabled")} ·{" "}
                       {key.status.replaceAll("_", " ")}
                       {key.expires_at
-                        ? t(" · Expires {{value}}", { value: formatDate(key.expires_at) })
+                        ? translateUi(" · Expires {{value1}}", { value1: formatDate(key.expires_at) })
                         : ""}
                     </span>
                     {editable && renderActions?.(key)}
@@ -564,14 +567,14 @@ export function ServiceConnectionTable({
                     <span
                       className="truncate font-medium"
                       title={
-                        org ? t("{{owner}} · Organization · {{role}}", { owner: owner, role: org.role }) : owner
+                        org ? translateUi("{{value1}} · Organization · {{value2}}", { value1: owner, value2: org.role }) : owner
                       }
                     >
                       {owner}
                     </span>
                   </div>
                   <p
-                    className="mt-1 truncate text-11 text-muted-foreground"
+                    className="mt-1 truncate text-13 text-muted-foreground"
                     title={credentialLabel(key, billing)}
                   >
                     {credentialLabel(key, billing)}
@@ -583,10 +586,10 @@ export function ServiceConnectionTable({
                     onClick={() => toggle(key.id, "access")}
                     aria-expanded={expanded && open.view === "access"}
                     aria-controls={panelId}
-                    aria-label={t("Agent key access for {{label}}", { label: key.label })}
+                    aria-label={translateUi("Agent key access for {{value1}}", { value1: key.label })}
                     data-insight-view="access"
                     data-connection-id={key.id}
-                    className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                    className="inline-flex items-center gap-1.5 rounded-sm type-secondary-emphasis text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <UsersRound className="size-3.5 shrink-0" />
                     <span
@@ -595,10 +598,10 @@ export function ServiceConnectionTable({
                         usage
                           ? [
                               usage.access.basis === "configuration"
-                                ? t("Configured scope{{value}}", { value: usage.access.incomplete ? t(" · partial inventory") : "" })
+                                ? `Configured scope${usage.access.incomplete ? " · partial inventory" : ""}`
                                 : usage.access.visibility === "own_keys"
-                                  ? t("Your keys with access")
-                                  : t("Managed keys with access"),
+                                  ? "Your keys with access"
+                                  : "Managed keys with access",
                               ...usage.access.keys.map((agent) => agent.name),
                             ].join("\n")
                           : undefined
@@ -608,7 +611,7 @@ export function ServiceConnectionTable({
                         ? accessCountLabel(usage.access)
                         : insightStatusLabel(insights.status, "Access")}
                       {overrideCount > 0 &&
-                        t(" · {{overrideCount}} {{value}}", { overrideCount: overrideCount, value: overrideCount === 1 ? t("override") : t("overrides") })}
+                        ` · ${overrideCount} ${overrideCount === 1 ? "override" : "overrides"}`}
                     </span>
                   </button>
                   <button
@@ -616,17 +619,17 @@ export function ServiceConnectionTable({
                     onClick={() => toggle(key.id, "requests")}
                     aria-expanded={expanded && open.view === "requests"}
                     aria-controls={panelId}
-                    aria-label={t("Recent requests for {{label}}", { label: key.label })}
+                    aria-label={translateUi("Recent requests for {{value1}}", { value1: key.label })}
                     data-insight-view="requests"
                     data-connection-id={key.id}
                     title={
                       latest
-                        ? t("{{value}} · {{value1}} · {{occurred_at}}", { value: recordedSourceLabel(latest, key), value1: outcomeLabel(latest.outcome), occurred_at: latest.occurred_at })
+                        ? translateUi("{{value}} · {{value1}} · {{occurred_at}}", { value: recordedSourceLabel(latest, key), value1: outcomeLabel(latest.outcome), occurred_at: latest.occurred_at })
                         : useTracked
-                          ? t("No recorded use with exact connection attribution in the last 30 days")
-                          : t("Use is not reported by this server")
+                          ? translateUi("No recorded use with exact connection attribution in the last 30 days")
+                          : translateUi("Use is not reported by this server")
                     }
-                    className="mt-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm text-left text-11 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
+                    className="mt-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm text-left text-13 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <Clock3
                       className="size-3.5 shrink-0 text-muted-foreground"
@@ -634,15 +637,15 @@ export function ServiceConnectionTable({
                     />
                     <span className="shrink-0 whitespace-nowrap text-muted-foreground">
                       {usage?.activity.visibility === "own_requests"
-                        ? t("Your last use")
-                        : t("Last used")}{" "}
+                        ? translateUi("Your last use")
+                        : translateUi("Last used")}{" "}
                       ·
                     </span>
                     {latest ? (
                       <span className="min-w-0 truncate">
                         {callerLabel(latest.caller)}
                         {latest.caller.app_name
-                          ? t(" · {{app_name}}", { app_name: latest.caller.app_name })
+                          ? translateUi(" · {{app_name}}", { app_name: latest.caller.app_name })
                           : ""}{" "}
                         · {formatRelativeTime(latest.occurred_at)} ·{" "}
                         {outcomeLabel(latest.outcome)}
@@ -650,12 +653,12 @@ export function ServiceConnectionTable({
                     ) : (
                       <span className="min-w-0 truncate">
                         {insights.status === "loading"
-                          ? t("Loading…")
+                          ? translateUi("Loading…")
                           : insights.status === "restricted"
-                            ? t("History restricted")
+                            ? translateUi("History restricted")
                             : insights.status === "error"
-                              ? t("History couldn't load")
-                              : t("Not recorded")}
+                              ? translateUi("History couldn't load")
+                              : translateUi("Not recorded")}
                       </span>
                     )}
                   </button>
@@ -668,7 +671,7 @@ export function ServiceConnectionTable({
                         onClick={() => toggle(key.id, "billing")}
                         aria-expanded={expanded && open.view === "billing"}
                         aria-controls={panelId}
-                        aria-label={t("Billing for {{label}}", { label: key.label })}
+                        aria-label={translateUi("Billing for {{value1}}", { value1: key.label })}
                         aria-description={
                           billingCategory === "not_billable"
                             ? "Not billable by NyxID"
@@ -677,7 +680,7 @@ export function ServiceConnectionTable({
                         data-insight-view="billing"
                         data-connection-id={key.id}
                         className={cn(
-                          "block max-w-full rounded-sm text-left text-xs hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring",
+                          "block max-w-full rounded-sm text-left text-13 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring",
                           billingCategory === "not_billable"
                             ? "w-fit"
                             : "w-full",
@@ -694,7 +697,7 @@ export function ServiceConnectionTable({
                         {billing &&
                           (billingCategory === "platform" ||
                             billingCategory === "byok") && (
-                            <span className="mt-1 block truncate text-11 text-muted-foreground">
+                            <span className="mt-1 block truncate text-13 text-muted-foreground">
                               {plainBilling(key, billing, catalog).short}
                             </span>
                           )}
@@ -712,7 +715,7 @@ export function ServiceConnectionTable({
                       className="max-w-xs whitespace-normal"
                     >
                       {billingCategory === "not_billable" ? (
-                        <p>{t("Not billable by NyxID")}</p>
+                        <p>{translateUi("Not billable by NyxID")}</p>
                       ) : (
                         <>
                           <p className="font-medium">
@@ -725,7 +728,7 @@ export function ServiceConnectionTable({
                               {plainBilling(key, billing, catalog).detail}
                             </p>
                           )}
-                          <p className="mt-1 text-muted-foreground">{t("Click for details and your usage.")}</p>
+                          <p className="mt-1 text-muted-foreground">{translateUi("Click for details and your usage.")}</p>
                         </>
                       )}
                     </TooltipContent>
@@ -735,47 +738,47 @@ export function ServiceConnectionTable({
                   {editable ? (
                     <>
                       <p
-                        className="truncate font-mono text-11"
+                        className="truncate font-mono text-13"
                         title={target(key)}
                       >
                         {target(key)}
                       </p>
-                      <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11 text-muted-foreground">
+                      <p className="mt-1 flex flex-wrap items-center gap-x-2 text-13 text-muted-foreground">
                         <span className="truncate" title={configCounts}>
                           {authNames[key.auth_method] ?? key.auth_method} ·{" "}
                           {route}
-                          {configCounts ? t(" · {{configCounts}}", { configCounts: configCounts }) : ""}
+                          {configCounts ? translateUi(" · {{configCounts}}", { configCounts: configCounts }) : ""}
                         </span>
                         <Link
                           to="/keys/$keyId"
                           params={{ keyId: key.id }}
-                          aria-label={t("Configure {{label}} ({{owner}})", { label: key.label, owner: owner })}
+                          aria-label={translateUi("Configure {{value1}} ({{value2}})", { value1: key.label, value2: owner })}
                           className="inline-flex shrink-0 items-center gap-1 text-primary-text hover:underline"
                         >
-                          <Settings2 className="size-3" aria-hidden="true" />{" "}{t("Configure")}</Link>
+                          <Settings2 className="size-3" aria-hidden="true" />{" "}{translateUi("Configure")}</Link>
                       </p>
                     </>
                   ) : (
-                    <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
+                    <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
                       <LockKeyhole
                         className="size-3 shrink-0"
                         aria-hidden="true"
                       />
-                      {key.auto_connected ? t("Platform managed") : t("Editors only")}
+                      {key.auto_connected ? translateUi("Platform managed") : translateUi("Editors only")}
                     </p>
                   )}
-                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11">
+                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-13">
                     <span
                       className="truncate"
                       title={
                         changedAt
-                          ? t("{{value}} · {{value1}}", { value: change ? `${activity} by ${change.actor.name}` : activity, value1: formatDateTime(changedAt) })
+                          ? translateUi("{{value}} · {{value1}}", { value: change ? `${activity} by ${change.actor.name}` : activity, value1: formatDateTime(changedAt) })
                           : undefined
                       }
                     >
                       {activity}
-                      {changedAt ? t(" {{value}}", { value: formatDate(changedAt) }) : ""}
-                      {change ? t(" · {{name}}", { name: change.actor.name }) : ""}
+                      {changedAt ? translateUi(" {{value}}", { value: formatDate(changedAt) }) : ""}
+                      {change ? translateUi(" · {{name}}", { name: change.actor.name }) : ""}
                     </span>
                     <button
                       type="button"
@@ -784,12 +787,12 @@ export function ServiceConnectionTable({
                           ? onViewHistory(key)
                           : toggle(key.id, "history")
                       }
-                      aria-label={t("History for {{label}} ({{owner}})", { label: key.label, owner: owner })}
+                      aria-label={translateUi("History for {{value1}} ({{value2}})", { value1: key.label, value2: owner })}
                       aria-expanded={expanded && open.view === "history"}
                       aria-controls={panelId}
                       className="inline-flex shrink-0 items-center gap-1 rounded-sm text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                     >
-                      <History className="size-3" aria-hidden="true" />{t(" History")}</button>
+                      <History className="size-3" aria-hidden="true" />{translateUi(" History")}</button>
                   </p>
                 </TableCell>
               </TableRow>
@@ -807,9 +810,9 @@ export function ServiceConnectionTable({
                     colSpan={5}
                     className="whitespace-normal pb-3 pt-0"
                   >
-                    <p className="mb-1.5 text-11 font-medium text-muted-foreground">{t("Member of service pools")}</p>
+                    <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">{translateUi("Member of service pools")}</p>
                     <ul
-                      aria-label={t("Pools using {{label}}", { label: key.label })}
+                      aria-label={translateUi("Pools using {{value1}}", { value1: key.label })}
                       className="flex flex-col items-start gap-1.5"
                     >
                       {memberships.map((pool) => {
@@ -821,8 +824,8 @@ export function ServiceConnectionTable({
                             <button
                               type="button"
                               onClick={() => onViewPool?.(pool.id)}
-                              className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-11 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
-                              title={t("{{value}} · {{length}} connections{{value2}}{{value3}}", { value: poolStrategyLabel(pool), length: pool.members.length, value2: !pool.is_active ? t(" · pool disabled") : "", value3: !member.enabled ? t(" · member disabled") : "" })}
+                              className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-13 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                              title={translateUi("{{value1}} · {{value2}} connections{{value3}}{{value4}}", { value1: poolStrategyLabel(pool), value2: pool.members.length, value3: !pool.is_active ? " · pool disabled" : "", value4: !member.enabled ? " · member disabled" : "" })}
                             >
                               <PoolStrategyIcon
                                 strategy={pool.strategy}
@@ -831,7 +834,7 @@ export function ServiceConnectionTable({
                               <span className="min-w-0 break-words [overflow-wrap:anywhere]">
                                 {pool.name} ·{" "}
                                 {pool.strategy === "priority"
-                                  ? t("Priority {{value}}", { value: member.priority ?? 0 })
+                                  ? translateUi("Priority {{value1}}", { value1: member.priority ?? 0 })
                                   : poolStrategyLabel(pool)}
                               </span>
                             </button>
@@ -857,13 +860,13 @@ export function ServiceConnectionTable({
                             className="rounded-xl border border-border/60 bg-card"
                           >
                             {open.view === "history" ? (
-                              <PanelSection icon={History} title={t("History")}>
+                              <PanelSection icon={History} title={translateUi("History")}>
                                 <ServiceHistory serviceId={key.id} />
                               </PanelSection>
                             ) : open.view === "details" ? (
                               <PanelSection
                                 icon={Info}
-                                title={t("Connection details")}
+                                title={translateUi("Connection details")}
                               >
                                 <ConnectionMetadata
                                   connection={key}
@@ -897,28 +900,28 @@ export function ServiceConnectionTable({
   const blocked = ordering.busy || ordering.blocked;
   return (
     <div ref={root} className="min-w-0">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/50 p-3 text-12">
-        <p className="flex-1 text-muted-foreground">{t("Showing all ")}{connections.length}{t(" connections while ordering; filters still apply to other services. Drag a handle, or press Space and use arrow keys; Escape cancels a drag.")}</p>
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/50 p-3 text-14">
+        <p className="flex-1 text-muted-foreground">{translateUi("Showing all ")}{connections.length}{translateUi(" connections while ordering; filters still apply to other services. Drag a handle, or press Space and use arrow keys; Escape cancels a drag.")}</p>
         <Button
           type="button"
           size="sm"
           variant="outline"
           disabled={blocked}
           onClick={ordering.moveDisabled}
-        >{t("Move disabled to end")}</Button>
+        >{translateUi("Move disabled to end")}</Button>
         <Button
           type="button"
           size="sm"
           variant="outline"
           disabled={blocked}
           onClick={ordering.reset}
-        >{t("Reset to default")}</Button>
+        >{translateUi("Reset to default")}</Button>
       </div>
       {ordering.validationError && (
-        <p role="alert" className="p-3 text-12 text-destructive">{t("At most 200 connections can have a saved agent order across all services. Reset this group to default, or reduce the group before saving.")}</p>
+        <p role="alert" className="p-3 text-14 text-destructive">{translateUi("At most 200 connections can have a saved agent order across all services. Reset this group to default, or reduce the group before saving.")}</p>
       )}
       {ordering.message && (
-        <p role="status" className="p-3 text-12 text-muted-foreground">
+        <p role="status" className="p-3 text-14 text-muted-foreground">
           {ordering.message}
         </p>
       )}
@@ -928,32 +931,32 @@ export function ServiceConnectionTable({
           variant="outline"
           disabled={blocked}
           onClick={() => void ordering.retrySave()}
-        >{t("Retry save")}</Button>
+        >{translateUi("Retry save")}</Button>
       )}
       {ordering.failure === "conflict" && (
         <div
           role="alert"
-          className="flex flex-wrap items-center gap-2 p-3 text-12"
+          className="flex flex-wrap items-center gap-2 p-3 text-14"
         >
-          <p>{t("Agent order changed in another tab.")}</p>
+          <p>{translateUi("Agent order changed in another tab.")}</p>
           <Button
             type="button"
             variant="outline"
             disabled={ordering.busy}
             onClick={() => void ordering.recover(false)}
-          >{t("Reload order")}</Button>
+          >{translateUi("Reload order")}</Button>
           <Button
             type="button"
             variant="outline"
             disabled={ordering.busy}
             onClick={() => void ordering.recover(true)}
-          >{t("Overwrite")}</Button>
+          >{translateUi("Overwrite")}</Button>
         </div>
       )}
       {ordering.failure === "stale" && (
         <div role="alert">
           <ErrorBanner
-            message={t("Some connections are no longer available. Refresh connections before saving again.")}
+            message={translateUi("Some connections are no longer available. Refresh connections before saving again.")}
             onRetry={() => void ordering.refreshStale()}
           />
         </div>
@@ -961,7 +964,7 @@ export function ServiceConnectionTable({
       {ordering.readError && (
         <div role="alert">
           <ErrorBanner
-            message={t("Could not refresh connections or agent order. Your edits are kept.")}
+            message={translateUi("Could not refresh connections or agent order. Your edits are kept.")}
             onRetry={() => void ordering.retryRead()}
           />
         </div>
@@ -969,29 +972,29 @@ export function ServiceConnectionTable({
       {ordering.failure === "network" && (
         <div role="alert">
           <ErrorBanner
-            message={t("Could not save agent order. Your edits are kept.")}
+            message={translateUi("Could not save agent order. Your edits are kept.")}
             onRetry={() => void ordering.retrySave()}
           />
         </div>
       )}
       {ordering.failure === "capacity" && (
-        <div role="alert" className="space-y-2 p-3 text-12">
+        <div role="alert" className="space-y-2 p-3 text-14">
           <p>
             {ordering.capacityMessage ||
-              t("Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again.")}
+              translateUi("Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again.")}
           </p>
           <Button
             type="button"
             variant="outline"
             disabled={ordering.busy}
             onClick={() => void ordering.releaseHidden()}
-          >{t("Release unavailable preferences")}</Button>
+          >{translateUi("Release unavailable preferences")}</Button>
           <Button
             type="button"
             variant="outline"
             disabled={ordering.busy}
             onClick={ordering.reset}
-          >{t("Reset to default")}</Button>
+          >{translateUi("Reset to default")}</Button>
         </div>
       )}
       <DndContext
@@ -1029,7 +1032,7 @@ export function ServiceConnectionTable({
       </DndContext>
       <form
         id={orderFormId}
-        aria-label={t("Agent order for {{serviceName}}", { serviceName: serviceName })}
+        aria-label={translateUi("Agent order for {{value1}}", { value1: serviceName })}
         onSubmit={(event) => void ordering.save(event)}
       >
         {!externalOrderActions && (

@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -47,7 +47,7 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRolesPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -126,11 +126,11 @@ export function AdminRolesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Role Management")}
-        description={t("Manage roles and permissions for your organization.")}
+        title={translateUi("Role Management")}
+        description={translateUi("Manage roles and permissions for your organization.")}
         actions={
           canWrite ? (
-            <AddCtaButton label={t("Add Role")} onClick={openCreateDialog} />
+            <AddCtaButton label={translateUi("Add Role")} onClick={openCreateDialog} />
           ) : null
         }
       />
@@ -145,16 +145,16 @@ export function AdminRolesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartRemoteIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("Failed to load roles")}</p>
-            <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("Failed to load roles")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
           </div>
         </div>
       ) : roles.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartRemoteIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No roles found")}</p>
-            <p className="text-xs text-muted-foreground">{t("There are no roles to display.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("No roles found")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("There are no roles to display.")}</p>
           </div>
         </div>
       ) : (
@@ -185,23 +185,23 @@ export function AdminRolesPage() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{r.name}</p>
-                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                  <p className="type-row-title truncate">{r.name}</p>
+                  <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                     {r.slug}
                   </p>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <Badge variant="secondary">
-                    {r.is_system ? t("System") : t("Custom")}
+                    {r.is_system ? translateUi("System") : translateUi("Custom")}
                   </Badge>
                 </div>
               </div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+              <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
                 <span>
-                  {String(r.permissions.length)}{t(" permission")}{r.permissions.length !== 1 ? "s" : ""}
+                  {String(r.permissions.length)}{translateUi(" permission")}{r.permissions.length !== 1 ? "s" : ""}
                 </span>
                 <span className="text-border">|</span>
-                <span>{t("Created ")}{formatDate(r.created_at)}</span>
+                <span>{translateUi("Created ")}{formatDate(r.created_at)}</span>
               </div>
             </div>
           ))}
@@ -212,12 +212,12 @@ export function AdminRolesPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("Name")}</TableHead>
-                <TableHead>{t("Slug")}</TableHead>
-                <TableHead>{t("Permissions")}</TableHead>
-                <TableHead>{t("Type")}</TableHead>
-                <TableHead>{t("Default")}</TableHead>
-                <TableHead>{t("Created")}</TableHead>
+                <TableHead>{translateUi("Name")}</TableHead>
+                <TableHead>{translateUi("Slug")}</TableHead>
+                <TableHead>{translateUi("Permissions")}</TableHead>
+                <TableHead>{translateUi("Type")}</TableHead>
+                <TableHead>{translateUi("Default")}</TableHead>
+                <TableHead>{translateUi("Created")}</TableHead>
                 <TableHead className="w-[60px]" />
               </TableRow>
             </TableHeader>
@@ -244,27 +244,27 @@ export function AdminRolesPage() {
                     }
                   }}
                 >
-                  <TableCell className="font-medium">{role.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-normal">{role.name}</TableCell>
+                  <TableCell className="font-mono text-14">
                     {role.slug}
                   </TableCell>
                   <TableCell>
-                    <span className="text-muted-foreground text-xs">
-                      {String(role.permissions.length)}{t(" permission")}{role.permissions.length !== 1 ? "s" : ""}
+                    <span className="text-muted-foreground text-13">
+                      {String(role.permissions.length)}{translateUi(" permission")}{role.permissions.length !== 1 ? "s" : ""}
                     </span>
                   </TableCell>
                   <TableCell>
                     {role.is_system ? (
-                      <Badge variant="secondary">{t("System")}</Badge>
+                      <Badge variant="secondary">{translateUi("System")}</Badge>
                     ) : (
-                      <Badge variant="secondary">{t("Custom")}</Badge>
+                      <Badge variant="secondary">{translateUi("Custom")}</Badge>
                     )}
                   </TableCell>
                   <TableCell>
                     {role.is_default ? (
-                      <Badge variant="success">{t("Yes")}</Badge>
+                      <Badge variant="success">{translateUi("Yes")}</Badge>
                     ) : (
-                      <span className="text-muted-foreground text-xs">{t("No")}</span>
+                      <span className="text-muted-foreground text-13">{translateUi("No")}</span>
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
@@ -297,8 +297,8 @@ export function AdminRolesPage() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Create Role")}</DialogTitle>
-            <DialogDescription>{t("Create a new role with specific permissions.")}</DialogDescription>
+            <DialogTitle>{translateUi("Create Role")}</DialogTitle>
+            <DialogDescription>{translateUi("Create a new role with specific permissions.")}</DialogDescription>
           </DialogHeader>
           <Form {...createForm}>
             <form
@@ -312,9 +312,9 @@ export function AdminRolesPage() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Name")}</FormLabel>
+                    <FormLabel>{translateUi("Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("e.g. Editor")} {...field} />
+                      <Input placeholder={translateUi("e.g. Editor")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -325,9 +325,9 @@ export function AdminRolesPage() {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Slug")}</FormLabel>
+                    <FormLabel>{translateUi("Slug")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("e.g. editor")} {...field} />
+                      <Input placeholder={translateUi("e.g. editor")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -338,9 +338,9 @@ export function AdminRolesPage() {
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Description")}</FormLabel>
+                    <FormLabel>{translateUi("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Optional description")} {...field} />
+                      <Input placeholder={translateUi("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -351,10 +351,10 @@ export function AdminRolesPage() {
                 name="permissions"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Permissions")}</FormLabel>
+                    <FormLabel>{translateUi("Permissions")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder={t("e.g. users:read, users:write")}
+                        placeholder={translateUi("e.g. users:read, users:write")}
                         {...field}
                       />
                     </FormControl>
@@ -373,7 +373,7 @@ export function AdminRolesPage() {
                         onCheckedChange={field.onChange}
                       />
                     </FormControl>
-                    <FormLabel>{t("Auto-assign to new users")}</FormLabel>
+                    <FormLabel>{translateUi("Auto-assign to new users")}</FormLabel>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -383,8 +383,8 @@ export function AdminRolesPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setCreateOpen(false)}
-                >{t("Cancel")}</Button>
-                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{t("Create Role")}</Button>
+                >{translateUi("Cancel")}</Button>
+                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{translateUi("Create Role")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -400,16 +400,16 @@ export function AdminRolesPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete Role")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to delete this role? It will be removed from all users and groups. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete Role")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete this role? It will be removed from all users and groups. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteRoleId(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteRoleId(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Delete Role")}</Button>
+            >{translateUi("Delete Role")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

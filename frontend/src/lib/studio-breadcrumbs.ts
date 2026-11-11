@@ -90,7 +90,8 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
     billing: "Billing",
     usage: "Usage",
   }),
-  "/admin/usage": tabSection(["dashboard", "list"], "dashboard", {
+  "/admin/usage": tabSection(["dashboard", "list", "nyxbot"], "dashboard", {
+    nyxbot: "NyxBot",
     dashboard: "Dashboard",
     list: "List",
   }),
@@ -113,6 +114,8 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
 };
 
 const PAGE_LABELS: Record<string, string> = {
+  "/models": "Platform Models",
+  "/admin/platform-models": "Platform Models",
   get "/dashboard"() { return translateUi("Dashboard"); },
   get "/billing"() { return translateUi("Billing & Usage"); },
   get "/keys"() { return translateUi("Services & Credentials"); },
@@ -174,19 +177,17 @@ export function buildStudioBreadcrumbs(
   labels: Readonly<Record<string, string>> = {},
   search: Readonly<Record<string, unknown>> = {},
   activeSection?: string,
-  t: (key: string, options?: { readonly name: string }) => string = (key, options) =>
-    options ? key.replaceAll("{{name}}", options.name) : key,
 ): readonly StudioBreadcrumb[] {
   const path = pathname.replace(/\/+$/, "") || "/";
   const named = (to: string, fallback: string): StudioBreadcrumb => ({
-    label: labels[to] || t(fallback),
+    label: labels[to] || translateUi(fallback),
     to,
   });
   const page = (
     to: string,
     search?: Record<string, string>,
   ): StudioBreadcrumb => ({
-    label: t(PAGE_LABELS[to]!),
+    label: translateUi(PAGE_LABELS[to]!),
     to,
     ...(search && { search }),
   });
@@ -200,12 +201,12 @@ export function buildStudioBreadcrumbs(
       section.values,
       section.defaultValue,
     );
-    return { label: t(section.labels[value]!) };
+    return { label: translateUi(section.labels[value]!) };
   };
   const keysParent = (tab: "services" | "nyxid") => [
     page("/keys", { tab: KEYS_TAB_DEFAULT }),
     {
-      label: t(TAB_SECTIONS["/keys"]!.labels[tab]!),
+      label: translateUi(TAB_SECTIONS["/keys"]!.labels[tab]!),
       to: "/keys",
       search: { tab },
     },
@@ -214,12 +215,12 @@ export function buildStudioBreadcrumbs(
   if (path === "/settings/devices/bind") {
     return finish([
       page("/settings", { tab: SETTINGS_TAB_DEFAULT }),
-      { label: t("Security"), to: "/settings", search: { tab: "security" } },
-      { label: t("Bind device") },
+      { get label() { return translateUi("Security"); }, to: "/settings", search: { tab: "security" } },
+      { get label() { return translateUi("Bind device"); } },
     ]);
   }
   if (path === "/channel-bots/connect") {
-    return finish([page("/channel-bots"), { label: t("Setup links") }]);
+    return finish([page("/channel-bots"), { get label() { return translateUi("Setup links"); } }]);
   }
   const platformSetup = path.match(/^\/onboarding\/setups\/[^/]+$/);
   if (platformSetup) {
@@ -228,7 +229,7 @@ export function buildStudioBreadcrumbs(
   if (path === "/providers/callback") {
     return finish([
       page("/keys", { tab: "services" }),
-      { label: t("Connection status") },
+      { get label() { return translateUi("Connection status"); } },
     ]);
   }
   if (path === "/ai-setup") {
@@ -238,12 +239,12 @@ export function buildStudioBreadcrumbs(
     );
     const mcp = AI_TOOLS.find((tool) => tool.id === search.tool);
     const selected = [
-      skills && t("{{name}} skills", { name: skills.name }),
-      mcp && t("{{name}} MCP", { name: mcp.name }),
+      skills && translateUi("{{name}} skills", { name: skills.name }),
+      mcp && translateUi("{{name}} MCP", { name: mcp.name }),
     ].filter(Boolean);
     return selected.length
       ? finish([page(path), { label: selected.join(" · ") }])
-      : [{ label: t(PAGE_LABELS[path]!) }];
+      : [{ label: translateUi(PAGE_LABELS[path]!) }];
   }
   const tabSection = TAB_SECTIONS[path];
   if (tabSection) {
@@ -252,7 +253,11 @@ export function buildStudioBreadcrumbs(
       subsection(tabSection),
     ]);
   }
-  if (PAGE_LABELS[path]) return [{ label: t(PAGE_LABELS[path]!) }];
+  if (PAGE_LABELS[path]) return [{ label: PAGE_LABELS[path] }];
+
+  if (/^\/admin\/platform-models\/[^/]+$/.test(path)) {
+    return finish([page("/admin/platform-models"), named(path, "Model")]);
+  }
 
   const apiKey = path.match(/^\/keys\/api-key\/[^/]+$/);
   if (apiKey) {
@@ -274,7 +279,7 @@ export function buildStudioBreadcrumbs(
   }
 
   if (/^\/orgs\/join\/[^/]+$/.test(path)) {
-    return finish([page("/orgs"), { label: t("Join organization") }]);
+    return finish([page("/orgs"), { get label() { return translateUi("Join organization"); } }]);
   }
   const orgChild = path.match(
     /^(\/orgs\/[^/]+)\/(service-accounts|developer-apps)\/[^/]+$/,
@@ -289,7 +294,7 @@ export function buildStudioBreadcrumbs(
         search: { tab: ORG_DETAIL_TAB_DEFAULT },
       },
       {
-        label: t(isAccount ? "Service Accounts" : "Developer Apps"),
+        label: translateUi(isAccount ? "Service Accounts" : "Developer Apps"),
         to: orgPath,
         search: { tab: orgChild[2]! },
       },
@@ -326,7 +331,7 @@ export function buildStudioBreadcrumbs(
     const parentPath = parent === "/providers" ? "/providers/manage" : parent;
     const items = [page(parentPath), named(detailPath, fallback)];
     if (parts[1] === "edit") {
-      items.push({ label: t("Edit") });
+      items.push({ get label() { return translateUi("Edit"); } });
       items[1] = { ...items[1]!, label: labels[path] || items[1]!.label };
     }
     return finish(items);

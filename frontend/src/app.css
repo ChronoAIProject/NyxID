@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./typography.css";
 
 /* Class-based `dark:` variant. By default Tailwind v4 binds `dark:` to
    `@media (prefers-color-scheme: dark)`; we rebind it to the dashboard's
@@ -17,12 +18,23 @@
    on the never-themed public pages. */
 @custom-variant light (&:where(.theme-light, .theme-light *));
 
+/* Window-height tiers for full-viewport page chrome: the CLI wizard shell
+   shrinks its header and footer to stay within 20% of a short window. The
+   ranges are disjoint, so a utility in one tier never competes with the
+   other's. */
+@custom-variant short (@media (min-height: 680px) and (max-height: 919.98px));
+@custom-variant very-short (@media (max-height: 679.98px));
+
 @utility min-h-control {
-  min-height: calc(1lh + var(--spacing) * 2);
+  min-height: max(24px, calc(1lh + var(--spacing) * 2));
+}
+
+@utility min-w-control {
+  min-width: max(24px, 1.5rem);
 }
 
 @utility min-h-input {
-  min-height: calc(1lh + var(--spacing) * 3 + 2px);
+  min-height: max(24px, calc(1lh + var(--spacing) * 3 + 2px));
 }
 
 @theme {
@@ -59,7 +71,8 @@
   --color-card-foreground: #FAFAFA;
   --color-popover: #171717;
   --color-popover-foreground: #FAFAFA;
-  --color-sidebar: #0D0D0D;
+  --color-sidebar: #121212;
+  --color-sidebar-hover: #191919;
   --color-surface: #171717;
 
   /* ── Primary / Accent ── */
@@ -105,6 +118,8 @@
   --color-hairline-strong: rgba(255, 255, 255, 0.15);
   --color-overlay: rgba(255, 255, 255, 0.03);
   --color-overlay-strong: rgba(255, 255, 255, 0.06);
+  --color-chat-bubble: #2C2C30;
+  --color-chat-bubble-foreground: #EFEFF1;
 
   /* ── Radius ── (px, not rem: only text follows the user's text size) */
   --radius-sm: 6px;
@@ -116,23 +131,6 @@
      keeps padding, gaps and control heights fixed when the Appearance text
      size changes the root font size. */
   --spacing: 4px;
-
-  /* ── Text scale (rem → follows the root font size set by Appearance) ──
-     `text-12` = 12px at the default 100%. Matches the DESIGN.md scale; use
-     these instead of `text-[12px]` so every size responds to the setting. */
-  --text-9: 0.5625rem;
-  --text-10: 0.625rem;
-  --text-11: 0.6875rem;
-  --text-12: 0.75rem;
-  --text-13: 0.8125rem;
-  --text-14: 0.875rem;
-  --text-15: 0.9375rem;
-  --text-17: 1.0625rem;
-  --text-20: 1.25rem;
-  --text-22: 1.375rem;
-  --text-24: 1.5rem;
-  --text-28: 1.75rem;
-  --text-36: 2.25rem;
 
   /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
   --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
@@ -151,6 +149,28 @@
   --color-landing-surface: #171717;
   --color-landing-surface-raised: #262626;
   --color-landing-border-subtle: rgba(90, 42, 241, 0.15);
+}
+
+/* Keep every canonical size available to runtime canvas and audit consumers. */
+@theme static {
+  /* ── Text scale (rem → follows the root font size set by Appearance) ──
+     Every token is its nominal size divided by 16: text-N = N/16rem.
+     The themed root applies the 0.85 display baseline. Use tokens instead of
+     `text-[12px]` so every size responds to the setting. */
+  --text-9: 0.5625rem;
+  --text-10: 0.625rem;
+  --text-11: 0.6875rem;
+  --text-12: 0.75rem;
+  --text-13: 0.8125rem;
+  --text-14: 0.875rem;
+  --text-15: 0.9375rem;
+  --text-16: 1rem;
+  --text-17: 1.0625rem;
+  --text-20: 1.25rem;
+  --text-22: 1.375rem;
+  --text-24: 1.5rem;
+  --text-28: 1.75rem;
+  --text-36: 2.25rem;
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -175,7 +195,8 @@ html.theme-light {
   --color-card-foreground: #18181B;
   --color-popover: #FFFFFF;
   --color-popover-foreground: #18181B;
-  --color-sidebar: #F4F4F5;
+  --color-sidebar: #FFFFFF;
+  --color-sidebar-hover: #F6F6F6;
   --color-surface: #FFFFFF;
 
   /* Secondary / accent — faint purple tints on light */
@@ -189,7 +210,7 @@ html.theme-light {
   --color-muted-foreground: #3F3F46;
 
   /* Destructive */
-  --color-destructive: #DC2626;
+  --color-destructive: #B91C1C;
 
   /* Borders & input — dividers clearly visible on both tones; control edges
      meet the 3:1 non-text contrast minimum on white */
@@ -209,6 +230,8 @@ html.theme-light {
   --color-hairline-strong: rgba(0, 0, 0, 0.34);
   --color-overlay: rgba(0, 0, 0, 0.035);
   --color-overlay-strong: rgba(0, 0, 0, 0.06);
+  --color-chat-bubble: #E0E0E5;
+  --color-chat-bubble-foreground: #18181B;
 }
 
 /* Dark theme for themed surfaces. Lifted off near-black so surfaces, borders
@@ -224,7 +247,8 @@ html.theme-dark {
   --color-card-foreground: #EFEFF1;
   --color-popover: #222225;
   --color-popover-foreground: #EFEFF1;
-  --color-sidebar: #141416;
+  --color-sidebar: #1C1C1F;
+  --color-sidebar-hover: #27272A;
   --color-surface: #222225;
 
   /* Text needs a lighter accent than solid button fills.
@@ -246,6 +270,218 @@ html.theme-dark {
   --color-hairline-strong: rgba(255, 255, 255, 0.24);
   --color-overlay: rgba(255, 255, 255, 0.05);
   --color-overlay-strong: rgba(255, 255, 255, 0.095);
+  --color-chat-bubble: #2C2C30;
+  --color-chat-bubble-foreground: #EFEFF1;
+}
+
+html:is(.theme-light, .theme-dark) body {
+  @apply type-body;
+}
+
+html:is(.theme-light, .theme-dark) {
+  --display-density: 1;
+}
+
+/* Custom actions share the same hit-area floor as Button, including Studio
+   and body portals. Keep switches and checkboxes on their own primitives. */
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], summary) {
+  min-width: max(24px, 1.5rem);
+  min-height: max(24px, 1.5rem);
+}
+
+/* Compact spacing must still leave room for enlarged labels and usable
+   pointer targets. The tab strip must contain the same padding as its tabs. */
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  height: auto;
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+}
+
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) {
+  min-width: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+}
+
+/* Shared interface icons follow the surrounding text, independently of density.
+   Brand marks and illustrations retain their own proportions. */
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) svg.lucide,
+html:is(.theme-light, .theme-dark) svg[data-ui-icon] {
+  width: max(0.75rem, 1.125em);
+  height: max(0.75rem, 1.125em);
+  flex-shrink: 0;
+}
+
+/* Page geometry is shared by both shells; transcript/composer layout is separate. */
+.shell-page-content {
+  padding: calc(var(--spacing) * 4);
+  padding-bottom: max(2rem, var(--sab, 0px));
+}
+@media (min-width: 640px) { .shell-page-content { padding-top: calc(var(--spacing) * 6); padding-inline: calc(var(--spacing) * 6); } }
+@media (min-width: 768px) { .shell-page-content { padding-inline: calc(var(--spacing) * 8); } }
+@media (min-width: 1024px) { .shell-page-content { padding-inline: calc(var(--spacing) * 10); } }
+.shell-page-stack { display: flex; flex-direction: column; gap: calc(var(--spacing) * 6); }
+.shell-card-grid { gap: calc(var(--spacing) * 4); }
+.shell-nav-stack { display: flex; flex-direction: column; gap: calc(var(--spacing) * 0.5); }
+.shell-user-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 0; }
+.shell-user-avatar { display: flex; flex-shrink: 0; align-items: center; justify-content: center; padding: 0.375em; border-radius: var(--radius-lg); }
+html:is(.theme-light, .theme-dark) .shell-user-avatar svg { width: max(0.75rem, 1.125em); height: max(0.75rem, 1.125em); }
+html:is(.theme-light, .theme-dark) .shell-user-block { min-width: 0; min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2)); display: flex; align-items: center; gap: calc(var(--spacing) * 3); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); border-radius: var(--radius-lg); text-align: left; }
+
+/* Shared shell roles keep navigation and account typography identical in
+   Studio and the assistant, including Studio's mobile navigation. */
+.shell-nav-item {
+  min-width: 0;
+  @apply type-nav-item;
+  column-gap: calc(0.5em * var(--display-density, 1));
+  padding: calc(0.375em * var(--display-density, 1)) calc(0.75em * var(--display-density, 1));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+  border-radius: var(--radius-lg);
+}
+.shell-nav-item[aria-current="page"] {
+  @apply type-active-nav-item;
+}
+html:is(.theme-light, .theme-dark) .shell-nav-item[data-nav-collapsed="true"] {
+  justify-content: center;
+  column-gap: 0;
+  padding-inline: 0;
+}
+
+html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-icon]) {
+  width: max(0.75rem, 1.125em);
+  height: max(0.75rem, 1.125em);
+  flex-shrink: 0;
+}
+
+.shell-group-label {
+  min-height: 0;
+  min-width: 0;
+  display: block;
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
+  @apply type-group-label;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--color-text-tertiary);
+}
+
+.shell-account-heading { display: flex; flex-direction: column; gap: 0; padding: calc(var(--spacing) * 1.5) calc(var(--spacing) * 3); }
+
+.shell-user-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  @apply type-account-name;
+  color: var(--color-foreground);
+}
+
+.shell-user-email {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  @apply type-account-email;
+  color: var(--color-text-tertiary);
+}
+
+html:is(.theme-light, .theme-dark) :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .ui-icon-button, [data-grouped-row], .shell-user-block)):has(> :is(svg.lucide, svg[data-ui-icon])) {
+  column-gap: calc(0.5em * var(--display-density));
+  padding-inline: calc(0.75em * var(--display-density));
+  padding-block: calc(0.375em * var(--display-density));
+  height: auto;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Grouped rows own their insets; icon-button density must not shift their text. */
+html:is(.theme-light, .theme-dark) [data-grouped-row] {
+  min-height: max(24px, calc(var(--spacing) * 11));
+  padding-inline: calc(var(--spacing) * 4);
+  padding-block: calc(var(--spacing) * 2.5);
+}
+
+html:is(.theme-light, .theme-dark) [data-grouped-list] [data-slot="grouped-select"] {
+  padding-inline: 0;
+}
+
+/* Focus belongs to the entire row, including its borderless field or accessory. */
+[data-grouped-row]:focus-within {
+  background-color: var(--color-overlay);
+}
+
+[data-grouped-row]:not(:has(input, textarea, [contenteditable])):focus-visible,
+[data-grouped-row]:has(:focus-visible):not(:has(input, textarea, [contenteditable])) {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-input-focus);
+}
+
+[data-grouped-list] > [data-grouped-row]:first-child,
+[data-grouped-list] > :first-child:not([data-grouped-row]) > [data-grouped-row]:nth-child(1 of [data-grouped-row]) {
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+
+[data-grouped-list] > [data-grouped-row]:last-child,
+[data-grouped-list] > :last-child:not([data-grouped-row]) > [data-grouped-row]:nth-last-child(1 of [data-grouped-row]) {
+  border-bottom-left-radius: var(--radius-xl);
+  border-bottom-right-radius: var(--radius-xl);
+}
+
+[data-grouped-row].grouped-field > span:first-child,
+[data-grouped-row].grouped-field > label,
+[data-grouped-row].grouped-field > label > span:first-child {
+  @apply type-field-label;
+  color: var(--color-text-tertiary);
+}
+
+[data-grouped-row].grouped-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+html:is(.theme-light, .theme-dark) [data-grouped-row] > * { margin-block: 0; }
+
+html:is(.theme-light, .theme-dark) button:has(> svg.lucide):not([data-icon-button]):not(.shell-nav-item) {
+  flex-wrap: wrap;
+}
+
+/* Display utilities still decide which responsive actions are present. */
+@layer base {
+  html:is(.theme-light, .theme-dark) :is([data-icon-button], .ui-icon-button) {
+    display: inline-flex;
+  }
+}
+
+html:is(.theme-light, .theme-dark) :is([data-icon-button], .ui-icon-button) {
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: auto;
+  height: auto;
+  padding: calc(0.5em * var(--display-density));
+}
+
+html:is(.theme-light, .theme-dark) .ui-icon-button {
+  min-width: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+}
+
+html:is(.theme-light, .theme-dark) [role="option"]:has(> [data-select-indicator]) {
+  padding-right: calc(1.125em + 1.25em * var(--display-density));
+}
+
+html:is(.theme-light, .theme-dark) [data-select-indicator] {
+  right: calc(0.75em * var(--display-density));
+  width: max(0.75rem, 1.125em);
+  height: max(0.75rem, 1.125em);
+}
+
+html:is(.theme-light, .theme-dark) [role="tablist"] {
+  height: auto;
+  flex-shrink: 0;
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 4));
+}
+
+html:is(.theme-light, .theme-dark) input[type="range"] {
+  min-height: max(24px, 1.5rem);
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark
@@ -314,6 +550,53 @@ html.motion-reduce *::after {
     border-color: var(--color-border);
     -webkit-tap-highlight-color: transparent;
   }
+
+  /* Tailwind 4 leaves buttons on the default cursor; everything clickable
+     shows a pointer. Cursor utilities (resize, grab, not-allowed) still win. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([data-disabled]),
+  [role="menuitemcheckbox"]:not([data-disabled]),
+  [role="menuitemradio"]:not([data-disabled]),
+  [role="option"]:not([aria-disabled="true"]):not([data-disabled]),
+  [role="switch"]:not([aria-disabled="true"]),
+  [role="checkbox"]:not([aria-disabled="true"]),
+  [role="radio"]:not([aria-disabled="true"]),
+  summary,
+  select:not(:disabled),
+  input:is([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]):not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* Disclosures show the app's chevron instead of the browser triangle.
+     Summaries that draw their own icon opt out with `list-none`; the billing
+     page styles its own. */
+  summary:not(.list-none):not(.billing-page *) {
+    list-style: none;
+  }
+  summary:not(.list-none):not(.billing-page *)::-webkit-details-marker {
+    display: none;
+  }
+  summary:not(.list-none):not(.billing-page *)::before {
+    content: "";
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    margin-right: 0.25em;
+    vertical-align: -0.15em;
+    background-color: currentColor;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    transition: transform 150ms ease-out;
+  }
+  details[open] > summary:not(.list-none):not(.billing-page *)::before {
+    transform: rotate(90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    summary:not(.list-none):not(.billing-page *)::before {
+      transition: none;
+    }
+  }
 }
 
 html,
@@ -323,7 +606,7 @@ body {
 
 body {
   font-family: var(--font-sans);
-  line-height: 1.4;
+  line-height: var(--line-public-body);
 }
 
 /* Label-to-input spacing */
@@ -424,15 +707,17 @@ input[type="number"] {
   -moz-appearance: textfield;
 }
 
-/* ── iOS: prevent input zoom and keep custom selects at the same text size ── */
-@supports (-webkit-touch-callout: none) {
+/* ── Touch: prevent iOS input zoom while respecting larger text settings ── */
+@media (pointer: coarse) {
   input,
   select,
   textarea,
-  [data-composer-text-measure],
-  [role="combobox"],
-  [role="option"] {
-    font-size: 16px !important;
+  [role="combobox"][contenteditable="true"] {
+    font-size: max(16px, var(--text-14)) !important;
+  }
+  [data-composer-textbox],
+  [data-composer-text-measure] {
+    font-size: max(16px, var(--text-16)) !important;
   }
 }
 
@@ -881,6 +1166,56 @@ html.theme-dark .assistant-halo--visible {
   }
 }
 
+/* Workspace glyphs play one activation cycle, then restore lucide's rest
+   frame. A negative delay resumes the same timeline after SPA navigation. */
+.nav-glyph-chimney { transform: translateY(5px); }
+[data-playing] .nav-glyph-chimney {
+  animation: nav-glyph-chimney var(--nav-glyph-duration) ease-out 1 both;
+  animation-delay: var(--nav-glyph-offset);
+}
+@keyframes nav-glyph-chimney {
+  0%, 100% { transform: translateY(5px); }
+  13% { transform: translateY(-0.5px); }
+  21%, 86% { transform: translateY(0); }
+}
+.nav-glyph-smoke-puff {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+  animation: nav-glyph-smoke 1.5s ease-out 1 both;
+}
+@keyframes nav-glyph-smoke {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.6); }
+  15% { opacity: 0.9; }
+  50% { transform: translate(0.6px, -3.5px) scale(1.1); }
+  100% { opacity: 0; transform: translate(2.5px, -7px) scale(1.6); }
+}
+.nav-glyph-heartbeat {
+  opacity: 0;
+  stroke-dasharray: 28 200;
+  stroke-dashoffset: 28;
+}
+[data-playing] > .nav-glyph-heartbeat {
+  opacity: 1;
+  animation: nav-glyph-heartbeat var(--nav-glyph-duration) linear 1 both;
+  animation-delay: var(--nav-glyph-offset);
+}
+@keyframes nav-glyph-heartbeat {
+  0% { stroke-dashoffset: 28; }
+  70%, 100% { stroke-dashoffset: -100; }
+}
+[data-playing] .nav-glyph-minute-hand,
+[data-playing] .nav-glyph-hour-hand {
+  transform-origin: 16px 16.2px;
+  animation: nav-glyph-hand var(--nav-glyph-duration) ease-in-out 1 both;
+  animation-delay: var(--nav-glyph-offset);
+}
+[data-playing] .nav-glyph-minute-hand { --nav-glyph-hand-turn: 720deg; }
+[data-playing] .nav-glyph-hour-hand { --nav-glyph-hand-turn: 360deg; }
+@keyframes nav-glyph-hand {
+  to { transform: rotate(var(--nav-glyph-hand-turn)); }
+}
+
 /* ── Card hover glow ── */
 .hover-glow {
   transition:
@@ -968,9 +1303,7 @@ html.theme-dark .assistant-halo--visible {
   background: color-mix(in srgb, var(--color-primary) 13%, transparent);
   color: var(--color-foreground);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 24%, transparent);
-  font-weight: 500;
-  font-size: 0.92em;
-  line-height: inherit;
+  @apply type-chat-mention;
 }
 .composer-mention[data-composer-mention="agent"] {
   color: var(--color-primary);
@@ -987,4 +1320,236 @@ html.theme-dark .assistant-halo--visible {
   position: absolute;
   color: var(--color-text-tertiary);
   pointer-events: none;
+}
+
+/* The aura breathes while audio is active; its strength and size follow live
+   amplitude. Separate opacity and filter let stopping fade out mid-breath. */
+.composer-audio-surface {
+  isolation: isolate;
+}
+.composer-audio-surface::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+  inset: -0.5rem;
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(ellipse at 25% 15%, var(--color-primary), transparent 65%),
+    radial-gradient(ellipse at 80% 20%, var(--color-warning), transparent 65%);
+  filter: blur(18px);
+  opacity: 0;
+  transform: scaleY(calc(1 + var(--composer-audio-level, 0) * 0.25));
+  animation: composer-aura-breathe 3.2s ease-in-out infinite paused;
+  transition:
+    opacity 800ms ease-out,
+    transform 180ms ease-out;
+}
+.composer-audio-surface[data-audio-active]::before {
+  opacity: calc(0.22 + var(--composer-audio-level, 0) * 0.55);
+  animation-play-state: running;
+  transition-duration: 450ms, 180ms;
+}
+@keyframes composer-aura-breathe {
+  0%, 100% { filter: blur(18px) opacity(0); }
+  50% { filter: blur(18px) opacity(1); }
+}
+.dictation-split-control {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  border-radius: 0.65rem;
+}
+.dictation-split-control:hover,
+.dictation-split-control:focus-within,
+.dictation-split-control:has([data-state="open"]) {
+  background: var(--color-overlay);
+}
+/* The options arrow is always there: nothing slides out under a passing
+   pointer. */
+.dictation-split-control .dictation-chevron {
+  width: 1.25rem;
+}
+@media (max-width: 540px) {
+  [data-composer-editor].composer-compact {
+    flex-wrap: wrap;
+  }
+  .composer-compact .composer-text-region {
+    order: -1;
+    flex-basis: 100%;
+    min-width: 0;
+  }
+  .composer-compact [data-composer-footer] {
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+  .composer-compact [data-composer-settings] {
+    margin-right: auto;
+  }
+  .composer-compact > [data-composer-settings] {
+    margin-left: auto;
+  }
+  .dictation-waveform {
+    gap: 2px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-audio-surface::before {
+    animation: none;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* Only the edge hiding more content fades. A short eased top fade avoids
+   dimming the first readable lines; masks inherit every surface/theme color. */
+[data-scroll-fade],
+[data-chat-index-rail] {
+  --scroll-fade-top: 0px;
+  --scroll-fade-bottom: 0px;
+  --scroll-fade-left: 0px;
+  --scroll-fade-right: 0px;
+  mask-image:
+    linear-gradient(to bottom,
+      transparent, rgb(0 0 0 / 65%) calc(var(--scroll-fade-top) * .4),
+      black var(--scroll-fade-top),
+      black calc(100% - var(--scroll-fade-bottom)), transparent),
+    linear-gradient(to right,
+      transparent, black var(--scroll-fade-left),
+      black calc(100% - var(--scroll-fade-right)), transparent);
+  mask-composite: intersect;
+}
+[data-scroll-edges~="top"] { --scroll-fade-top: 20px; }
+[data-scroll-edges~="bottom"] { --scroll-fade-bottom: 28px; }
+[data-scroll-edges~="left"] { --scroll-fade-left: 20px; }
+[data-scroll-edges~="right"] { --scroll-fade-right: 20px; }
+
+/* The index is a dense graphical navigator, not a row of text controls.
+   Its measured pitch must also be its rendered pitch at every reading size. */
+:root {
+  --chat-index-pitch: calc(0.4375rem / 0.85);
+  --chat-index-tick-width: calc(1rem / 0.85);
+  --chat-index-tick-thickness: calc(var(--chat-index-tick-width) / 16);
+  --chat-index-track-width: calc(var(--chat-index-tick-width) * 1.5);
+}
+
+@media (max-resolution: 1dppx) {
+  :root { --chat-index-tick-thickness: calc(var(--chat-index-tick-width) * 3 / 32); }
+}
+
+html.assistant-display [data-chat-index-target] {
+  min-height: 0;
+  min-width: 0;
+  padding-block: 0;
+  flex: none;
+}
+
+[data-chat-index-rail][data-scroll-edges~="top"] { --scroll-fade-top: min(calc(var(--chat-index-pitch) * 4), 20%); }
+[data-chat-index-rail][data-scroll-edges~="bottom"] { --scroll-fade-bottom: min(calc(var(--chat-index-pitch) * 4), 20%); }
+
+@media (min-width: 768px) {
+  [data-chat-content-layout]:has([data-chat-index-rail]) {
+    --chat-index-width: var(--chat-index-track-width);
+  }
+}
+
+/* A chat transcript fades only its text: the scrollbar strip on its right
+   (mid-slab beside the machine column) stays fully drawn. */
+[data-chat-transcript][data-scroll-fade] {
+  mask-image:
+    linear-gradient(to bottom,
+      transparent, rgb(0 0 0 / 65%) calc(var(--scroll-fade-top) * .4),
+      black var(--scroll-fade-top),
+      black calc(100% - var(--scroll-fade-bottom)), transparent),
+    linear-gradient(black, black);
+  mask-size: calc(100% - var(--assistant-scrollbar-width, 0px)) 100%, var(--assistant-scrollbar-width, 0px) 100%;
+  mask-position: left top, right top;
+  mask-repeat: no-repeat;
+  mask-composite: add;
+}
+
+/* While the open agent's row is pinned to the top of the list, rows slide
+   under it and a top fade would only dim it. Any other time the fade stays,
+   so rows never end in a hard cut. */
+[data-scroll-fade]:has([data-sticky-agent][data-stuck]) {
+  --scroll-fade-top: 0px;
+}
+
+/* On hover a muted icon takes its label's colour: when the text turns from
+   grey to white, so does the icon. Coloured icons (active, status) keep
+   theirs. Unlayered so it wins over the utility that greyed the icon. */
+:is(a, button, summary, [role="button"], [role="menuitem"], [role="option"], [role="tab"]):hover svg:is(.text-text-tertiary, .text-muted-foreground) {
+  color: inherit;
+}
+
+/* Search reveals retain row focus without moving content. */
+[data-drawer-search-target][data-search-highlight]:not(:has(input, textarea, [contenteditable])) {
+  background-color: var(--color-overlay);
+  outline: 2px solid var(--color-input-focus);
+  outline-offset: -2px;
+  border-radius: var(--radius-xl);
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-drawer-search-target] { transition: background-color 160ms ease; }
+}
+
+[data-viewport-save-bar] { position: relative; flex-shrink: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .compact-title-bar { transition: opacity 120ms ease, translate 120ms ease; }
+  .compact-title-bar[data-visible="false"] { translate: 0 -0.25rem; }
+}
+
+[data-compact-scroll] > [aria-hidden="true"] { margin: 0 !important; }
+
+/* Header controls keep their position while identity chrome compacts. */
+.agent-header-icon {
+  display: inline-flex;
+  width: calc(var(--spacing) * 8);
+  height: calc(var(--spacing) * 8);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--color-overlay);
+  color: var(--color-text-secondary);
+}
+.agent-header-icon:hover { background: var(--color-overlay-strong); }
+.agent-header-icon:focus-visible { outline: 2px solid var(--color-input-focus); outline-offset: 2px; }
+.agent-header-icon[hidden] { display: none; }
+.agent-header-search { position: relative; min-width: 0; }
+.agent-header-search-field { width: 100%; transform-origin: right center; }
+.agent-header-search[data-open="false"] .agent-header-search-field { position: absolute; right: 0; top: 0; width: 0; opacity: 0; visibility: hidden; overflow: hidden; }
+.agent-header-name, .agent-header-avatar { transform-origin: left center; }
+[data-agent-header][data-compact="true"] .agent-header-name { transform: scale(.867); }
+[data-agent-header][data-compact="true"] .agent-header-avatar { transform: translateX(6px) scale(.625); }
+[data-agent-header][data-compact="true"] .agent-header-subtitle { opacity: 0; transform: translateY(-8px); visibility: hidden; }
+.agent-details-sheet { container: agent-details / inline-size; }
+@container agent-details (width < 480px) {
+  [data-agent-header][data-search-open="true"] .agent-header-avatar,
+  [data-agent-header][data-search-open="true"] .agent-header-name {
+    position: absolute;
+    left: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(-0.25rem) scale(.95);
+  }
+  [data-agent-header][data-search-open="true"] .agent-header-name { left: calc(var(--spacing) * 10); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .agent-header-name, .agent-header-avatar, .agent-header-subtitle { transition: transform 240ms ease-out, opacity 240ms ease-out, visibility 240ms; }
+  .agent-header-search[data-open="true"] .agent-header-search-field { animation: agent-search-open 200ms ease-out; }
+  @keyframes agent-search-open { from { clip-path: inset(0 0 0 100%); opacity: 0; } to { clip-path: inset(0); opacity: 1; } }
+}
+
+/* Shared hit areas include portaled Studio controls at the smallest Display size. */
+html:is(.theme-light, .theme-dark) [data-icon-button] {
+  min-width: max(24px, 1.5rem);
+  min-height: max(24px, 1.5rem);
+}
+
+/* Field-label role is identical for shared and manually authored forms. */
+html:is(.theme-light, .theme-dark) [data-field-label] {
+  @apply type-field-label;
 }

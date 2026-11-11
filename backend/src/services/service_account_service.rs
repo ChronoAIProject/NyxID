@@ -16,7 +16,7 @@ use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, Service
 #[cfg(test)]
 tokio::task_local! { pub(crate) static ISSUANCE_BARRIER: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>); }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ClientCredentialsResponse {
     pub access_token: String,
     pub token_type: String,
@@ -186,9 +186,23 @@ pub async fn create_service_account_with_authority(
         last_authenticated_at: None,
     };
 
-    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .insert_one(&sa)
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::credential_change_in_session(db, created_by, &mut session)
+            .await?;
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .session(&mut session)
+            .await?;
+        Ok(())
+    }
+    .await;
+    super::org_membership_authority::finish(session, result).await?;
 
     Ok((sa, raw_secret))
 }
@@ -608,17 +622,23 @@ pub async fn authenticate_client_credentials(
         created_at: Utc::now(),
     };
 
-    db.collection::<ServiceAccountToken>(SA_TOKENS)
-        .insert_one(&token_record)
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    // Update last_authenticated_at
-    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .update_one(
-            doc! { "_id": &sa.id },
-            doc! { "$set": { "last_authenticated_at": bson::DateTime::from_chrono(Utc::now()) } },
-        )
-        .await?;
+    let result:AppResult<()>=async {
+        super::erasure_admission::fence_in_session(db,&sa.id,&mut session).await?;
+        let live=db.collection::<ServiceAccount>(SERVICE_ACCOUNTS).update_one(
+            doc! {"_id":&sa.id,"is_active":true,"client_secret_hash":&sa.client_secret_hash,
+                "allowed_scopes":&sa.allowed_scopes,"$expr":{"$eq":[{"$ifNull":["$credential_generation",0_i64]},sa.credential_generation]}},
+            doc! {"$set":{"last_authenticated_at":bson::DateTime::now()}}).session(&mut session).await?;
+        if live.matched_count!=1 {return Err(AppError::AuthenticationFailed("Service account authority changed during authentication".into()));}
+        db.collection::<ServiceAccountToken>(SA_TOKENS).insert_one(&token_record).session(&mut session).await?;
+        Ok(())
+    }.await;
+    super::org_membership_authority::finish(session, result).await?;
 
     Ok(ClientCredentialsResponse {
         access_token: token,
@@ -957,5 +977,12 @@ mod custom_scope_regression_tests {
         .unwrap();
         assert_eq!(current.scope, updated);
         assert!(!crate::mw::auth::scope_allows_rest_proxy(&current.scope));
+    }
+}
+
+impl std::fmt::Debug for ClientCredentialsResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCredentialsResponse")
+            .finish_non_exhaustive()
     }
 }

@@ -10,6 +10,10 @@ pub struct SavedLogin {
     /// Person or organization, using the same owner ACL as nodes.
     pub user_id: String,
     pub label: String,
+    /// Explicit storage contract for all three secret fields, written together.
+    /// None retains exact legacy envelope decoding during the staged rollout.
+    #[serde(default)]
+    pub secret_context_version: Option<u32>,
     pub allowed_origins: Vec<String>,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub username_encrypted: Vec<u8>,

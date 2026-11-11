@@ -659,19 +659,27 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
         .unwrap()
         .unwrap();
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(provider.client_id_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::provider(&provider)
+            .decrypt(
+                &state.encryption_keys,
+                "client_id_encrypted",
+                provider.client_id_encrypted.as_deref().unwrap()
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         b"new-client"
     );
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(provider.client_secret_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::provider(&provider)
+            .decrypt(
+                &state.encryption_keys,
+                "client_secret_encrypted",
+                provider.client_secret_encrypted.as_deref().unwrap()
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         b"new-secret"
     );
     assert_eq!(

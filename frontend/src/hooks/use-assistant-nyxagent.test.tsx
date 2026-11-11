@@ -53,6 +53,7 @@ beforeEach(() => {
   requests = [];
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   page = {
+    cma_operations: [],
     conversation: {
       id,
       title: "Question",
@@ -108,6 +109,24 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
+
+it("keeps polling a CMA job after the assistant turn has ended", async () => {
+  page.conversation.active_turn = null;
+  page.cma_operations = [{
+    id: "watch-1", turn_id: "turn", kind: "cma_response", operation_id: "resp_agt_test_1",
+    agent_id: "agt_test", idempotency_key: null, status: "in_progress", phase: null,
+    state: "waiting", reason: null, monitor_name: "NyxBot", created_at: "2026-10-22T10:00:00Z", checked_at: null,
+  }];
+  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), threadsAgentId: NYXBOT,
+  }), { wrapper });
+  await waitFor(() => expect(result.current.isStreaming).toBe(false));
+  const reads = () => requests.filter((request) => request.includes(`/conversations/${id}`)).length;
+  await waitFor(() => expect(reads()).toBeGreaterThanOrEqual(1));
+  await waitFor(() => expect(reads()).toBeGreaterThanOrEqual(2), { timeout: 6500 });
+  expect(requests.some((request) => request.startsWith("POST"))).toBe(false);
+  unmount();
+}, 8000);
 
 it("polls only selected history every two seconds and refreshes the agent's threads once on settlement",
   async () => {
@@ -312,7 +331,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
   }, 8000,
 );
 
-it.each(["specialist", "automation", "voice"])(
+it.each(["specialist", "automation", "voice", "invocation"])(
   "leaves %s confirmation continuation to the server",
   async (kind) => {
     page.conversation.active_turn = null;
@@ -320,18 +339,18 @@ it.each(["specialist", "automation", "voice"])(
     page.acknowledgements = [
       {
         id: "12345678-1234-4123-8123-123456789012",
-        kind: "service",
+        kind: kind === "invocation" ? "action" : "service",
         status: "pending",
         summary: "Use GitHub",
         decider: kind === "specialist" ? "orchestrator" : "user",
         trigger_run_id: kind === "automation" ? "run-id" : null,
-        continuation_owner: kind === "voice" ? "server" : null,
-        continuation_receipt_id: kind === "voice" ? "12345678-1234-4123-8123-123456789013" : null,
+        continuation_owner: ["voice", "invocation"].includes(kind) ? "server" : null,
+        continuation_receipt_id: ["voice", "invocation"].includes(kind) ? "12345678-1234-4123-8123-123456789013" : null,
         decided_by: null,
         reason: null,
         service_slug: "github",
         service_name: "GitHub",
-        tool_name: null,
+        tool_name: kind === "invocation" ? "nyxid__delete_node" : null,
         created_at: "2026-09-17T00:00:00Z",
         decided_at: null,
         expires_at: "2026-09-17T00:15:00Z",
@@ -704,7 +723,7 @@ it("never opens for failures already in the transcript or in older pages", async
     expect(result.current.session.messages.at(-1)?.status).toBe("error"),
   );
   expect(result.current.session.messages.at(-1)?.error).toBe(
-    "There aren't enough credits to run this turn.",
+    "There aren't enough credits to run this turn. Add credits in Billing & Usage, then try again.",
   );
   page.messages = [failedReply("older", "insufficient_credits", 1)];
   page.before_seq = null;

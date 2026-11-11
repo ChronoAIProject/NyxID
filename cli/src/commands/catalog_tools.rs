@@ -1,11 +1,14 @@
 use super::service::catalog_admin::fetch_catalog_service;
 use crate::{
     api::ApiClient,
-    cli::{CatalogCommands, CatalogEndpointArgs, CatalogEndpointCommands, ToolsCommands},
+    cli::{
+        CatalogCommands, CatalogEndpointArgs, CatalogEndpointCommands, OutputFormat, ToolsCommands,
+    },
     output,
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::io::{BufRead, IsTerminal, Write};
 
 pub fn endpoint_body(args: &CatalogEndpointArgs, create: bool) -> Result<Value> {
     if create && (args.name.is_none() || args.method.is_none() || args.path.is_none()) {
@@ -58,6 +61,29 @@ async fn endpoint_id(api: &mut ApiClient, service: &str, reference: &str) -> Res
         .context("Catalog endpoint not found")
 }
 
+fn confirm_resync(name: &str, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+    write!(
+        output,
+        "Overwrite the identity-forwarding settings on every connection to {name} with the \
+         service's current settings, including customized connections? Connections that already \
+         match are left unchanged [y/N]: "
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+        bail!("Identity resync cancelled");
+    }
+    Ok(())
+}
+
+fn resync_summary(name: &str, result: &Value) -> String {
+    format!(
+        "Resynced connection identity for {name}: {} checked, {} updated",
+        result["matched_count"], result["changed_count"]
+    )
+}
+
 pub async fn run_admin(command: CatalogCommands) -> Result<()> {
     match command {
         CatalogCommands::Topics { auth } => {
@@ -108,6 +134,31 @@ pub async fn run_admin(command: CatalogCommands) -> Result<()> {
                 Some("endpoints"),
                 &[("Name", "name"), ("Publication", "publication")],
             )
+        }
+        CatalogCommands::ResyncIdentity { service, yes, auth } => {
+            super::billing_support::require_human(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let row = fetch_catalog_service(&mut api, &service).await?;
+            let id = row["id"].as_str().context("Catalog service has no id")?;
+            let name = row["name"].as_str().unwrap_or(&service);
+            // Absent when the slug resolved through the listing; the server decides then.
+            if row["can_resync_identity"] == false {
+                bail!("Only an Admin or the creator of {name} can resync its connection identity");
+            }
+            if !yes {
+                if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+                    bail!("Confirm the identity resync in a terminal or pass --yes");
+                }
+                confirm_resync(name, std::io::stdin().lock(), std::io::stderr().lock())?;
+            }
+            let result: Value = api
+                .post(&format!("/services/{id}/resync-identity"), &json!({}))
+                .await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => println!("{}", resync_summary(name, &result)),
+            }
+            Ok(())
         }
         CatalogCommands::Endpoint { command } => match command {
             CatalogEndpointCommands::List {
@@ -546,6 +597,149 @@ mod tests {
                 "Vendor"
             ])
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod resync_identity {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use clap::Parser;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    const ID: &str = "7f0b1f8e-2f4b-4c3c-9a59-3f1f3d0a2b11";
+
+    fn command(service: &str, server: &MockServer) -> CatalogCommands {
+        CatalogCommands::ResyncIdentity {
+            service: service.into(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        }
+    }
+
+    async fn mount_resync(server: &MockServer, calls: u64) {
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/services/{ID}/resync-identity")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "catalog_service_id": ID,
+                "matched_count": 37,
+                "changed_count": 0,
+                "affected_count": 0,
+            })))
+            .expect(calls)
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn arguments_parse() {
+        let parsed = crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "catalog",
+            "resync-identity",
+            "cma",
+            "--yes",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            crate::cli::Commands::Catalog {
+                command: CatalogCommands::ResyncIdentity { service, yes: true, auth }
+            } if service == "cma" && matches!(auth.output, OutputFormat::Json)
+        ));
+        assert!(crate::cli::Cli::try_parse_from(["nyxid", "catalog", "resync-identity"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn resyncs_a_service_by_uuid() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/services/{ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"id": ID, "slug": "cma", "name": "CMA", "can_resync_identity": true}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_resync(&server, 1).await;
+
+        run_admin(command(ID, &server)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolves_a_slug_through_the_service_listing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/services/cma"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(
+                json!({"error": "not_found", "error_code": 1004, "message": "Service not found"}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/services"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"services": [
+                    {"id": "other", "slug": "other", "name": "Other"},
+                    {"id": ID, "slug": "cma", "name": "CMA"},
+                ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_resync(&server, 1).await;
+
+        run_admin(command("cma", &server)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stops_before_writing_when_the_server_says_no() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/services/{ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"id": ID, "slug": "cma", "name": "CMA", "can_resync_identity": false}),
+            ))
+            .mount(&server)
+            .await;
+        mount_resync(&server, 0).await;
+
+        let error = run_admin(command(ID, &server)).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Only an Admin or the creator of CMA"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn confirmation_requires_an_explicit_yes() {
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n", "n\n", "\n", ""] {
+            let mut output = Vec::new();
+            let result = confirm_resync("CMA", answer.as_bytes(), &mut output);
+            let prompt = String::from_utf8(output).unwrap();
+            assert!(prompt.contains("every connection to CMA"));
+            assert!(prompt.contains("including customized connections"));
+            assert_eq!(
+                result.is_ok(),
+                matches!(answer.trim(), "y" | "Y" | "yes" | "YES"),
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_reports_checked_and_updated_counts() {
+        assert_eq!(
+            resync_summary("CMA", &json!({"matched_count": 37, "changed_count": 2})),
+            "Resynced connection identity for CMA: 37 checked, 2 updated"
         );
     }
 }

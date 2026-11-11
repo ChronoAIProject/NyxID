@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -51,7 +51,7 @@ import { HierarchyIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function AdminGroupsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -129,11 +129,11 @@ export function AdminGroupsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Group Management")}
-        description={t("Manage groups and their role assignments.")}
+        title={translateUi("Group Management")}
+        description={translateUi("Manage groups and their role assignments.")}
         actions={
           canWrite ? (
-            <AddCtaButton label={t("Add Group")} onClick={openCreateDialog} />
+            <AddCtaButton label={translateUi("Add Group")} onClick={openCreateDialog} />
           ) : null
         }
       />
@@ -148,16 +148,16 @@ export function AdminGroupsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("Failed to load groups")}</p>
-            <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("Failed to load groups")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
           </div>
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No groups found")}</p>
-            <p className="text-xs text-muted-foreground">{t("There are no groups to display.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("No groups found")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("There are no groups to display.")}</p>
           </div>
         </div>
       ) : (
@@ -188,17 +188,17 @@ export function AdminGroupsPage() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{group.name}</p>
-                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                  <p className="type-row-title truncate">{group.name}</p>
+                  <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                     {group.slug}
                   </p>
                 </div>
-                <Badge variant="secondary" className="text-xs">
-                  {String(group.member_count)}{t(" member")}{group.member_count !== 1 ? "s" : ""}
+                <Badge variant="secondary" className="text-12">
+                  {String(group.member_count)}{translateUi(" member")}{group.member_count !== 1 ? "s" : ""}
                 </Badge>
               </div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
-                <span>{t("Created ")}{formatDate(group.created_at)}</span>
+              <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
+                <span>{translateUi("Created ")}{formatDate(group.created_at)}</span>
               </div>
             </div>
           ))}
@@ -209,11 +209,11 @@ export function AdminGroupsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("Name")}</TableHead>
-                <TableHead>{t("Slug")}</TableHead>
-                <TableHead>{t("Roles")}</TableHead>
-                <TableHead>{t("Members")}</TableHead>
-                <TableHead>{t("Created")}</TableHead>
+                <TableHead>{translateUi("Name")}</TableHead>
+                <TableHead>{translateUi("Slug")}</TableHead>
+                <TableHead>{translateUi("Roles")}</TableHead>
+                <TableHead>{translateUi("Members")}</TableHead>
+                <TableHead>{translateUi("Created")}</TableHead>
                 <TableHead className="w-[60px]" />
               </TableRow>
             </TableHeader>
@@ -240,20 +240,20 @@ export function AdminGroupsPage() {
                     }
                   }}
                 >
-                  <TableCell className="font-medium">{group.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-normal">{group.name}</TableCell>
+                  <TableCell className="font-mono text-14">
                     {group.slug}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
                       {group.roles.length === 0 ? (
-                        <span className="text-muted-foreground text-xs">{t("None")}</span>
+                        <span className="text-muted-foreground text-13">{translateUi("None")}</span>
                       ) : (
                         group.roles.map((role) => (
                           <Badge
                             key={role.id}
                             variant="secondary"
-                            className="text-xs"
+                            className="text-12"
                           >
                             {role.name}
                           </Badge>
@@ -262,7 +262,7 @@ export function AdminGroupsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-muted-foreground text-13">
                       {String(group.member_count)}
                     </span>
                   </TableCell>
@@ -296,8 +296,8 @@ export function AdminGroupsPage() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Create Group")}</DialogTitle>
-            <DialogDescription>{t("Create a new group to organize users and inherit roles.")}</DialogDescription>
+            <DialogTitle>{translateUi("Create Group")}</DialogTitle>
+            <DialogDescription>{translateUi("Create a new group to organize users and inherit roles.")}</DialogDescription>
           </DialogHeader>
           <Form {...createForm}>
             <form
@@ -311,9 +311,9 @@ export function AdminGroupsPage() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Name")}</FormLabel>
+                    <FormLabel>{translateUi("Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("e.g. Engineering")} {...field} />
+                      <Input placeholder={translateUi("e.g. Engineering")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -324,9 +324,9 @@ export function AdminGroupsPage() {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Slug")}</FormLabel>
+                    <FormLabel>{translateUi("Slug")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("e.g. engineering")} {...field} />
+                      <Input placeholder={translateUi("e.g. engineering")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -337,9 +337,9 @@ export function AdminGroupsPage() {
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Description")}</FormLabel>
+                    <FormLabel>{translateUi("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Optional description")} {...field} />
+                      <Input placeholder={translateUi("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -350,10 +350,10 @@ export function AdminGroupsPage() {
                 name="role_ids"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Roles")}</FormLabel>
+                    <FormLabel>{translateUi("Roles")}</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-12 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-14 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -388,8 +388,8 @@ export function AdminGroupsPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setCreateOpen(false)}
-                >{t("Cancel")}</Button>
-                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{t("Create Group")}</Button>
+                >{translateUi("Cancel")}</Button>
+                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{translateUi("Create Group")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -405,16 +405,16 @@ export function AdminGroupsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete Group")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to delete this group? All members will be removed. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete Group")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete this group? All members will be removed. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteGroupId(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteGroupId(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Delete Group")}</Button>
+            >{translateUi("Delete Group")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

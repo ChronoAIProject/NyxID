@@ -322,8 +322,13 @@ pub async fn allocate_worker(
         .and_then(|request| request.label)
         .map(|label| label.trim().to_string())
         .filter(|label| !label.is_empty());
-    let allocated =
-        oracle_worker_service::allocate_worker(&state.db, &pool, requested.as_deref()).await?;
+    let allocated = oracle_worker_service::allocate_worker_for_manager(
+        &state.db,
+        &actor,
+        &pool,
+        requested.as_deref(),
+    )
+    .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -390,8 +395,14 @@ pub async fn forget_worker(
 ) -> AppResult<Json<ForgetWorkerResponse>> {
     let actor = auth_user.user_id.to_string();
     let (pool, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
-    let outcome =
-        oracle_worker_service::forget_authorized_worker(&state.db, &worker, query.force).await?;
+    let outcome = oracle_worker_service::forget_authorized_worker(
+        &state.db,
+        &pool,
+        &worker,
+        &actor,
+        query.force,
+    )
+    .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -429,7 +440,7 @@ pub async fn enqueue_command(
         None
     };
     let command = oracle_worker_service::enqueue_worker_command(
-        &state.db, &worker, &actor, kind, None, bundle,
+        &state.db, &pool, &worker, &actor, kind, None, bundle,
     )
     .await?;
     audit_service::log_for_user(
@@ -453,8 +464,14 @@ pub async fn cancel_command(
 ) -> AppResult<Json<OracleWorkerCommandInfo>> {
     let actor = auth_user.user_id.to_string();
     let (pool, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
-    let command =
-        oracle_worker_service::cancel_worker_command(&state.db, &worker, &command_id).await?;
+    let command = oracle_worker_service::cancel_worker_command(
+        &state.db,
+        &pool,
+        &worker,
+        &actor,
+        &command_id,
+    )
+    .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -476,8 +493,8 @@ pub async fn list_commands(
     Path((id_or_slug, label)): Path<(String, String)>,
 ) -> AppResult<Json<ListOracleWorkerCommandsResponse>> {
     let actor = auth_user.user_id.to_string();
-    let (_, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
-    let commands = oracle_worker_service::list_worker_commands(&state.db, &worker)
+    let (pool, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
+    let commands = oracle_worker_service::list_worker_commands(&state.db, &pool, &worker, &actor)
         .await?
         .into_iter()
         .map(command_info)

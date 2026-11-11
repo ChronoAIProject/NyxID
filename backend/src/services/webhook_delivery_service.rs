@@ -14,6 +14,24 @@ const BASE_BACKOFF_MS: u64 = 1_000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 const LEGACY_REVOCATION_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_WEBHOOK_TARGET: String;
+}
+
+/// Scope an exact, locally bound wire fixture without relaxing production
+/// HTTPS/public-address policy or sharing mutable transport state across tests.
+#[cfg(test)]
+pub(crate) async fn with_test_webhook_target<F: std::future::Future>(
+    address: std::net::SocketAddr,
+    future: F,
+) -> F::Output {
+    assert!(address.ip().is_loopback());
+    TEST_WEBHOOK_TARGET
+        .scope(format!("http://{address}/hook"), future)
+        .await
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureContract {
     /// Sign `timestamp + "." + body` and send the timestamp in its own header.
@@ -163,6 +181,13 @@ pub async fn validate_webhook_url(url: &str, field_name: &str) -> AppResult<Stri
     let normalized = url.trim();
     let parsed = url::Url::parse(normalized)
         .map_err(|_| AppError::ValidationError(format!("{field_name} must be a valid URL")))?;
+    #[cfg(test)]
+    if TEST_WEBHOOK_TARGET
+        .try_with(|target| target == normalized)
+        .unwrap_or(false)
+    {
+        return Ok(normalized.to_owned());
+    }
     if parsed.scheme() != "https" {
         return Err(AppError::ValidationError(format!(
             "{field_name} must use https"

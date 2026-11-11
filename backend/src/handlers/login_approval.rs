@@ -37,11 +37,11 @@ fn cookie_name(id: &str) -> String {
     format!("nyx_approval_{}", id.replace('-', ""))
 }
 fn origin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
-    let expected = url::Url::parse(&state.config.frontend_url)
-        .map_err(|_| service::invalid())?
-        .origin()
-        .ascii_serialization();
-    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(expected.as_str()) {
+    if !headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|origin| state.config.frontend_origin_allowed(origin))
+    {
         return Err(AppError::Forbidden(
             "Request verification must start from NyxID.".into(),
         ));
@@ -121,6 +121,10 @@ async fn response(state: &AppState, row: &LoginApproval) -> AppResult<ApprovalSt
     } else {
         None
     };
+    status_response(row, user.as_ref())
+}
+
+fn status_response(row: &LoginApproval, user: Option<&User>) -> AppResult<ApprovalStatus> {
     Ok(ApprovalStatus {
         id: row.id.clone(),
         flow: row.flow,
@@ -130,9 +134,9 @@ async fn response(state: &AppState, row: &LoginApproval) -> AppResult<ApprovalSt
         keep_signed_in: row.keep_signed_in,
         expires_at: row.expires_at.to_rfc3339(),
         user: user.map(|u| Identity {
-            id: u.id,
-            email: u.email,
-            display_name: u.display_name,
+            id: u.id.clone(),
+            email: u.email.clone(),
+            display_name: u.display_name.clone(),
         }),
     })
 }
@@ -185,38 +189,138 @@ async fn complete(
     addr: SocketAddr,
 ) -> AppResult<Private<ApprovalStatus>> {
     let method = if mfa { "password_mfa" } else { "password" };
-    complete_identity(state, row, mfa, method, headers, addr, None).await
+    complete_identity(
+        state,
+        row,
+        IdentityCompletion {
+            trusted_authentication: mfa,
+            method,
+            app_request: None,
+            completion: None,
+        },
+        headers,
+        addr,
+    )
+    .await
 }
 
+struct IdentityCompletion<'a> {
+    trusted_authentication: bool,
+    method: &'a str,
+    app_request: Option<&'a crate::models::auth_device_code::AuthDeviceCode>,
+    completion: Option<mfa_service::LoginCompletion>,
+}
 async fn complete_identity(
     state: &AppState,
     row: &LoginApproval,
-    trusted_authentication: bool,
-    method: &str,
+    identity: IdentityCompletion<'_>,
     headers: &HeaderMap,
     addr: SocketAddr,
-    app_request: Option<&crate::models::auth_device_code::AuthDeviceCode>,
 ) -> AppResult<Private<ApprovalStatus>> {
-    service::live(&state.db, state.auth_device_hmac_key.as_slice(), row).await?;
-    let actor = service::user(&state.db, row).await?;
-    if actor.mfa_enabled && !trusted_authentication {
+    let IdentityCompletion {
+        trusted_authentication,
+        method,
+        app_request,
+        mut completion,
+    } = identity;
+    let prepared: AppResult<_> = async {
+        service::live(&state.db, state.auth_device_hmac_key.as_slice(), row).await?;
+        let actor = service::user(&state.db, row).await?;
+        let ip = resolve_client_ip(headers, addr, state)?.to_string();
+        Ok((actor, ip))
+    }
+    .await;
+    let (actor, ip) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Some(completion) = completion.take() {
+                completion.abort().await?;
+            }
+            return Err(error);
+        }
+    };
+    if actor.mfa_enabled
+        && !trusted_authentication
+        && app_request
+            .and_then(|r| r.mfa_policy_revision.as_ref())
+            .is_none()
+    {
+        if let Some(completion) = completion.take() {
+            completion.abort().await?;
+        }
         return Ok(private(response(state, row).await?));
     }
-    let ip = resolve_client_ip(headers, addr, state)?.to_string();
     let ua = extract_user_agent(headers);
-    let (row, session) = if let Some(request) = app_request {
-        service::verify_app(&state.db, row, request, &ip, ua.as_deref()).await?
+    let mut ordinary_transaction = if completion.is_none() {
+        let mut transaction = state.db.client().start_session().await?;
+        transaction
+            .start_transaction()
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
+        Some(transaction)
     } else {
-        service::verify(&state.db, row, trusted_authentication, &ip, ua.as_deref()).await?
+        None
     };
-    let (mut result_headers, body) = private(response(state, &row).await?);
-    if let Some(session) = session {
-        apply_browser_session_cookies(
-            &mut result_headers,
-            &session.session_token,
-            state.config.use_secure_cookies(),
-            state.config.cookie_domain(),
-        )?;
+    let transaction = completion
+        .as_mut()
+        .map(|completion| &mut completion.transaction)
+        .or(ordinary_transaction.as_mut())
+        .expect("completion transaction");
+    let prepared: AppResult<_> = async {
+        let (verified, session) = service::verify_identity_in_transaction(
+            &state.db,
+            row,
+            trusted_authentication,
+            &ip,
+            ua.as_deref(),
+            app_request,
+            transaction,
+        )
+        .await?;
+        // The already-verified actor snapshot supplies identity display data;
+        // no fallible database reads or header construction follow proof commit.
+        let (mut headers, body) = private(status_response(&verified, Some(&actor))?);
+        if let Some(session) = session {
+            apply_browser_session_cookies(
+                &mut headers,
+                &session.session_token,
+                state.config.use_secure_cookies(),
+                state.config.cookie_domain(),
+            )?;
+        }
+        Ok((verified, headers, body))
+    }
+    .await;
+    let (row, result_headers, body) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Some(completion) = completion {
+                completion.abort().await?;
+            }
+            if let Some(mut transaction) = ordinary_transaction {
+                transaction.abort_transaction().await?;
+            }
+            if matches!(error, AppError::AuthDeviceCodeDenied)
+                && let Some(request) = app_request
+                && let Some(revision) = request.mfa_policy_revision.as_deref()
+            {
+                crate::services::approved_sign_in_policy::deny_undelivered(
+                    &state.db,
+                    crate::models::auth_device_code::COLLECTION_NAME,
+                    &request.id,
+                    revision,
+                )
+                .await?;
+            }
+            return Err(error);
+        }
+    };
+    if let Some(completion) = completion {
+        let factor = completion.commit().await?;
+        mfa_service::notify_recovery_use(state, &actor.id, factor);
+    }
+    if let Some(mut transaction) = ordinary_transaction {
+        crate::services::transaction_service::commit(&mut transaction).await?;
     }
     audit_service::log_async(
         state.db.clone(),
@@ -224,7 +328,8 @@ async fn complete_identity(
         "login_request_identity_verified".into(),
         Some(
             serde_json::json!({"request_id": row.request_id, "keep_signed_in": row.keep_signed_in,
-                "method": method, "mfa_verified": method == "password_mfa"}),
+                "method": method, "mfa_verified": row.mfa_verified, "mfa_policy": row.mfa_policy_revision.as_ref().map(|_| "approved_sign_in"),
+                "policy_default": row.mfa_policy_revision.as_deref() == Some(crate::services::approved_sign_in_policy::DEFAULT_REVISION)}),
         ),
         Some(ip),
         ua,
@@ -289,7 +394,19 @@ pub async fn app_poll(
         &body.device_code,
     )
     .await?;
-    complete_identity(&state, &row, true, "app", &headers, addr, Some(&request)).await
+    complete_identity(
+        &state,
+        &row,
+        IdentityCompletion {
+            trusted_authentication: request.mfa_assured,
+            method: "app",
+            app_request: Some(&request),
+            completion: None,
+        },
+        &headers,
+        addr,
+    )
+    .await
 }
 pub async fn password(
     State(state): State<AppState>,
@@ -305,8 +422,17 @@ pub async fn password(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
     let actor = auth_service::authenticate_user(&state.db, &body.email, &body.password).await?;
-    let row = service::identify(&state.db, &row, &actor).await?;
-    complete(&state, &row, false, &headers, addr).await
+    finish_password_identity(&state, &row, &actor, &headers, addr).await
+}
+pub(crate) async fn finish_password_identity(
+    state: &AppState,
+    row: &LoginApproval,
+    actor: &User,
+    headers: &HeaderMap,
+    addr: SocketAddr,
+) -> AppResult<Private<ApprovalStatus>> {
+    let row = service::identify_password(&state.db, row, actor).await?;
+    complete(state, &row, false, headers, addr).await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -325,14 +451,28 @@ pub async fn mfa(
     let actor = service::user(&state.db, &row).await?;
     limit(&state, &headers, addr, Some(&actor.id)).await?;
     service::attempt(&state.db, &row).await?;
-    if body.code.len() != 6
-        || !body.code.bytes().all(|b| b.is_ascii_digit())
-        || !mfa_service::verify_totp(&state.db, &state.encryption_keys, &actor.id, &body.code)
-            .await?
-    {
-        return Err(AppError::AuthenticationFailed("Invalid MFA code".into()));
-    }
-    complete(&state, &row, true, &headers, addr).await
+    let factor = mfa_service::begin_login_completion(
+        &state.db,
+        &state.encryption_keys,
+        &actor.id,
+        &body.code,
+        None,
+    )
+    .await?
+    .ok_or_else(|| AppError::AuthenticationFailed("Invalid MFA code".into()))?;
+    complete_identity(
+        &state,
+        &row,
+        IdentityCompletion {
+            trusted_authentication: true,
+            method: "password_mfa",
+            app_request: None,
+            completion: Some(factor),
+        },
+        &headers,
+        addr,
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -406,6 +546,16 @@ pub async fn approve(
         return Err(service::invalid());
     }
     let actor = service::user(&state.db, &row).await?;
+    let mut authority = crate::services::session_authority::DerivedMfaAuthority::new(
+        actor.mfa_enabled,
+        row.mfa_verified,
+    );
+    authority.app_policy_revision = row
+        .mfa_policy_revision
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| service::invalid())?;
     let ip = limit(&state, &headers, addr, Some(&actor.id)).await?;
     let ua = extract_user_agent(&headers);
     let expiry = body
@@ -431,6 +581,7 @@ pub async fn approve(
                 expiry,
                 Some(&ip),
                 ua.as_deref(),
+                authority,
             )
             .await
         }
@@ -449,6 +600,7 @@ pub async fn approve(
                     input,
                     selection,
                     expiry,
+                    authority,
                 )
                 .await
             } else {
@@ -459,6 +611,7 @@ pub async fn approve(
                     &state.encryption_keys,
                     state.auth_device_hmac_key.as_slice(),
                     input,
+                    authority,
                 )
                 .await
             }
@@ -544,9 +697,21 @@ pub(super) async fn social_complete(
     let row =
         service::consume_social(&state.db, state.auth_device_hmac_key.as_slice(), id, raw).await?;
     let row = service::identify(&state.db, &row, actor).await?;
-    // Match ordinary social login: the provider owns its authentication challenges.
-    let (mut headers, _) =
-        complete_identity(state, &row, true, "social", headers, addr, None).await?;
+    // Social identity proves the external first factor only. NyxID MFA users
+    // still complete the approval MFA step, including request-only approvals.
+    let (mut headers, _) = complete_identity(
+        state,
+        &row,
+        IdentityCompletion {
+            trusted_authentication: false,
+            method: "social",
+            app_request: None,
+            completion: None,
+        },
+        headers,
+        addr,
+    )
+    .await?;
     // Identity and scope hints remain in tab-local state. The callback carries no credential.
     let mut url = url::Url::parse(&state.config.frontend_url).map_err(|_| service::invalid())?;
     url.set_path(&format!(
@@ -563,4 +728,19 @@ pub(super) async fn social_complete(
         url.as_str().parse().map_err(|_| service::invalid())?,
     );
     Ok((StatusCode::FOUND, headers, ()))
+}
+
+#[cfg(test)]
+mod domain_alias_tests {
+    #[tokio::test]
+    async fn domain_alias_browser_origin_gate_is_opt_in() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", "https://old.example".parse().unwrap());
+        assert!(super::origin(&state, &headers).is_err());
+        state.config.domain_aliases.frontend_urls = vec!["https://old.example".into()];
+        assert!(super::origin(&state, &headers).is_ok());
+        headers.insert("origin", "https://old.example.evil".parse().unwrap());
+        assert!(super::origin(&state, &headers).is_err());
+    }
 }

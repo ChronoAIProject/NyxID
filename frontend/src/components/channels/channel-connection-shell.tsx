@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ReactNode } from "react";
 import { ExternalLink } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
@@ -8,6 +9,7 @@ import { ConnectionArc } from "@/components/shared/connection-arc";
 import { useApplyTheme } from "@/hooks/use-theme";
 
 function ChannelIcon({ platform }: { readonly platform: string }) {
+  useUiTranslation();
   if (platform === "telegram" || platform === "telegram-new") {
     return <TelegramGlyph className="size-9 text-foreground" />;
   }
@@ -38,7 +40,7 @@ export function ChannelConnectionShell({
   readonly guideUrl?: string | null;
   readonly children: ReactNode;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   useApplyTheme();
   return (
     <div className="flex min-h-dvh flex-col bg-background px-4 py-6 text-foreground sm:py-10">
@@ -51,61 +53,61 @@ export function ChannelConnectionShell({
                   href={guideUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                >{t("Channel setup guide")}<ExternalLink className="size-3" aria-hidden="true" />
+                  className="inline-flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
+                >{translateUi("Channel setup guide")}<ExternalLink className="size-3" aria-hidden="true" />
                 </a>
               </div>
             )}
             <div
               className="mb-6 flex items-start justify-center"
               role="img"
-              aria-label={t("NyxID connects to {{value}}", { value: platformName ?? t("your channel") })}
+              aria-label={translateUi("NyxID connects to {{value1}}", { value1: platformName ?? "your channel" })}
             >
               <div className="flex w-20 flex-col items-center gap-2.5">
                 <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
                   <NyxidIcon className="size-9" alt="" />
                 </div>
-                <span className="text-12 font-medium">{t("NyxID")}</span>
+                <span className="type-row-title">NyxID</span>
               </div>
               <ConnectionArc complete={complete} />
               <div className="flex w-20 flex-col items-center gap-2.5">
                 <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
                   <ChannelIcon platform={platform} />
                 </div>
-                <span className="text-center text-12 font-medium">
-                  {platformName ?? t("Channel")}
+                <span className="text-center type-row-title">
+                  {platformName ?? translateUi("Channel")}
                 </span>
               </div>
             </div>
             <div className="mb-7 space-y-2 text-center">
-              <h1 className="font-display text-22 font-medium leading-tight tracking-tight sm:text-28">
+              <h1 className="font-display type-compact-page-title tracking-tight sm:type-page-title">
                 {platform === "telegram"
                   ? complete
-                    ? t("Your Telegram bot is connected")
-                    : t("Connect your Telegram bot")
+                    ? translateUi("Your Telegram bot is connected")
+                    : translateUi("Connect your Telegram bot")
                   : platformName
                     ? complete
-                      ? t("Your {{platformName}} channel bot is created", { platformName: platformName })
-                      : t("Create your {{platformName}} channel bot", { platformName: platformName })
-                    : t("Set up your channel bot")}
+                      ? translateUi("Your {{value1}} channel bot is created", { value1: platformName })
+                      : translateUi("Create your {{value1}} channel bot", { value1: platformName })
+                    : translateUi("Set up your channel bot")}
               </h1>
-              <p className="text-12 leading-relaxed text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 {complete
-                  ? t("Finish any platform setup, then choose an agent to respond to your messages.")
+                  ? translateUi("Finish any platform setup, then choose an agent to respond to your messages.")
                   : platform === "telegram-new"
-                    ? t("Create a bot in Telegram and connect it to your AI agents through NyxID.")
-                    : t("Connect your {{value}} bot to NyxID so your AI agents can receive and reply to messages.", { value: platformName ?? t("channel") })}
+                    ? translateUi("Create a bot in Telegram and connect it to your AI agents through NyxID.")
+                    : translateUi("Connect your {{value1}} bot to NyxID so your AI agents can receive and reply to messages.", { value1: platformName ?? "channel" })}
               </p>
             </div>
             {children}
           </div>
           {email && (
-            <div className="border-t border-border/60 px-5 py-3 text-center text-11 text-muted-foreground sm:px-8">{t("Signed in as")}{" "}
+            <div className="border-t border-border/60 px-5 py-3 text-center text-13 text-muted-foreground sm:px-8">{translateUi("Signed in as")}{" "}
               <span className="break-all text-foreground">{email}</span>
             </div>
           )}
         </main>
-        <footer className="mt-6 flex h-7 items-center justify-center text-center text-11 text-muted-foreground">{t("Channel connections by NyxID")}</footer>
+        <footer className="mt-6 flex h-7 items-center justify-center text-center text-13 text-muted-foreground">{translateUi("Channel connections by NyxID")}</footer>
       </div>
     </div>
   );

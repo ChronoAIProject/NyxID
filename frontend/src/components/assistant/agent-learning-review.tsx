@@ -1,10 +1,15 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+} from "@/components/ui/grouped-list";
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { GroupedDetail } from "@/components/ui/grouped-detail";
 import { Switch } from "@/components/ui/switch";
 import { useAgentLearningReview } from "@/hooks/use-agent-learning-review";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -29,7 +34,7 @@ export function AgentLearningReview({
   readonly proposalId?: string;
   readonly readOnly?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string | undefined>(proposalId);
@@ -45,6 +50,10 @@ export function AgentLearningReview({
     if (serverThreshold !== undefined) setThreshold(serverThreshold);
   }, [serverThreshold]);
 
+  useDrawerSearchEntries(enabled && (!readOnly || review.data) ? (review.data?.proposals ?? []).map((proposal) => ({
+    id: `learning-${proposal.id}`, title: proposal.draft?.name ?? "Learning proposal", breadcrumb: "Skills › Learning proposals",
+    keywords: `${proposal.status} ${proposal.source}`, pages: [`learning-${proposal.id}`], reveal: () => setOpen(proposal.id),
+  })) : []);
   if (!enabled || (readOnly && !review.data)) {
     return null;
   }
@@ -53,80 +62,111 @@ export function AgentLearningReview({
   const proposals = review.data?.proposals ?? [];
 
   return (
-    <section aria-label={t("Learning")} className="space-y-3">
-      <div className="space-y-1">
-        <h3 className="text-13 font-semibold text-foreground">{t("Learning proposals")}</h3>
-        <p className="text-12 text-muted-foreground">{t("Completed work can produce private, untrusted Ornn skill drafts. Full access publishes and attaches automatically; other modes require your confirmation.")}</p>
-      </div>
-      {review.error ? (
-        <p role="alert" className="text-12 text-destructive">{t("Automatic learning is unavailable.")}</p>
-      ) : null}
-      {review.status.data?.publication_blocked ? (
-        <p role="alert" className="text-12 text-warning">{t("Publishing is unavailable for this organization because it has no owner binding. Organization members may consent to learning, but only the bound owner can publish private Ornn skills. Contact an organization owner to publish.")}</p>
-      ) : null}
-      {review.status.data?.org_owned && !readOnly ? (
-        <label className="flex items-center gap-2 text-12">
-          <Switch
-            checked={review.status.data.opted_in ?? false}
-            disabled={review.consent?.isPending}
-            onCheckedChange={(checked) => review.consent?.mutate(checked)}
-          />{t("I consent to learning proposals for this organization")}</label>
-      ) : null}
-      {/* Draft edit failures render inside the editor, beside their fields. */}
-      {[
-        review.run.error,
-        review.configure.error,
-        review.consent?.error,
-        review.reject.error,
-      ]
-        .filter(Boolean)
-        .map((error, index) => (
-          <p key={index} role="alert" className="text-12 text-destructive">
-            {requestFailure(error)}
-          </p>
-        ))}
-
-      {!readOnly ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3">
-          <label className="flex items-center gap-2 text-12">
-            <Switch
-              checked={learningEnabled}
-              disabled={review.configure.isPending}
-              onCheckedChange={(checked) =>
-                review.configure.mutate({
-                  enabled: checked,
-                  threshold: Math.min(50, Math.max(1, threshold)),
-                })
-              }
-            />{t("Enable automatic learning")}</label>
-          <label className="flex items-center gap-2 text-12">
-            <span>{t("Threshold")}</span>
-            <Input
-              aria-label={t("Learning threshold")}
-              className="w-16"
-              type="number"
-              min={1}
-              max={50}
-              value={threshold}
-              onChange={(event) =>
-                setThreshold(Number(event.target.value) || 15)
-              }
-              onBlur={() => {
-                if (learningEnabled) {
+    <section aria-label={translateUi("Learning")} className="space-y-3">
+      <GroupedList
+        title={translateUi("Learning proposals")}
+        search={{ id: "learning-proposals", title: "Learning proposals", breadcrumb: "Skills", keywords: "Automatic learning private drafts" }}
+        footer={
+          <>
+            <p>{translateUi("Completed work can produce private, untrusted Ornn skill drafts. Full access publishes and attaches automatically; other modes require your confirmation.")}</p>
+            {review.error ? (
+              <p role="alert" className="text-destructive">{translateUi("Automatic learning is unavailable.")}</p>
+            ) : null}
+            {review.status.data?.publication_blocked ? (
+              <p role="alert" className="text-warning">{translateUi("Publishing is unavailable for this organization because it has no owner binding. Organization members may consent to learning, but only the bound owner can publish private Ornn skills. Contact an organization owner to publish.")}</p>
+            ) : null}
+            {[
+              review.run.error,
+              review.configure.error,
+              review.consent?.error,
+              review.reject.error,
+            ]
+              .filter(Boolean)
+              .map((error, index) => (
+                <p key={index} role="alert" className="text-destructive">
+                  {requestFailure(error)}
+                </p>
+              ))}
+          </>
+        }
+      >
+        <GroupedRow
+          search={{ id: "automatic-learning", title: "Automatic learning", breadcrumb: "Skills › Learning proposals", keywords: learningEnabled ? "On" : "Off" }}
+          title={translateUi("Automatic learning")}
+          accessory={
+            readOnly ? (
+              learningEnabled ? (
+                "On"
+              ) : (
+                "Off"
+              )
+            ) : (
+              <Switch
+                aria-label={translateUi("Enable automatic learning")}
+                checked={learningEnabled}
+                disabled={review.configure.isPending}
+                onCheckedChange={(checked) =>
                   review.configure.mutate({
-                    enabled: true,
+                    enabled: checked,
                     threshold: Math.min(50, Math.max(1, threshold)),
-                  });
+                  })
                 }
-              }}
-            />
-          </label>
-        </div>
-      ) : null}
-
-      {proposals.length === 0 ? (
-        <p className="text-12 text-text-tertiary">{t("No pending proposals.")}</p>
-      ) : null}
+              />
+            )
+          }
+        />
+        {!readOnly ? (
+          <GroupedRow
+            search={{ id: "learning-threshold", title: "Threshold", breadcrumb: "Skills › Learning proposals", keywords: String(threshold) }}
+            title={translateUi("Threshold")}
+            accessory={
+              <GroupedInput
+                aria-label={translateUi("Learning threshold")}
+                className="w-16 text-right"
+                type="number"
+                min={1}
+                max={50}
+                value={threshold}
+                onChange={(event) =>
+                  setThreshold(Number(event.target.value) || 15)
+                }
+                onBlur={() => {
+                  if (learningEnabled)
+                    review.configure.mutate({
+                      enabled: true,
+                      threshold: Math.min(50, Math.max(1, threshold)),
+                    });
+                }}
+              />
+            }
+          />
+        ) : null}
+        {review.status.data?.org_owned && !readOnly ? (
+          <GroupedRow
+            title={translateUi("I consent to learning proposals for this organization")}
+            accessory={
+              <Switch
+                aria-label={translateUi("I consent to learning proposals for this organization")}
+                checked={review.status.data.opted_in ?? false}
+                disabled={review.consent?.isPending}
+                onCheckedChange={(checked) => review.consent?.mutate(checked)}
+              />
+            }
+          />
+        ) : null}
+        {!proposals.length ? (
+          <GroupedRow title={translateUi("No pending proposals.")} />
+        ) : null}
+        {!readOnly ? (
+          <GroupedRow asChild interactive>
+            <button
+              type="button"
+              disabled={review.run.isPending}
+              onClick={() => review.run.mutate()}
+            >{translateUi("Run learning now")}</button>
+          </GroupedRow>
+        ) : null}
+      </GroupedList>
 
       {proposals.map((proposal) => {
         const draft = proposal.draft;
@@ -154,76 +194,91 @@ export function AgentLearningReview({
             recovering ||
             proposal.status === "pending" ||
             proposal.status === "publication_failed");
-        return (
-          <article
-            key={proposal.id}
-            id={`learning-proposal-${proposal.id}`}
-            className="space-y-3 rounded-lg border border-border/50 p-3"
+        const summary = (
+          <GroupedList
+            title={translateUi("Proposal")}
+            footer={
+              <>
+                {proposal.failure_code ? (
+                  <p role="alert" className="text-destructive">
+                    {publicationFailureText(
+                      proposal.failure_code,
+                      proposal.status,
+                      proposal.source,
+                    )}
+                  </p>
+                ) : null}
+                {errors[proposal.id] ? (
+                  <p role="alert" className="text-destructive">
+                    {errors[proposal.id]}
+                  </p>
+                ) : null}
+                {checkOnly ? (
+                  <p role="status" className="text-warning">{translateUi("Learning evidence or consent is no longer available. NyxID can only check whether this publication reached Ornn; it will not attach it to the agent.")}</p>
+                ) : null}
+              </>
+            }
           >
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-12 font-medium">
-                {draft?.name ?? t("Learning proposal")}
-              </p>
-              <Badge variant="secondary">{proposal.status}</Badge>
-            </div>
-            <p className="text-12 text-muted-foreground">
-              {draft?.description}
-            </p>
-            <p className="text-11 text-text-tertiary">
-              {proposal.evidence_count}{t(" evidence items ·")}{" "}
-              {proposal.body_bytes.toLocaleString(getFormattingLocale())}{t(" bytes")}</p>
+            <GroupedRow
+              title={draft?.name ?? translateUi("Learning proposal")}
+              description={draft?.description}
+              accessory={proposal.status.replaceAll("_", " ")}
+            />
+            <GroupedRow
+              title={translateUi("Evidence")}
+              accessory={`${proposal.evidence_count} items · ${proposal.body_bytes.toLocaleString(getFormattingLocale())} bytes`}
+            />
             {proposal.published_version ? (
-              <p className="text-11 text-success">{t("Published version: ")}{proposal.published_version}
-              </p>
-            ) : null}
-            {proposal.failure_code ? (
-              <p role="alert" className="text-11 text-destructive">
-                {publicationFailureText(proposal.failure_code, proposal.status, proposal.source)}
-              </p>
-            ) : null}
-            {errors[proposal.id] ? (
-              <p role="alert" className="text-11 text-destructive">
-                {errors[proposal.id]}
-              </p>
-            ) : null}
-            {checkOnly ? (
-              <p role="status" className="text-11 text-warning">{t("Learning evidence or consent is no longer available. NyxID can only check whether this publication reached Ornn; it will not attach it to the agent.")}</p>
-            ) : null}
-
-            {isOpen && proposal.source === "authored" && proposal.auto_allowed ? (
-              <AuthoredSkillScopePreview agentId={agentId} proposalId={proposal.id} />
-            ) : null}
-            {isOpen && draft ? (
-              <LearningDraftEditor
-                key={`${proposal.id}:${proposal.revision}`}
-                agentId={agentId}
-                proposal={{ ...proposal, draft }}
-                readOnly={readOnly || !learningDraftEditable(proposal.status)}
-                edit={review.edit}
-                validate={review.validate}
+              <GroupedRow
+                title={translateUi("Published version")}
+                accessory={proposal.published_version}
               />
             ) : null}
-
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
+          </GroupedList>
+        );
+        const actions = (
+          <GroupedList
+            footer={
+              approvable &&
+              proposal.source !== "authored" &&
+              !legacyPackage &&
+              !checkOnly &&
+              !readOnly ? (
+                <p className="text-warning">
+                  {card
+                    ? translateUi("Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes.")
+                    : translateUi("Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm.")}
+                </p>
+              ) : undefined
+            }
+          >
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
                 onClick={() => setOpen(isOpen ? undefined : proposal.id)}
               >
-                {isOpen ? t("Hide draft") : t("Review draft")}
-              </Button>
-              {proposal.source === "authored" && proposal.status !== "pinned" ? (
-                proposal.card_conversation_id ? (
+                {isOpen ? translateUi("Hide draft") : translateUi("Review draft")}
+              </button>
+            </GroupedRow>
+            {proposal.source === "authored" && proposal.status !== "pinned" ? (
+              proposal.card_conversation_id ? (
+                <GroupedRow asChild interactive>
                   <Link
                     to="/assistant"
-                    search={{ c: proposal.card_conversation_id, card: proposal.acknowledgement_id ?? undefined }}
-                    className="text-11 text-primary hover:underline"
-                  >{t("Open the confirmation card")}</Link>
-                ) : (
-                  <p className="text-11 text-muted-foreground">{t("Confirm this authored skill from its conversation card.")}</p>
-                )
-              ) : legacyPackage ? (
-                <Button
-                  size="sm"
+                    search={{
+                      c: proposal.card_conversation_id,
+                      card: proposal.acknowledgement_id ?? undefined,
+                    }}
+                    className="type-row-title text-primary hover:underline"
+                  >{translateUi("Open the confirmation card")}</Link>
+                </GroupedRow>
+              ) : (
+                <GroupedRow title={translateUi("Confirm this authored skill from its conversation card.")} />
+              )
+            ) : legacyPackage ? (
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
                   disabled={readOnly || review.reprepare.isPending}
                   onClick={async () => {
                     setErrors((current) => ({ ...current, [proposal.id]: "" }));
@@ -238,10 +293,12 @@ export function AgentLearningReview({
                       }));
                     }
                   }}
-                >{t("Review updated package")}</Button>
-              ) : !approvable ? null : (
-                <Button
-                  size="sm"
+                >{translateUi("Review updated package")}</button>
+              </GroupedRow>
+            ) : !approvable ? null : (
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
                   disabled={readOnly || review.approve.isPending}
                   onClick={async () => {
                     setErrors((current) => ({ ...current, [proposal.id]: "" }));
@@ -271,26 +328,29 @@ export function AgentLearningReview({
                 >
                   {checkOnly
                     ? card
-                      ? t("Confirm check")
-                      : t("Check publication")
+                      ? translateUi("Confirm check")
+                      : translateUi("Check publication")
                     : recovering
                       ? card
-                        ? t("Confirm finish publishing")
-                        : t("Finish publishing")
+                        ? translateUi("Confirm finish publishing")
+                        : translateUi("Finish publishing")
                       : proposal.status === "publication_failed"
-                        ? t("Retry publication")
+                        ? translateUi("Retry publication")
                         : card
-                          ? t("Confirm publish & attach")
-                          : t("Publish & request confirmation")}
-                </Button>
-              )}
-              {/* The server rejects only pending or failed drafts. A failed
+                          ? translateUi("Confirm publish & attach")
+                          : translateUi("Publish & request confirmation")}
+                </button>
+              </GroupedRow>
+            )}
+            {/* The server rejects only pending or failed drafts. A failed
                   publication that may have reached Ornn is refused, and the
                   reason appears in the error line above. */}
-              {proposal.status === "pending" ||
-              proposal.status === "publication_failed" || (proposal.auto_allowed && proposal.status === "pinned") ? (
-                <Button
-                  size="sm"
+            {proposal.status === "pending" ||
+            proposal.status === "publication_failed" ||
+            (proposal.auto_allowed && proposal.status === "pinned") ? (
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
                   disabled={readOnly || review.reject.isPending}
                   onClick={async () => {
                     setErrors((current) => ({ ...current, [proposal.id]: "" }));
@@ -307,33 +367,56 @@ export function AgentLearningReview({
                     }
                   }}
                 >
-                  {proposal.auto_allowed && proposal.status === "pinned" ? t("Discard and detach") : t("Reject")}
-                </Button>
-              ) : null}
-            </div>
-            {approvable &&
-            proposal.source !== "authored" &&
-            !legacyPackage &&
-            !checkOnly &&
-            !readOnly ? (
-              <p className="text-11 text-warning">
-                {card
-                  ? t("Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes.")
-                  : t("Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm.")}
-              </p>
+                  {proposal.auto_allowed && proposal.status === "pinned"
+                    ? translateUi("Discard and detach")
+                    : translateUi("Reject")}
+                </button>
+              </GroupedRow>
             ) : null}
+          </GroupedList>
+        );
+        return (
+          <article
+            key={proposal.id}
+            id={`learning-proposal-${proposal.id}`}
+            className="space-y-3"
+          >
+            {!isOpen ? summary : null}
+            <GroupedDetail
+              searchPage={`learning-${proposal.id}`}
+              open={isOpen}
+              title={draft?.name ?? translateUi("Learning proposal")}
+              info="Review this proposed skill and its supporting evidence before publishing or dismissing it."
+              onReveal={() => setOpen(proposal.id)}
+              backLabel={translateUi("Back to Skills")}
+              onBack={() => setOpen(undefined)}
+            >
+              {isOpen ? <div data-drawer-search-target={`learning-${proposal.id}`}>{summary}</div> : null}
+              {isOpen &&
+              proposal.source === "authored" &&
+              proposal.auto_allowed ? (
+                <AuthoredSkillScopePreview
+                  agentId={agentId}
+                  proposalId={proposal.id}
+                />
+              ) : null}
+              {isOpen && draft ? (
+                <LearningDraftEditor
+                  key={`${proposal.id}:${proposal.revision}`}
+                  agentId={agentId}
+                  proposal={{ ...proposal, draft }}
+                  readOnly={readOnly || !learningDraftEditable(proposal.status)}
+                  edit={review.edit}
+                  validate={review.validate}
+                />
+              ) : null}
+
+              {isOpen ? actions : null}
+            </GroupedDetail>
+            {!isOpen ? actions : null}
           </article>
         );
       })}
-
-      {!readOnly ? (
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={review.run.isPending}
-          onClick={() => review.run.mutate()}
-        >{t("Run learning now")}</Button>
-      ) : null}
     </section>
   );
 }

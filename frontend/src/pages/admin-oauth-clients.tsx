@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -175,7 +175,7 @@ const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
     field: "created_by",
     get label() { return translateUi("Created By"); },
     defaultWidth: 200,
-    cellClassName: "font-mono text-11 text-muted-foreground",
+    cellClassName: "font-mono text-13 text-muted-foreground",
   },
   {
     field: "broker",
@@ -196,7 +196,7 @@ const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
     field: "created_at",
     get label() { return translateUi("Created"); },
     defaultWidth: 190,
-    cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
+    cellClassName: "whitespace-nowrap text-14 text-muted-foreground",
   },
 ];
 
@@ -223,7 +223,7 @@ type OAuthClientSearchEditTarget =
     };
 
 export function AdminOAuthClientsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const routeSearch = useSearch({
     strict: false,
@@ -455,7 +455,7 @@ export function AdminOAuthClientsPage() {
         nextValues,
       );
       if (!encoded) {
-        toast.error(translateUi("Search supports up to 8 values per field and 32 overall"));
+        toast.error(translateErrorMessage("Search supports up to 8 values per field and 32 overall"));
         return;
       }
       nextScopedSearch = encoded;
@@ -644,13 +644,13 @@ export function AdminOAuthClientsPage() {
         return (
           <div className="min-w-0 space-y-1">
             <p
-              className="line-clamp-2 break-words text-sm font-medium text-foreground"
+              className="line-clamp-2 break-words type-row-title text-foreground"
               title={client.client_name}
             >
               {client.client_name}
             </p>
             <p
-              className="line-clamp-2 break-all font-mono text-11 text-muted-foreground"
+              className="line-clamp-2 break-all font-mono text-13 text-muted-foreground"
               title={client.id}
             >
               {client.id}
@@ -667,16 +667,16 @@ export function AdminOAuthClientsPage() {
         return (
           <span
             className="line-clamp-2 break-all"
-            title={client.created_by ?? t("ownerless")}
+            title={client.created_by ?? translateUi("ownerless")}
           >
-            {client.created_by ?? t("ownerless")}
+            {client.created_by ?? translateUi("ownerless")}
           </span>
         );
       case "broker":
         return canWrite ? (
           <div className="flex items-center gap-2.5">
             <Switch
-              aria-label={t("Toggle broker capability for {{client_name}} ({{id}})", { client_name: client.client_name, id: client.id })}
+              aria-label={translateUi("Toggle broker capability for {{value1}} ({{value2}})", { value1: client.client_name, value2: client.id })}
               checked={client.broker_capability_effective}
               disabled={
                 isFetching ||
@@ -687,10 +687,10 @@ export function AdminOAuthClientsPage() {
                 stageBrokerCapability(client, checked)
               }
             />
-            <span className="whitespace-nowrap text-11 font-medium text-foreground">
+            <span className="whitespace-nowrap type-secondary-emphasis text-foreground">
               {client.broker_capability_effective
-                ? t("Broker enabled")
-                : t("No broker")}
+                ? translateUi("Broker enabled")
+                : translateUi("No broker")}
             </span>
             <BrokerSourceBadge source={client.broker_capability_source} />
           </div>
@@ -698,8 +698,8 @@ export function AdminOAuthClientsPage() {
           <div className="flex items-center gap-2">
             <ClientStateBadge
               active={client.broker_capability_effective}
-              activeLabel={t("Broker enabled")}
-              inactiveLabel={t("No broker")}
+              activeLabel={translateUi("Broker enabled")}
+              inactiveLabel={translateUi("No broker")}
             />
             <BrokerSourceBadge source={client.broker_capability_source} />
           </div>
@@ -708,7 +708,7 @@ export function AdminOAuthClientsPage() {
         return canWrite ? (
           <div className="flex items-center gap-2.5">
             <Switch
-              aria-label={t("Toggle active status for {{client_name}} ({{id}})", { client_name: client.client_name, id: client.id })}
+              aria-label={translateUi("Toggle active status for {{value1}} ({{value2}})", { value1: client.client_name, value2: client.id })}
               checked={client.is_active}
               disabled={
                 isFetching ||
@@ -717,15 +717,15 @@ export function AdminOAuthClientsPage() {
               }
               onCheckedChange={(checked) => stageActive(client, checked)}
             />
-            <span className="whitespace-nowrap text-11 font-medium text-foreground">
-              {client.is_active ? t("Active") : t("Inactive")}
+            <span className="whitespace-nowrap type-secondary-emphasis text-foreground">
+              {client.is_active ? translateUi("Active") : translateUi("Inactive")}
             </span>
           </div>
         ) : (
           <ClientStateBadge
             active={client.is_active}
-            activeLabel={t("Active")}
-            inactiveLabel={t("Inactive")}
+            activeLabel={translateUi("Active")}
+            inactiveLabel={translateUi("Inactive")}
           />
         );
       case "allowed_scopes":
@@ -738,8 +738,8 @@ export function AdminOAuthClientsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("OAuth Clients")}
-        description={t("Manage platform OAuth clients, including dynamic registrations used by broker-capable apps.")}
+        title={translateUi("OAuth Clients")}
+        description={translateUi("Manage platform OAuth clients, including dynamic registrations used by broker-capable apps.")}
       />
 
       {canWrite && (
@@ -754,7 +754,7 @@ export function AdminOAuthClientsPage() {
 
       <section
         className="m-0 overflow-hidden rounded-lg border border-border/60 bg-card"
-        aria-label={t("OAuth clients")}
+        aria-label={translateUi("OAuth clients")}
       >
         <DataTableControls
           search={
@@ -796,13 +796,13 @@ export function AdminOAuthClientsPage() {
               <div
                 role="status"
                 aria-live="polite"
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                className="flex items-center gap-1.5 text-13 text-muted-foreground"
               >
                 <Loader2
                   className="h-3.5 w-3.5 animate-spin"
                   aria-hidden="true"
                 />
-                <span>{t("Updating results")}</span>
+                <span>{translateUi("Updating results")}</span>
               </div>
             ) : null
           }
@@ -828,11 +828,11 @@ export function AdminOAuthClientsPage() {
         {error && data && (
           <div
             role="alert"
-            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between"
+            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-14 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>{t("Results may be out of date because the refresh failed.")}</span>
+              <span>{translateUi("Results may be out of date because the refresh failed.")}</span>
             </div>
             <Button
               type="button"
@@ -840,7 +840,7 @@ export function AdminOAuthClientsPage() {
               size="sm"
               disabled={isFetching}
               onClick={() => void refetch()}
-            >{t("Retry")}</Button>
+            >{translateUi("Retry")}</Button>
           </div>
         )}
 
@@ -850,7 +850,7 @@ export function AdminOAuthClientsPage() {
             role="status"
             aria-live="polite"
             aria-label={
-              isLoading ? t("Loading OAuth clients") : t("Updating OAuth clients")
+              isLoading ? translateUi("Loading OAuth clients") : translateUi("Updating OAuth clients")
             }
           >
             {Array.from({ length: 5 }).map((_, i) => (
@@ -869,27 +869,27 @@ export function AdminOAuthClientsPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="text-sm font-medium text-destructive">{t("Failed to load OAuth clients")}</p>
+            <p className="type-row-title text-destructive">{translateUi("Failed to load OAuth clients")}</p>
             <Button
               type="button"
               variant="outline"
               size="sm"
               onClick={() => void refetch()}
-            >{t("Retry")}</Button>
+            >{translateUi("Retry")}</Button>
           </div>
         ) : clients.length === 0 ? (
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
             <KeyRound className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="text-sm font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 {hasActiveFilters
-                  ? t("No clients match these filters")
-                  : t("No OAuth clients")}
+                  ? translateUi("No clients match these filters")
+                  : translateUi("No OAuth clients")}
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {hasActiveFilters
-                  ? t("Adjust or clear the current filters.")
-                  : t("Registered clients will appear here.")}
+                  ? translateUi("Adjust or clear the current filters.")
+                  : translateUi("Registered clients will appear here.")}
               </p>
               {hasActiveFilters && (
                 <Button
@@ -898,7 +898,7 @@ export function AdminOAuthClientsPage() {
                   size="sm"
                   className="mt-3"
                   onClick={clearSearchAndFilters}
-                >{t("Clear search and filters")}</Button>
+                >{translateUi("Clear search and filters")}</Button>
               )}
             </div>
           </div>
@@ -976,9 +976,9 @@ export function AdminOAuthClientsPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-11 text-text-tertiary">{t("Showing ")}{String((displayedPage - 1) * displayedPerPage + 1)}-
-                {String(Math.min(displayedPage * displayedPerPage, total))}{t(" of")}{" "}
-                {String(total)}{t(" clients")}</p>
+              <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((displayedPage - 1) * displayedPerPage + 1)}-
+                {String(Math.min(displayedPage * displayedPerPage, total))}{translateUi(" of")}{" "}
+                {String(total)}{translateUi(" clients")}</p>
               <div className="flex flex-wrap items-center gap-2">
                 {!isDefaultColumnLayout && (
                   <Button
@@ -990,7 +990,7 @@ export function AdminOAuthClientsPage() {
                     <RotateCcw
                       className="mr-2 h-3.5 w-3.5"
                       aria-hidden="true"
-                    />{t("Reset columns")}</Button>
+                    />{translateUi("Reset columns")}</Button>
                 )}
                 <Select
                   value={String(listParams.per_page)}
@@ -1007,7 +1007,7 @@ export function AdminOAuthClientsPage() {
                   }}
                 >
                   <SelectTrigger
-                    aria-label={t("Rows per page")}
+                    aria-label={translateUi("Rows per page")}
                     className="w-[112px]"
                   >
                     <SelectValue />
@@ -1015,7 +1015,7 @@ export function AdminOAuthClientsPage() {
                   <SelectContent>
                     {ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS.map((rows) => (
                       <SelectItem key={rows} value={String(rows)}>
-                        {String(rows)}{t(" rows")}</SelectItem>
+                        {String(rows)}{translateUi(" rows")}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -1028,11 +1028,11 @@ export function AdminOAuthClientsPage() {
                   onClick={() =>
                     updateListSearch({ page: Math.max(1, listParams.page - 1) })
                   }
-                  aria-label={t("Previous page")}
+                  aria-label={translateUi("Previous page")}
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-11 text-text-tertiary">{t("Page ")}{String(displayedPage)}{t(" of ")}{String(displayedTotalPages)}
+                <span className="min-w-[84px] text-center text-13 text-text-tertiary">{translateUi("Page ")}{String(displayedPage)}{translateUi(" of ")}{String(displayedTotalPages)}
                 </span>
                 <Button
                   type="button"
@@ -1043,7 +1043,7 @@ export function AdminOAuthClientsPage() {
                   onClick={() =>
                     updateListSearch({ page: listParams.page + 1 })
                   }
-                  aria-label={t("Next page")}
+                  aria-label={translateUi("Next page")}
                 >
                   <ChevronRight />
                 </Button>
@@ -1068,10 +1068,10 @@ export function AdminOAuthClientsPage() {
           </DialogHeader>
           {pendingClientAction && (
             <div className="rounded-lg bg-muted/50 p-3">
-              <p className="text-sm font-medium">
+              <p className="type-row-title">
                 {pendingClientAction.client.client_name}
               </p>
-              <p className="mt-1 font-mono text-11 text-muted-foreground">
+              <p className="mt-1 font-mono text-13 text-muted-foreground">
                 {pendingClientAction.client.id}
               </p>
             </div>
@@ -1081,13 +1081,13 @@ export function AdminOAuthClientsPage() {
               type="button"
               variant="outline"
               onClick={() => setPendingClientAction(null)}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               type="button"
               onClick={() => void confirmClientAction()}
               disabled={updateClient.isPending}
             >
-              {pendingClientAction?.confirmLabel ?? t("Confirm")}
+              {pendingClientAction?.confirmLabel ?? translateUi("Confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1111,13 +1111,13 @@ export function AdminOAuthClientsPage() {
               type="button"
               variant="outline"
               onClick={() => setPendingSettingAction(null)}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               type="button"
               onClick={() => void confirmSettingAction()}
               disabled={updateSettings.isPending}
             >
-              {pendingSettingAction?.confirmLabel ?? t("Confirm")}
+              {pendingSettingAction?.confirmLabel ?? translateUi("Confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1139,12 +1139,12 @@ function BrokerSettingsSection({
   readonly onStage: (field: BrokerSettingKey, value: boolean | null) => void;
   readonly disabled: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{t("Broker Rollout Policy")}</CardTitle>
-        <CardDescription>{t("Runtime overrides are applied immediately and fall back to env defaults when reset.")}</CardDescription>
+        <CardTitle>{translateUi("Broker Rollout Policy")}</CardTitle>
+        <CardDescription>{translateUi("Runtime overrides are applied immediately and fall back to env defaults when reset.")}</CardDescription>
       </CardHeader>
       <CardContent>
         {isLoading ? (
@@ -1153,12 +1153,12 @@ function BrokerSettingsSection({
             <Skeleton className="h-14 w-full" />
           </div>
         ) : error ? (
-          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-            <AlertTriangle className="h-4 w-4" />{t("Failed to load broker settings")}</div>
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-14 text-destructive">
+            <AlertTriangle className="h-4 w-4" />{translateUi("Failed to load broker settings")}</div>
         ) : settings ? (
           <div className="divide-y divide-border/60">
             <BrokerPolicyRow
-              label={t("Require sender constraint")}
+              label={translateUi("Require sender constraint")}
               setting={settings.broker_require_sender_constraint}
               disabled={disabled}
               onToggle={(checked) =>
@@ -1167,7 +1167,7 @@ function BrokerSettingsSection({
               onReset={() => onStage("broker_require_sender_constraint", null)}
             />
             <BrokerPolicyRow
-              label={t("Require admin broker capability")}
+              label={translateUi("Require admin broker capability")}
               setting={settings.broker_require_admin_capability}
               disabled={disabled}
               onToggle={(checked) =>
@@ -1195,21 +1195,21 @@ function BrokerPolicyRow({
   readonly onToggle: (checked: boolean) => void;
   readonly onReset: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const overridden = setting.source === "override";
   return (
     <div className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="text-sm font-medium text-foreground">{label}</p>
+          <p className="type-row-title text-foreground">{label}</p>
           <Badge variant={overridden ? "default" : "secondary"}>
-            {overridden ? t("Overridden") : t("Env default")}
+            {overridden ? translateUi("Overridden") : translateUi("Env default")}
           </Badge>
           <BoolBadge value={setting.effective} />
         </div>
-        <p className="text-xs text-muted-foreground">{t("Env default: ")}{setting.env_default ? t("enabled") : t("disabled")}
+        <p className="text-13 text-muted-foreground">{translateUi("Env default: ")}{setting.env_default ? translateUi("enabled") : translateUi("disabled")}
           {overridden
-            ? t(" · Override: {{value}}", { value: setting.override ? t("enabled") : t("disabled") })
+            ? translateUi(" · Override: {{value1}}", { value1: setting.override ? "enabled" : "disabled" })
             : ""}
         </p>
       </div>
@@ -1222,10 +1222,10 @@ function BrokerPolicyRow({
             onClick={onReset}
             disabled={disabled}
           >
-            <RotateCcw className="mr-2 h-3.5 w-3.5" />{t("Reset")}</Button>
+            <RotateCcw className="mr-2 h-3.5 w-3.5" />{translateUi("Reset")}</Button>
         )}
         <Switch
-          aria-label={t("Toggle {{label}}", { label: label })}
+          aria-label={translateUi("Toggle {{value1}}", { value1: label })}
           checked={setting.effective}
           disabled={disabled}
           onCheckedChange={onToggle}
@@ -1240,11 +1240,11 @@ function BrokerSourceBadge({
 }: {
   readonly source: AdminOAuthClient["broker_capability_source"];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (source === "none") return null;
   return (
     <Badge variant="secondary" className="whitespace-nowrap">
-      {source === "flag" ? t("Admin grant") : t("Broker scope")}
+      {source === "flag" ? translateUi("Admin grant") : translateUi("Broker scope")}
     </Badge>
   );
 }
@@ -1258,6 +1258,7 @@ function ClientStateBadge({
   readonly activeLabel: string;
   readonly inactiveLabel: string;
 }) {
+  useUiTranslation();
   return (
     <Badge variant={active ? "success" : "secondary"}>
       {active ? activeLabel : inactiveLabel}
@@ -1266,19 +1267,19 @@ function ClientStateBadge({
 }
 
 function BoolBadge({ value }: { readonly value: boolean }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Badge variant={value ? "default" : "secondary"}>
-      {value ? t("Enabled") : t("Disabled")}
+      {value ? translateUi("Enabled") : translateUi("Disabled")}
     </Badge>
   );
 }
 
 function ScopeList({ scopes }: { readonly scopes: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const items = scopes.split(/\s+/).filter(Boolean);
   if (items.length === 0) {
-    return <span className="text-sm text-muted-foreground">{t("None")}</span>;
+    return <span className="text-14 text-muted-foreground">{translateUi("None")}</span>;
   }
   const visibleItems = items.slice(0, 3);
   const hiddenItems = items.slice(3);
@@ -1289,31 +1290,31 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
         <button
           type="button"
           className="flex max-w-full items-center gap-1.5 rounded-md text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label={t("View all {{value}} allowed scopes: {{value1}}", { value: String(items.length), value1: items.join(", ") })}
+          aria-label={translateUi("View all {{value1}} allowed scopes: {{value2}}", { value1: String(items.length), value2: items.join(", ") })}
           title={items.join("\n")}
         >
           {visibleItems.map((scope) => (
             <span
               key={scope}
-              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono text-10 font-medium text-muted-foreground"
+              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono type-group-label text-muted-foreground"
             >
               {scope}
             </span>
           ))}
           {hiddenItems.length > 0 && (
-            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 text-10 font-medium text-muted-foreground">
-              +{String(hiddenItems.length)}{t(" more")}</span>
+            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 type-group-label text-muted-foreground">
+              +{String(hiddenItems.length)}{translateUi(" more")}</span>
           )}
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 rounded-lg p-3">
-        <p className="mb-2 text-xs font-semibold text-foreground">{t("Allowed scopes")}</p>
+        <p className="mb-2 type-secondary-strong text-foreground">{translateUi("Allowed scopes")}</p>
         <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
           {items.map((scope) => (
             <Badge
               key={scope}
               variant="secondary"
-              className="max-w-full break-all font-mono text-10"
+              className="max-w-full break-all font-mono text-12"
             >
               {scope}
             </Badge>

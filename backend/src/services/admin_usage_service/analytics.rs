@@ -104,7 +104,8 @@ impl AnalyticsQuery {
             ));
         }
         let breakdown = self.breakdown.unwrap_or_else(|| "service".into());
-        if !["service", "user", "owner", "credential_class"].contains(&breakdown.as_str()) {
+        if !["service", "model", "user", "owner", "credential_class"].contains(&breakdown.as_str())
+        {
             return Err(AppError::ValidationError(
                 "Unknown analytics breakdown".into(),
             ));
@@ -186,6 +187,7 @@ impl AnalyticsOptions {
     }
     pub(super) fn facets(&self, reduced: &impl Fn(&[&str]) -> Vec<Document>) -> Document {
         let dimensions: &[&str] = match self.breakdown.as_str() {
+            "model" => &["model"],
             "user" => &["actor"],
             "owner" => &["owner"],
             "credential_class" => &["class"],
@@ -456,6 +458,7 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
     let group_key = |row: &Document| -> AppResult<Option<String>> {
         let key = id(row)?;
         Ok(match options.breakdown.as_str() {
+            "model" => key.get_str("model").ok().map(str::to_owned),
             "user" => key.get_str("actor").ok().map(str::to_owned),
             "owner" => key.get_str("owner").ok().map(str::to_owned),
             "credential_class" => key.get_str("class").ok().map(str::to_owned),
@@ -490,7 +493,7 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
                 }
             }
         }
-    } else if options.breakdown != "credential_class" {
+    } else if matches!(options.breakdown.as_str(), "user" | "owner") {
         names = crate::services::reporting_identity_service::resolve(db, &refs, QUERY_TIMEOUT)
             .await
             .map_err(query_error)?
@@ -509,6 +512,18 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
             ("unknown", "Unknown credential class"),
         ] {
             names.insert(key.to_owned(), label.to_owned());
+        }
+    }
+    if options.breakdown == "model" {
+        for key in &refs {
+            names.insert(
+                key.clone(),
+                if matches!(key.as_str(), "Other" | "Unattributed") {
+                    format!("{key} (model)")
+                } else {
+                    key.clone()
+                },
+            );
         }
     }
     let mut label_counts = HashMap::<String, usize>::new();

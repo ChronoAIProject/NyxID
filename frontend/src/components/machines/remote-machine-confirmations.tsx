@@ -1,6 +1,21 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateErrorMessage } from "@/lib/error-messages";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import {
+  GroupedDialog,
+  GroupedDialogContent,
+  GroupedDialogCancel,
+  GroupedDecisionDraft,
+} from "@/components/ui/grouped-dialog";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField as FormItem,
+  GroupedMessage as FormMessage,
+} from "@/components/ui/grouped-fields";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
@@ -16,19 +31,15 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Form,
   FormControl,
   FormField,
-  FormItem,
   FormLabel,
-  FormMessage,
   useAppForm,
 } from "@/components/ui/form";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -95,7 +106,7 @@ export function RemoteMachineConfirmations({
   readonly machineId: string;
   readonly confirmationId?: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const owner = useAuthStore((state) => state.user?.id);
   const context = `${owner ?? ""}:${machineId}`;
   const [pages, setPages] = useState<{
@@ -107,6 +118,10 @@ export function RemoteMachineConfirmations({
   const cursor = pages.machineId === context ? pages.cursors.at(-1) : undefined;
   const query = useRemoteMachineConfirmations(machineId, cursor);
   const [review, setReview] = useState<RemoteMachineConfirmation | null>(null);
+  const [notice, setNotice] = useState<{
+    context: string;
+    message: string;
+  } | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
@@ -133,32 +148,41 @@ export function RemoteMachineConfirmations({
   if (review && !reviewStillCurrent) setReview(null);
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">{t("Only the human owner can approve external execution. The client must retry the same operation and parameters using the same valid identity; approval is consumed once after live authorization is checked again. Approval does not execute the request from this page.")}</p>
-      <p className="text-12 text-muted-foreground">{t("Waiting approval expires after 15 minutes. Once approved, execution has a separate window of at most 10 minutes and remains limited by grant, credential, runtime and funding deadlines. A different child credential cannot consume this approval.")}</p>
-      <p className="text-12 text-muted-foreground">{t("Each page contains at most 100 live pending or approved confirmations.")}{query.data?.next_cursor === undefined
-          ? t(" Older-page availability is unknown on this server.")
-          : t(" Older pages use the server’s stable cursor.")}
+      {notice?.context === context && (
+        <p
+          role="status"
+          className="rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground"
+        >
+          {notice.message}
+        </p>
+      )}
+      <p className="text-14 text-muted-foreground">{translateUi("Only the human owner can approve external execution. The client must retry the same operation and parameters using the same valid identity; approval is consumed once after live authorization is checked again. Approval does not execute the request from this page.")}</p>
+      <p className="text-14 text-muted-foreground">{translateUi("Waiting approval expires after 15 minutes. Once approved, execution has a separate window of at most 10 minutes and remains limited by grant, credential, runtime and funding deadlines. A different child credential cannot consume this approval.")}</p>
+      <p className="text-14 text-muted-foreground">{translateUi("Each page contains at most 100 live pending or approved confirmations.")}{query.data?.next_cursor === undefined
+          ? translateUi(" Older-page availability is unknown on this server.")
+          : translateUi(" Older pages use the server’s stable cursor.")}
       </p>
+      <p className="rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground">{translateUi("Assistant action confirmations stay in the original conversation. This list contains external client requests, not Assistant conversation cards.")}</p>
       {query.isPending && (
-        <p role="status" className="text-12">{t("Loading confirmations…")}</p>
+        <p role="status" className="text-14">{translateUi("Loading confirmations…")}</p>
       )}
       {query.error &&
         (missing ? (
           <p
             role="status"
-            className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground"
-          >{t("External confirmations are unavailable on this server. Requests that require confirmation must remain blocked; this page cannot approve or bypass them until the owner confirmation API is connected.")}</p>
+            className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground"
+          >{translateUi("External confirmations are unavailable on this server. Requests that require confirmation must remain blocked; this page cannot approve or bypass them until the owner confirmation API is connected.")}</p>
         ) : (
           <ErrorBanner
-            message={t("Confirmations could not be loaded. {{message}}", { message: translateErrorMessage(query.error.message) })}
+            message={translateUi("Confirmations could not be loaded. {{value1}}", { value1: query.error.message })}
             onRetry={() => void query.refetch()}
           />
         ))}
       {confirmationId && !linked && !query.isPending && !query.error && (
-        <p role="status" className="text-12 text-muted-foreground">{t("The linked confirmation is not on this page. Check older pages; it may have expired or no longer be visible under your current authorization.")}</p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("The linked confirmation is not on this page. Check older pages; it may have expired or no longer be visible under your current authorization.")}</p>
       )}
       {!query.isPending && !query.error && !rows.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("No pending or approved confirmations are available.")}</p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("No pending or approved confirmations are available.")}</p>
       )}
       {rows.map((row) => {
         const expired =
@@ -186,15 +210,15 @@ export function RemoteMachineConfirmations({
               </Badge>
             }
           >
-            <DetailRow label={t("Confirmation ID")} value={row.id} mono />
-            <DetailRow label={t("Principal")} value={identity(row)} mono />
-            <DetailRow label={t("Acting person")} value={row.subject.user_id} mono />
+            <DetailRow label={translateUi("Confirmation ID")} value={row.id} mono />
+            <DetailRow label={translateUi("Principal")} value={identity(row)} mono />
+            <DetailRow label={translateUi("Acting person")} value={row.subject.user_id} mono />
             <DetailRow
-              label={t("Grant / assignment revision")}
+              label={translateUi("Grant / assignment revision")}
               value={`${row.grant_revision} / ${row.assignment_revision}`}
             />
             <DetailRow
-              label={t("Runtime generation")}
+              label={translateUi("Runtime generation")}
               value={
                 row.runtime_generation === null
                   ? "Unknown"
@@ -204,18 +228,21 @@ export function RemoteMachineConfirmations({
             <DetailRow
               label={
                 row.status === "approved"
-                  ? t("Approved retry deadline")
-                  : t("Waiting approval expires")
+                  ? translateUi("Approved retry deadline")
+                  : translateUi("Waiting approval expires")
               }
               value={new Date(row.expires_at).toLocaleString(getFormattingLocale())}
             />
             {row.approved_until && row.status !== "approved" && (
               <DetailRow
-                label={t("Approved retry deadline")}
+                label={translateUi("Approved retry deadline")}
                 value={new Date(row.approved_until).toLocaleString(getFormattingLocale())}
               />
             )}
-            <div className="space-y-2 px-4 py-3 text-12 text-muted-foreground">
+            <div className="space-y-2 px-4 py-3 text-14 text-muted-foreground">
+              {status === "approved" && (
+                <p role="status">{translateUi("Approved — waiting for the original caller to retry within the returned deadline. This approval does not execute the request; live permissions and Machine state are checked again.")}</p>
+              )}
               {row.safe_parameters.length ? (
                 <dl className="space-y-2">
                   {row.safe_parameters.map((parameter, index) => (
@@ -228,12 +255,12 @@ export function RemoteMachineConfirmations({
                   ))}
                 </dl>
               ) : (
-                <p>{t("No safe parameter summary was provided. Approval is unavailable until the server provides a reviewable summary.")}</p>
+                <p>{translateUi("No safe parameter summary was provided. Approval is unavailable until the server provides a reviewable summary.")}</p>
               )}
               {!reviewable(row, clock) && status === "pending" && (
-                <p role="status">{t("A server-confirmed safe summary and known runtime generation are required before either approval or decline is available here.")}</p>
+                <p role="status">{translateUi("A server-confirmed safe summary and known runtime generation are required before either approval or decline is available here.")}</p>
               )}
-              <p>{t("Only server-redacted parameters appear here. Raw commands, environment values, input and secrets are not shown.")}</p>
+              <p>{translateUi("Only server-redacted parameters appear here. Raw commands, environment values, input and secrets are not shown.")}</p>
               <Button
                 disabled={
                   Boolean(query.error) ||
@@ -243,7 +270,7 @@ export function RemoteMachineConfirmations({
                   !reviewable(row, clock)
                 }
                 onClick={() => setReview(row)}
-              >{t("Review decision")}</Button>
+              >{translateUi("Review decision")}</Button>
             </div>
           </DetailSection>
         );
@@ -257,7 +284,7 @@ export function RemoteMachineConfirmations({
               cursors: pages.cursors.slice(0, -1),
             })
           }
-        >{t("Newer confirmations")}</Button>
+        >{translateUi("Newer confirmations")}</Button>
         <Button
           disabled={!query.data?.next_cursor || query.isFetching}
           onClick={() => {
@@ -267,22 +294,24 @@ export function RemoteMachineConfirmations({
                 cursors: [...pages.cursors, query.data.next_cursor],
               });
           }}
-        >{t("Older confirmations")}</Button>
+        >{translateUi("Older confirmations")}</Button>
         <Button
           onClick={() => {
             setPages({ machineId: context, cursors: [undefined] });
             void query.refetch();
           }}
-        >{t("Refresh confirmations")}</Button>
+        >{translateUi("Refresh confirmations")}</Button>
       </div>
       {review && reviewStillCurrent && (
         <ConfirmationDecision
           key={review.id}
           confirmation={review}
           machineId={machineId}
-          onClose={() => {
+          onClose={(message) => {
+            if (useAuthStore.getState().user?.id !== owner) return;
             setReview(null);
             setPages({ machineId: context, cursors: [undefined] });
+            if (message) setNotice({ context, message });
           }}
         />
       )}
@@ -296,9 +325,9 @@ export function ConfirmationDecision({
 }: {
   readonly confirmation: RemoteMachineConfirmation;
   readonly machineId: string;
-  readonly onClose: () => void;
+  readonly onClose: (message?: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const mutation = useDecideRemoteMachineConfirmation();
   const active = useRef(true);
   useEffect(() => {
@@ -340,7 +369,7 @@ export function ConfirmationDecision({
     )
       return;
     try {
-      await mutation.mutateAsync({
+      const result = await mutation.mutateAsync({
         machineId,
         confirmationId: confirmation.id,
         body: {
@@ -350,7 +379,13 @@ export function ConfirmationDecision({
           parameters_digest: confirmation.parameters_digest,
         },
       });
-      onClose();
+      onClose(
+        result.status === "approved"
+          ? "Approval recorded. Waiting for the original caller to retry within the returned deadline; the request has not been executed by this page."
+          : result.status === "declined"
+            ? "Request declined. This page has not executed the operation."
+            : "Decision response received. Refresh confirmations to check the latest status.",
+      );
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -360,64 +395,112 @@ export function ConfirmationDecision({
     }
   }
   return (
-    <Dialog
+    <GroupedDialog
       open
       onOpenChange={(open) => {
         if (!open && !mutation.isPending) onClose();
       }}
     >
-      <DialogContent>
+      <GroupedDialogContent>
+        <GroupedDecisionDraft
+          dirty={form.formState.isDirty}
+          pending={mutation.isPending}
+          discard={() => form.reset()}
+        />
         <DialogHeader>
-          <DialogTitle>{t("Review external request")}</DialogTitle>
-          <DialogDescription>{t("This decision is bound to the displayed principal, child, grant, runtime generation and parameter digest.")}</DialogDescription>
+          <DialogTitle>{translateUi("Review external request")}</DialogTitle>
+          <DialogDescription>{translateUi("This decision is bound to the displayed principal, child, grant, runtime generation and parameter digest.")}</DialogDescription>
         </DialogHeader>
-        <p className="break-all text-12 text-muted-foreground">
-          {identity(confirmation)}
-        </p>
-        <p className="text-12 text-muted-foreground">{t("Operation: ")}{confirmation.operation}
-        </p>
-        <dl className="space-y-2 text-12">
-          {confirmation.safe_parameters.map((parameter, index) => (
-            <div key={`${index}:${parameter.name}`}>
-              <dt className="font-medium">{parameter.name}</dt>
-              <dd className="break-words text-muted-foreground">
-                {parameter.value}
-              </dd>
-            </div>
-          ))}
-        </dl>
-        <Form {...form}>
-          <FormField
-            control={form.control}
-            name="reviewed"
-            render={({ field }) => (
-              <FormItem>
-                <div className="flex items-start gap-2">
-                  <FormControl>
-                    <Checkbox
-                      checked={field.value}
-                      onCheckedChange={(value) =>
-                        field.onChange(value === true)
-                      }
-                    />
-                  </FormControl>
-                  <FormLabel className="text-12">{t("I reviewed this identity and safe request summary.")}</FormLabel>
-                </div>
-                <FormMessage />
-              </FormItem>
-            )}
+        <GroupedList title={translateUi("Request")}>
+          <GroupedRow title={translateUi("Principal")} accessory={identity(confirmation)} />
+          <GroupedRow title={translateUi("Operation")} accessory={confirmation.operation} />
+        </GroupedList>
+        <GroupedList title={translateUi("Reviewed authority")}>
+          <ConfirmationRow
+            label={translateUi("Confirmation ID")}
+            value={confirmation.id}
+            mono
           />
-        </Form>
-        {expired && (
-          <p role="status" className="text-12 text-destructive">{t("This confirmation expired. The client must submit a new request.")}</p>
-        )}
-        {error && (
-          <div role="alert">
-            <ErrorBanner message={error} />
-          </div>
-        )}
-        <DialogFooter>
-          <Button onClick={onClose} disabled={mutation.isPending}>{t("Close")}</Button>
+          <ConfirmationRow
+            label={translateUi("Grant ID")}
+            value={confirmation.grant_id}
+            mono
+          />
+          <ConfirmationRow
+            label={translateUi("Grant / assignment revision")}
+            value={`${confirmation.grant_revision} / ${confirmation.assignment_revision}`}
+          />
+          <ConfirmationRow
+            label={translateUi("Runtime generation")}
+            value={
+              confirmation.runtime_generation === null
+                ? "Unknown"
+                : String(confirmation.runtime_generation)
+            }
+          />
+          <ConfirmationRow
+            label={translateUi("Parameter digest")}
+            value={confirmation.parameters_digest}
+            mono
+          />
+          <ConfirmationRow
+            label={translateUi("Waiting approval expires")}
+            value={new Date(confirmation.expires_at).toLocaleString(getFormattingLocale())}
+          />
+        </GroupedList>
+        <GroupedList
+          title={translateUi("Safe request summary")}
+          footer={
+            confirmation.review_content_available === false
+              ? translateUi("Full request content is unavailable. Review the server’s safe summary below; it does not verify every effect of the operation.")
+              : undefined
+          }
+        >
+          {confirmation.safe_parameters.map((parameter, index) => (
+            <GroupedRow
+              key={`${index}:${parameter.name}`}
+              title={parameter.name}
+              accessory={parameter.value}
+            />
+          ))}
+        </GroupedList>
+        <GroupedList title={translateUi("Decision")}>
+          <Form {...form}>
+            <FormField
+              control={form.control}
+              name="reviewed"
+              render={({ field }) => (
+                <FormItem inline>
+                  <div className="flex w-full items-start gap-2">
+                    <FormControl>
+                      <Switch
+                        className="order-last shrink-0"
+                        checked={field.value}
+                        onCheckedChange={(value) =>
+                          field.onChange(value === true)
+                        }
+                      />
+                    </FormControl>
+                    <FormLabel className="min-w-0 flex-1">{translateUi("I reviewed this identity and safe request summary.")}</FormLabel>
+                  </div>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </Form>
+          <GroupedFooter>
+            {expired && (
+              <p role="status" className="text-14 text-destructive">{translateUi("This confirmation expired. The client must submit a new request.")}</p>
+            )}
+            {error && (
+              <div role="alert">
+                <ErrorBanner message={error} />
+              </div>
+            )}
+          </GroupedFooter>
+        </GroupedList>
+        <DialogFooter className="flex-wrap border-t border-border/50 bg-background pt-3 md:bg-background [&>button]:h-auto [&>button]:min-h-8 [&>button]:min-w-0 [&>button]:flex-auto [&>button]:whitespace-normal [&>button]:py-1.5">
+          <GroupedDialogCancel disabled={mutation.isPending}>{translateUi("Cancel")}</GroupedDialogCancel>
           <Button
             variant="destructive"
             disabled={
@@ -429,7 +512,7 @@ export function ConfirmationDecision({
             }
             isLoading={mutation.isPending}
             onClick={() => void decide(false)}
-          >{t("Decline")}</Button>
+          >{translateUi("Decline")}</Button>
           <Button
             variant="primary"
             disabled={
@@ -442,9 +525,31 @@ export function ConfirmationDecision({
             }
             isLoading={mutation.isPending}
             onClick={() => void decide(true)}
-          >{t("Approve one retry")}</Button>
+          >{translateUi("Approve one retry")}</Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </GroupedDialogContent>
+    </GroupedDialog>
+  );
+}
+
+function ConfirmationRow({
+  label,
+  value,
+  mono,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly mono?: boolean;
+}) {
+  useUiTranslation();
+  return (
+    <GroupedRow
+      title={label}
+      accessory={
+        <span className={mono ? "break-all font-mono text-13" : "break-words"}>
+          {value}
+        </span>
+      }
+    />
   );
 }

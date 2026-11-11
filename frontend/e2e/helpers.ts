@@ -38,7 +38,9 @@ export async function openAssistant(
   }
   const search = new URLSearchParams({ mock: "1" });
   if (options.conversation) search.set("c", options.conversation);
-  await page.goto(`/assistant?${search.toString()}`);
+  // Remote fonts need not finish loading before the app becomes interactive.
+  // The visible-control assertion below waits for the actual React surface.
+  await page.goto(`/assistant?${search.toString()}`, { waitUntil: "domcontentloaded" });
   // The earlier engines' sidebar leads with "New chat"; the NyxAgent sidebar
   // has none (chats start from the NyxBot home or an agent) and leads with
   // its agents instead.
@@ -49,7 +51,7 @@ export async function openAssistant(
           .getByRole("button", { name: "New chat", exact: true })
           .first()
           .isVisible()) ||
-        (await page.getByRole("button", { name: "New agent", exact: true }).first().isVisible()) ||
+        (await page.getByRole("button", { name: "Create new agent", exact: true }).first().isVisible()) ||
         (await page.getByRole("button", { name: "Open chats" }).isVisible()),
       { timeout: 20_000 },
     )
@@ -65,6 +67,13 @@ export function composerInput(page: Page) {
   // Placeholder flips to "Assistant is working..." while a turn runs; match
   // the element, not one placeholder value.
   return page.locator("[data-composer-textbox]");
+}
+
+/** Opens the sidebar account menu, through the drawer on narrow viewports. */
+export async function openAccountMenu(page: Page): Promise<void> {
+  const drawer = page.getByRole("button", { name: "Open chats" });
+  if (await drawer.isVisible()) await drawer.click();
+  await page.getByRole("button", { name: "Account menu" }).click();
 }
 
 export async function sendMessage(page: Page, text: string): Promise<void> {
@@ -236,7 +245,7 @@ export async function openLatestToolActivity(page: Page): Promise<void> {
  */
 export function conversationRow(page: Page, title: string) {
   return page
-    .getByRole("navigation")
+    .getByRole("navigation", { name: "Agents and conversations" })
     .getByRole("button", { name: title, exact: true });
 }
 

@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useRef, useCallback } from "react";
 import { useRouterState, useNavigate } from "@tanstack/react-router";
 import { useLogout } from "@/hooks/use-auth";
@@ -42,7 +43,7 @@ function getInitials(name: string | null, email: string): string {
 export function Header({
   onMenuClick,
 }: { readonly onMenuClick?: () => void } = {}) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const routerState = useRouterState();
   const navigate = useNavigate();
   const logoutMutation = useLogout();
@@ -85,11 +86,11 @@ export function Header({
           type="button"
           onClick={onMenuClick}
           className="flex h-9 w-9 items-center justify-center rounded-lg transition-colors duration-300 hover:bg-accent md:hidden"
-          aria-label={t("Open menu")}
+          aria-label={translateUi("Open menu")}
         >
           <Menu className="h-5 w-5 text-muted-foreground" />
         </button>
-        <h1 className="text-lg font-semibold md:text-xl">
+        <h1 className="type-card-title md:type-section-heading">
           {title}
         </h1>
       </div>
@@ -103,21 +104,21 @@ export function Header({
             <button
               type="button"
               className="flex items-center gap-3 rounded-lg p-1.5 transition-colors duration-300 hover:bg-accent"
-              aria-label={t("User menu")}
+              aria-label={translateUi("User menu")}
             >
               <div className="hidden flex-col items-end gap-0.5 sm:flex">
-                <span className="text-13 font-medium text-foreground">
-                  {user?.display_name ?? user?.email ?? t("User")}
+                <span className="type-card-title text-foreground">
+                  {user?.display_name ?? user?.email ?? translateUi("User")}
                 </span>
                 {user?.display_name && (
-                  <span className="text-11 text-text-tertiary">
+                  <span className="text-13 text-text-tertiary">
                     {user.email}
                   </span>
                 )}
               </div>
               <Avatar className="h-9 w-9">
                 {safeAvatarUrl && <AvatarImage src={safeAvatarUrl} alt="" />}
-                <AvatarFallback className="bg-nyx-500/10 text-xs text-nyx-300">
+                <AvatarFallback className="bg-nyx-500/10 text-13 text-nyx-300">
                   {getInitials(user?.display_name ?? null, user?.email ?? "")}
                 </AvatarFallback>
               </Avatar>
@@ -130,22 +131,22 @@ export function Header({
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
         >
-          <DropdownMenuLabel>{t("My Account")}</DropdownMenuLabel>
+          <DropdownMenuLabel>{translateUi("My Account")}</DropdownMenuLabel>
 
           <DropdownMenuItem
             onClick={() => void navigate({ to: "/settings" })}
           >
-            <User className="h-4 w-4" aria-hidden="true" />{t("Profile")}</DropdownMenuItem>
+            <User className="h-4 w-4" aria-hidden="true" />{translateUi("Profile")}</DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => void navigate({ to: "/settings" })}
           >
-            <Settings className="h-4 w-4" aria-hidden="true" />{t("Settings")}</DropdownMenuItem>
+            <Settings className="h-4 w-4" aria-hidden="true" />{translateUi("Settings")}</DropdownMenuItem>
 
           <DropdownMenuItem
             onClick={() => void handleLogout()}
             className="text-destructive focus:text-destructive"
           >
-            <LogOut className="h-4 w-4" aria-hidden="true" />{t("Log out")}</DropdownMenuItem>
+            <LogOut className="h-4 w-4" aria-hidden="true" />{translateUi("Log out")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </header>

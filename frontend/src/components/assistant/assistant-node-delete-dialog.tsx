@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +43,7 @@ export function AssistantNodeDeleteDialog({
   readonly params: AssistantNodeDeleteParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -101,19 +102,19 @@ export function AssistantNodeDeleteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? t("Credential node deleted") : t("Delete credential node")}
+            {resultId ? translateUi("Credential node deleted") : translateUi("Delete credential node")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? t("The node authorization projection is absent, confirming deletion.")
-              : t("This deactivates the node, its bindings, and pending credential work. It cannot be undone from chat.")}
+              ? translateUi("The node authorization projection is absent, confirming deletion.")
+              : translateUi("This deactivates the node, its bindings, and pending credential work. It cannot be undone from chat.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Node")}</span>
+              <span className="text-muted-foreground">{translateUi("Node")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -121,19 +122,19 @@ export function AssistantNodeDeleteDialog({
                 {params.nodeId}
               </Badge>
             </div>
-            <label className="flex items-start gap-2">
+            <Label className="flex items-start gap-2">
               <Checkbox
                 checked={confirmed}
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{t("I understand this removes node routing and pending credential work.")}</span>
-            </label>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{translateUi("I understand this removes node routing and pending credential work.")}</span>
+            </Label>
           </div>
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -146,17 +147,17 @@ export function AssistantNodeDeleteDialog({
                 onComplete(resultId);
                 close();
               }}
-            >{t("Done")}</Button>
+            >{translateUi("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting || !confirmed}
                 onClick={() => void submit()}
-              >{t("Delete node")}</Button>
+              >{translateUi("Delete node")}</Button>
             </>
           )}
         </DialogFooter>

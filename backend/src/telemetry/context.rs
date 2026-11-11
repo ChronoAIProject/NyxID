@@ -24,6 +24,10 @@ pub struct TelemetryContext {
     /// The client's self-declared semver, from `X-NyxID-Client-Version`.
     /// `None` when the header is absent or malformed.
     pub client_version: Option<String>,
+    /// Explicit device narrowing only; never substitutes for account permission.
+    pub analytics_allowed: bool,
+    /// Device choice belongs only to this authenticated actor.
+    pub analytics_account: Option<String>,
 }
 
 impl Default for TelemetryContext {
@@ -31,11 +35,43 @@ impl Default for TelemetryContext {
         Self {
             surface: "backend",
             client_version: None,
+            analytics_allowed: false,
+            analytics_account: None,
         }
     }
 }
 
 impl TelemetryContext {
+    /// Authentication protocols have no established request actor yet. Even a
+    /// spoofed device opt-in header must not produce account-linked events.
+    pub fn pre_auth(headers: &axum::http::HeaderMap) -> Self {
+        let mut context = Self::from_request_headers(headers);
+        context.analytics_allowed = false;
+        context
+    }
+
+    pub fn from_request_headers(headers: &axum::http::HeaderMap) -> Self {
+        let mut context = Self::from_headers(
+            headers
+                .get("x-nyxid-client")
+                .and_then(|value| value.to_str().ok()),
+            headers
+                .get("x-nyxid-client-version")
+                .and_then(|value| value.to_str().ok()),
+        );
+        context.analytics_allowed = headers.get("dnt").is_none_or(|value| value != "1")
+            && headers.get("sec-gpc").is_none_or(|value| value != "1")
+            && headers
+                .get("x-nyxid-analytics")
+                .is_some_and(|value| value == "enabled");
+        context.analytics_account = headers
+            .get("x-nyxid-analytics-account")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+            .map(str::to_owned);
+        context
+    }
+
     /// Build the context from the two `X-NyxID-Client*` headers. Unknown
     /// header values fall back to `"backend"` (internal / non-NyxID caller).
     pub fn from_headers(client_header: Option<&str>, version_header: Option<&str>) -> Self {
@@ -48,12 +84,14 @@ impl TelemetryContext {
         };
         Self {
             surface,
-            client_version: version_header.map(str::to_owned),
+            client_version: version_header.filter(|v| v.len() <= 64).map(str::to_owned),
+            analytics_allowed: false,
+            analytics_account: None,
         }
     }
 }
 
-/// Fire-and-forget event emission helper. Handles the `agent` surface
+/// Event admission helper (bounded account lookup; asynchronous vendor delivery). Handles the `agent` surface
 /// override for API-key-authenticated requests, pulls `user_id` as the
 /// distinct_id, and passes through to the underlying [`TelemetryClient`].
 ///
@@ -63,7 +101,7 @@ impl TelemetryContext {
 ///
 /// Callers pass the event's domain type from [`TelemetryEvent`]; the
 /// name/properties translation happens inside so emit sites stay terse.
-pub fn emit_event(
+pub async fn emit_event(
     client: Option<&TelemetryClient>,
     auth_user_id: &str,
     api_key_id: Option<&str>,
@@ -87,8 +125,10 @@ pub fn emit_event(
     let ctx = TelemetryContext {
         surface,
         client_version: ctx.client_version.clone(),
+        analytics_allowed: ctx.analytics_allowed,
+        analytics_account: ctx.analytics_account.clone(),
     };
-    client.track(auth_user_id, event, &ctx, api_key_id);
+    client.track(auth_user_id, event, &ctx, api_key_id).await;
 }
 
 /// Axum extractor: return the request-scoped `TelemetryContext` if the
@@ -123,6 +163,23 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+
+    #[test]
+    fn request_headers_only_narrow_and_preauth_never_collects() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!TelemetryContext::from_request_headers(&headers).analytics_allowed);
+        headers.insert("x-nyxid-analytics", "enabled".parse().unwrap());
+        assert!(TelemetryContext::from_request_headers(&headers).analytics_allowed);
+        assert!(!TelemetryContext::pre_auth(&headers).analytics_allowed);
+        headers.insert("dnt", "1".parse().unwrap());
+        assert!(!TelemetryContext::from_request_headers(&headers).analytics_allowed);
+        headers.insert("dnt", "0".parse().unwrap());
+        headers.insert("sec-gpc", "1".parse().unwrap());
+        assert!(!TelemetryContext::from_request_headers(&headers).analytics_allowed);
+        headers.remove("sec-gpc");
+        headers.insert("x-nyxid-analytics", "invalid".parse().unwrap());
+        assert!(!TelemetryContext::from_request_headers(&headers).analytics_allowed);
+    }
 
     #[test]
     fn default_surface_is_backend() {
@@ -174,11 +231,13 @@ mod tests {
         assert_eq!(ctx.client_version.as_deref(), Some("0.1.0-beta"));
     }
 
-    #[test]
-    fn emit_event_overrides_surface_for_api_key() {
+    #[tokio::test]
+    async fn emit_event_overrides_surface_for_api_key() {
         let ctx = TelemetryContext {
             surface: "cli",
             client_version: None,
+            analytics_allowed: false,
+            analytics_account: None,
         };
         // When client is None, emit_event is a no-op - verify no panic
         emit_event(
@@ -190,11 +249,12 @@ mod tests {
                 method: "email".to_string(),
                 mfa_required: false,
             },
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn emit_event_noop_when_no_client() {
+    #[tokio::test]
+    async fn emit_event_noop_when_no_client() {
         let ctx = TelemetryContext::default();
         emit_event(
             None,
@@ -205,7 +265,8 @@ mod tests {
                 method: "email".to_string(),
                 mfa_required: false,
             },
-        );
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -213,6 +274,8 @@ mod tests {
         let expected = TelemetryContext {
             surface: "mobile",
             client_version: Some("2.0.1".to_string()),
+            analytics_allowed: false,
+            analytics_account: None,
         };
         let mut req = Request::builder().body(Body::empty()).unwrap();
         req.extensions_mut().insert(expected.clone());

@@ -23,6 +23,9 @@ pub struct Config {
     pub browser_user: Option<String>,
     pub dev_browser_user: Option<String>,
     pub managed_browser: Option<ManagedBrowserConfig>,
+    /// Intent for new assignments only. None preserves pre-W9.4 profiles and
+    /// must never be interpreted as an explicit shared-legacy choice.
+    pub separation_choice: Option<crate::context::Choice>,
 }
 
 impl Default for Config {
@@ -43,6 +46,7 @@ impl Default for Config {
             browser_user: None,
             dev_browser_user: None,
             managed_browser: None,
+            separation_choice: None,
         }
     }
 }
@@ -108,7 +112,33 @@ mod tests {
         assert_eq!(config.computer_mode, ComputerMode::Standard);
         assert_eq!(config.max_jobs, 4);
         assert_eq!(config.max_timeout_secs, 3600);
+        assert_eq!(config.separation_choice, None);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn setup_intent_round_trips_without_reinterpreting_absence() {
+        use crate::context::Choice;
+        for choice in [
+            Choice::Automatic,
+            Choice::RequireSeparated,
+            Choice::SharedLegacy,
+        ] {
+            let config = Config {
+                separation_choice: Some(choice),
+                ..Default::default()
+            };
+            let value = serde_json::to_value(&config).unwrap();
+            assert_eq!(value["separation_choice"], choice.as_str());
+            let read: Config = serde_json::from_value(value).unwrap();
+            assert_eq!(read.separation_choice, Some(choice));
+        }
+        assert!(
+            serde_json::from_value::<Config>(serde_json::json!({
+                "separation_choice":"future_choice"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

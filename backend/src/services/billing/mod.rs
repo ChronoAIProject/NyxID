@@ -1,5 +1,6 @@
 pub mod allowances;
 pub mod amounts;
+pub mod bill;
 pub mod config;
 pub mod funding;
 pub mod grants;
@@ -9,6 +10,8 @@ pub mod machine_runtime;
 mod machine_runtime_math;
 pub mod meter;
 pub mod metric_resolution;
+pub mod model_tariffs;
+pub mod model_usage;
 pub mod owner_resolver;
 pub mod periods;
 pub mod pool_attempt;
@@ -18,8 +21,13 @@ pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
+pub mod sandbox_rates;
+pub mod sandbox_runtime;
+mod sandbox_runtime_math;
+pub mod sandbox_settings;
 pub mod schedules;
 mod targets;
+pub mod taxes;
 pub mod topup_expiry;
 pub mod usage_rollup;
 pub mod webhook;
@@ -55,7 +63,7 @@ pub struct BillingStartupDiagnostic {
 pub async fn startup_diagnostics(
     db: &mongodb::Database,
 ) -> AppResult<Vec<BillingStartupDiagnostic>> {
-    let mut items = Vec::new();
+    let mut items = crate::services::platform_model_execution::diagnostics(db).await?;
     let migration = db
         .collection::<Document>("billing_migrations")
         .find_one(doc! {
@@ -172,6 +180,8 @@ pub struct BillingService {
     lago: Option<Arc<dyn LagoApi>>,
     #[cfg(test)]
     pub(crate) settlement_gate: Option<Arc<SettlementGate>>,
+    #[cfg(test)]
+    pub(crate) before_send_gate: Option<Arc<SettlementGate>>,
 }
 
 #[cfg(test)]
@@ -220,6 +230,8 @@ impl BillingService {
             lago,
             #[cfg(test)]
             settlement_gate: None,
+            #[cfg(test)]
+            before_send_gate: None,
         }
     }
 
@@ -235,6 +247,7 @@ impl BillingService {
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
             settlement_gate: None,
+            before_send_gate: None,
         }
     }
 
@@ -385,6 +398,36 @@ impl BillingService {
         .await
     }
 
+    /// Explicit organization wallet setup may repair a legacy missing
+    /// subscription. Reads and ordinary provisioning keep their existing path.
+    pub async fn ensure_org_wallet_subscription(
+        &self,
+        wallet: &BillingWallet,
+    ) -> AppResult<BillingWallet> {
+        if wallet
+            .lago_subscription_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+        {
+            return Ok(wallet.clone());
+        }
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        let subscription = lago
+            .ensure_subscription(&wallet.lago_customer_id, &self.config.lago_plan_code)
+            .await?;
+        self.db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(bson::doc! {"_id":&wallet.id,"owner_id":&wallet.owner_id,
+                "lago_customer_id":&wallet.lago_customer_id,
+                "$or":[{"lago_subscription_id":null},{"lago_subscription_id":""}]},
+                bson::doc! {"$set":{"lago_subscription_id":subscription,"updated_at":bson::DateTime::now()}})
+            .await?;
+        self.get_wallet(&wallet.owner_id).await?.ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Billing wallet no longer exists".into())
+        })
+    }
+
     pub async fn create_topup_checkout(
         &self,
         owner_id: &str,
@@ -488,6 +531,39 @@ impl BillingService {
         ctx: &BillingRouteContext,
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
+        let model_paid = ctx.model_tariff.as_ref().is_some_and(|t| t.paid());
+        let required = required || model_paid;
+        if model_paid && (!self.config.billing_enabled || self.lago.is_none()) {
+            return Err(model_tariffs::unavailable(
+                "billing_disabled_or_unconfigured",
+            ));
+        }
+        if ctx.model_tariff.is_none()
+            && ctx
+                .platform_specs()
+                .any(|(metric, _)| metric.requires_model_evidence())
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Strict model units require a complete model tariff".into(),
+            ));
+        }
+        if ctx
+            .platform_specs()
+            .any(|(metric, _)| metric.is_runtime_allocation())
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Runtime allocation pricing requires dedicated prepaid window admission".into(),
+            ));
+        }
+        let org_guest = ctx.org_channel_guest.is_some();
+        if let Some(guest) = &ctx.org_channel_guest {
+            if !self.config.billing_enabled || self.lago.is_none() {
+                return Err(crate::errors::AppError::BillingNotConfigured(
+                    "Organization channel guests require active billing".into(),
+                ));
+            }
+            crate::services::org_channel_service::budget::require_payer(&self.db, guest).await?;
+        }
         let public = ctx.public_admission.is_some();
         let managed = ctx.managed_admission.is_some();
         if public && (!required || !self.config.billing_enabled || ctx.pool_attempt.is_some()) {
@@ -509,7 +585,7 @@ impl BillingService {
             // Staged rollout: charging applies only to owners covered by the
             // billing feature flag. Everyone else is metered for
             // observability but never charged on either layer.
-            let rollout_enabled = if required && !managed {
+            let rollout_enabled = if (required && !managed) || org_guest {
                 // Autonomous channels have a persisted owner but no acting
                 // organization member. Use the owner's rollout baseline.
                 let owner = self
@@ -538,12 +614,14 @@ impl BillingService {
             // without billing.platform_billable stay free (metered only),
             // so BYOK and unconfigured services never draw from wallets.
             let platform_billable = if rollout_enabled && ctx.service_platform_billable {
-                self.ensure_wallet_for_charging(&ctx.billing_owner_id)
-                    .await?;
+                if !org_guest {
+                    self.ensure_wallet_for_charging(&ctx.billing_owner_id)
+                        .await?;
+                }
                 let chargeable = self
                     .owner_has_chargeable_wallet(&ctx.billing_owner_id)
                     .await?;
-                if required && !chargeable {
+                if (required || org_guest) && !chargeable {
                     return Err(crate::errors::AppError::BillingNotConfigured(
                         if managed { "Managed execution requires a provisioned billing wallet and subscription" } else {
                             "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding"
@@ -554,7 +632,9 @@ impl BillingService {
             } else {
                 false
             };
-            if (public || managed) && (!rollout_enabled || !platform_billable) {
+            if (org_guest && !rollout_enabled)
+                || ((public || managed || model_paid) && (!rollout_enabled || !platform_billable))
+            {
                 return Err(crate::errors::AppError::BillingProviderUnavailable(
                     "Required execution funding is unavailable".into(),
                 ));
@@ -577,18 +657,22 @@ impl BillingService {
         }
 
         let reservation = if self.config.billing_enabled {
-            reservation::gate_and_reserve(
+            let result = reservation::gate_and_reserve(
                 &self.db,
                 self.lago.as_deref(),
                 &ctx,
                 self.config.billing_fail_closed,
                 self.config.billing_rate_cache_ttl_secs,
             )
-            .await?
+            .await;
+            if result.is_err() && meter::has_complete_meter(&self.db, &ctx).await? {
+                return Ok(MeteredProxyContext::from_route(&ctx));
+            }
+            result?
         } else {
             None
         };
-        if required
+        if (required || org_guest)
             && self.config.billing_enabled
             && ctx.has_billable_layers()
             && reservation.is_none()
@@ -602,29 +686,12 @@ impl BillingService {
                 .into(),
             ));
         }
-        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some() || managed)
-            && reservation.is_some()
-        {
-            // Pool funding and meter rows committed together; cancellation at
-            // any later await can recover from the durable attempt lease.
+        if reservation.is_some() {
+            // All funded admission holds and meter rows committed together.
+            // Recovery owns their durable usage intent after this handoff.
             return Ok(MeteredProxyContext::from_route(&ctx));
         }
-        match meter::open(&self.db, &ctx, reservation.as_ref()).await {
-            Ok(metered) => Ok(metered),
-            Err(error) => {
-                if let Some(reservation) = reservation.as_ref()
-                    && let Err(release_error) =
-                        reservation::release_billing_reservation(&self.db, reservation).await
-                {
-                    tracing::error!(
-                        billing_request_id = %ctx.billing_request_id,
-                        error = %release_error,
-                        "failed to release billing reservation after meter setup failed"
-                    );
-                }
-                Err(error)
-            }
-        }
+        meter::open(&self.db, &ctx, None).await
     }
 
     async fn ensure_wallet_for_charging(&self, owner_id: &str) -> AppResult<()> {
@@ -657,7 +724,12 @@ impl BillingService {
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
-        meter::mark_forwarded(&self.db, metered).await
+        meter::mark_forwarded(&self.db, metered).await?;
+        #[cfg(test)]
+        if let Some(gate) = &self.before_send_gate {
+            gate.wait().await?;
+        }
+        Ok(())
     }
 
     pub async fn settle(
@@ -710,6 +782,23 @@ impl BillingService {
 
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
+    }
+
+    /// A private sender fence proved that the operation was never sent. Undo
+    /// pre-send bookkeeping before releasing its reservation; transport errors
+    /// and cancellation after dispatch must use the ordinary settlement path.
+    pub(crate) fn reject_before_send<'a>(
+        &'a self,
+        metered: &'a MeteredProxyContext,
+        reason: &'a str,
+        previously_dispatched: bool,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if previously_dispatched {
+                return self.fail(metered, reason).await;
+            }
+            meter::reject_before_send(&self.db, metered, reason).await
+        })
     }
 }
 
@@ -1224,6 +1313,7 @@ mod tests {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric,
@@ -1479,6 +1569,7 @@ mod tests {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric,
@@ -1550,6 +1641,9 @@ mod tests {
         let mut config = test_app_config();
         config.billing_enabled = true;
         let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago);
+        // Price sync invalidates profiles. Supply the reconcile result before
+        // this benefit-only estimate spills into wallet funding at settlement.
+        super::taxes::seed_test_profiles(&db).await;
         for credential in [
             CredentialClass::UserOwned,
             CredentialClass::NyxidManagedMaster,
@@ -1582,6 +1676,7 @@ mod tests {
                 .settle(
                     &metered,
                     PlatformUsage {
+                        model_charges: None,
                         input_tokens: 0,
                         output_tokens: 0,
                         cache_read_tokens: 0,
@@ -1594,6 +1689,7 @@ mod tests {
                         token_breakdown: None,
                         audio_tokens: None,
                         image_tokens: None,
+                        reported_model: None,
                     },
                     None,
                     None,
@@ -1723,6 +1819,9 @@ mod tests {
         grants::issue_grants(
             &db,
             grants::IssueCreditGrantInput {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![owner.clone()],
@@ -1740,6 +1839,8 @@ mod tests {
         let mut config = test_app_config();
         config.billing_enabled = true;
         let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        // Recovery runs after the regular sweep refreshes invalidated profiles.
+        super::taxes::seed_test_profiles(&db).await;
         let ctx = BillingRouteContext::new(
             BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
@@ -2008,6 +2109,7 @@ mod tests {
                     sync_error: None,
                 }),
                 byok_pricing: credits.map(|credits| LanePricing {
+                    model_prices: Vec::new(),
                     components: Vec::new(),
                     operations: vec![],
                     metric: BillingMetric::Requests,
@@ -2107,6 +2209,14 @@ mod tests {
 
     #[async_trait]
     impl crate::services::billing::lago_client::LagoApi for FakeLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn sync_standard_charge(
             &self,
             _plan: &str,
@@ -2330,6 +2440,7 @@ mod tests {
             })
             .await
             .expect("insert wallet");
+        crate::services::billing::taxes::seed_test_profiles(db).await;
     }
 }
 
@@ -2348,3 +2459,10 @@ mod legacy_v1_fixture;
 mod operation_pricing_tests;
 
 pub mod voice;
+
+pub mod service_limits;
+mod submissions;
+pub mod summaries;
+
+#[cfg(test)]
+mod allocation_policy_tests;

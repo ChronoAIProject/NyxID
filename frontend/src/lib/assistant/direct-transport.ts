@@ -18,6 +18,14 @@ import {
   isInsufficientCreditsHttp,
   notifyCreditsDenied,
 } from "@/lib/credits-denial";
+import {
+  captureNyxbotError,
+  httpErrorCode,
+  messageTraceId,
+  responseCorrelation,
+  type ErrorCorrelation,
+} from "@/lib/assistant/error-telemetry";
+import type { NyxbotErrorCode } from "@/lib/telemetry-schema";
 import type { Conversation } from "@/types/assistant";
 
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
@@ -68,7 +76,7 @@ interface DirectTurnError {
 }
 
 interface DirectActiveTurn {
-  readonly turnMetadata?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null };
+  readonly turnMetadata?: { readonly failureReason?: import("@/schemas/assistant-nyxagent").NyxAgentFailureReason | null; readonly attempts?: number | null; readonly capacityWaitMs?: number | null };
   readonly continuations?: number;
   readonly turnId: string | null;
   readonly status: DirectTurnStatus;
@@ -125,7 +133,7 @@ export type DirectTurnEvent =
     })
   | (DirectTurnEventBase & {
       readonly event: "turn.completed";
-      readonly turn_metadata?: { readonly attempts?: number | null; readonly capacity_wait_ms?: number | null } | null;
+      readonly turn_metadata?: { readonly failure_reason?: import("@/schemas/assistant-nyxagent").NyxAgentFailureReason | null; readonly attempts?: number | null; readonly capacity_wait_ms?: number | null } | null;
       readonly turn_id: string | null;
       readonly status: "blocked" | "completed" | "failed" | "cancelled";
       readonly error: DirectTurnError | null;
@@ -218,7 +226,8 @@ export function applyDirectTurnEvent(
             (block) => block.block_id === event.block_id,
           );
           if (existingIndex >= 0) blocks[existingIndex] = event.block;
-          else blocks.splice(Math.min(event.index, blocks.length), 0, event.block);
+          else
+            blocks.splice(Math.min(event.index, blocks.length), 0, event.block);
           return { ...message, blocks };
         }),
       };
@@ -243,7 +252,7 @@ export function applyDirectTurnEvent(
         activeTurn: {
           turnId: event.turn_id,
           status: event.status,
-          turnMetadata: event.turn_metadata ? { attempts: event.turn_metadata.attempts, capacityWaitMs: event.turn_metadata.capacity_wait_ms } : undefined,
+          turnMetadata: event.turn_metadata ? { failureReason: event.turn_metadata.failure_reason, attempts: event.turn_metadata.attempts, capacityWaitMs: event.turn_metadata.capacity_wait_ms } : undefined,
           error: event.error,
         },
       };
@@ -329,6 +338,10 @@ interface StoredConversation {
 
 interface RunningTurn {
   readonly turnId: string;
+  readonly startedAt: number;
+  responseStatus?: number;
+  correlation?: ErrorCorrelation;
+  upstreamCode?: number;
   readonly controller: AbortController;
   readonly onEvent: (event: DirectTurnEvent) => void;
   /** Signed-in identity when the turn was sent (credits-denial fence). */
@@ -472,7 +485,10 @@ export class DirectAssistantTransport {
   getSettings(conversationId?: string): DirectConversationSettings {
     this.ensureOwner();
     if (!conversationId) return this.draftSettings;
-    return this.conversations.get(conversationId)?.settings ?? DEFAULT_DIRECT_SETTINGS;
+    return (
+      this.conversations.get(conversationId)?.settings ??
+      DEFAULT_DIRECT_SETTINGS
+    );
   }
 
   readonly subscribeSettings = (listener: () => void): (() => void) => {
@@ -499,9 +515,7 @@ export class DirectAssistantTransport {
       );
   }
 
-  getHistorySnapshot(
-    conversationId: string,
-  ): DirectConversationHistory | null {
+  getHistorySnapshot(conversationId: string): DirectConversationHistory | null {
     this.ensureOwner();
     const stored = this.conversations.get(conversationId);
     if (!stored) return null;
@@ -669,6 +683,7 @@ export class DirectAssistantTransport {
     }
     const run: RunningTurn = {
       turnId: newId("turn"),
+      startedAt: this.now(),
       controller: new AbortController(),
       onEvent,
       actorId: currentCreditsActor(),
@@ -818,12 +833,15 @@ export class DirectAssistantTransport {
         run,
         "first_byte_timeout",
       );
+      run.responseStatus = response.status;
+      run.correlation = responseCorrelation(response);
       if (!response.ok) {
         const body = await parseJsonErrorResponse(response);
         // Before the generic `http_402` rewrite below discards the symbol.
         if (isInsufficientCreditsHttp(response.status, body)) {
           this.notifyCredits(conversationId, run);
         }
+        if (isNyxidErrorEnvelope(body)) run.upstreamCode = body.error_code;
         if (
           response.status >= 400 &&
           response.status < 500 &&
@@ -1044,6 +1062,43 @@ export class DirectAssistantTransport {
     error: { readonly code: string; readonly message: string } | null,
   ): void {
     if (run.terminalEmitted) return;
+    if (status === "failed" && !run.discarded && !run.drained) {
+      let code: NyxbotErrorCode;
+      if (run.sawUpstreamError) code = "NYXBOT_RUN_ERROR";
+      else if (run.responseStatus !== undefined && run.responseStatus >= 400)
+        code = httpErrorCode(run.responseStatus);
+      else if (error?.code === "first_byte_timeout")
+        code = "NYXBOT_START_TIMEOUT";
+      else if (error?.code === "idle_timeout") code = "NYXBOT_STREAM_TIMEOUT";
+      else if (
+        error?.code === "missing_stream" ||
+        error?.code === "truncated_stream"
+      )
+        code = "NYXBOT_PROTOCOL_ERROR";
+      else
+        code =
+          run.responseStatus !== undefined
+            ? "NYXBOT_STREAM_ERROR"
+            : "NYXBOT_NETWORK_ERROR";
+      captureNyxbotError({
+        code,
+        engine: "direct",
+        stage:
+          run.responseStatus !== undefined && run.responseStatus < 400
+            ? "stream"
+            : "request",
+        endpoint: DIRECT_COMPLETIONS_URL,
+        status: run.responseStatus,
+        upstreamCode:
+          run.upstreamCode ?? (run.sawUpstreamError ? error?.code : undefined),
+        ...run.correlation,
+        traceId:
+          run.correlation?.traceId || messageTraceId(error?.message ?? ""),
+        conversationId,
+        turnId: run.turnId,
+        durationMs: this.now() - run.startedAt,
+      });
+    }
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "turn.completed",

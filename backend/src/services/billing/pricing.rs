@@ -94,7 +94,16 @@ pub async fn sync_service_price(
     plan_code: &str,
     service: &DownstreamService,
 ) -> AppResult<bool> {
-    let mut changed = cleanup_components(db, lago, plan_code, service).await?;
+    let mut changed = false;
+    for tariff in super::model_tariffs::load_for(db, std::slice::from_ref(service)).await? {
+        changed |= super::model_tariffs::sync(db, lago, plan_code, &tariff).await?;
+    }
+    if service.platform_key.as_ref().is_some_and(|p| {
+        p.purpose == crate::models::downstream_service::PlatformKeyPurpose::ModelOffering
+    }) {
+        return Ok(changed);
+    }
+    changed |= cleanup_components(db, lago, plan_code, service).await?;
     changed |= sync_legacy_price(db, lago, plan_code, service).await?;
     for field in ["byok_pricing", "platform_key_pricing"] {
         changed |= sync_lane_price(db, lago, plan_code, service, field).await?;
@@ -136,7 +145,29 @@ pub fn normalize_lane_pricing(
             "pk",
         ),
     ] {
+        if lane.is_none() && previous.is_some_and(|p| !p.model_prices.is_empty()) {
+            return Err(AppError::ValidationError(
+                "Model tariff billing lanes cannot be removed by ordinary catalog edits".into(),
+            ));
+        }
         if let Some(lane) = lane {
+            let references = previous.map(|p| p.model_prices.clone()).unwrap_or_default();
+            if !lane.model_prices.is_empty() && lane.model_prices != references {
+                return Err(AppError::ValidationError(
+                    "Model prices are published through the model tariff API".into(),
+                ));
+            }
+            lane.model_prices = references;
+            if lane.metric.requires_model_evidence()
+                || lane
+                    .components
+                    .iter()
+                    .any(|c| c.metric.requires_model_evidence())
+            {
+                return Err(AppError::ValidationError(
+                    "This unit requires a certified model tariff".into(),
+                ));
+            }
             if lane.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
                 || lane.components.iter().any(|component| {
                     component.metric
@@ -386,7 +417,10 @@ async fn sync_lane_price(
         let Some(code) = cleanup.as_deref().filter(|c| !c.is_empty()) else {
             return Ok(false);
         };
-        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+        if super::taxes::remove_charge(db, lago, plan_code, code)
+            .await
+            .is_err()
+        {
             return Ok(false);
         }
         retire_rate(db, code).await?;
@@ -479,7 +513,9 @@ async fn sync_lane_component(
         metric_description: format!("NyxID {field} usage for {}", service.slug),
         credits_per_unit: lane.credits_per_unit.clone(),
     };
-    let synced = lago.sync_standard_charge(plan_code, &input).await.is_ok();
+    let synced = super::taxes::sync_charge(db, lago, plan_code, &input)
+        .await
+        .is_ok();
     // Include the unit: identical prices in a different unit are different charges.
     let mut filter = doc! { "_id": &service.id,
         format!("{path}.lago_metric_code"): &lane.lago_metric_code,
@@ -568,7 +604,10 @@ async fn cleanup_components(
     };
     let mut changed = false;
     for code in &billing.component_cleanup_metric_codes {
-        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+        if super::taxes::remove_charge(db, lago, plan_code, code)
+            .await
+            .is_err()
+        {
             continue;
         }
         retire_rate(db, code).await?;
@@ -601,7 +640,7 @@ async fn sync_legacy_price(
         else {
             return Ok(false);
         };
-        match lago.remove_standard_charge(plan_code, metric_code).await {
+        match super::taxes::remove_charge(db, lago, plan_code, metric_code).await {
             Ok(()) => {
                 complete_price_removal(db, &service.id, metric_code).await?;
                 return Ok(true);
@@ -628,7 +667,7 @@ async fn sync_legacy_price(
         credits_per_unit: pricing.credits_per_unit.clone(),
     };
 
-    match lago.sync_standard_charge(plan_code, &input).await {
+    match super::taxes::sync_charge(db, lago, plan_code, &input).await {
         Ok(()) => {
             let pico = decimal_to_pico(&pricing.credits_per_unit)
                 .ok_or_else(|| AppError::Internal("stored service price is invalid".to_string()))?;
@@ -744,6 +783,7 @@ pub async fn retry_pending_service_prices(
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
+            "platform_key.purpose": {"$ne":"model_offering"},
             "$or": [
                 { "billing.component_cleanup_metric_codes.0": { "$exists": true } },
                 { "billing.byok_pricing.components.sync_status": { "$in": ["pending", "failed"] } },
@@ -831,11 +871,64 @@ mod tests {
     };
 
     #[test]
+    fn sandbox_units_reuse_service_component_prices_and_pending_sync() {
+        use crate::models::service_billing::{BillingMetric, LanePriceComponent, LanePricing};
+        let mut billing = ServiceBilling {
+            platform_key_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
+                metric: BillingMetric::SandboxCpuMillisSeconds,
+                credits_per_unit: "0.000000010000".into(),
+                lago_metric_code: String::new(),
+                sync_status: PricingSyncStatus::Pending,
+                sync_error: None,
+                operations: vec![],
+                components: vec![
+                    LanePriceComponent {
+                        metric: BillingMetric::SandboxMemoryMibSeconds,
+                        credits_per_unit: "0.000000001000".into(),
+                        lago_metric_code: String::new(),
+                        sync_status: PricingSyncStatus::Pending,
+                        sync_error: None,
+                    },
+                    LanePriceComponent {
+                        metric: BillingMetric::SandboxDiskGibSeconds,
+                        credits_per_unit: "0.000000040000".into(),
+                        lago_metric_code: String::new(),
+                        sync_status: PricingSyncStatus::Pending,
+                        sync_error: None,
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        super::normalize_lane_pricing("cma-allocation", None, &mut billing).unwrap();
+        let lane = billing.platform_key_pricing.as_ref().unwrap();
+        assert_eq!(lane.credits_per_unit, "0.00000001");
+        assert_eq!(lane.sync_status, PricingSyncStatus::Pending);
+        assert_eq!(lane.components.len(), 2);
+        assert!(lane.lago_metric_code.starts_with("platform_svc_"));
+        assert!(
+            lane.components
+                .iter()
+                .all(|part| part.sync_status == PricingSyncStatus::Pending
+                    && part.lago_metric_code.starts_with("platform_svc_")
+                    && part.lago_metric_code != lane.lago_metric_code)
+        );
+        let previous = billing.clone();
+        billing.platform_key_pricing.as_mut().unwrap().components[1].credits_per_unit =
+            "0.0000000400001".into();
+        assert!(
+            super::normalize_lane_pricing("cma-allocation", Some(&previous), &mut billing).is_err()
+        );
+    }
+
+    #[test]
     fn machine_runtime_cannot_be_authored_as_a_service_lane() {
         use crate::models::service_billing::{BillingMetric, LanePriceComponent, LanePricing};
         for component in [false, true] {
             let mut billing = ServiceBilling {
                 byok_pricing: Some(LanePricing {
+                    model_prices: Vec::new(),
                     metric: if component {
                         BillingMetric::Requests
                     } else {

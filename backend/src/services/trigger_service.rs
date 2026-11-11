@@ -65,29 +65,43 @@ pub struct UpdateInput {
 
 pub struct CreatedTrigger {
     pub trigger: Trigger,
-    pub raw_secret: String,
-    pub delivery_signing_secret: Option<String>,
+    pub raw_secret: Zeroizing<String>,
+    pub delivery_signing_secret: Option<Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
 pub struct UpdatedTrigger {
     pub trigger: Trigger,
-    pub delivery_signing_secret: Option<String>,
+    pub delivery_signing_secret: Option<Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
 pub struct RotatedDeliverySecret {
     pub trigger: Trigger,
-    pub raw_secret: String,
+    pub raw_secret: Zeroizing<String>,
     pub key_id: String,
+}
+crate::errors::redacted_debug!(CreatedTrigger, UpdatedTrigger, RotatedDeliverySecret);
+
+#[cfg(test)]
+tokio::task_local! {
+    static UPDATE_COMMITTED: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
 pub enum WebhookAdmission {
     Accepted {
         record: Box<TriggerDeliveryRecord>,
-        body: Vec<u8>,
+        body: Zeroizing<Vec<u8>>,
     },
     Duplicate,
+}
+
+fn new_secret(prefix: &str) -> Zeroizing<String> {
+    let random = Zeroizing::new(generate_random_token());
+    let mut secret = Zeroizing::new(String::with_capacity(prefix.len() + random.len()));
+    secret.push_str(prefix);
+    secret.push_str(&random);
+    secret
 }
 
 #[derive(serde::Serialize)]
@@ -97,6 +111,12 @@ pub struct TriggerEventEnvelope {
     pub source: &'static str,
     pub received_at: chrono::DateTime<Utc>,
     pub payload: serde_json::Value,
+}
+
+impl Drop for TriggerEventEnvelope {
+    fn drop(&mut self) {
+        crate::crypto::secret_json::clear_json_strings(&mut self.payload);
+    }
 }
 
 pub async fn create(
@@ -138,26 +158,53 @@ pub async fn create(
             "Webhook triggers require inbound verification and no schedule".into(),
         ));
     }
-    let (delivery, delivery_secret_encrypted, delivery_signing_secret, delivery_key_id) =
-        prepare_delivery(encryption_keys, input.delivery).await?;
     let id = Uuid::new_v4().to_string();
+    let (delivery, delivery_secret_encrypted, delivery_signing_secret, delivery_key_id) =
+        prepare_delivery(encryption_keys, &id, &input.user_id, input.delivery).await?;
     let raw_secret = if input.source == TriggerSource::Webhook {
-        format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token())
+        new_secret(TRIGGER_SECRET_PREFIX)
     } else {
-        String::new()
+        Zeroizing::new(String::new())
     };
     let verification_secret_encrypted = if input.source == TriggerSource::Schedule {
         None
     } else {
         match input.verification {
-            TriggerVerification::HmacSha256 { .. } => {
-                Some(encryption_keys.encrypt(raw_secret.as_bytes()).await?)
-            }
+            TriggerVerification::HmacSha256 { .. } => Some(
+                super::trigger_record_service::encrypt_secret(
+                    encryption_keys,
+                    &id,
+                    &input.user_id,
+                    "verification_secret_encrypted",
+                    raw_secret.as_bytes(),
+                )
+                .await?,
+            ),
             TriggerVerification::Token { .. } | TriggerVerification::Schedule => None,
         }
     };
     let now = Utc::now();
+    let mut secret_context_versions = std::collections::BTreeMap::new();
+    for (field, present) in [
+        (
+            "verification_secret_encrypted",
+            verification_secret_encrypted.is_some(),
+        ),
+        (
+            "delivery_secret_encrypted",
+            delivery_secret_encrypted.is_some(),
+        ),
+    ] {
+        if present {
+            super::credential_record_service::mark_version(
+                &mut secret_context_versions,
+                encryption_keys,
+                field,
+            );
+        }
+    }
     let trigger = Trigger {
+        secret_context_versions,
         id: id.clone(),
         source: input.source,
         setup_watch_id: input.setup_watch_id,
@@ -190,8 +237,12 @@ pub async fn create(
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
+                super::erasure_admission::fence_in_session(&db_copy, &saved.user_id, session)
+                    .await?;
                 if let Some(watch_id) = &saved.setup_watch_id {
                     if saved.source != TriggerSource::Webhook
                         || !matches!(saved.delivery, TriggerDelivery::Assistant { .. })
@@ -317,6 +368,7 @@ pub async fn update(
     current: &Trigger,
     input: UpdateInput,
 ) -> AppResult<UpdatedTrigger> {
+    let source = capture_source(db, current).await?;
     let mut next = current.clone();
     next.schedule_state.terminal_failure_code = None;
     next.schedule_state.terminal_failure_count = 0;
@@ -343,9 +395,19 @@ pub async fn update(
             &delivery,
         )
         .await?;
-        let (delivery, encrypted, raw, key) = prepare_delivery(encryption_keys, delivery).await?;
+        let (delivery, encrypted, raw, key) =
+            prepare_delivery(encryption_keys, &current.id, &current.user_id, delivery).await?;
         next.delivery = delivery;
         next.delivery_secret_encrypted = encrypted;
+        next.secret_context_versions
+            .remove("delivery_secret_encrypted");
+        if next.delivery_secret_encrypted.is_some() {
+            super::credential_record_service::mark_version(
+                &mut next.secret_context_versions,
+                encryption_keys,
+                "delivery_secret_encrypted",
+            );
+        }
         next.delivery_key_id = key;
         delivery_signing_secret = raw;
         if next.delivery != current.delivery {
@@ -396,12 +458,14 @@ pub async fn update(
     };
     let db_copy = db.clone();
     let saved = next.clone();
-    let previous = current.updated_at;
     let mut session = db.client().start_session().await?;
-    session
+    let trigger = session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
-            let result: AppResult<()> = async {
+            let result: AppResult<Trigger> = async {
+                super::erasure_admission::fence_in_session(&db_copy,&saved.user_id,session).await?;
                 let encrypted = saved
                     .delivery_secret_encrypted
                     .as_ref()
@@ -417,6 +481,7 @@ pub async fn update(
                     "status": bson::to_bson(&saved.status).map_err(serialization_error)?,
                     "delivery": bson::to_bson(&saved.delivery).map_err(serialization_error)?,
                     "delivery_secret_encrypted": encrypted,
+                    "secret_context_versions":bson::to_bson(&saved.secret_context_versions).map_err(serialization_error)?,
                     "delivery_key_id": &saved.delivery_key_id,
                     "overlap": bson::to_bson(&saved.overlap).map_err(serialization_error)?,
                     "schedule": bson::to_bson(&saved.schedule).map_err(serialization_error)?,
@@ -452,35 +517,33 @@ pub async fn update(
                 if target_changed {
                     set.insert("schedule_state.dedicated_thread_id", bson::Bson::Null);
                 }
-                let modified = db_copy
+                let committed = db_copy
                     .collection::<Trigger>(TRIGGERS)
-                    .update_one(
-                        doc! { "_id": &saved.id, "updated_at": schedules::date(previous) },
+                    .find_one_and_update(
+                        super::record_storage::exact_document_predicate(&source),
                         doc! { "$set": set },
                     )
+                    .return_document(ReturnDocument::After)
                     .session(&mut *session)
                     .await?
-                    .matched_count;
-                if modified == 0 {
-                    return Err(AppError::Conflict(
+                    .ok_or_else(|| AppError::Conflict(
                         "Trigger changed; reload and retry".into(),
-                    ));
-                }
+                    ))?;
                 if schedule_changed {
                     schedules::set_schedule_job(&db_copy, &saved, session).await?;
                 }
-                Ok(())
+                Ok(committed)
             }
             .await;
             transactions::transaction_result(result)
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    let trigger = db
-        .collection::<Trigger>(TRIGGERS)
-        .find_one(doc! { "_id": &next.id })
-        .await?
-        .ok_or(AppError::TriggerNotFound)?;
+    #[cfg(test)]
+    if let Ok((entered, release)) = UPDATE_COMMITTED.try_with(Clone::clone) {
+        entered.notify_one();
+        release.notified().await;
+    }
     Ok(UpdatedTrigger {
         delivery_signing_key_id: trigger.delivery_key_id.clone(),
         trigger,
@@ -507,13 +570,14 @@ pub async fn rotate_secret(
     db: &Database,
     encryption_keys: &EncryptionKeys,
     current: &Trigger,
-) -> AppResult<(Trigger, String)> {
+) -> AppResult<(Trigger, Zeroizing<String>)> {
     if current.source == TriggerSource::Schedule {
         return Err(AppError::ValidationError(
             "Scheduled automations have no inbound secret".into(),
         ));
     }
-    let raw_secret = format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token());
+    let source = capture_source(db, current).await?;
+    let raw_secret = new_secret(TRIGGER_SECRET_PREFIX);
     let mut set_doc = doc! {
         "secret_hash": hash_token(&raw_secret),
         "schedule_state.terminal_failure_code": null,
@@ -522,7 +586,30 @@ pub async fn rotate_secret(
     };
     let update = match current.verification {
         TriggerVerification::HmacSha256 { .. } => {
-            let encrypted = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
+            let encrypted = super::trigger_record_service::encrypt_secret(
+                encryption_keys,
+                &current.id,
+                &current.user_id,
+                "verification_secret_encrypted",
+                raw_secret.as_bytes(),
+            )
+            .await?;
+            if encryption_keys.contextual_record_writes() {
+                set_doc.insert(
+                    "secret_context_versions.verification_secret_encrypted",
+                    3_i32,
+                );
+            } else {
+                set_doc.insert(
+                    "secret_context_versions",
+                    bson::to_bson(&{
+                        let mut versions = current.secret_context_versions.clone();
+                        versions.remove("verification_secret_encrypted");
+                        versions
+                    })
+                    .map_err(serialization_error)?,
+                );
+            }
             set_doc.insert(
                 "verification_secret_encrypted",
                 bson::Binary {
@@ -535,21 +622,10 @@ pub async fn rotate_secret(
         TriggerVerification::Schedule => return Err(AppError::TriggerDeliveryUnsupported),
         TriggerVerification::Token { .. } => doc! {
             "$set": set_doc,
-            "$unset": { "verification_secret_encrypted": "" },
+            "$unset": { "verification_secret_encrypted": "", "secret_context_versions.verification_secret_encrypted":"" },
         },
     };
-    let updated = db
-        .collection::<Trigger>(TRIGGERS)
-        .find_one_and_update(
-            doc! { "_id": &current.id, "user_id": &current.user_id, "updated_at": schedules::date(current.updated_at) },
-            update,
-        )
-        .return_document(ReturnDocument::After)
-        .await?;
-    let updated = match updated {
-        Some(updated) => updated,
-        None => return Err(rotation_conflict(db, current).await?),
-    };
+    let updated = commit_rotation(db, current, &source, update).await?;
     Ok((updated, raw_secret))
 }
 
@@ -561,33 +637,34 @@ pub async fn rotate_delivery_secret(
     if !matches!(current.delivery, TriggerDelivery::Webhook { .. }) {
         return Err(AppError::TriggerDeliveryUnsupported);
     }
-    let raw_secret = format!(
-        "{TRIGGER_DELIVERY_SECRET_PREFIX}{}",
-        generate_random_token()
+    let source = capture_source(db, current).await?;
+    let raw_secret = new_secret(TRIGGER_DELIVERY_SECRET_PREFIX);
+    let encrypted = super::trigger_record_service::encrypt_secret(
+        encryption_keys,
+        &current.id,
+        &current.user_id,
+        "delivery_secret_encrypted",
+        raw_secret.as_bytes(),
+    )
+    .await?;
+    let mut versions = current.secret_context_versions.clone();
+    super::credential_record_service::mark_version(
+        &mut versions,
+        encryption_keys,
+        "delivery_secret_encrypted",
     );
-    let encrypted = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
     let key_id = webhook_delivery_service::generate_signing_key_id();
-    let trigger = db
-        .collection::<Trigger>(TRIGGERS)
-        .find_one_and_update(
-            doc! { "_id": &current.id, "user_id": &current.user_id, "updated_at": schedules::date(current.updated_at) },
-            doc! { "$set": {
+    let trigger=commit_rotation(db,current,&source,doc! { "$set": {
                 "delivery_secret_encrypted": bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
                     bytes: encrypted,
                 },
                 "delivery_key_id": &key_id,
+                "secret_context_versions":bson::to_bson(&versions).map_err(serialization_error)?,
                 "schedule_state.terminal_failure_code": null,
                 "schedule_state.terminal_failure_count": 0,
                 "updated_at": bson::DateTime::from_chrono(Utc::now().max(current.updated_at + chrono::Duration::milliseconds(1))),
-            }},
-        )
-        .return_document(ReturnDocument::After)
-        .await?;
-    let trigger = match trigger {
-        Some(trigger) => trigger,
-        None => return Err(rotation_conflict(db, current).await?),
-    };
+            }}).await?;
     Ok(RotatedDeliverySecret {
         trigger,
         raw_secret,
@@ -595,19 +672,43 @@ pub async fn rotate_delivery_secret(
     })
 }
 
-async fn rotation_conflict(db: &Database, current: &Trigger) -> AppResult<AppError> {
-    if db
-        .collection::<Trigger>(TRIGGERS)
-        .find_one(doc! {"_id": &current.id, "user_id": &current.user_id})
+async fn capture_source(db: &Database, current: &Trigger) -> AppResult<bson::Document> {
+    let raw = db
+        .collection::<bson::Document>(TRIGGERS)
+        .find_one(doc! {"_id":&current.id,"user_id":&current.user_id})
         .await?
-        .is_none()
+        .ok_or(AppError::TriggerNotFound)?;
+    let stored: Trigger = bson::from_document(raw.clone()).map_err(serialization_error)?;
+    if bson::to_document(&stored).map_err(serialization_error)?
+        != bson::to_document(current).map_err(serialization_error)?
     {
-        Ok(AppError::TriggerNotFound)
-    } else {
-        Ok(AppError::Conflict(
+        return Err(AppError::Conflict(
             "Trigger changed; reload and retry".into(),
-        ))
+        ));
     }
+    Ok(raw)
+}
+
+async fn commit_rotation(
+    db: &Database,
+    current: &Trigger,
+    source: &bson::Document,
+    update: bson::Document,
+) -> AppResult<Trigger> {
+    let mut tx = super::erasure_admission::begin_write(db, &current.user_id).await?;
+    let result: AppResult<Trigger> = async {
+        db.collection::<Trigger>(TRIGGERS)
+            .find_one_and_update(
+                super::record_storage::exact_document_predicate(source),
+                update,
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut tx)
+            .await?
+            .ok_or_else(|| AppError::Conflict("Trigger changed; reload and retry".into()))
+    }
+    .await;
+    super::org_membership_authority::finish(tx, result).await
 }
 
 pub async fn load_active_for_ingress(db: &Database, id: &str) -> AppResult<Trigger> {
@@ -657,11 +758,12 @@ pub async fn verify_ingress(
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("sha256="))
                 .ok_or(AppError::TriggerSecretInvalid)?;
-            let encrypted = trigger
-                .verification_secret_encrypted
-                .as_deref()
-                .ok_or(AppError::TriggerSecretInvalid)?;
-            let secret = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+            let secret = super::trigger_record_service::secret(
+                encryption_keys,
+                trigger,
+                "verification_secret_encrypted",
+            )
+            .await?;
             type HmacSha256 = Hmac<Sha256>;
             let mut mac =
                 HmacSha256::new_from_slice(secret.as_slice()).expect("HMAC accepts any key length");
@@ -716,7 +818,7 @@ pub async fn deliver_event(
     event_id: &str,
     payload: serde_json::Value,
 ) -> AppResult<()> {
-    let envelope = TriggerEventEnvelope {
+    let mut envelope = TriggerEventEnvelope {
         event_id: event_id.to_string(),
         trigger_id: trigger.id.clone(),
         source: if trigger.source == TriggerSource::Schedule {
@@ -727,7 +829,9 @@ pub async fn deliver_event(
         received_at: Utc::now(),
         payload,
     };
-    let value = serde_json::to_value(&envelope).map_err(serialization_error)?;
+    let mut value = crate::crypto::secret_json::SecretJson(
+        serde_json::to_value(&envelope).map_err(serialization_error)?,
+    );
     match &trigger.delivery {
         TriggerDelivery::Assistant { .. } => return Err(AppError::TriggerDeliveryUnsupported),
         TriggerDelivery::Webhook { .. } => {
@@ -740,7 +844,7 @@ pub async fn deliver_event(
                     encryption_keys,
                     trigger,
                     event_id,
-                    envelope.payload,
+                    std::mem::take(&mut envelope.payload),
                     config.trigger_delivery_retention_hours,
                     max_body_bytes,
                 )
@@ -759,7 +863,12 @@ pub async fn deliver_event(
                     outcome.map_err(|_| AppError::TriggerDeliveryFailed)?;
                 }
             } else {
-                let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
+                let body = Zeroizing::new(
+                    crate::crypto::secret_json::to_secret_string(&envelope)
+                        .map_err(serialization_error)?
+                        .as_bytes()
+                        .to_vec(),
+                );
                 deliver_webhook_body(
                     encryption_keys,
                     http_client,
@@ -778,7 +887,7 @@ pub async fn deliver_event(
                 source: envelope.source.to_string(),
                 event_type: "trigger.event".to_string(),
                 timestamp: envelope.received_at,
-                payload: Some(value),
+                payload: Some(std::mem::take(&mut value.0)),
                 metadata: None,
             };
             channel_event_service::forward_trigger_event(
@@ -856,21 +965,23 @@ pub async fn admit_webhook_delivery(
         received_at: now,
         payload,
     };
-    let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
+    let body = Zeroizing::new(
+        crate::crypto::secret_json::to_secret_string(&envelope)
+            .map_err(serialization_error)?
+            .as_bytes()
+            .to_vec(),
+    );
     if body.len() > max_body_bytes {
         return Err(AppError::TriggerPayloadTooLarge);
     }
-    let envelope_encrypted = if retention_hours == 0 {
-        None
-    } else {
-        Some(encryption_keys.encrypt(&body).await?)
-    };
+
     let retained_hours = if retention_hours == 0 {
         METADATA_ONLY_RETENTION_HOURS
     } else {
         i64::try_from(retention_hours).unwrap_or(i64::MAX)
     };
-    let record = TriggerDeliveryRecord {
+    let mut record = TriggerDeliveryRecord {
+        secret_context_versions: Default::default(),
         id: delivery_record_id(&trigger.id, event_id),
         trigger_id: trigger.id.clone(),
         user_id: trigger.user_id.clone(),
@@ -878,23 +989,56 @@ pub async fn admit_webhook_delivery(
         status: TriggerDeliveryRecordStatus::Pending,
         attempts: 0,
         last_status_code: None,
-        envelope_encrypted,
+        envelope_encrypted: None,
         created_at: now,
         updated_at: now,
         expires_at: now + chrono::Duration::hours(retained_hours),
         delivered_at: None,
     };
-    match db
-        .collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
-        .insert_one(&record)
-        .await
-    {
-        Ok(_) => Ok(WebhookAdmission::Accepted {
+    if retention_hours != 0 {
+        record.envelope_encrypted = Some(
+            super::trigger_record_service::encrypt_envelope(encryption_keys, &record, &body)
+                .await?,
+        );
+        super::credential_record_service::mark_version(
+            &mut record.secret_context_versions,
+            encryption_keys,
+            "envelope_encrypted",
+        );
+    }
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::fence_in_session(db, &trigger.user_id, &mut session).await?;
+        if db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id":&trigger.id,"user_id":&trigger.user_id,"status":"active"})
+            .session(&mut session)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::TriggerNotFound);
+        }
+        db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+            .insert_one(&record)
+            .session(&mut session)
+            .await?;
+        Ok(())
+    }
+    .await;
+    match super::org_membership_authority::finish(session, result).await {
+        Ok(()) => Ok(WebhookAdmission::Accepted {
             record: Box::new(record),
             body,
         }),
-        Err(error) if is_duplicate_key_error(&error) => Ok(WebhookAdmission::Duplicate),
-        Err(error) => Err(error.into()),
+        Err(AppError::DatabaseError(error)) if is_duplicate_key_error(&error) => {
+            Ok(WebhookAdmission::Duplicate)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -906,7 +1050,7 @@ pub fn dispatch_webhook_event(
     http_client: reqwest::Client,
     trigger: Trigger,
     record: TriggerDeliveryRecord,
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
     max_body_bytes: usize,
 ) {
     tokio::spawn(async move {
@@ -993,13 +1137,13 @@ async fn deliver_webhook_body(
             last_status: None,
         });
     };
-    let Some(encrypted) = trigger.delivery_secret_encrypted.as_deref() else {
+    if trigger.delivery_secret_encrypted.is_none() {
         return Err(DeliveryFailure {
             attempts: 0,
             reason: "signing_secret_missing",
             last_status: None,
         });
-    };
+    }
     let Some(key_id) = trigger.delivery_key_id.as_deref() else {
         return Err(DeliveryFailure {
             attempts: 0,
@@ -1014,22 +1158,17 @@ async fn deliver_webhook_body(
             last_status: None,
         });
     }
-    let secret = encryption_keys
-        .decrypt(encrypted)
-        .await
-        .map(Zeroizing::new)
-        .map_err(|error| {
-            tracing::warn!(
-                trigger_id = %trigger.id,
-                %error,
-                "failed to decrypt trigger webhook signing secret"
-            );
-            DeliveryFailure {
-                attempts: 0,
-                reason: "secret_decrypt_failed",
-                last_status: None,
-            }
-        })?;
+    let secret = super::trigger_record_service::secret(
+        encryption_keys,
+        trigger,
+        "delivery_secret_encrypted",
+    )
+    .await
+    .map_err(|_| DeliveryFailure {
+        attempts: 0,
+        reason: "secret_decrypt_failed",
+        last_status: None,
+    })?;
     webhook_delivery_service::deliver_signed_body(
         http_client,
         url,
@@ -1118,11 +1257,7 @@ pub async fn redeliver(
         .find_one(doc! { "trigger_id": &trigger.id, "event_id": event_id })
         .await?
         .ok_or(AppError::TriggerDeliveryRecordNotFound)?;
-    let encrypted = record
-        .envelope_encrypted
-        .as_deref()
-        .ok_or(AppError::TriggerDeliveryRecordNotFound)?;
-    let body = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+    let body = super::trigger_record_service::envelope(encryption_keys, &record).await?;
     db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
         .update_one(
             doc! { "_id": &record.id, "trigger_id": &trigger.id },
@@ -1210,21 +1345,27 @@ fn agent_event_uuid(trigger_id: &str, event_id: &str) -> String {
 
 async fn prepare_delivery(
     encryption_keys: &EncryptionKeys,
+    id: &str,
+    owner: &str,
     delivery: TriggerDelivery,
 ) -> AppResult<(
     TriggerDelivery,
     Option<Vec<u8>>,
-    Option<String>,
+    Option<Zeroizing<String>>,
     Option<String>,
 )> {
     match delivery {
         TriggerDelivery::Webhook { url } => {
             let url = webhook_delivery_service::validate_webhook_url(&url, "delivery.url").await?;
-            let raw = format!(
-                "{TRIGGER_DELIVERY_SECRET_PREFIX}{}",
-                generate_random_token()
-            );
-            let encrypted = encryption_keys.encrypt(raw.as_bytes()).await?;
+            let raw = new_secret(TRIGGER_DELIVERY_SECRET_PREFIX);
+            let encrypted = super::trigger_record_service::encrypt_secret(
+                encryption_keys,
+                id,
+                owner,
+                "delivery_secret_encrypted",
+                raw.as_bytes(),
+            )
+            .await?;
             let key_id = webhook_delivery_service::generate_signing_key_id();
             Ok((
                 TriggerDelivery::Webhook { url },
@@ -1324,6 +1465,376 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use chrono::TimeZone;
 
+    #[tokio::test]
+    async fn update_returns_its_committed_delivery_secret_pair_during_successor_rotation() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("trigger_response_pair").await;
+        let keys = test_encryption_keys();
+        let owner = Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let created = create(
+            &db,
+            &keys,
+            CreateInput {
+                source: Default::default(),
+                setup_watch_id: None,
+                schedule: None,
+                overlap: Default::default(),
+                user_id: owner,
+                label: "Pairing".into(),
+                user_service_id: None,
+                verification: TriggerVerification::HmacSha256 {
+                    header_name: "X-Signature".into(),
+                },
+                delivery: TriggerDelivery::Notification,
+            },
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let change = webhook_delivery_service::with_test_webhook_target(
+            address,
+            UPDATE_COMMITTED.scope(
+                (entered.clone(), release.clone()),
+                update(
+                    &db,
+                    &keys,
+                    &created.trigger,
+                    UpdateInput {
+                        schedule: None,
+                        overlap: None,
+                        label: None,
+                        status: None,
+                        delivery: Some(TriggerDelivery::Webhook {
+                            url: format!("http://{address}/hook"),
+                        }),
+                    },
+                ),
+            ),
+        );
+        let rotate = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                .await
+                .expect("update did not reach committed-response barrier");
+            let committed = db
+                .collection::<Trigger>(TRIGGERS)
+                .find_one(doc! {"_id":&created.trigger.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let successor = rotate_delivery_secret(&db, &keys, &committed)
+                .await
+                .unwrap();
+            release.notify_one();
+            Ok::<_, AppError>((committed, successor))
+        };
+        // An early update error cancels the paired waiter. Bound the entire
+        // barrier as well so a missing notification cannot hang the suite.
+        let (updated, (committed, successor)) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                tokio::try_join!(change, rotate)
+            })
+            .await
+            .expect("committed-response pairing timed out")
+            .unwrap();
+        assert_eq!(updated.trigger.delivery_key_id, committed.delivery_key_id);
+        assert_eq!(updated.delivery_signing_key_id, committed.delivery_key_id);
+        let secret = super::super::trigger_record_service::secret(
+            &keys,
+            &committed,
+            "delivery_secret_encrypted",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated.delivery_signing_secret.as_ref().unwrap().as_bytes(),
+            secret.as_slice()
+        );
+        assert_ne!(
+            updated.delivery_signing_key_id.as_deref(),
+            Some(successor.key_id.as_str())
+        );
+        let live = db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id":&created.trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            live.delivery_key_id.as_deref(),
+            Some(successor.key_id.as_str())
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_hmac_rotation_and_delivery_support_staging_migration_and_strict_reads() {
+        let db = connect_test_database("trigger_contextual_lifecycle")
+            .await
+            .expect("MongoDB fixture required");
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                let sent = sent.clone();
+                async move {
+                    sent.send((headers, body)).unwrap();
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut staged = test_encryption_keys();
+        staged.set_contextual_record_writes(false);
+        let migration = test_encryption_keys();
+        let mut strict = test_encryption_keys();
+        strict.set_allow_legacy_record_reads(false);
+        let owner = Uuid::new_v4().to_string();
+        let created = webhook_delivery_service::with_test_webhook_target(
+            address,
+            create(
+                &db,
+                &staged,
+                CreateInput {
+                    source: Default::default(),
+                    setup_watch_id: None,
+                    schedule: None,
+                    overlap: Default::default(),
+                    user_id: owner,
+                    label: "Contextual webhook".into(),
+                    user_service_id: None,
+                    verification: TriggerVerification::HmacSha256 {
+                        header_name: "X-Hub-Signature-256".into(),
+                    },
+                    delivery: TriggerDelivery::Webhook {
+                        url: format!("http://{address}/hook"),
+                    },
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(created.trigger.secret_context_versions.is_empty());
+        // The reader stage retains the exact pre-cutover encrypted format.
+        assert_eq!(
+            staged
+                .decrypt(
+                    created
+                        .trigger
+                        .verification_secret_encrypted
+                        .as_deref()
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+            created.raw_secret.as_bytes()
+        );
+        let body = br#"{"action":"opened"}"#;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Hub-Signature-256",
+            HeaderValue::from_str(&format!(
+                "sha256={}",
+                webhook_delivery_service::compute_body_signature(
+                    created.raw_secret.as_bytes(),
+                    body
+                )
+            ))
+            .unwrap(),
+        );
+        verify_ingress(&staged, &created.trigger, &headers, None, body)
+            .await
+            .unwrap();
+        assert!(
+            verify_ingress(&strict, &created.trigger, &headers, None, body)
+                .await
+                .is_err()
+        );
+        let WebhookAdmission::Accepted {
+            record,
+            body: retained,
+        } = admit_webhook_delivery(
+            &db,
+            &staged,
+            &created.trigger,
+            "before-cutover",
+            serde_json::json!({"action":"opened"}),
+            72,
+            1024 * 1024,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("first delivery must be admitted")
+        };
+        assert!(record.secret_context_versions.is_empty());
+        assert_eq!(
+            staged
+                .decrypt(record.envelope_encrypted.as_deref().unwrap())
+                .await
+                .unwrap()
+                .as_slice(),
+            retained.as_slice()
+        );
+        for (collection, id) in [
+            (TRIGGERS, &created.trigger.id),
+            (TRIGGER_DELIVERIES, &record.id),
+        ] {
+            let raw = db
+                .collection::<bson::Document>(collection)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                super::super::trigger_record_service::migrate_snapshot(
+                    &db, &migration, collection, &raw
+                )
+                .await
+                .unwrap()
+            );
+            let current = db
+                .collection::<bson::Document>(collection)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            super::super::trigger_record_service::verify_current_snapshot(
+                &strict, collection, &current,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !super::super::trigger_record_service::migrate_snapshot(
+                    &db, &migration, collection, &current
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .find_one(doc! {"_id":id})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                current
+            );
+        }
+        let live = load_active_for_ingress(&db, &created.trigger.id)
+            .await
+            .unwrap();
+        verify_ingress(&strict, &live, &headers, None, body)
+            .await
+            .unwrap();
+        let replayed = redeliver(
+            &db,
+            &strict,
+            &reqwest::Client::new(),
+            &live,
+            "before-cutover",
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed.status, TriggerDeliveryRecordStatus::Delivered);
+        let (wire_headers, wire_body) = received.recv().await.unwrap();
+        assert_eq!(wire_body.as_ref(), retained.as_slice());
+        let expected = webhook_delivery_service::compute_timestamped_signature(
+            created.delivery_signing_secret.as_ref().unwrap().as_bytes(),
+            wire_headers["X-NyxID-Timestamp"].to_str().unwrap(),
+            &wire_body,
+        );
+        assert_eq!(
+            wire_headers["X-NyxID-Signature"],
+            format!("sha256={expected}")
+        );
+        let (rotated, secret) = rotate_secret(&db, &strict, &live).await.unwrap();
+        assert_eq!(
+            rotated
+                .secret_context_versions
+                .get("verification_secret_encrypted"),
+            Some(&3)
+        );
+        assert!(
+            verify_ingress(&strict, &rotated, &headers, None, body)
+                .await
+                .is_err()
+        );
+        headers.insert(
+            "X-Hub-Signature-256",
+            HeaderValue::from_str(&format!(
+                "sha256={}",
+                webhook_delivery_service::compute_body_signature(secret.as_bytes(), body)
+            ))
+            .unwrap(),
+        );
+        verify_ingress(&strict, &rotated, &headers, None, body)
+            .await
+            .unwrap();
+        let outgoing = rotate_delivery_secret(&db, &strict, &rotated)
+            .await
+            .unwrap();
+        assert_eq!(
+            outgoing
+                .trigger
+                .secret_context_versions
+                .get("delivery_secret_encrypted"),
+            Some(&3)
+        );
+        let WebhookAdmission::Accepted { record, .. } = admit_webhook_delivery(
+            &db,
+            &strict,
+            &outgoing.trigger,
+            "after-cutover",
+            serde_json::json!({"action":"closed"}),
+            72,
+            1024 * 1024,
+        )
+        .await
+        .unwrap() else {
+            panic!("new event must be admitted")
+        };
+        assert_eq!(
+            record.secret_context_versions.get("envelope_encrypted"),
+            Some(&3)
+        );
+        let mut moved = (*record).clone();
+        moved.trigger_id = Uuid::new_v4().to_string();
+        assert!(
+            super::super::trigger_record_service::envelope(&strict, &moved)
+                .await
+                .is_err()
+        );
+        moved = (*record).clone();
+        moved.event_id = "different-event".into();
+        assert!(
+            super::super::trigger_record_service::envelope(&strict, &moved)
+                .await
+                .is_err()
+        );
+        moved = (*record).clone();
+        moved.user_id = Uuid::new_v4().to_string();
+        assert!(
+            super::super::trigger_record_service::envelope(&strict, &moved)
+                .await
+                .is_err()
+        );
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
     async fn webhook_trigger(keys: &EncryptionKeys, url: String) -> Trigger {
         let mut trigger = trigger(
             TriggerVerification::Token {
@@ -1343,6 +1854,7 @@ mod tests {
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
+            secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,
             schedule: None,
@@ -1391,6 +1903,10 @@ mod tests {
         };
         let keys = test_encryption_keys();
         let trigger = webhook_trigger(&keys, "https://events.example.test/hook".to_string()).await;
+        db.collection::<Trigger>(TRIGGERS)
+            .insert_one(&trigger)
+            .await
+            .unwrap();
         let payload = serde_json::json!({"event_id":"event-1","action":"opened"});
         let first = admit_webhook_delivery(
             &db,
@@ -1408,11 +1924,10 @@ mod tests {
         };
         assert!(record.envelope_encrypted.is_some());
         assert!(!format!("{record:?}").contains("opened"));
-        let plaintext = keys
-            .decrypt(record.envelope_encrypted.as_deref().unwrap())
+        let plaintext = super::super::trigger_record_service::envelope(&keys, &record)
             .await
             .unwrap();
-        assert_eq!(plaintext, body);
+        assert_eq!(plaintext.as_slice(), body.as_slice());
 
         let second = admit_webhook_delivery(
             &db,
@@ -1429,12 +1944,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webhook_admission_rejects_missing_or_deleted_live_parent() {
+        let db = connect_test_database("trigger_delivery_missing_parent")
+            .await
+            .expect("Mongo8 required");
+        let keys = test_encryption_keys();
+        let trigger = webhook_trigger(&keys, "https://events.example.test/hook".into()).await;
+        for previously_stored in [false, true] {
+            if previously_stored {
+                db.collection::<Trigger>(TRIGGERS)
+                    .insert_one(&trigger)
+                    .await
+                    .unwrap();
+                db.collection::<Trigger>(TRIGGERS)
+                    .delete_one(doc! {"_id":&trigger.id})
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                admit_webhook_delivery(
+                    &db,
+                    &keys,
+                    &trigger,
+                    "missing-parent-event",
+                    serde_json::json!({"action":"opened"}),
+                    72,
+                    256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES
+                )
+                .await,
+                Err(AppError::TriggerNotFound)
+            ));
+            assert_eq!(
+                db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn zero_retention_keeps_metadata_without_replayable_payload() {
         let Some(db) = connect_test_database("trigger_delivery_metadata_only").await else {
             return;
         };
         let keys = test_encryption_keys();
         let trigger = webhook_trigger(&keys, "https://events.example.test/hook".to_string()).await;
+        db.collection::<Trigger>(TRIGGERS)
+            .insert_one(&trigger)
+            .await
+            .unwrap();
         let admitted = admit_webhook_delivery(
             &db,
             &keys,
@@ -1487,6 +2048,10 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let keys = test_encryption_keys();
         let trigger = webhook_trigger(&keys, format!("http://{address}/hook")).await;
+        db.collection::<Trigger>(TRIGGERS)
+            .insert_one(&trigger)
+            .await
+            .unwrap();
         admit_webhook_delivery(
             &db,
             &keys,
@@ -1706,7 +2271,7 @@ mod tests {
         .expect("create trigger");
         assert!(created.raw_secret.starts_with(TRIGGER_SECRET_PREFIX));
         assert_eq!(created.trigger.secret_hash, hash_token(&created.raw_secret));
-        assert!(!format!("{:?}", created.trigger).contains(&created.raw_secret));
+        assert!(!format!("{:?}", created.trigger).contains(created.raw_secret.as_str()));
         assert!(created.delivery_signing_secret.is_none());
 
         let listed = list_for_owner(&db, &owner).await.expect("list triggers");
@@ -1784,17 +2349,14 @@ mod tests {
             rotated.trigger.delivery_key_id.as_deref(),
             Some(rotated.key_id.as_str())
         );
-        let decrypted = keys
-            .decrypt(
-                rotated
-                    .trigger
-                    .delivery_secret_encrypted
-                    .as_deref()
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(decrypted, rotated.raw_secret.as_bytes());
+        let decrypted = super::super::trigger_record_service::secret(
+            &keys,
+            &rotated.trigger,
+            "delivery_secret_encrypted",
+        )
+        .await
+        .unwrap();
+        assert_eq!(decrypted.as_slice(), rotated.raw_secret.as_bytes());
         db.collection::<Trigger>(TRIGGERS)
             .delete_one(doc! {"_id": &current.id})
             .await

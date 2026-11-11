@@ -931,6 +931,29 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))
 }
 
+/// Deterministic semantic transport projection used by assistant admission.
+pub(crate) fn execution_headers() -> Vec<(String, String)> {
+    vec![
+        ("content-type".into(), "application/json".into()),
+        ("accept".into(), "text/event-stream".into()),
+        ("originator".into(), "codex_cli_rs".into()),
+        ("user-agent".into(), codex_user_agent()),
+    ]
+}
+
+pub(crate) fn execution_header_map() -> axum::http::HeaderMap {
+    execution_headers()
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                axum::http::HeaderName::from_bytes(name.as_bytes())
+                    .expect("static Codex header name"),
+                axum::http::HeaderValue::from_str(&value).expect("server Codex header value"),
+            )
+        })
+        .collect()
+}
+
 fn build_chatgpt_request(
     client: &reqwest::Client,
     api_url: &str,
@@ -976,6 +999,7 @@ pub async fn send_to_chatgpt(
     usage_context: Option<UsageAuditContext>,
     usage_complete: Option<UsageCompleteCallback>,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    execution_target: Option<&super::proxy_service::ProxyTarget>,
 ) -> AppResult<axum::response::Response> {
     send_to_chatgpt_with_api_url(
         translated_body,
@@ -986,12 +1010,13 @@ pub async fn send_to_chatgpt(
         CHATGPT_RESPONSES_API_URL,
         usage_context,
         usage_complete,
+        execution_target,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_to_chatgpt_with_api_url(
+pub(crate) async fn send_to_chatgpt_with_api_url(
     translated_body: &serde_json::Value,
     bearer_token: &str,
     is_streaming: bool,
@@ -1000,6 +1025,7 @@ async fn send_to_chatgpt_with_api_url(
     api_url: &str,
     usage_context: Option<UsageAuditContext>,
     usage_complete: Option<UsageCompleteCallback>,
+    execution_target: Option<&super::proxy_service::ProxyTarget>,
 ) -> AppResult<axum::response::Response> {
     use axum::body::Body;
     use axum::http::StatusCode;
@@ -1023,19 +1049,30 @@ async fn send_to_chatgpt_with_api_url(
 
     let request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
 
-    let response =
-        tokio::time::timeout(std::time::Duration::from_secs(30), client.execute(request))
-            .await
-            .map_err(|_| {
-                tracing::error!(
-                    "ChatGPT HTTP request timed out waiting for response headers (30s)"
-                );
-                AppError::Internal("ChatGPT backend did not respond within 30 seconds".to_string())
-            })?
-            .map_err(|e| {
-                tracing::error!("ChatGPT HTTP request failed: {e}");
-                AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
-            })?;
+    if let Some(target) = execution_target {
+        if let Some(context) = &target.execution_request {
+            context.check_drain().await?;
+        }
+        if let Some(permit) = &target.execution_permission {
+            permit.validate_specialized_request(target, &request)?;
+            permit.before_send(target).await?;
+        }
+    }
+
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(30), client.execute(request)).await;
+    if let Some(permit) = execution_target.and_then(|target| target.execution_permission.as_ref()) {
+        permit.complete(matches!(&result, Ok(Ok(_)))).await?;
+    }
+    let response = result
+        .map_err(|_| {
+            tracing::error!("ChatGPT HTTP request timed out waiting for response headers (30s)");
+            AppError::Internal("ChatGPT backend did not respond within 30 seconds".to_string())
+        })?
+        .map_err(|e| {
+            tracing::error!("ChatGPT HTTP request failed: {e}");
+            AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
+        })?;
 
     let status = response.status();
     tracing::debug!("ChatGPT HTTP response status: {status}");
@@ -1045,10 +1082,7 @@ async fn send_to_chatgpt_with_api_url(
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
         finalize_usage_capture(None, usage_complete, None, error_body.len() as i64).await;
-        tracing::warn!(
-            "ChatGPT backend returned HTTP {status}: {}",
-            truncate_for_log(&error_body, 1000),
-        );
+        tracing::warn!(status = %status, body_bytes = error_body.len(), "ChatGPT backend rejected request");
 
         let content_type = if error_body.starts_with('{') {
             "application/json"
@@ -2186,6 +2220,7 @@ mod tests {
             &format!("http://{upstream_addr}/responses"),
             None,
             Some(usage_complete),
+            None,
         )
         .await
         .expect("send ChatGPT request");

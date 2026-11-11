@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
 import { Shield, RotateCcw, Trash2 } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -65,7 +66,7 @@ interface OrgApprovalConfigsProps {
  * call goes through.
  */
 export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: keys, isLoading: isKeysLoading } = useKeys();
   const {
     data: serviceConfigs,
@@ -295,8 +296,8 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <CardTitle className="flex items-center gap-2">
                 <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
                   <Shield className="h-4 w-4" aria-hidden="true" />
-                </span>{t("Org Approval Policies")}</CardTitle>
-              <CardDescription>{t("Require approval when members of this org use shared services. When an org policy is set, it takes precedence over the member’s personal approval settings, and admins of this org are notified to decide.")}</CardDescription>
+                </span>{translateUi("Org Approval Policies")}</CardTitle>
+              <CardDescription>{translateUi("Require approval when members of this org use shared services. When an org policy is set, it takes precedence over the member&rsquo;s personal approval settings, and admins of this org are notified to decide.")}</CardDescription>
             </div>
             <Button
               variant="outline"
@@ -306,7 +307,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 Boolean(configsError) ||
                 availableServices.length === 0
               }
-            >{t("Add Policy")}</Button>
+            >{translateUi("Add Policy")}</Button>
           </div>
         </CardHeader>
         <CardContent>
@@ -317,12 +318,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </div>
           ) : configsError ? (
             <div className="py-4">
-              <ErrorBanner message={t("Failed to load org approval policies. Try refreshing the page.")} onRetry={refetchConfigs} />
+              <ErrorBanner message={translateUi("Failed to load org approval policies. Try refreshing the page.")} onRetry={refetchConfigs} />
             </div>
           ) : orgServices.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("No org-owned services yet. Add a key to this org before configuring approval policies.")}</div>
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No org-owned services yet. Add a key to this org before configuring approval policies.")}</div>
           ) : serviceConfigs?.configs.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("No org approval policies configured. Members use their personal approval settings.")}</div>
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No org approval policies configured. Members use their personal approval settings.")}</div>
           ) : (
             <div className="space-y-3">
               {serviceConfigs?.configs.map((config) => {
@@ -345,11 +346,11 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 >
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
-                      <p className="text-12 font-medium">
+                      <p className="type-row-title">
                         {config.service_name}
                       </p>
-                      <p className="text-xs text-muted-foreground">
-                        {approvalPolicyLabel(config)}{t(" (org policy dominant)")}</p>
+                      <p className="text-13 text-muted-foreground">
+                        {approvalPolicyLabel(config)}{translateUi(" (org policy dominant)")}</p>
                     </div>
                     <div className="flex items-center gap-3">
                       <Switch
@@ -362,7 +363,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                         variant="ghost"
                         size="icon"
                         onClick={() => void handleDelete(mutationKey)}
-                        title={t("Remove org policy")}
+                        title={translateUi("Remove org policy")}
                       >
                         <RotateCcw className="h-4 w-4 text-muted-foreground" />
                       </Button>
@@ -371,13 +372,13 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                   {hasPolicy && (
                     <Tabs defaultValue="simple" className="mt-3 border-t border-border pt-3">
                       <TabsList>
-                        <TabsTrigger value="simple">{t("Simple")}</TabsTrigger>
-                        <TabsTrigger value="advanced">{t("Advanced")}</TabsTrigger>
+                        <TabsTrigger value="simple">{translateUi("Simple")}</TabsTrigger>
+                        <TabsTrigger value="advanced">{translateUi("Advanced")}</TabsTrigger>
                       </TabsList>
                       <TabsContent value="simple" className="mt-3">
                         <div className="flex flex-col gap-3">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs text-muted-foreground">{t("Mode:")}</span>
+                            <Label htmlFor={`approval-mode-${mutationKey}`}>{translateUi("Mode")}</Label>
                             <Select
                               value={config.approval_mode}
                               onValueChange={(value) =>
@@ -388,25 +389,25 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                 )
                               }
                             >
-                              <SelectTrigger className="h-7 w-[180px] text-xs">
+                              <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
-                                <SelectItem value="per_request">{t("Per request")}</SelectItem>
-                                <SelectItem value="grant">{t("Time-based grant")}</SelectItem>
+                                <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
+                                <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                               </SelectContent>
                             </Select>
-                            <span className="text-xs text-muted-foreground">
+                            <span className="text-13 text-muted-foreground">
                               {config.approval_mode === "grant"
-                                ? t("Approval creates a reusable grant")
-                                : t("Every request needs fresh approval")}
+                                ? translateUi("Approval creates a reusable grant")
+                                : translateUi("Every request needs fresh approval")}
                             </span>
                           </div>
                           <div className="flex flex-wrap gap-3">
                             {approvalVerbs.map((verb) => (
-                              <label
+                              <Label
                                 key={verb}
-                                className="flex items-center gap-2 text-xs text-muted-foreground"
+                                className="flex items-center gap-2 text-muted-foreground"
                               >
                                 <Switch
                                   checked={enabledVerbs.includes(verb)}
@@ -420,7 +421,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                   }
                                 />
                                 {approvalVerbLabels[verb]}
-                              </label>
+                              </Label>
                             ))}
                           </div>
                         </div>
@@ -457,21 +458,21 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
       <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Add Org Approval Policy")}</DialogTitle>
-            <DialogDescription>{t("Choose an org-owned service and configure whether approval is required for any member using it.")}</DialogDescription>
+            <DialogTitle>{translateUi("Add Org Approval Policy")}</DialogTitle>
+            <DialogDescription>{translateUi("Choose an org-owned service and configure whether approval is required for any member using it.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
+              <Label
+
                 htmlFor="org-service-select"
-              >{t("Service")}</label>
+              >{translateUi("Service")}</Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
               >
                 <SelectTrigger id="org-service-select">
-                  <SelectValue placeholder={t("Select a service")} />
+                  <SelectValue placeholder={translateUi("Select a service")} />
                 </SelectTrigger>
                 <SelectContent>
                   {availableServices.map((s) => (
@@ -493,8 +494,8 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-12 font-medium">{t("Require Approval")}</p>
-                <p className="text-xs text-muted-foreground">{t("Whether members must get an admin’s approval to use this service.")}</p>
+                <p className="type-row-title">{translateUi("Require Approval")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Whether members must get an admin&rsquo;s approval to use this service.")}</p>
               </div>
               <Switch
                 checked={selectedApprovalRequired}
@@ -507,10 +508,10 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             {selectedApprovalRequired && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label
-                    className="text-12 font-medium"
+                  <Label
+
                     htmlFor="org-approval-mode-select"
-                  >{t("Approval Mode")}</label>
+                  >{translateUi("Approval Mode")}</Label>
                   <Select
                     value={selectedApprovalMode}
                     onValueChange={(v) =>
@@ -521,23 +522,23 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="per_request">{t("Per request")}</SelectItem>
-                      <SelectItem value="grant">{t("Time-based grant")}</SelectItem>
+                      <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
+                      <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {selectedApprovalMode === "grant"
-                      ? t("Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires.")
-                      : t("Every API request requires a fresh approval. No grant is created.")}
+                      ? translateUi("Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires.")
+                      : translateUi("Every API request requires a fresh approval. No grant is created.")}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-12 font-medium">{t("Require Approval For")}</p>
+                  <p className="type-row-title">{translateUi("Require Approval For")}</p>
                   <div className="grid gap-2 sm:grid-cols-3">
                     {approvalVerbs.map((verb) => (
-                      <label
+                      <Label
                         key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-xs text-muted-foreground"
+                        className="flex items-center justify-between rounded-lg border border-border p-3 text-muted-foreground"
                       >
                         <span>{approvalVerbLabels[verb]}</span>
                         <Switch
@@ -558,7 +559,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                             });
                           }}
                         />
-                      </label>
+                      </Label>
                     ))}
                   </div>
                 </div>
@@ -566,13 +567,13 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAddDialogOpen(false)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setAddDialogOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={() => void handleAdd()}
               disabled={!selectedServiceId}
               isLoading={setConfigMutation.isPending}
-            >{t("Add Policy")}</Button>
+            >{translateUi("Add Policy")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -590,7 +591,7 @@ interface OrgApprovalGrantsProps {
  * user_id, so without this admin-only panel they would be unreachable.
  */
 function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data, isLoading, error, refetch } = useApprovalGrants(1, 50, {
     orgId,
   });
@@ -614,8 +615,8 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
         <CardTitle className="flex items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
             <Shield className="h-4 w-4" aria-hidden="true" />
-          </span>{t("Org Approval Grants")}</CardTitle>
-        <CardDescription>{t("Active reusable grants created when org approval policies in time-based grant mode have been decided. Revoking a grant forces the next member call to require fresh approval.")}</CardDescription>
+          </span>{translateUi("Org Approval Grants")}</CardTitle>
+        <CardDescription>{translateUi("Active reusable grants created when org approval policies in time-based grant mode have been decided. Revoking a grant forces the next member call to require fresh approval.")}</CardDescription>
       </CardHeader>
       <CardContent>
         {isLoading ? (
@@ -625,10 +626,10 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
           </div>
         ) : error ? (
           <div className="py-4">
-            <ErrorBanner message={t("Failed to load org approval grants. Try refreshing the page.")} onRetry={refetch} />
+            <ErrorBanner message={translateUi("Failed to load org approval grants. Try refreshing the page.")} onRetry={refetch} />
           </div>
         ) : grants.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("No active org approval grants.")}</div>
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No active org approval grants.")}</div>
         ) : (
           <div className="space-y-3">
             {grants.map((grant) => (
@@ -637,9 +638,9 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                 className="flex items-center justify-between rounded-lg border border-border p-4"
               >
                 <div className="space-y-0.5">
-                  <p className="text-12 font-medium">{grant.service_name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {grant.requester_label ?? grant.requester_type}{t(" · granted ")}{formatDate(grant.granted_at)}{t(" · expires")}{" "}
+                  <p className="type-row-title">{grant.service_name}</p>
+                  <p className="text-13 text-muted-foreground">
+                    {grant.requester_label ?? grant.requester_type}{translateUi(" · granted ")}{formatDate(grant.granted_at)}{translateUi(" · expires")}{" "}
                     {formatDate(grant.expires_at)}
                   </p>
                 </div>
@@ -647,7 +648,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                   variant="ghost"
                   size="icon"
                   onClick={() => void handleRevoke(grant.id)}
-                  title={t("Revoke grant")}
+                  title={translateUi("Revoke grant")}
                 >
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>

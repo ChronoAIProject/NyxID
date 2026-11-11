@@ -17,8 +17,9 @@ use axum::{
 use zeroize::Zeroizing;
 
 /// POST /api/v1/public-nyxbot/models/{service_id}/{*path}
-/// Mount without ordinary AuthUser middleware; this extractor accepts only an
-/// exact public-purpose primary key and explicit immutable callback headers.
+/// Mount without ordinary AuthUser middleware. Readiness accepts a one-use signed
+/// probe assertion; execution accepts an exact public-purpose primary key with
+/// explicit immutable callback headers. Neither path creates ordinary user authority.
 pub async fn dispatch(
     State(state): State<AppState>,
     Path((service_id, path)): Path<(String, String)>,
@@ -44,9 +45,30 @@ pub async fn dispatch(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or_else(denied)?;
+    if raw.starts_with("eyJ") {
+        let token = Zeroizing::new(raw.to_owned());
+        let body = Zeroizing::new(
+            to_bytes(request.into_body(), 4096)
+                .await
+                .map_err(|_| denied())?
+                .to_vec(),
+        );
+        return crate::services::platform_public_contract_service::dispatch_probe(
+            &state,
+            &token,
+            &service_id,
+            &path,
+            &body,
+        )
+        .await;
+    }
     let (_, key, child) = key_service::validate_api_key(&state.db, raw).await?;
     let authority = platform_public_tools::authenticate(&state.db, &key, child.as_deref()).await?;
     authority.validate_callback_headers(headers)?;
+    let trace = crate::turn_trace::TurnContext::for_request(
+        headers,
+        Some(&authority.context().turn.turn_id),
+    );
     if headers.get_all("x-nyx-public-call-id").iter().count() != 1 {
         return Err(denied());
     }
@@ -78,16 +100,20 @@ pub async fn dispatch(
             .map_err(|_| denied())?
             .to_vec(),
     );
-    platform_public_proxy_service::dispatch_model(
-        &state,
-        authority.context(),
-        ModelRequest {
-            key_id: authority.key_id(),
-            service_id: &service_id,
-            path: &path,
-            body: &body,
-            call_id: &call,
-        },
-    )
-    .await
+    trace
+        .response(
+            crate::turn_trace::Stage::Proxy,
+            platform_public_proxy_service::dispatch_model(
+                &state,
+                authority.context(),
+                ModelRequest {
+                    key_id: authority.key_id(),
+                    service_id: &service_id,
+                    path: &path,
+                    body: &body,
+                    call_id: &call,
+                },
+            ),
+        )
+        .await
 }

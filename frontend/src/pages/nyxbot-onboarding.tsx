@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -42,6 +43,7 @@ function StepRedirect({
   readonly onNavigate: StepNavigation;
   readonly callbackStatus?: "success" | "error";
 }) {
+  useUiTranslation();
   useEffect(() => {
     onNavigate(step, { replace: true, callbackStatus });
   }, [step, onNavigate, callbackStatus]);
@@ -61,6 +63,7 @@ function ConnectedDataSource({
   readonly callbackStatus?: "success" | "error";
   readonly onNavigate: StepNavigation;
 }) {
+  useUiTranslation();
   const { t } = useTranslation();
   const flow = useNyxbotDataSource(progress, updateProgress);
   const loading =
@@ -160,6 +163,7 @@ function ConnectedOnboarding({
   readonly callbackStatus?: "success" | "error";
   readonly onNavigate: StepNavigation;
 }) {
+  useUiTranslation();
   const { progress, updateProgress } = useNyxbotProgress(userId, referral);
   const [showSpendingCap, setShowSpendingCap] = useState(false);
 
@@ -215,6 +219,7 @@ function ConnectedOnboarding({
 }
 
 export function NyxbotOnboardingPage() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const authenticated = useAuthStore((s) => s.isAuthenticated);
   const authLoading = useAuthStore((s) => s.isLoading);

@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { Label } from "@/components/ui/label";
 import {
   changedFields,
   describeChanges,
@@ -64,12 +65,13 @@ import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
+  useUiTranslation();
   const { groupId } = useParams({ strict: false }) as { groupId: string };
   return <AdminGroupDetailPageEditor key={groupId} groupId={groupId} />;
 }
 
 function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -215,12 +217,12 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">{t("Group not found")}</h3>
-        <p className="mb-4 text-sm text-muted-foreground">{t("The group you are looking for does not exist or has been deleted.")}</p>
+        <h3 className="mb-2 font-display type-card-title">{translateUi("Group not found")}</h3>
+        <p className="mb-4 text-14 text-muted-foreground">{translateUi("The group you are looking for does not exist or has been deleted.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: "/admin/groups" })}
-        >{t("Back to Groups")}</Button>
+        >{translateUi("Back to Groups")}</Button>
       </div>
     );
   }
@@ -236,36 +238,36 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
               <Button variant="outline" onClick={openEditDialog}>
                 <ButtonIcon>
                   <Pencil className="h-3 w-3" />
-                </ButtonIcon>{t("Edit")}</Button>
+                </ButtonIcon>{translateUi("Edit")}</Button>
               <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
                 <ButtonIcon variant="destructive">
                   <Trash2 className="h-3 w-3 text-destructive" />
-                </ButtonIcon>{t("Delete")}</Button>
+                </ButtonIcon>{translateUi("Delete")}</Button>
             </>
           ) : null
         }
       />
 
-      <DetailSection title={t("Group Information")}>
-        <DetailRow label={t("ID")} value={group.id} copyable />
-        <DetailRow label={t("Name")} value={group.name} />
-        <DetailRow label={t("Slug")} value={group.slug} copyable />
-        <DetailRow label={t("Members")} value={String(group.member_count)} />
+      <DetailSection title={translateUi("Group Information")}>
+        <DetailRow label={translateUi("ID")} value={group.id} copyable />
+        <DetailRow label={translateUi("Name")} value={group.name} />
+        <DetailRow label={translateUi("Slug")} value={group.slug} copyable />
+        <DetailRow label={translateUi("Members")} value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
-            label={t("Parent Group")}
+            label={translateUi("Parent Group")}
             value={group.parent_group_id}
             copyable
           />
         )}
-        <DetailRow label={t("Created")} value={formatDate(group.created_at)} />
-        <DetailRow label={t("Updated")} value={formatDate(group.updated_at)} />
+        <DetailRow label={translateUi("Created")} value={formatDate(group.created_at)} />
+        <DetailRow label={translateUi("Updated")} value={formatDate(group.updated_at)} />
       </DetailSection>
 
-      <DetailSection title={t("Inherited Roles")}>
+      <DetailSection title={translateUi("Inherited Roles")}>
         <div className="px-4 py-3">
           {group.roles.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t("No roles assigned to this group.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("No roles assigned to this group.")}</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {group.roles.map((role) => (
@@ -278,11 +280,11 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         </div>
       </DetailSection>
 
-      <DetailSection title={t("Members")}>
+      <DetailSection title={translateUi("Members")}>
         {canWrite && (
           <div className="px-4 py-3">
             <AddCtaButton
-              label={t("Add Member")}
+              label={translateUi("Add Member")}
               onClick={() => setAddMemberOpen(true)}
               icon={UserPlus}
             />
@@ -291,21 +293,21 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         {members.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BenchesIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">{t("No members in this group.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("No members in this group.")}</p>
           </div>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("Email")}</TableHead>
-                <TableHead>{t("Name")}</TableHead>
+                <TableHead>{translateUi("Email")}</TableHead>
+                <TableHead>{translateUi("Name")}</TableHead>
                 <TableHead className="w-[60px]" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {members.map((member) => (
                 <TableRow key={member.id}>
-                  <TableCell className="font-medium">{member.email}</TableCell>
+                  <TableCell className="font-normal">{member.email}</TableCell>
                   <TableCell>
                     {member.display_name ?? (
                       <span className="text-muted-foreground">--</span>
@@ -335,8 +337,8 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Edit Group")}</DialogTitle>
-            <DialogDescription>{t("Update group details for ")}{group.name}.
+            <DialogTitle>{translateUi("Edit Group")}</DialogTitle>
+            <DialogDescription>{translateUi("Update group details for ")}{group.name}.
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
@@ -349,9 +351,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Name")}</FormLabel>
+                    <FormLabel>{translateUi("Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Group name")} {...field} />
+                      <Input placeholder={translateUi("Group name")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -362,9 +364,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Slug")}</FormLabel>
+                    <FormLabel>{translateUi("Slug")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={"group-slug"} {...field} />
+                      <Input placeholder="group-slug" {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -375,9 +377,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Description")}</FormLabel>
+                    <FormLabel>{translateUi("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Optional description")} {...field} />
+                      <Input placeholder={translateUi("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -388,10 +390,10 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="role_ids"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Roles")}</FormLabel>
+                    <FormLabel>{translateUi("Roles")}</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-12 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-14 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -421,7 +423,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                           .map((id) => (
                             <option key={id} value={id}>
                               {group.roles.find((role) => role.id === id)
-                                ?.name ?? id}{" "}{t("(unavailable)")}</option>
+                                ?.name ?? id}{" "}{translateUi("(unavailable)")}</option>
                           ))}
                         {availableRoles.map((role) => (
                           <option key={role.id} value={role.id}>
@@ -439,12 +441,12 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                   type="button"
                   variant="outline"
                   onClick={() => setEditOpen(false)}
-                >{t("Cancel")}</Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={updateMutation.isPending}
-                >{t("Save Changes")}</Button>
+                >{translateUi("Save Changes")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -455,16 +457,16 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete Group")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to delete \"")}{group.name}{t("\"? All members will be removed. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete Group")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete \"")}{group.name}{translateUi("\"? All members will be removed. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Delete Group")}</Button>
+            >{translateUi("Delete Group")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -473,15 +475,15 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <Dialog open={addMemberOpen} onOpenChange={setAddMemberOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Add Member")}</DialogTitle>
-            <DialogDescription>{t("Enter the user ID to add to this group.")}</DialogDescription>
+            <DialogTitle>{translateUi("Add Member")}</DialogTitle>
+            <DialogDescription>{translateUi("Enter the user ID to add to this group.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="add-member-id">{t("User ID")}</label>
+              <Label htmlFor="add-member-id">{translateUi("User ID")}</Label>
               <Input
                 id="add-member-id"
-                placeholder={t("Enter user ID")}
+                placeholder={translateUi("Enter user ID")}
                 value={newMemberUserId}
                 onChange={(e) => setNewMemberUserId(e.target.value)}
               />
@@ -494,11 +496,11 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 setAddMemberOpen(false);
                 setNewMemberUserId("");
               }}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               onClick={() => void handleAddMember()}
               isLoading={addMemberMutation.isPending}
-            >{t("Add Member")}</Button>
+            >{translateUi("Add Member")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -512,16 +514,16 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Remove Member")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to remove this member from the group?")}</DialogDescription>
+            <DialogTitle>{translateUi("Remove Member")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to remove this member from the group?")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRemoveMemberId(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setRemoveMemberId(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRemoveMember()}
               isLoading={removeMemberMutation.isPending}
-            >{t("Remove Member")}</Button>
+            >{translateUi("Remove Member")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

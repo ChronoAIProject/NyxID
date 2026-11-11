@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { ProviderServices } from "@/components/providers/provider-services";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -34,7 +35,7 @@ const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function ProviderDetailPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { providerId } = useParams({ strict: false }) as {
     providerId: string;
   };
@@ -52,7 +53,7 @@ export function ProviderDetailPage() {
       toast.success(translateUi("Provider deleted successfully"));
       void navigate({ to: "/providers/manage" });
     } catch {
-      toast.error(translateUi("Failed to delete provider"));
+      toast.error(translateErrorMessage("Failed to delete provider"));
     } finally {
       setDeleteOpen(false);
     }
@@ -71,9 +72,9 @@ export function ProviderDetailPage() {
   if (error || !provider) {
     return (
       <div className="space-y-8">
-        <PageHeader title={t("Provider Not Found")} />
+        <PageHeader title={translateUi("Provider Not Found")} />
         <ErrorBanner
-          message={error instanceof ApiError ? error.message : t("The provider you are looking for does not exist or has been deleted.")}
+          message={error instanceof ApiError ? error.message : translateUi("The provider you are looking for does not exist or has been deleted.")}
           onRetry={refetch}
         />
       </div>
@@ -109,22 +110,22 @@ export function ProviderDetailPage() {
                 })
               }
             >
-              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>{t("Edit")}</Button>
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>{translateUi("Edit")}</Button>
             <Button
               variant="destructive"
               onClick={() => setDeleteOpen(true)}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Delete")}</Button>
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Delete")}</Button>
           </>
         }
       />
 
       <ProviderServices provider={provider} />
 
-      <DetailSection title={t("General")}>
-        <DetailRow label={t("Slug")} value={provider.slug} copyable />
+      <DetailSection title={translateUi("General")}>
+        <DetailRow label={translateUi("Slug")} value={provider.slug} copyable />
         <DetailRow
-          label={t("Provider Type")}
+          label={translateUi("Provider Type")}
           value={
             PROVIDER_TYPE_LABELS[provider.provider_type] ??
             provider.provider_type
@@ -134,7 +135,7 @@ export function ProviderDetailPage() {
         {(provider.provider_type === "oauth2" ||
           provider.provider_type === "device_code") && (
           <DetailRow
-            label={t("Credential Mode")}
+            label={translateUi("Credential Mode")}
             value={
               provider.credential_mode === "admin"
                 ? "Admin Only"
@@ -148,34 +149,40 @@ export function ProviderDetailPage() {
           />
         )}
         <DetailRow
-          label={t("Status")}
+          label={translateUi("Status")}
           value={provider.is_active ? "Active" : "Inactive"}
           badge
           badgeVariant={provider.is_active ? "success" : "secondary"}
         />
-        <DetailRow label={t("Created")} value={formatDate(provider.created_at)} />
-        <DetailRow label={t("Updated")} value={formatDate(provider.updated_at)} />
+        <DetailRow label={translateUi("Created")} value={formatDate(provider.created_at)} />
+        <DetailRow label={translateUi("Updated")} value={formatDate(provider.updated_at)} />
       </DetailSection>
 
       {isOAuth && (
         <>
 
-          <DetailSection title={t("OAuth 2.0 Configuration")}>
+          <DetailSection title={translateUi("OAuth 2.0 Configuration")}>
             <DetailRow
-              label={t("OAuth Configured")}
+              label={translateUi("OAuth Configured")}
               value={provider.has_oauth_config ? "Yes" : "No"}
               badge
               badgeVariant={provider.has_oauth_config ? "success" : "secondary"}
             />
             <DetailRow
-              label={t("Supports PKCE")}
+              label={translateUi("Supports PKCE")}
               value={provider.supports_pkce ? "Yes" : "No"}
               badge
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
+            {provider.provider_type === "oauth2" && (
+              <DetailRow
+                label={translateUi("Authorization nonce required")}
+                value={provider.authorization_nonce_required ? "Yes (hosted OAuth)" : "No"}
+              />
+            )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between px-4 py-2.5 text-12">
-                <span className="text-muted-foreground">{t("Default Scopes")}</span>
+              <div className="flex items-start justify-between px-4 py-2.5 text-14">
+                <span className="text-muted-foreground">{translateUi("Default Scopes")}</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
                     <Badge key={scope} variant="secondary">
@@ -192,37 +199,37 @@ export function ProviderDetailPage() {
       {isDeviceCode && (
         <>
 
-          <DetailSection title={t("Device Code Configuration (RFC 8628)")}>
+          <DetailSection title={translateUi("Device Code Configuration (RFC 8628)")}>
             <DetailRow
-              label={t("OAuth Configured")}
+              label={translateUi("OAuth Configured")}
               value={provider.has_oauth_config ? "Yes" : "No"}
               badge
               badgeVariant={provider.has_oauth_config ? "success" : "secondary"}
             />
             {provider.device_code_url && (
               <DetailRow
-                label={t("Device Code URL")}
+                label={translateUi("Device Code URL")}
                 value={provider.device_code_url}
                 copyable
               />
             )}
             {provider.device_token_url && (
               <DetailRow
-                label={t("Device Token URL")}
+                label={translateUi("Device Token URL")}
                 value={provider.device_token_url}
                 copyable
               />
             )}
             {provider.hosted_callback_url && (
               <DetailRow
-                label={t("Hosted Callback URL (legacy)")}
+                label={translateUi("Hosted Callback URL (legacy)")}
                 value={provider.hosted_callback_url}
                 copyable
               />
             )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between px-4 py-2.5 text-12">
-                <span className="text-muted-foreground">{t("Default Scopes")}</span>
+              <div className="flex items-start justify-between px-4 py-2.5 text-14">
+                <span className="text-muted-foreground">{translateUi("Default Scopes")}</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
                     <Badge key={scope} variant="secondary">
@@ -239,18 +246,18 @@ export function ProviderDetailPage() {
       {isApiKey && (
         <>
 
-          <DetailSection title={t("API Key Configuration")}>
+          <DetailSection title={translateUi("API Key Configuration")}>
             {provider.api_key_instructions && (
-              <div className="px-4 py-2.5 text-12">
-                <span className="text-muted-foreground block mb-1">{t("Instructions")}</span>
-                <p className="whitespace-pre-wrap text-12">
+              <div className="px-4 py-2.5 text-14">
+                <span className="text-muted-foreground block mb-1">{translateUi("Instructions")}</span>
+                <p className="whitespace-pre-wrap text-14">
                   {provider.api_key_instructions}
                 </p>
               </div>
             )}
             {provider.api_key_url && (
               <DetailRow
-                label={t("API Key URL")}
+                label={translateUi("API Key URL")}
                 value={provider.api_key_url}
                 copyable
               />
@@ -262,15 +269,15 @@ export function ProviderDetailPage() {
       {isTelegram && (
         <>
 
-          <DetailSection title={t("Telegram Widget Configuration")}>
+          <DetailSection title={translateUi("Telegram Widget Configuration")}>
             <DetailRow
-              label={t("Configured")}
+              label={translateUi("Configured")}
               value={provider.has_oauth_config ? "Yes" : "No"}
               badge
               badgeVariant={provider.has_oauth_config ? "success" : "secondary"}
             />
             <DetailRow
-              label={t("Bot Username")}
+              label={translateUi("Bot Username")}
               value={
                 provider.client_id_param_name
                   ? `@${provider.client_id_param_name}`
@@ -285,13 +292,13 @@ export function ProviderDetailPage() {
       {(provider.icon_url || provider.documentation_url) && (
         <>
 
-          <DetailSection title={t("Display")}>
+          <DetailSection title={translateUi("Display")}>
             {provider.icon_url && (
-              <DetailRow label={t("Icon URL")} value={provider.icon_url} copyable />
+              <DetailRow label={translateUi("Icon URL")} value={provider.icon_url} copyable />
             )}
             {provider.documentation_url && (
               <DetailRow
-                label={t("Documentation URL")}
+                label={translateUi("Documentation URL")}
                 value={provider.documentation_url}
                 copyable
               />
@@ -303,16 +310,16 @@ export function ProviderDetailPage() {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete Provider")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to delete \"")}{provider.name}{t("\"? This will deactivate the provider and revoke all user tokens. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete Provider")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete \"")}{provider.name}{translateUi("\"? This will deactivate the provider and revoke all user tokens. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Delete")}</Button>
+            >{translateUi("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -25,6 +25,8 @@ use crate::services::{audit_service, billing};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct IssueGrantRequest {
+    /// Legacy whole-credit input. Exact `amount`, when present, takes precedence.
+    #[serde(default)]
     pub amount_credits: i64,
     pub target_kind: BillingTargetKind,
     #[serde(default)]
@@ -38,6 +40,10 @@ pub struct IssueGrantRequest {
     pub service_refs: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
+    pub amount: Option<crate::models::credits::Credits>,
+    #[serde(default)]
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -109,6 +115,12 @@ pub struct CreditGrantResponse {
     pub remaining_micros: i64,
     pub reserved_micros: i64,
     pub scope: BillingServiceScope,
+    pub service_limits: Vec<ServiceLimitResponse>,
+    pub reclaimed: String,
+    pub terminal_amount: String,
+    pub held: String,
+    pub available: String,
+    pub revoke_requested_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
     pub granted_by: String,
@@ -228,6 +240,8 @@ pub struct UserAllowanceBalanceResponse {
     pub consumed_quantity: i64,
     pub reserved_quantity: i64,
     pub remaining_quantity: i64,
+    pub held_quantity: i64,
+    pub total_quantity: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -252,11 +266,17 @@ pub async fn issue_grant(
     Json(body): Json<IssueGrantRequest>,
 ) -> AppResult<Json<IssueGrantResponse>> {
     require_credit_grant_manager(&state, &auth_user).await?;
+    if !body.service_limits.is_empty() {
+        require_allocation_capability(&state)?;
+    }
     let target_org_ids = body.target_org_ids.clone();
     let target_group_ids = body.target_group_ids.clone();
     let grants = billing::grants::issue_grants(
         &state.db,
         billing::grants::IssueCreditGrantInput {
+            amount: body.amount,
+            service_limits: body.service_limits,
+            request_id: body.request_id,
             amount_credits: body.amount_credits,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
@@ -310,6 +330,7 @@ pub async fn issue_grant(
             "target_org_count": target_org_ids.len(),
             "target_group_count": target_group_ids.len(),
             "amount_credits_each": body.amount_credits,
+            "amount_each": grants.first().map(|grant| grant.amount.to_string()),
         })),
     );
     Ok(Json(IssueGrantResponse {
@@ -368,7 +389,7 @@ pub async fn admin_list_grants(
                 );
                 grant_response(grant, user, recipient_billing_enabled)
             })
-            .collect(),
+            .collect::<AppResult<Vec<_>>>()?,
         page,
         per_page,
         total,
@@ -389,14 +410,41 @@ pub async fn revoke_grant(
     Path(grant_id): Path<String>,
 ) -> AppResult<Json<CreditGrantResponse>> {
     require_credit_grant_manager(&state, &auth_user).await?;
-    let grant = billing::grants::revoke_grant(&state.db, &grant_id).await?;
+    let before = state
+        .db
+        .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
+        .find_one(doc! { "_id": &grant_id })
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest("credit grant is not active or has an in-flight settlement".into())
+        })?;
+    let grant = if state.config.billing_allocations_enabled {
+        billing::grants::request_revoke_grant(
+            &state.db,
+            &grant_id,
+            Some(&auth_user.user_id.to_string()),
+        )
+        .await?
+    } else {
+        billing::grants::revoke_grant_immediate(&state.db, &grant_id).await?
+    };
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
-        "billing.credit_grant.revoked",
-        Some(serde_json::json!({ "grant_id": grant_id })),
+        if before.status == grant.status && before.revoke_requested_at == grant.revoke_requested_at
+        {
+            "billing.credit_grant.reclaim_unchanged"
+        } else if grant.status == CreditGrantStatus::Revoked {
+            "billing.credit_grant.revoked"
+        } else {
+            "billing.credit_grant.reclaim_requested"
+        },
+        Some(
+            serde_json::json!({ "grant_id": grant_id, "status": grant.status,
+            "revoke_requested_at": grant.revoke_requested_at, "requested_by": grant.revoke_requested_by }),
+        ),
     );
-    Ok(Json(grant_response(grant, None, None)))
+    Ok(Json(grant_response(grant, None, None)?))
 }
 
 #[utoipa::path(
@@ -426,7 +474,7 @@ pub async fn user_list_grants(
         grants: grants
             .into_iter()
             .map(|grant| grant_response(grant, None, None))
-            .collect(),
+            .collect::<AppResult<Vec<_>>>()?,
         page: 1,
         per_page: total.min(u64::from(u32::MAX)) as u32,
         total,
@@ -681,11 +729,11 @@ pub async fn user_list_allowances(
     }))
 }
 
-fn grant_response(
+pub(super) fn grant_response(
     grant: CreditGrant,
     user: Option<&User>,
     recipient_billing_enabled: Option<bool>,
-) -> CreditGrantResponse {
+) -> AppResult<CreditGrantResponse> {
     let activation_state = activation_state(&grant);
     let schedule_id = grant
         .schedule_origin
@@ -695,7 +743,37 @@ fn grant_response(
         .schedule_origin
         .as_ref()
         .map(|origin| origin.period_start);
-    CreditGrantResponse {
+    let held = billing::service_limits::held(&grant)?.to_string();
+    let available = if grant.status == CreditGrantStatus::Active
+        && grant.issued_ledgered_at.is_some()
+        && grant.revoke_requested_at.is_none()
+        && grant.expires_at.is_none_or(|expiry| expiry > Utc::now())
+    {
+        billing::service_limits::realizable(&grant)?
+    } else {
+        crate::models::credits::Credits::ZERO
+    }
+    .to_string();
+    let service_limits = grant
+        .service_limits
+        .iter()
+        .map(|rule| {
+            let mut response = ServiceLimitResponse::from(rule);
+            let extra = if grant
+                .active_settlement
+                .as_ref()
+                .and_then(|lock| lock.service_limit_key.as_deref())
+                == Some(rule.key.as_str())
+            {
+                billing::service_limits::unapplied_extra(grant.active_settlement.as_ref())?
+            } else {
+                crate::models::credits::Credits::ZERO
+            };
+            response.held = rule.reserved.checked_add(extra)?.to_string();
+            Ok(response)
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(CreditGrantResponse {
         id: grant.id,
         batch_id: grant.batch_id,
         schedule_id,
@@ -709,6 +787,16 @@ fn grant_response(
         target_org_ids: grant.target_org_ids,
         target_group_ids: grant.target_group_ids,
         amount_credits: grant.amount_credits,
+        reclaimed: if grant.status == CreditGrantStatus::Revoked {
+            grant.terminal_amount.to_string()
+        } else {
+            "0".into()
+        },
+        terminal_amount: grant.terminal_amount.to_string(),
+        held,
+        available,
+        revoke_requested_at: grant.revoke_requested_at,
+        service_limits,
         amount: grant.amount.to_string(),
         remaining: grant.remaining.to_string(),
         reserved: grant.reserved.to_string(),
@@ -725,7 +813,7 @@ fn grant_response(
         consumed_at: grant.consumed_at,
         expired_at: grant.expired_at,
         revoked_at: grant.revoked_at,
-    }
+    })
 }
 
 fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
@@ -748,17 +836,31 @@ fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
     }
 }
 
-fn user_allowance_response(
+pub(super) fn user_allowance_response(
     allowance: UsageAllowance,
     period: UsageAllowancePeriod,
 ) -> UserAllowanceBalanceResponse {
+    let extra = period
+        .active_settlement
+        .as_ref()
+        .filter(|l| !l.applied)
+        .map_or(0, |l| {
+            l.consume_quantity
+                .saturating_sub(l.reserved_quantity)
+                .max(0)
+        });
+    let remaining = billing::allowances::available_period_quantity(&period)
+        .saturating_sub(extra)
+        .max(0);
     UserAllowanceBalanceResponse {
+        total_quantity: period.total_quantity,
+        held_quantity: period.reserved_quantity.saturating_add(extra),
         allowance: allowance_response(allowance),
         period_start: period.period_start,
         period_end: period.period_end,
         consumed_quantity: period.consumed_quantity,
         reserved_quantity: period.reserved_quantity,
-        remaining_quantity: billing::allowances::available_period_quantity(&period),
+        remaining_quantity: remaining,
     }
 }
 
@@ -832,7 +934,40 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use uuid::Uuid;
 
-    async fn setup(prefix: &str) -> Option<(AppState, String, String, String)> {
+    #[test]
+    fn allowance_preview_counts_unapplied_extra_holds_against_frozen_period_limit() {
+        let now = bson::DateTime::now();
+        let allowance: UsageAllowance = bson::from_document(doc! {
+            "_id": "allowance", "service_id": "svc", "service_slug": "svc", "metric": "requests",
+            "quantity": 200_i64, "recurrence": "daily", "target_kind": "all_users",
+            "is_active": true, "created_by": "admin", "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        let mut period: UsageAllowancePeriod = bson::from_document(doc! {
+            "_id": "period", "allowance_id": "allowance", "owner_user_id": "owner",
+            "total_quantity": 100_i64, "consumed_quantity": 20_i64, "reserved_quantity": 10_i64,
+            "period_start": now, "created_at": now, "updated_at": now,
+            "active_settlement": {"operation_id": "op", "usage_row_id": "row", "reserved_quantity": 10_i64,
+                "consume_quantity": 15_i64, "applied": false, "updated_at": now},
+        }).unwrap();
+        let pending = user_allowance_response(allowance.clone(), period.clone());
+        assert_eq!(
+            (
+                pending.total_quantity,
+                pending.held_quantity,
+                pending.remaining_quantity
+            ),
+            (100, 15, 65)
+        );
+        period.active_settlement.as_mut().unwrap().applied = true;
+        let applied = user_allowance_response(allowance, period);
+        assert_eq!(
+            (applied.held_quantity, applied.remaining_quantity),
+            (10, 70)
+        );
+    }
+
+    pub(super) async fn setup(prefix: &str) -> Option<(AppState, String, String, String)> {
         let db = connect_test_database(prefix).await?;
         role_service::seed_system_roles(&db).await.ok()?;
         let role_ids = role_service::get_platform_role_ids(&db).await.ok()?;
@@ -949,6 +1084,9 @@ mod tests {
             State(state.clone()),
             operator.clone(),
             Json(IssueGrantRequest {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 1,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -1026,6 +1164,9 @@ mod tests {
         // amount 0 passes authorization and then fails validation.
         let issue_body = || {
             Json(IssueGrantRequest {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 0,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -1131,6 +1272,9 @@ mod tests {
             State(state.clone()),
             admin.clone(),
             Json(IssueGrantRequest {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 0,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -1169,3 +1313,75 @@ mod tests {
 
 #[cfg(test)]
 mod target_tests;
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ServiceLimitResponse {
+    pub key: String,
+    pub service_ids: Vec<String>,
+    pub service_slugs: Vec<String>,
+    pub label: Option<String>,
+    pub limit: String,
+    pub consumed: String,
+    pub reserved: String,
+    pub held: String,
+}
+impl From<&crate::models::credit_service_limit::CreditServiceLimit> for ServiceLimitResponse {
+    fn from(rule: &crate::models::credit_service_limit::CreditServiceLimit) -> Self {
+        Self {
+            key: rule.key.clone(),
+            service_ids: rule.service_ids.clone(),
+            service_slugs: rule.service_slugs.clone(),
+            label: rule.label.clone(),
+            limit: rule.limit.to_string(),
+            consumed: rule.consumed.to_string(),
+            reserved: rule.reserved.to_string(),
+            held: rule.reserved.to_string(),
+        }
+    }
+}
+pub(super) fn require_allocation_capability(state: &AppState) -> AppResult<()> {
+    if !state.config.billing_allocations_enabled {
+        return Err(AppError::Conflict(
+            "Credit allocation policies are not enabled on this deployment".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AllocationOverviewResponse {
+    pub allocations_v1: bool,
+    pub summary: billing::summaries::AllocationSummary,
+}
+#[utoipa::path(get, path = "/api/v1/admin/credits/allocations/summary", tag = "Admin Credits", responses((status = 200, body = AllocationOverviewResponse)), security(("bearer_auth" = [])))]
+pub async fn allocation_summary(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<AllocationOverviewResponse>> {
+    require_admin_or_operator(&state, &auth, "admin.credits.allocations.summary").await?;
+    Ok(Json(AllocationOverviewResponse {
+        allocations_v1: state.config.billing_allocations_enabled,
+        summary: billing::summaries::allocations(&state.db, None, Utc::now()).await?,
+    }))
+}
+#[utoipa::path(post, path = "/api/v1/admin/credits/allocations", tag = "Admin Credits", request_body = IssueGrantRequest, responses((status = 200, body = IssueGrantResponse)), security(("bearer_auth" = [])))]
+pub async fn allocate(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<IssueGrantRequest>,
+) -> AppResult<Json<IssueGrantResponse>> {
+    require_allocation_capability(&state)?;
+    issue_grant(State(state), auth, Json(body)).await
+}
+#[utoipa::path(delete, path = "/api/v1/admin/credits/allocations/{grant_id}", tag = "Admin Credits", params(("grant_id" = String, Path)), responses((status = 200, body = CreditGrantResponse)), security(("bearer_auth" = [])))]
+pub async fn reclaim(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<CreditGrantResponse>> {
+    require_allocation_capability(&state)?;
+    revoke_grant(State(state), auth, Path(id)).await
+}
+
+#[cfg(test)]
+mod allocation_tests;

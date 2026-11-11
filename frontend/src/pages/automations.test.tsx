@@ -1,3 +1,5 @@
+import { formatAutomationTime } from "@/lib/automation-time";
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   act,
   fireEvent,
@@ -19,10 +21,12 @@ const mocks = vi.hoisted(() => ({
   triggers: vi.fn(),
   remove: vi.fn(),
   run: vi.fn(),
+  cancel: vi.fn(),
   history: vi.fn(),
   older: vi.fn(),
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   useSearch: () => mocks.search(),
   Link: ({
     to,
@@ -60,6 +64,7 @@ vi.mock("@/hooks/use-automations", () => ({
   }),
   useRunAutomation: () => ({ mutateAsync: mocks.run }),
   useAutomationRuns: mocks.history,
+  useCancelAutomationRun: () => ({ mutate: mocks.cancel, isPending: false }),
 }));
 import { AutomationEditor, AutomationsPage } from "./automations";
 import { AutomationPreferences } from "@/components/assistant/automation-preferences";
@@ -119,6 +124,82 @@ function chooseOption(label: string, name: string) {
   fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowDown" });
   fireEvent.keyDown(screen.getByRole("option", { name }), { key: "Enter" });
 }
+
+it.each([
+  { status: "disabled", schedule: { kind: "at", at: "2026-10-22T08:40:00Z" }, next: "2026-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "disabled", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "active", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: null },
+] as const)("shows the effective next run on desktop and mobile: $status / $schedule.kind / $next", ({ status, schedule, next }) => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [{ ...trigger, status, schedule, next_run_at: next }] } });
+  render(<AutomationsPage />);
+  const expected = status !== "active"
+    ? "Schedule paused"
+    : next === null ? "No run scheduled" : `Next: ${formatAutomationTime(next, "Asia/Singapore")}`;
+  const row = screen.getByRole("button", { name: trigger.label });
+  expect(row).toHaveTextContent(expected);
+  if (status !== "active") {
+    expect(row).not.toHaveTextContent(formatAutomationTime(next, "Asia/Singapore"));
+  }
+  expect(mocks.update).not.toHaveBeenCalled();
+});
+
+it("preserves schedule drafts across segments and guards dismissal until discarded", async () => {
+  const user = userEvent.setup();
+  const close = vi.fn();
+  render(<AutomationEditor onClose={close} onSecrets={vi.fn()} />);
+  expect(
+    screen.queryByRole("region", { name: "Unsaved changes" }),
+  ).not.toBeInTheDocument();
+  screen.getByRole("tab", { name: "Calendar" }).focus();
+  await user.keyboard("{ArrowRight}");
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Every" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    ),
+  );
+  await user.clear(screen.getByRole("spinbutton", { name: "Interval amount" }));
+  await user.type(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+    "3",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Start, end and run limits" }),
+  );
+  await user.type(screen.getByLabelText("Maximum occurrences"), "7");
+  await user.click(screen.getByRole("tab", { name: "Once" }));
+  expect(screen.getByLabelText("Run at time")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Webhook" }));
+  expect(screen.getByLabelText("Inbound verification")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Schedule" }));
+  await user.click(screen.getByRole("tab", { name: "Every" }));
+  expect(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+  ).toHaveValue(3);
+  expect(screen.getByLabelText("Maximum occurrences")).toHaveValue(7);
+  expect(
+    screen.getAllByRole("region", { name: "Form actions" }),
+  ).toHaveLength(1);
+  await user.keyboard("{Escape}");
+  const guard = await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  });
+  await user.click(within(guard).getByRole("button", { name: "Keep editing" }));
+  expect(close).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+  ).toHaveValue(3);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  await user.click(within(await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  })).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(mocks.create).not.toHaveBeenCalled();
+});
 
 it("previews calendar times after the debounce and cancels stale previews", async () => {
   vi.useFakeTimers();
@@ -299,11 +380,13 @@ it("edits a schedule without changing its source", async () => {
   render(
     <AutomationEditor row={trigger} onClose={vi.fn()} onSecrets={vi.fn()} />,
   );
-  expect(screen.getByLabelText("Source")).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Schedule" })).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Webhook" })).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Instruction"), {
     target: { value: "Summarise unread notifications" },
   });
   await user.click(screen.getByRole("button", { name: "Save automation" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(mocks.update).toHaveBeenCalledWith({
       id: trigger.id,
@@ -327,7 +410,9 @@ it("shows history thread links, pages older runs and confirms deletion", async (
               id: "run",
               outcome: "completed",
               scheduled_at: trigger.created_at,
-              started_at: new Date(Date.parse(trigger.created_at) + 23_000).toISOString(),
+              started_at: new Date(
+                Date.parse(trigger.created_at) + 23_000,
+              ).toISOString(),
               capacity_wait_ms: 80_000,
               reason: null,
               duration_ms: 2000,
@@ -361,7 +446,9 @@ it("shows history thread links, pages older runs and confirms deletion", async (
     "href",
     "/assistant?c=thread-1",
   );
-  expect(screen.getByText("waited 1 minute 20 seconds for capacity")).toBeInTheDocument();
+  expect(
+    screen.getByText("waited 1 minute 20 seconds for capacity"),
+  ).toBeInTheDocument();
   expect(screen.getByText(/^Started /)).toBeInTheDocument();
   expect(
     screen.getByText(/Missed 864 occurrences between/),
@@ -379,6 +466,55 @@ it("shows history thread links, pages older runs and confirms deletion", async (
   );
   expect(mocks.remove).toHaveBeenCalledWith(trigger.id);
 });
+
+it("shows the closed model failure in run history and preserves legacy reasons", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: {
+      pages: [
+        {
+          runs: [
+            {
+              id: "failed",
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              reason: "assistant_unavailable",
+              duration_ms: 9000,
+              thread_id: "failed-thread",
+              failure_reason: {
+                source: "nyxid",
+                stage: "model_proxy",
+                code: "api_key_scope_forbidden",
+                http_status: 403,
+                nyxid_error_code: 9000,
+              },
+            },
+            {
+              id: "legacy",
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              reason: "turn_lost",
+              duration_ms: null,
+              thread_id: null,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AutomationsPage />);
+  await user.click(
+    screen.getAllByRole("button", { name: "Morning summary" })[0]!,
+  );
+  expect(
+    screen.getByText(
+      "Model request failed: api_key_scope_forbidden (HTTP 403)",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("assistant unavailable")).not.toBeInTheDocument();
+  expect(screen.getByText("turn lost")).toBeInTheDocument();
+});
 it("shows preference validation errors and keeps invalid timezones unsaved", async () => {
   mocks.settings.mockReturnValue({ data: { timezone: "Mars/Olympus" } });
   const user = userEvent.setup();
@@ -387,8 +523,16 @@ it("shows preference validation errors and keeps invalid timezones unsaved", asy
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
   );
 
+  await user.clear(screen.getByRole("spinbutton", { name: "Runs per hour" }));
+  await user.type(
+    screen.getByRole("spinbutton", { name: "Runs per hour" }),
+    "4",
+  );
   await user.click(screen.getByRole("button", { name: "Save preferences" }));
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent("IANA timezone");
+  expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAccessibleDescription(/IANA timezone/);
   expect(mocks.saveSettings).not.toHaveBeenCalled();
 });
 
@@ -441,4 +585,159 @@ it("keeps expired setup instructions unavailable", () => {
   render(<AutomationsPage />);
   expect(screen.getByText("Setup link expired")).toBeInTheDocument();
   expect(screen.queryByLabelText("Instruction")).not.toBeInTheDocument();
+});
+
+
+it("names webhook, paused and never-run states without placeholder dashes", () => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [
+    { ...trigger, id: "webhook", source: "webhook", schedule: null, next_run_at: null, last_run: null },
+    { ...trigger, id: "paused", status: "disabled", next_run_at: null, last_run: null },
+    { ...trigger, id: "active", next_run_at: null, last_run: null },
+  ] } });
+  render(<AutomationsPage />);
+  expect(screen.getByText(/Runs on webhook events/)).toHaveTextContent("Not run yet");
+  expect(screen.getByText(/Schedule paused/)).toHaveTextContent("Not run yet");
+  expect(screen.getByText(/No run scheduled/)).toHaveTextContent("Not run yet");
+  expect(screen.queryByText(/Next: [—–-]/)).not.toBeInTheDocument();
+});
+
+it("shows a waiting coordinator deadline and sends exact run cancellation", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: {
+      pages: [
+        {
+          runs: [
+            {
+              id: "waiting-run",
+              outcome: "waiting",
+              scheduled_at: trigger.created_at,
+              duration_ms: null,
+              coordinator_deadline: "2026-10-01T01:00:00Z",
+              can_cancel: true,
+              reason: "coordinator_pending",
+              wait_kind: "coordinator",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AutomationsPage />);
+  await user.click(
+    screen.getAllByRole("button", { name: "Morning summary" })[0]!,
+  );
+  expect(screen.getByText(/Completion deadline/)).toBeInTheDocument();
+  expect(screen.getByText("Waiting for delegated work to finish")).toBeInTheDocument();
+  expect(screen.queryByText("coordinator pending")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Cancel run" }));
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Keep run" }));
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Cancel run" }));
+  await user.click(screen.getByRole("button", { name: "Confirm cancellation" }));
+  expect(mocks.cancel).toHaveBeenCalledWith({
+    triggerId: trigger.id,
+    runId: "waiting-run",
+  });
+});
+
+it("shows the coordinator timeout reason after expiry", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: {
+      pages: [
+        {
+          runs: [
+            {
+              id: "timed-out",
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              duration_ms: null,
+              reason: "coordinator_timeout",
+              can_cancel: false,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AutomationsPage />);
+  await user.click(
+    screen.getAllByRole("button", { name: "Morning summary" })[0]!,
+  );
+  expect(
+    screen.getByText("Coordinator deadline expired (coordinator_timeout)."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("coordinator timeout")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Cancel run" }),
+  ).not.toBeInTheDocument();
+});
+
+
+it.each(["cancelled", "continuation_limit_exceeded"])(
+  "shows a terminal %s reason when coordinator wait metadata remains",
+  async (reason) => {
+    const user = userEvent.setup();
+    mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+    mocks.history.mockReturnValue({
+      data: {
+        pages: [{
+          runs: [{
+            id: "finished-wait",
+            outcome: "failed",
+            scheduled_at: trigger.created_at,
+            duration_ms: null,
+            reason,
+            wait_kind: "coordinator",
+            coordinator_deadline: "2026-10-01T01:00:00Z",
+            can_cancel: false,
+          }],
+        }],
+      },
+    });
+    render(<AutomationsPage />);
+    await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+    expect(screen.getByText(reason.replaceAll("_", " "))).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for delegated work to finish")).not.toBeInTheDocument();
+    expect(screen.queryByText("Completion deadline")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
+  },
+);
+
+it("separates task execution from actionable push failure, retry and acceptance", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({ data: { pages: [{ runs: [
+    {
+      id: "push-failed", outcome: "failed", execution_outcome: "completed",
+      scheduled_at: trigger.created_at, reason: "push_disabled", duration_ms: 2000, thread_id: "saved-report",
+      notification_delivery: { state: "failed", reason: "push_disabled", message: "Mobile push is disabled. Enable notifications in the NyxID app.", attempts: 0 },
+    },
+    {
+      id: "push-pending", outcome: "started", execution_outcome: "completed",
+      scheduled_at: trigger.created_at, reason: null, duration_ms: null, thread_id: "pending-report",
+      notification_delivery: { state: "retrying", reason: "push_temporarily_refused", message: "NyxID will retry the saved report without running the task again.", attempts: 1, http_status: 429, retry_at: "2026-11-07T10:00:00Z" },
+    },
+    {
+      id: "task-failed", outcome: "failed", execution_outcome: "failed",
+      scheduled_at: trigger.created_at, reason: "model_unavailable", duration_ms: 2000, thread_id: "failed-task",
+      notification_delivery: { state: "accepted", reason: null, message: null, attempts: 1 },
+    },
+  ] }] } });
+  render(<AutomationsPage />);
+  await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+  expect(screen.getAllByText("Task execution")).toHaveLength(3);
+  expect(screen.getAllByText("Mobile push delivery")).toHaveLength(3);
+  expect(screen.getByText(/Mobile push is disabled/)).toBeInTheDocument();
+  expect(screen.queryByText("push disabled")).not.toBeInTheDocument();
+  expect(screen.getByText("model unavailable")).toBeInTheDocument();
+  expect(screen.getByText("Accepted by push provider")).toBeInTheDocument();
+  expect(screen.getByText(/without running the task again/)).toBeInTheDocument();
+  expect(screen.getByText(/Next delivery attempt:/)).toBeInTheDocument();
+  expect(screen.getByText(/Provider HTTP 429/)).toBeInTheDocument();
+  expect(screen.getAllByRole("link", { name: "Open thread" })[0]).toHaveAttribute("href", expect.stringContaining("saved-report"));
 });

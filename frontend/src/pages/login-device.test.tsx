@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import { LoginDevicePage } from "./login-device";
 import { LoginAgentKeyPage } from "./login-agent-key";
 import { loginInventory } from "@/lib/__fixtures__/login-inventory";
@@ -22,7 +23,8 @@ const mocks = vi.hoisted(() => ({
   query: "?user_code=ABCD-EFGH",
   config: { email_auth_enabled: true, social_providers: [] as string[] },
 }));
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: { post: mocks.post, get: mocks.get },
   apiClient: mocks.preview,
 }));
@@ -412,7 +414,7 @@ describe("three-step device approval", () => {
       expect(screen.queryByText("Change account")).not.toBeInTheDocument();
     },
   );
-  it("requires the second factor inside the same request before showing access choices", async () => {
+  it.each(["123456", "Ab_12-xy", "0123456789abcdef0123456789abcdef"])("requires second factor %s inside the same request before showing access choices", async (code) => {
     mocks.auth = false;
     const identity = {
       id: "22222222-2222-4222-8222-222222222222",
@@ -454,7 +456,7 @@ describe("three-step device approval", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByLabelText("Authenticator code")).toBeVisible();
     fireEvent.change(screen.getByLabelText("Authenticator code"), {
-      target: { value: "123456" },
+      target: { value: code },
     });
     await click("Verify & continue");
     expect(
@@ -462,7 +464,7 @@ describe("three-step device approval", () => {
     ).toBeVisible();
     expect(mocks.preview).toHaveBeenCalledWith(
       `/auth/approval/${identity.id}/mfa`,
-      expect.objectContaining({ body: { code: "123456" } }),
+      expect.objectContaining({ body: { code } }),
     );
     expect(approvals()).toEqual([]);
   });
@@ -589,6 +591,28 @@ describe("three-step device approval", () => {
         }),
       ],
     ]);
+  });
+  it.each(["device", "agent-key"] as const)("steps up inline and retries %s approval", async (flow) => {
+    let denied = false;
+    const original = mocks.post.getMockImplementation()!;
+    mocks.post.mockImplementation(async (path: string, body: unknown) => {
+      if (path.includes("/approve") && !denied) {denied = true; throw new ApiError(403, {error: "mfa_step_up_required", error_code: 2003, message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."});}
+      return original(path, body);
+    });
+    if (flow === "device") {
+      mount(); await click("Continue"); await click("Continue"); await click("Continue to approval"); await click("Approve full account access");
+    } else {
+      await scope("agent-key");
+      // The existing key flow still requires explicit permission confirmation.
+      await click("Create new Agent Key"); await click("Create & continue");
+    }
+    expect(screen.getByRole("region", {name: "Verify this session"})).toBeVisible();
+    expect(screen.queryByText("Approved — return to the requesting device")).not.toBeInTheDocument();
+    await click("Use a recovery code");
+    fireEvent.change(screen.getByLabelText("Recovery code"), {target: {value: "a".repeat(32)}});
+    await click("Verify & continue");
+    expect(mocks.preview).toHaveBeenCalledWith("/auth/mfa/step-up", expect.objectContaining({body: {code: "a".repeat(32)}}));
+    expect(screen.getByText("Approved — return to the requesting device")).toBeVisible();
   });
   it("previews linked requests, shows actual requester details, and approves full account once", async () => {
     mount();

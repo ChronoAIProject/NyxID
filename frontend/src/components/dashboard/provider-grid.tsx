@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import type { ProviderConfig } from "@/types/api";
 import {
@@ -49,7 +49,7 @@ import {
 } from "@/components/ui/dialog";
 
 export function ProviderGrid() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [targetOrgId, setTargetOrgId] = useState<string | null>(null);
   const { data: providers, isLoading: providersLoading } = useProviders();
   const { data: orgs, isLoading: orgsLoading } = useOrgs();
@@ -108,7 +108,7 @@ export function ProviderGrid() {
       if (error instanceof ApiError) {
         toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error(translateUi("Failed to initiate OAuth connection"));
+        toast.error(translateErrorMessage("Failed to initiate OAuth connection"));
       }
     } finally {
       setActiveProviderId(null);
@@ -129,13 +129,13 @@ export function ProviderGrid() {
         label,
         gatewayUrl,
       });
-      toast.success(translateUi("Connected to {{name}}", { name: apiKeyDialog.name }));
+      toast.success(translateUi(`Connected to ${apiKeyDialog.name}`));
       setApiKeyDialog(null);
     } catch (error) {
       if (error instanceof ApiError) {
         toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error(translateUi("Failed to connect API key"));
+        toast.error(translateErrorMessage("Failed to connect API key"));
       }
     } finally {
       setActiveProviderId(null);
@@ -154,9 +154,9 @@ export function ProviderGrid() {
         ...options,
       });
       toast.success(
-        response?.upstream_revocation_scheduled === true
+        translateUi(response?.upstream_revocation_scheduled === true
           ? "Removed from NyxID. Upstream revocation scheduled."
-          : "Removed from NyxID. Upstream access remains active.",
+          : "Removed from NyxID. Upstream revocation is not confirmed."),
       );
       setDisconnectDialog(null);
       setCascadeDetails(null);
@@ -172,7 +172,7 @@ export function ProviderGrid() {
       if (error instanceof ApiError) {
         toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error(translateUi("Failed to disconnect provider"));
+        toast.error(translateErrorMessage("Failed to disconnect provider"));
       }
     } finally {
       setActiveProviderId(null);
@@ -188,7 +188,7 @@ export function ProviderGrid() {
       if (error instanceof ApiError) {
         toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error(translateUi("Failed to refresh token"));
+        toast.error(translateErrorMessage("Failed to refresh token"));
       }
     } finally {
       setActiveProviderId(null);
@@ -220,18 +220,18 @@ export function ProviderGrid() {
   const scopeSelector = showScopeSelect ? (
     <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Building2 className="h-3.5 w-3.5" />{t("Owner")}</div>
+        <div className="flex items-center gap-2 type-secondary-emphasis text-muted-foreground">
+          <Building2 className="h-3.5 w-3.5" />{translateUi("Owner")}</div>
         <div className="w-full sm:w-[220px]">
           <OrgScopeSelect
             value={targetOrgId}
             onChange={setTargetOrgId}
-            label={t("Provider token owner")}
+            label={translateUi("Provider token owner")}
             adminOnly
           />
         </div>
       </div>
-      <p className="mt-1 text-11 text-muted-foreground">{t("Select an org to review and disconnect provider tokens owned by that org.")}</p>
+      <p className="mt-1 text-13 text-muted-foreground">{translateUi("Select an org to review and disconnect provider tokens owned by that org.")}</p>
     </div>
   ) : null;
 
@@ -242,13 +242,13 @@ export function ProviderGrid() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No Provider Tokens")}</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">{translateUi("No Provider Tokens")}</p>
+            <p className="text-13 text-muted-foreground">
               {targetOrgId
                 ? selectedOrgName
-                  ? t("No provider tokens for {{selectedOrgName}}.", { selectedOrgName: selectedOrgName })
-                  : t("No org provider tokens connected.")
-                : t("No providers available. An admin needs to configure providers first.")}
+                  ? translateUi("No provider tokens for {{value1}}.", { value1: selectedOrgName })
+                  : translateUi("No org provider tokens connected.")
+                : translateUi("No providers available. An admin needs to configure providers first.")}
             </p>
           </div>
         </div>
@@ -356,11 +356,11 @@ export function ProviderGrid() {
           >
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>{t("Disconnect ")}{disconnectDialog.name}?</DialogTitle>
+                <DialogTitle>{translateUi("Disconnect ")}{disconnectDialog.name}?</DialogTitle>
                 <DialogDescription>
                   {disconnectDialog.revocation?.revokes_grant
                     ? grantRevocationDescription(disconnectDialog.name)
-                    : t("This removes the stored provider connection from NyxID. Services using it will stop working until you reconnect.")}
+                    : translateUi("This removes the stored provider connection from NyxID. Services using it will stop working until you reconnect.")}
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>
@@ -368,12 +368,12 @@ export function ProviderGrid() {
                   variant="outline"
                   disabled={disconnectMutation.isPending}
                   onClick={() => setDisconnectDialog(null)}
-                >{t("Cancel")}</Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   variant="destructive"
                   isLoading={disconnectMutation.isPending}
                   onClick={() => void handleDisconnect(disconnectDialog.id)}
-                >{t("Disconnect")}</Button>
+                >{translateUi("Disconnect")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -389,6 +389,7 @@ export function ProviderGrid() {
 function ProviderCardWithCredentials(
   props: Omit<React.ComponentProps<typeof ProviderCard>, "hasUserCredentials">,
 ) {
+  useUiTranslation();
   const showCreds = needsUserCredentials(props.provider);
   const { data: credentials } = useMyProviderCredentials(
     showCreds ? props.provider.id : "",

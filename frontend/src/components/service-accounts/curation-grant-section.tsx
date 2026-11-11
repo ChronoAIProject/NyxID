@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -35,7 +35,7 @@ export function CurationGrantSection({
 }: {
   readonly account: ServiceAccount;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
   const issue = useIssueCurationGrant();
   const revoke = useRevokeCurationGrant();
@@ -112,13 +112,13 @@ export function CurationGrantSection({
   }
 
   return (
-    <DetailSection title={t("Catalog skill curation")}>
+    <DetailSection title={translateUi("Catalog skill curation")}>
       <DetailRow
-        label={t("Purpose")}
+        label={translateUi("Purpose")}
         value={account.purpose === "curation" ? "Curation" : "General"}
       />
       <DetailRow
-        label={t("Management")}
+        label={translateUi("Management")}
         value={
           account.platform_protected
             ? "Platform admin only"
@@ -126,30 +126,30 @@ export function CurationGrantSection({
         }
       />
       <DetailRow
-        label={t("Credential generation")}
+        label={translateUi("Credential generation")}
         value={String(account.credential_generation ?? 0)}
       />
       <DetailRow
-        label={t("Grant")}
+        label={translateUi("Grant")}
         value={grant ? (expired ? "Expired" : "Active") : "None"}
       />
       {grant && (
         <>
-          <DetailRow label={t("Grant ID")} value={grant.id} copyable />
+          <DetailRow label={translateUi("Grant ID")} value={grant.id} copyable />
           <DetailRow
-            label={t("Catalog service IDs")}
+            label={translateUi("Catalog service IDs")}
             value={grant.service_ids.join(", ")}
           />
           <DetailRow
-            label={t("Ornn proxy target")}
+            label={translateUi("Ornn proxy target")}
             value={grant.ornn_proxy_service_id ?? "Disabled"}
           />
           <DetailRow
-            label={t("Write budget")}
+            label={translateUi("Write budget")}
             value={`${grant.writes_used} / ${grant.max_writes} per ${grant.window_seconds}s`}
           />
           <DetailRow
-            label={t("Expires")}
+            label={translateUi("Expires")}
             value={
               grant.expires_at ? formatDate(grant.expires_at) : "No expiry"
             }
@@ -157,7 +157,7 @@ export function CurationGrantSection({
         </>
       )}
       <div className="space-y-4 p-5">
-        <p className="text-12 text-muted-foreground">{t("Recommendations can be assigned, replaced, removed, and restored within these catalog services. Package editing requires a separate scoped Ornn identity. Revoking the grant keeps this account protected.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Recommendations can be assigned, replaced, removed, and restored within these catalog services. Package editing requires a separate scoped Ornn identity. Revoking the grant keeps this account protected.")}</p>
         {isAdmin && !editing && (
           <div className="flex justify-end gap-2">
             {grant && (
@@ -165,17 +165,17 @@ export function CurationGrantSection({
                 variant="destructive"
                 isLoading={revoke.isPending}
                 onClick={() => void revokeGrant()}
-              >{t("Revoke grant")}</Button>
+              >{translateUi("Revoke grant")}</Button>
             )}
             <Button onClick={openForm}>
-              {grant ? t("Replace grant") : t("Issue grant")}
+              {grant ? translateUi("Replace grant") : translateUi("Issue grant")}
             </Button>
           </div>
         )}
         {isAdmin && editing && (
           <Form {...form}>
             <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
-              <p className="text-12 text-muted-foreground">{t("This legacy grant limits access to selected catalog services. Saving catalog scopes in Edit switches the account to platform-wide catalog access. Org-owned accounts cannot receive a legacy grant.")}</p>
+              <p className="text-14 text-muted-foreground">{translateUi("This legacy grant limits access to selected catalog services. Saving catalog scopes in Edit switches the account to platform-wide catalog access. Org-owned accounts cannot receive a legacy grant.")}</p>
               {(
                 [
                   [
@@ -209,7 +209,7 @@ export function CurationGrantSection({
                 />
               ))}
               {submitError && (
-                <p role="alert" className="text-12 text-destructive">
+                <p role="alert" className="text-14 text-destructive">
                   {translateUi(submitError)}
                 </p>
               )}
@@ -218,13 +218,13 @@ export function CurationGrantSection({
                   type="button"
                   variant="outline"
                   onClick={() => setEditing(false)}
-                >{t("Cancel")}</Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={issue.isPending}
                   disabled={!form.formState.isDirty || !form.formState.isValid}
-                >{t("Issue grant")}</Button>
+                >{translateUi("Issue grant")}</Button>
               </div>
             </form>
           </Form>

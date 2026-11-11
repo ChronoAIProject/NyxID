@@ -86,7 +86,9 @@ fn admin_node_info_from_model(
                 proxy_upload_v1: owner.proxy_upload_v1,
                 http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
+                credential_target_update_v1: owner.credential_target_update_v1,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
+                machine_execution_approval_v1: owner.machine_execution_approval_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
             },
         }
@@ -289,7 +291,8 @@ pub async fn admin_disconnect_node(
                 // keeps per-node granularity without leaking the UUID.
                 node_id: hash_short_id(&node_id),
             },
-        );
+        )
+        .await;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -331,7 +334,8 @@ pub async fn admin_delete_node(
             // per-node granularity without leaking the UUID.
             node_id: hash_short_id(&node_id),
         },
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -375,6 +379,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "deadbeef".repeat(8),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "abcdef01".repeat(8),
             last_heartbeat_at: None,
             connected_at: None,

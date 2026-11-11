@@ -1,13 +1,15 @@
 //! Node authority fences survive socket reconnects and daemon restarts. Only
 //! signed v2 messages reach this module; deadlines use the local monotonic clock.
 use anyhow::{Context, Result, bail};
-use nyxid_machine::authority::Authority;
+use nyxid_machine::authority::{Authority, LeaseClock};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::sync::watch;
 
@@ -88,7 +90,7 @@ impl Fences {
             .set_permissions(std::fs::Permissions::from_mode(0o600))?;
         let encoded = serde_json::to_vec(durable)?;
         if encoded.len() > 2 * 1024 * 1024 {
-            bail!("authority capacity");
+            bail!("authority_capacity");
         }
         file.write_all(&encoded)?;
         file.as_file().sync_all()?;
@@ -99,15 +101,16 @@ impl Fences {
     pub fn enrolled(&self) -> bool {
         self.state.lock().expect("authority lock").durable.enrolled
     }
-    pub fn admit(
+    pub fn admit_at(
         &self,
         authority: &Authority,
         runtime: &str,
         job: Option<String>,
+        clock: LeaseClock,
     ) -> Result<watch::Receiver<bool>> {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = clock.now_ms;
         if !authority.valid(runtime, now) {
-            bail!("invalid machine authority");
+            bail!("authority_binding_invalid");
         }
         let mut state = self.state.lock().expect("authority lock");
         if state
@@ -116,7 +119,7 @@ impl Fences {
             .get(&authority.agent_id)
             .is_some_and(|r| *r > authority.revision)
         {
-            bail!("stale authority");
+            bail!("authority_revision_stale");
         }
         let identity = Identity {
             agent: authority.agent_id.clone(),
@@ -140,13 +143,13 @@ impl Fences {
                         && old.generation > identity.generation)
             })
         {
-            bail!("context identity mismatch");
+            bail!("authority_context_mismatch");
         }
         if state.leases.contains_key(&authority.lease_id) {
-            bail!("duplicate authority lease");
+            bail!("authority_lease_duplicate");
         }
         if state.durable.contexts.len() >= 8192 || state.leases.len() >= 8192 {
-            bail!("authority capacity");
+            bail!("authority_capacity");
         }
         let changed = (authority.require_v2 && !state.durable.enrolled)
             || state.durable.contexts.get(&authority.context_id) != Some(&identity)
@@ -161,7 +164,8 @@ impl Fences {
                 .revisions
                 .insert(authority.agent_id.clone(), authority.revision);
             // A failed fsync/write must not make a retry skip the durable fence.
-            self.persist(&durable)?;
+            self.persist(&durable)
+                .map_err(|_| anyhow::anyhow!("authority_store_unavailable"))?;
             state.durable = durable;
         }
         for lease in state.leases.values() {
@@ -171,50 +175,54 @@ impl Fences {
                 lease.stop.send_replace(true);
             }
         }
+        // Persistence may block. Keep the committed fence but never activate
+        // work whose monotonic deadline passed while acquiring/writing it.
+        if clock.deadline <= Instant::now() {
+            bail!("authority_expired");
+        }
         let stop = watch::channel(false).0;
         let rx = stop.subscribe();
         state.leases.insert(
             authority.lease_id.clone(),
             Lease {
                 authority: Box::new(authority.clone()),
-                deadline: Instant::now()
-                    + Duration::from_millis((authority.expires_at_ms - now) as u64),
+                deadline: clock.deadline,
                 stop,
                 job,
             },
         );
         Ok(rx)
     }
-    pub fn renew(&self, authority: &Authority, runtime: &str) -> Result<()> {
-        let now = chrono::Utc::now().timestamp_millis();
+    pub fn renew_at(&self, authority: &Authority, runtime: &str, clock: LeaseClock) -> Result<()> {
+        let now = clock.now_ms;
         if !authority.valid(runtime, now) {
-            bail!("invalid renewal");
+            bail!("authority_binding_invalid");
         }
         let mut state = self.state.lock().expect("authority lock");
         if state.durable.revisions.get(&authority.agent_id) != Some(&authority.revision) {
-            bail!("stale renewal");
+            bail!("authority_revision_stale");
         }
         let lease = state
             .leases
             .get_mut(&authority.lease_id)
-            .context("unknown lease")?;
+            .context("authority_lease_unknown")?;
         let mut expected = lease.authority.clone();
         expected.expires_at_ms = authority.expires_at_ms;
         if *expected != *authority
             || *lease.stop.borrow()
             || lease.deadline <= Instant::now()
+            || clock.deadline <= Instant::now()
             || authority.expires_at_ms <= lease.authority.expires_at_ms
         {
-            bail!("expired or changed renewal");
+            bail!("authority_renewal_refused");
         }
         lease.authority.expires_at_ms = authority.expires_at_ms;
-        lease.deadline =
-            Instant::now() + Duration::from_millis((authority.expires_at_ms - now) as u64);
+        lease.deadline = clock.deadline;
         Ok(())
     }
-    pub fn revoke(&self, authority: &Authority, runtime: &str) -> Result<()> {
-        if !authority.valid(runtime, chrono::Utc::now().timestamp_millis()) {
-            bail!("invalid revocation");
+    pub fn revoke_at(&self, authority: &Authority, runtime: &str, clock: LeaseClock) -> Result<()> {
+        if !authority.valid(runtime, clock.now_ms) {
+            bail!("authority_binding_invalid");
         }
         let mut state = self.state.lock().expect("authority lock");
         let mut durable = state.durable.clone();
@@ -224,7 +232,8 @@ impl Fences {
             .entry(authority.agent_id.clone())
             .or_default();
         *revision = (*revision).max(authority.revision);
-        self.persist(&durable)?;
+        self.persist(&durable)
+            .map_err(|_| anyhow::anyhow!("authority_store_unavailable"))?;
         state.durable = durable;
         for lease in state.leases.values() {
             if lease.authority.agent_id == authority.agent_id
@@ -234,6 +243,32 @@ impl Fences {
             }
         }
         Ok(())
+    }
+    #[cfg(test)]
+    fn test_clock(authority: &Authority) -> LeaseClock {
+        let now = chrono::Utc::now().timestamp_millis();
+        LeaseClock {
+            now_ms: now,
+            deadline: Instant::now()
+                + Duration::from_millis(authority.expires_at_ms.saturating_sub(now).max(0) as u64),
+        }
+    }
+    #[cfg(test)]
+    pub fn admit(
+        &self,
+        a: &Authority,
+        runtime: &str,
+        job: Option<String>,
+    ) -> Result<watch::Receiver<bool>> {
+        self.admit_at(a, runtime, job, Self::test_clock(a))
+    }
+    #[cfg(test)]
+    pub fn renew(&self, a: &Authority, runtime: &str) -> Result<()> {
+        self.renew_at(a, runtime, Self::test_clock(a))
+    }
+    #[cfg(test)]
+    pub fn revoke(&self, a: &Authority, runtime: &str) -> Result<()> {
+        self.revoke_at(a, runtime, Self::test_clock(a))
     }
     pub fn finish(&self, id: &str) {
         let mut state = self.state.lock().expect("authority lock");
@@ -269,6 +304,20 @@ impl Fences {
     }
 }
 
+pub(super) fn rejection_reason(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "authority_binding_invalid" => "authority_binding_invalid",
+        "authority_expired" => "authority_expired",
+        "authority_revision_stale" => "authority_revision_stale",
+        "authority_context_mismatch" => "authority_context_mismatch",
+        "authority_lease_duplicate" => "authority_lease_duplicate",
+        "authority_lease_unknown" => "authority_lease_unknown",
+        "authority_capacity" => "authority_capacity",
+        "authority_store_unavailable" => "authority_store_unavailable",
+        _ => "authority_renewal_refused",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +344,30 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn expired_activation_preserves_durable_fence_but_never_activates_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let fences = Fences::open(dir.path()).unwrap();
+        let a = authority();
+        let clock = LeaseClock {
+            now_ms: chrono::Utc::now().timestamp_millis(),
+            deadline: Instant::now(),
+        };
+        assert!(
+            fences
+                .admit_at(&a, &a.runtime_id, Some("never-started".into()), clock)
+                .is_err()
+        );
+        assert!(!fences.live(&a.lease_id));
+        assert!(fences.enrolled());
+        assert!(Fences::open(dir.path()).unwrap().enrolled());
+        assert!(fences.expired_jobs().is_empty());
+        fences.admit(&a, &a.runtime_id, None).unwrap();
+        let mut renewed = a.clone();
+        renewed.expires_at_ms += 1;
+        assert!(fences.renew_at(&renewed, &a.runtime_id, clock).is_err());
+    }
+
     #[test]
     fn failed_persistence_never_admits_or_skips_the_next_write() {
         let dir = tempfile::tempdir().unwrap();

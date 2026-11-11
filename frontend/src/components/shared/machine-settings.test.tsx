@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   cleanup,
   fireEvent,
@@ -11,7 +12,7 @@ import type { NodeInfo } from "@/types/nodes";
 const save = vi.hoisted(() => vi.fn());
 const grant = vi.hoisted(() => vi.fn());
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
+  Link: ({ children, to, search }: { children: React.ReactNode; to: string; search?: { agent?: string; details?: string } }) => <a href={`${to}${search?.agent ? `?agent=${search.agent}${search.details ? `&details=${search.details}` : ""}` : ""}`}>{children}</a>,
 }));
 vi.mock("@/hooks/use-machines", () => ({
   useVerifiedUpdaterImage: () => ({
@@ -71,21 +72,22 @@ it("requires the owner to acknowledge the single-user warning before enabling fi
     screen.getByText(/prompt-injected agent could read/),
   ).toBeInTheDocument();
   fireEvent.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Allow saved-login typing on this machine",
     }),
   );
   expect(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   ).toBeDisabled();
   fireEvent.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "I understand the shared-user risk and allow typing.",
     }),
   );
   fireEvent.click(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   );
+  await confirmChanges();
   await waitFor(() =>
     expect(save).toHaveBeenCalledWith({
       machine_confirm: "none",
@@ -98,7 +100,7 @@ it("does not expose owner settings to a reader", () => {
   render(<MachineSettings node={node} canManage={false} />);
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Save machine settings" }),
+    screen.queryByRole("button", { name: "Save changes" }),
   ).not.toBeInTheDocument();
 });
 
@@ -108,7 +110,9 @@ it("explains configured shared access on a headless machine without a browser to
   } }} canManage />);
   expect(screen.getByText(/Agents configured for Shared legacy can run granted commands/)).toBeInTheDocument();
   expect(screen.getByText(/Browser permissions are not required/)).toBeInTheDocument();
-  expect(screen.getByText("separated_requires_managed_browser").closest("details")).not.toHaveAttribute("open");
+  expect(
+    screen.queryByText("separated_requires_managed_browser"),
+  ).not.toBeInTheDocument();
   expect(screen.queryByText("Live desktop")).not.toBeInTheDocument();
 });
 
@@ -141,8 +145,9 @@ it("changes one machine grant while preserving the specialist services and other
   fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
   expect(grant).not.toHaveBeenCalled();
   fireEvent.click(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   );
+  await confirmChanges();
   await waitFor(() =>
     expect(grant).toHaveBeenCalledWith({
       id: "specialist",
@@ -153,4 +158,45 @@ it("changes one machine grant while preserving the specialist services and other
   );
   expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("logins");
   expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("guest_access");
+});
+
+it("makes missing selection recoverable from the machine settings link", () => {
+  render(<MachineSettings node={node} canManage />);
+  expect(screen.getByRole("link", { name: "Review Coder separation" })).toHaveAttribute("href", "/assistant?agent=specialist&details=grants");
+  expect(screen.getByText(/New assignments need a recorded choice and confirmed support/)).toBeInTheDocument();
+  expect(screen.getByText(/may read node tokens, signing secrets and stored credentials/)).toBeInTheDocument();
+});
+
+it("keeps a failed grant dirty after settings save, and retries only that grant", async () => {
+  save.mockResolvedValue(undefined);
+  grant.mockRejectedValueOnce(new Error("Grant revision changed"));
+  render(<MachineSettings node={node} canManage />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
+  fireEvent.click(
+    screen.getByRole("switch", {
+      name: "Allow saved-login typing on this machine",
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("switch", {
+      name: "I understand the shared-user risk and allow typing.",
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save changes" }),
+  );
+  await confirmChanges();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Grant revision changed");
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(grant).toHaveBeenCalledTimes(1);
+  expect(save.mock.invocationCallOrder[0]).toBeLessThan(grant.mock.invocationCallOrder[0]!);
+  expect(screen.getByRole("checkbox", { name: "Coder" })).not.toBeChecked();
+  grant.mockResolvedValueOnce(undefined);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save changes" }),
+  );
+  await confirmChanges();
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(grant).toHaveBeenCalledTimes(2);
 });

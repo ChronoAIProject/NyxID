@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ProviderConfig } from "@/types/api";
 import { useProviders, useServiceRequirements } from "@/hooks/use-providers";
 import { EngineerCapIcon } from "@/components/icons/empty-state";
@@ -15,7 +16,7 @@ export function ServiceRequirementsView({
   serviceId,
   userTokenProviderIds,
 }: ServiceRequirementsViewProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: requirements, isLoading: reqLoading } =
     useServiceRequirements(serviceId);
   const { data: providers, isLoading: provLoading } = useProviders();
@@ -30,7 +31,7 @@ export function ServiceRequirementsView({
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-8">
         <EngineerCapIcon className="h-48 w-48 text-muted-foreground/30" />
-        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("This service has no provider requirements.")}</div>
+        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("This service has no provider requirements.")}</div>
       </div>
     );
   }
@@ -54,23 +55,23 @@ export function ServiceRequirementsView({
             <div className="flex items-center gap-3">
               <KeyRound className="h-4 w-4 text-muted-foreground" />
               <div>
-                <p className="text-12 font-medium">
+                <p className="type-row-title">
                   {provider?.name ?? req.provider_name}
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {req.injection_method === "bearer"
-                    ? t("Bearer token")
+                    ? translateUi("Bearer token")
                     : req.injection_method === "header"
-                      ? t("Header: {{value}}", { value: req.injection_key ?? "" })
+                      ? translateUi("Header: {{value1}}", { value1: req.injection_key ?? "" })
                       : req.injection_method === "path"
-                        ? t("Path prefix: {{value}}", { value: req.injection_key ?? "" })
-                        : t("Query: {{value}}", { value: req.injection_key ?? "" })}
+                        ? translateUi("Path prefix: {{value1}}", { value1: req.injection_key ?? "" })
+                        : translateUi("Query: {{value1}}", { value1: req.injection_key ?? "" })}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <Badge variant={req.required ? "default" : "secondary"}>
-                {req.required ? t("Required") : t("Optional")}
+                {req.required ? translateUi("Required") : translateUi("Optional")}
               </Badge>
               {userTokenProviderIds !== undefined &&
                 (hasToken ? (

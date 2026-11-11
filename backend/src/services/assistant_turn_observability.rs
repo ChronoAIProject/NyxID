@@ -37,7 +37,21 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
         .map_or(0, |started| {
             (now - started).num_milliseconds().max(0) as u64
         });
+    let mut timing = turn.timing.clone();
+    timing.total_ms = (now - turn.started_at).num_milliseconds().max(0) as u64;
+    timing.admission_wait_ms = turn
+        .capacity_accepted_at
+        .zip(turn.engine_request_started_at)
+        .map_or(0, |(accepted, started)| {
+            (accepted - started).num_milliseconds().max(0) as u64
+        });
     TurnMetadata {
+        artifact_recovery_target: None,
+        artifact_delivery: None,
+        work: None,
+        timing: Some(timing),
+        failure_reason: None,
+        channel_delivery: None,
         attempts: Some(turn.engine_attempts),
         capacity_wait_ms: Some(turn.capacity_wait_ms.saturating_add(active_wait_ms)),
     }
@@ -139,8 +153,10 @@ pub async fn failed_in_session(
 ) -> AppResult<()> {
     let data = metadata(turn, now);
     audit_service::log_actor_event_in_transaction(db, session, &actor(&row.user_id), "assistant_turn_failed", json!({
-        "conversation_id": row.id, "turn_id": turn.turn_id, "code": error.code, "stage": error.stage,
+        "conversation_id": row.id, "turn_id": turn.turn_id, "channel_event_id":turn.channel_event_id,
+        "timing":data.timing,"code": error.code, "stage": error.stage,
         "upstream_code": error.upstream_code, "http_status": error.http_status, "origin": origin(turn),
+        "failure_reason": error.metadata.as_ref().and_then(|data| data.failure_reason.as_ref()),
         "attempts": data.attempts, "capacity_wait_ms": data.capacity_wait_ms, "trigger_run_id": turn.trigger_run_id,
         "worker_instance": turn.worker_instance, "settled_by_worker_instance": super::assistant_engine_worker::instance(),
         "heartbeat_age_ms": heartbeat_age(turn, Some(error), now),
@@ -159,8 +175,16 @@ pub async fn run_metadata_in_session(
             .update_one(
                 doc! {"_id": run_id, "user_id": &row.user_id, "turn_id": &turn.turn_id},
                 vec![doc! {"$set": {
+                    "work": {
+                        "owner_id": {"$literal":row.agent_owner_id.as_deref().unwrap_or(&row.user_id)},
+                        "trigger_run_id": {"$literal":run_id},
+                        "source": {"$cond":[{"$ne":[{"$ifNull":["$confirmation_policy",null]},null]},"event","scheduled"]},
+                        "business_system_success": {"$or":[{"$ifNull":["$work.business_system_success",false]},turn.business_system_success]},
+                    },
                     "attempts": {"$add": [{"$ifNull": ["$attempts", 0]}, i64::from(turn.engine_attempts)]},
                     "capacity_wait_ms": {"$add": [{"$ifNull": ["$capacity_wait_ms", 0]}, data.capacity_wait_ms.unwrap_or(0) as i64]},
+                    "failure_reason": {"$literal": bson::to_bson(&data.failure_reason)
+                        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?},
                 }}],
             )
             .session(session)
@@ -185,8 +209,29 @@ pub fn settled(
     error: Option<&TurnError>,
     now: DateTime<Utc>,
 ) {
+    crate::turn_trace::milestone(
+        &turn.turn_id,
+        crate::turn_trace::Stage::Execution,
+        Some((now - turn.started_at).num_milliseconds().max(0) as u64),
+        Some(match error {
+            Some(error) if error.code == "cancelled" => crate::turn_trace::Outcome::Cancelled,
+            Some(_) => crate::turn_trace::Outcome::Failed,
+            None => crate::turn_trace::Outcome::Completed,
+        }),
+    );
     let data = metadata(turn, now);
+    if let Some(wait) = data.capacity_wait_ms.filter(|wait| *wait > 0) {
+        crate::turn_trace::milestone(
+            &turn.turn_id,
+            crate::turn_trace::Stage::CapacityWait,
+            Some(wait),
+            None,
+        );
+    }
     let worker = super::assistant_engine_worker::instance();
+    let failure = error
+        .and_then(|error| error.metadata.as_ref())
+        .and_then(|data| data.failure_reason.as_ref());
     tracing::info!(target: "nyxid::assistant_engine", conversation_id = %row.id, turn_id = %turn.turn_id,
         worker_instance = %worker.id, worker_hostname = worker.hostname.as_deref(),
         turn_worker_instance = turn.worker_instance.as_ref().map(|worker| worker.id.as_str()),
@@ -194,6 +239,11 @@ pub fn settled(
         heartbeat_age_ms = heartbeat_age(turn, error, now),
         code = error.map_or("completed", |e| e.code), stage = error.map(|e| e.stage),
         upstream_code = error.and_then(|e| e.upstream_code.as_deref()), http_status = error.and_then(|e| e.http_status),
+        failure_source = failure.map(|reason| reason.source.as_str()),
+        failure_stage = failure.map(|reason| reason.stage.as_str()),
+        failure_code = failure.map(|reason| reason.code.as_str()),
+        failure_http_status = failure.and_then(|reason| reason.http_status),
+        failure_nyxid_error_code = failure.and_then(|reason| reason.nyxid_error_code),
         attempts = error.and_then(TurnError::attempts).or(data.attempts),
         capacity_wait_ms = error.and_then(TurnError::capacity_wait_ms).or(data.capacity_wait_ms).unwrap_or(0),
         duration_ms = (now - turn.started_at).num_milliseconds().max(0), origin = origin(turn),
@@ -215,10 +265,15 @@ pub async fn request_started(
     let turn = row.active_turn.as_ref().expect("claimed turn");
     db.collection::<bson::Document>(COLLECTION_NAME).update_one(
         doc! {"_id": &row.id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": {"$ne": true}},
-        vec![doc! {"$set": {
-            "active_turn.engine_request_started_at": {"$ifNull": ["$active_turn.engine_request_started_at", bson::DateTime::from_chrono(started)]},
-            "active_turn.capacity_wait_deadline": {"$ifNull": ["$active_turn.capacity_wait_deadline", bson::DateTime::from_chrono(deadline)]},
-        }}],
+        vec![
+            doc! {"$set": {
+                "active_turn.engine_request_started_at": {"$ifNull": ["$active_turn.engine_request_started_at", bson::DateTime::from_chrono(started)]},
+                "active_turn.capacity_wait_deadline": {"$ifNull": ["$active_turn.capacity_wait_deadline", bson::DateTime::from_chrono(deadline)]},
+            }},
+            // A turn that queued has left the queue by now, even if its own
+            // best-effort display update was lost.
+            doc! {"$unset": ["active_turn.queued_at", "active_turn.queue_deadline"]},
+        ],
     ).await?;
     Ok(())
 }
@@ -252,7 +307,8 @@ pub async fn claim_notice(
             "active_turn.capacity_accepted_at": bson::Bson::Null,
             "active_turn.origin": {"$ne": "trigger"}, "active_turn.trigger_run_id": bson::Bson::Null,
             "active_turn.engine_request_started_at": {"$lte": bson::DateTime::from_chrono(now - chrono::Duration::from_std(policy::ACK_DELAY).expect("bounded acknowledgement delay"))},
-            "active_turn.capacity_notice_claimed": {"$ne": true}},
+            "active_turn.capacity_notice_claimed": {"$ne": true},
+            "active_turn.checking_notice_claimed": {"$ne": true}},
         doc! {"$set": {"active_turn.capacity_notice_claimed": true}},
     ).await?.modified_count == 1)
 }
@@ -283,4 +339,23 @@ pub fn capacity_message(wait_ms: Option<u64>) -> String {
         .filter(|ms| *ms > 0)
         .map_or_else(String::new, |ms| format!(" (waited {})", wait_duration(ms)));
     format!("NyxBot is at capacity right now{waited}. Try again shortly.")
+}
+
+/// One write on the first semantic model output, never on every SSE chunk.
+pub async fn first_output(db: &Database, row: &AssistantConversation) -> AppResult<()> {
+    let turn = row.active_turn.as_ref().expect("claimed turn");
+    let elapsed = (Utc::now() - turn.started_at).num_milliseconds().max(0);
+    let saved = db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+        doc! {"_id":&row.id,"active_turn.turn_id":&turn.turn_id,"active_turn.timing.first_output_ms":bson::Bson::Null},
+        doc! {"$set":{"active_turn.timing.first_output_ms":elapsed}},
+    ).await?;
+    if saved.modified_count == 1 {
+        crate::turn_trace::milestone(
+            &turn.turn_id,
+            crate::turn_trace::Stage::FirstOutput,
+            Some(elapsed as u64),
+            None,
+        );
+    }
+    Ok(())
 }

@@ -362,6 +362,12 @@ pub async fn insights(
 fn request_filter(actor_id: &str, managed: &[&str], own: &[&str]) -> Document {
     doc! {
         "event_type": "service_request",
+        // Owning the shared connection does not reveal another person's
+        // private chat activity. Platform audit access remains separate.
+        "$and": [{"$or": [
+            {"event_data.execution_mode": {"$ne": "shared"}},
+            {"user_id": actor_id},
+        ]}],
         "created_at": { "$gte": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::days(30)) },
         "$or": [
             { "event_data.user_service_id": { "$in": managed } },
@@ -519,6 +525,7 @@ fn recent_request(
 /// A response header is not stream completion, so successful HTTP responses keep
 /// the explicit `response_received` state and WS upgrades use `connection_opened`.
 pub struct RequestAudit {
+    business: Option<super::assistant_real_work::Signal>,
     db: Database,
     actor: audit_service::AuditActor,
     event: serde_json::Value,
@@ -539,7 +546,9 @@ fn admission_denial_status(error: &AppError) -> Option<u16> {
         | AppError::WalletSuspended
         | AppError::PlanEntitlementRequired(_) => Some(402),
         error if error.is_forbidden() => Some(403),
-        AppError::ApiKeyScopeForbidden(_) | AppError::OrgRoleInsufficient(_) => Some(403),
+        AppError::ApiKeyScopeForbidden(_)
+        | AppError::OrgRoleInsufficient(_)
+        | AppError::AssistantModelAuthorityChanged => Some(403),
         _ => None,
     }
 }
@@ -555,7 +564,7 @@ impl RequestAudit {
         execution_id: &str,
         credential_class: crate::models::usage_meter::CredentialClass,
     ) -> Self {
-        Self::from_attribution(
+        let mut result = Self::from_attribution(
             db,
             RequestAttribution {
                 actor: audit_service::AuditActor::from_auth_user(auth),
@@ -577,7 +586,9 @@ impl RequestAudit {
             owner_id,
             execution_id,
             credential_class,
-        )
+        );
+        result.assistant(auth.assistant_chat.as_deref());
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -591,6 +602,7 @@ impl RequestAudit {
         credential_class: crate::models::usage_meter::CredentialClass,
     ) -> Self {
         Self {
+            business: None,
             db: db.clone(),
             actor: attribution.actor,
             event: serde_json::json!({
@@ -604,7 +616,50 @@ impl RequestAudit {
         }
     }
 
-    pub fn response(&mut self, status: u16) {
+    pub fn assistant(
+        &mut self,
+        chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    ) {
+        if let Some(chat) = chat {
+            self.event["actor_user_id"] = chat.user_id.clone().into();
+            self.event["agent_id"] = chat.agent_id.clone().into();
+            if let Some(access) = chat.org_agent_access.as_ref() {
+                self.event["agent_owner_id"] = access.owner().into();
+                self.event["execution_mode"] = if access.shared().is_some() {
+                    "shared"
+                } else {
+                    "org_member"
+                }
+                .into();
+            } else {
+                self.event["agent_owner_id"] = chat.user_id.clone().into();
+                self.event["execution_mode"] = if chat.guest { "guest" } else { "owner" }.into();
+            }
+        }
+    }
+
+    /// Bind analytics evidence independently of the existing audit attribution.
+    /// This must not add or change any fields in the service_request event.
+    pub fn business_service(
+        &mut self,
+        chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+        service: &crate::models::downstream_service::DownstreamService,
+        auto_connected: bool,
+    ) {
+        let class = serde_json::from_value(self.event["credential_class"].clone());
+        if let Ok(class) = class {
+            self.business = super::assistant_real_work::Signal::for_call(
+                chat,
+                service,
+                self.event["user_service_id"].as_str(),
+                self.event["owner_user_id"].as_str().unwrap_or_default(),
+                class,
+                auto_connected,
+            );
+        }
+    }
+
+    pub async fn response(&mut self, status: u16) {
         self.event["response_status"] = status.into();
         self.event["outcome"] = match status {
             101 => "connection_opened",
@@ -612,6 +667,11 @@ impl RequestAudit {
             _ => "response_received",
         }
         .into();
+        if (200..300).contains(&status)
+            && let Some(signal) = self.business.take()
+        {
+            signal.success(&self.db).await;
+        }
     }
 
     pub fn denied(&mut self, status: u16) {
@@ -973,6 +1033,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_activity_is_private_even_from_the_connection_owner() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("shared_activity_privacy").await;
+        for (actor, mode) in [
+            ("owner", "shared"),
+            ("recipient", "shared"),
+            ("member", "org_member"),
+        ] {
+            audit_service::log_actor_event(
+                db.clone(),
+                &audit_service::AuditActor {
+                    user_id: actor.into(),
+                    ip_address: None,
+                    user_agent: None,
+                    api_key_id: None,
+                    api_key_name: None,
+                },
+                "service_request",
+                Some(serde_json::json!({
+                    "user_service_id": "service", "execution_mode": mode,
+                })),
+            )
+            .await
+            .unwrap();
+        }
+        let events = db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME);
+        assert_eq!(
+            events
+                .count_documents(request_filter("owner", &["service"], &[]))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            events
+                .count_documents(request_filter("recipient", &[], &["service"]))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            events
+                .count_documents(request_filter("manager", &["service"], &[]))
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_work_binding_preserves_existing_audit_payload() {
+        use super::super::assistant_nyxagent as engine;
+        let f = super::super::org_agent_tests::Fixture::new("real_work_audit").await;
+        let input = serde_json::from_value::<engine::TurnRequest>(
+            serde_json::json!({"text":"Check records"}),
+        )
+        .unwrap();
+        let row = Box::pin(engine::begin_turn(
+            &f.state.db,
+            &f.admin,
+            &input,
+            &f.state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let key = f.key(&row).await;
+        let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        let mut audit = RequestAudit::new(
+            &f.state.db,
+            &auth,
+            Some("connection"),
+            "catalog",
+            &f.admin,
+            "execution",
+            crate::models::usage_meter::CredentialClass::UserOwned,
+        );
+        let before = audit.event.clone();
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.service_category = "connection".into();
+        service.slug = "business".into();
+        service.inference = None;
+        audit.business_service(auth.assistant_chat.as_deref(), &service, false);
+        assert!(audit.business.is_some());
+        assert_eq!(audit.event, before);
+        drop(audit);
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn request_capture_keeps_exact_identity_and_billing_link_without_claiming_stream_completion()
      {
         use crate::{
@@ -998,7 +1150,7 @@ mod tests {
             "execution",
             CredentialClass::AgentOverrideUserOwned,
         );
-        audit.response(200);
+        audit.response(200).await;
         drop(audit);
         let event = tokio::time::timeout(Duration::from_secs(3), async {
             loop {

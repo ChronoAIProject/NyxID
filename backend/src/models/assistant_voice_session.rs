@@ -17,8 +17,35 @@ pub enum SessionState {
     Failed,
 }
 
+/// Credential identity only. Live Key, child, Bot and service grants authorize use.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceClientKey {
+    pub key_id: String,
+    pub credential_id: Option<String>,
+    pub agent_id: String,
+    pub service_id: String,
+}
+
+impl std::fmt::Debug for VoiceClientKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VoiceClientKey { [REDACTED] }")
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// Non-authorizing enrollment hint copied from the authenticated person.
+    #[serde(default)]
+    pub execution_enrolled: bool,
+    #[serde(flatten)]
+    pub responses: super::voice_responses::ResponsesState,
+    /// Accepted work suspends user-idle expiry, but never heartbeat or hard limits.
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub last_work_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key: Option<VoiceClientKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -28,6 +55,9 @@ pub struct VoiceSession {
     /// Absent on Phase 3 rows; provider identity cannot change during recovery.
     #[serde(default)]
     pub protocol: Option<super::downstream_service::VoiceProtocol>,
+    /// Audio-only composer transcription; never reattach or admit assistant work.
+    #[serde(default)]
+    pub dictation: bool,
     #[serde(default)]
     pub measured_ms: i64,
     pub state: SessionState,

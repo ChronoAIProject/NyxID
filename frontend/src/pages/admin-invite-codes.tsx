@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { Label } from "@/components/ui/label";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -86,7 +87,7 @@ import { flattenRedemptions } from "./admin-invite-codes.helpers";
 const DEFAULT_MAX_USES = 10;
 
 export function AdminInviteCodesPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: publicConfig } = usePublicConfig();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -193,7 +194,7 @@ export function AdminInviteCodesPage() {
         setCopiedId((current) => (current === id ? null : current));
       }, 2000);
     } catch {
-      toast.error(translateUi("Failed to copy to clipboard"));
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -207,7 +208,7 @@ export function AdminInviteCodesPage() {
         setCopiedLinkId((current) => (current === id ? null : current));
       }, 2000);
     } catch {
-      toast.error(translateUi("Failed to copy to clipboard"));
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -215,7 +216,7 @@ export function AdminInviteCodesPage() {
     if (!deactivateTarget) return;
     try {
       await deactivateMutation.mutateAsync(deactivateTarget.id);
-      toast.success(translateUi("Invite code {{code}} deactivated", { code: deactivateTarget.code }));
+      toast.success(translateUi(`Invite code ${deactivateTarget.code} deactivated`));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to deactivate code"),
@@ -242,11 +243,11 @@ export function AdminInviteCodesPage() {
         toast.success(translateUi("Note updated"));
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
-          toast.error(translateUi("Save timed out after 10 seconds. Try again."));
+          toast.error(translateErrorMessage("Save timed out after 10 seconds. Try again."));
         } else if (err instanceof ApiError) {
           toast.error(translateErrorMessage(err.message));
         } else {
-          toast.error(translateUi("Failed to update note"));
+          toast.error(translateErrorMessage("Failed to update note"));
         }
         throw err;
       }
@@ -268,33 +269,33 @@ export function AdminInviteCodesPage() {
 
   function getStatusBadge(ic: InviteCode) {
     const exhausted = ic.used_count >= ic.max_uses;
-    if (!ic.is_active) return <Badge variant="destructive">{t("Deactivated")}</Badge>;
-    if (exhausted) return <Badge variant="warning">{t("Exhausted")}</Badge>;
-    return <Badge variant="success">{t("Active")}</Badge>;
+    if (!ic.is_active) return <Badge variant="destructive">{translateUi("Deactivated")}</Badge>;
+    if (exhausted) return <Badge variant="warning">{translateUi("Exhausted")}</Badge>;
+    return <Badge variant="success">{translateUi("Active")}</Badge>;
   }
 
   return (
     <div className="space-y-8">
       {noteReview.dialog}
       <PageHeader
-        title={t("Invite Codes")}
-        description={t("Create and manage invite codes for new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time.")}
+        title={translateUi("Invite Codes")}
+        description={translateUi("Create and manage invite codes for new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time.")}
         actions={null}
       />
       {publicConfig?.invite_code_required === false && (
-        <p role="status" className="text-sm text-muted-foreground">{t("Invitation codes are currently not required for signup. Enable the invitation-code feature flag to require them again.")}</p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("Invitation codes are currently not required for signup. Enable the invitation-code feature flag to require them again.")}</p>
       )}
 
       <Tabs value={view} onValueChange={setView}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
-            <TabsTrigger value="codes">{t("Codes")}</TabsTrigger>
-            <TabsTrigger value="users">{t("By User")}</TabsTrigger>
+            <TabsTrigger value="codes">{translateUi("Codes")}</TabsTrigger>
+            <TabsTrigger value="users">{translateUi("By User")}</TabsTrigger>
           </TabsList>
           {canWrite && view === "codes" && (
             <div className="flex shrink-0 items-center gap-4 sm:pb-1">
               <AddCtaButton
-                label={t("Create Invite Code")}
+                label={translateUi("Create Invite Code")}
                 onClick={openCreateDialog}
               />
             </div>
@@ -315,16 +316,16 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">{t("Failed to load invite codes")}</p>
-                <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+                <p className="type-row-title text-muted-foreground">{translateUi("Failed to load invite codes")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
               </div>
             </div>
           ) : inviteCodes.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">{t("No invite codes found")}</p>
-                <p className="text-xs text-muted-foreground">{t("Create one to allow a new user to register.")}</p>
+                <p className="type-row-title text-muted-foreground">{translateUi("No invite codes found")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Create one to allow a new user to register.")}</p>
               </div>
             </div>
           ) : (
@@ -345,7 +346,7 @@ export function AdminInviteCodesPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium font-mono text-foreground truncate">
+                        <p className="type-row-title font-mono text-foreground truncate">
                           {ic.code}
                         </p>
                       </div>
@@ -369,14 +370,14 @@ export function AdminInviteCodesPage() {
                                 void handleCopyCode(ic.code, ic.id);
                               }}
                             >
-                              <Copy className="h-3 w-3" />{t("Copy code")}</DropdownMenuItem>
+                              <Copy className="h-3 w-3" />{translateUi("Copy code")}</DropdownMenuItem>
                             <DropdownMenuItem
                               onClick={(e) => {
                                 e.stopPropagation();
                                 void handleCopyLink(ic.code, ic.id);
                               }}
                             >
-                              <Link2 className="h-3 w-3" />{t("Copy invite link")}</DropdownMenuItem>
+                              <Link2 className="h-3 w-3" />{translateUi("Copy invite link")}</DropdownMenuItem>
                             {canWrite && ic.is_active && (
                               <DropdownMenuItem
                                 className="text-destructive focus:text-destructive"
@@ -385,15 +386,15 @@ export function AdminInviteCodesPage() {
                                   setDeactivateTarget(ic);
                                 }}
                               >
-                                <Ban className="h-3 w-3" />{t("Deactivate")}</DropdownMenuItem>
+                                <Ban className="h-3 w-3" />{translateUi("Deactivate")}</DropdownMenuItem>
                             )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
                     </div>
-                    <div className="mt-2 text-xs text-muted-foreground">
+                    <div className="mt-2 text-13 text-muted-foreground">
                       <span className="tabular-nums">
-                        {String(ic.used_count)}/{String(ic.max_uses)}{t(" uses")}</span>
+                        {String(ic.used_count)}/{String(ic.max_uses)}{translateUi(" uses")}</span>
                       {ic.note && (
                         <>
                           <span className="text-border mx-1.5">|</span>
@@ -401,8 +402,8 @@ export function AdminInviteCodesPage() {
                         </>
                       )}
                     </div>
-                    <div className="mt-1.5 text-xs text-muted-foreground">
-                      <span>{t("Created ")}{formatDate(ic.created_at)}</span>
+                    <div className="mt-1.5 text-13 text-muted-foreground">
+                      <span>{translateUi("Created ")}{formatDate(ic.created_at)}</span>
                     </div>
                   </div>
                 ))}
@@ -413,12 +414,12 @@ export function AdminInviteCodesPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>{t("Invite code")}</TableHead>
-                      <TableHead>{t("Uses")}</TableHead>
-                      <TableHead>{t("Status")}</TableHead>
-                      <TableHead>{t("Note")}</TableHead>
-                      <TableHead>{t("Created")}</TableHead>
-                      <TableHead className="w-[100px]">{t("Actions")}</TableHead>
+                      <TableHead>{translateUi("Code")}</TableHead>
+                      <TableHead>{translateUi("Uses")}</TableHead>
+                      <TableHead>{translateUi("Status")}</TableHead>
+                      <TableHead>{translateUi("Note")}</TableHead>
+                      <TableHead>{translateUi("Created")}</TableHead>
+                      <TableHead className="w-[100px]">{translateUi("Actions")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -435,19 +436,19 @@ export function AdminInviteCodesPage() {
                         )}
                       >
                         <TableCell>
-                          <span className="font-mono text-sm font-medium text-foreground">
+                          <span className="font-mono type-row-title text-foreground">
                             {ic.code}
                           </span>
                         </TableCell>
                         <TableCell>
-                          <span className="text-sm tabular-nums text-muted-foreground">
+                          <span className="text-14 tabular-nums text-muted-foreground">
                             {String(ic.used_count)}/{String(ic.max_uses)}
                           </span>
                         </TableCell>
                         <TableCell>{getStatusBadge(ic)}</TableCell>
                         <TableCell>
                           {ic.note ? (
-                            <span className="text-11 text-text-tertiary">
+                            <span className="text-13 text-text-tertiary">
                               {ic.note}
                             </span>
                           ) : (
@@ -476,14 +477,14 @@ export function AdminInviteCodesPage() {
                                   void handleCopyCode(ic.code, ic.id);
                                 }}
                               >
-                                <Copy className="h-3 w-3" />{t("Copy code")}</DropdownMenuItem>
+                                <Copy className="h-3 w-3" />{translateUi("Copy code")}</DropdownMenuItem>
                               <DropdownMenuItem
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void handleCopyLink(ic.code, ic.id);
                                 }}
                               >
-                                <Link2 className="h-3 w-3" />{t("Copy invite link")}</DropdownMenuItem>
+                                <Link2 className="h-3 w-3" />{translateUi("Copy invite link")}</DropdownMenuItem>
                               {canWrite && ic.is_active && (
                                 <DropdownMenuItem
                                   className="text-destructive focus:text-destructive"
@@ -492,7 +493,7 @@ export function AdminInviteCodesPage() {
                                     setDeactivateTarget(ic);
                                   }}
                                 >
-                                  <Ban className="h-3 w-3" />{t("Deactivate")}</DropdownMenuItem>
+                                  <Ban className="h-3 w-3" />{translateUi("Deactivate")}</DropdownMenuItem>
                               )}
                             </DropdownMenuContent>
                           </DropdownMenu>
@@ -520,8 +521,8 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">{t("Failed to load invite codes")}</p>
-                <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+                <p className="type-row-title text-muted-foreground">{translateUi("Failed to load invite codes")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
               </div>
             </div>
           ) : (
@@ -547,21 +548,21 @@ export function AdminInviteCodesPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {createdCode ? t("Invite code created") : t("Create Invite Code")}
+              {createdCode ? translateUi("Invite code created") : translateUi("Create Invite Code")}
             </DialogTitle>
             <DialogDescription>
               {createdCode
-                ? t("Share the code below with the user who should register. The code is also visible in the table.")
-                : t("Generate a new invite code. The code is created server-side and shown once it is ready.")}
+                ? translateUi("Share the code below with the user who should register. The code is also visible in the table.")
+                : translateUi("Generate a new invite code. The code is created server-side and shown once it is ready.")}
             </DialogDescription>
           </DialogHeader>
 
           {createdCode ? (
             <div className="space-y-4">
               <div className="rounded-md border border-border bg-muted/30 p-4">
-                <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">{t("Invite code")}</p>
+                <p className="mb-2 text-13 uppercase tracking-wider text-text-tertiary">{translateUi("Invite code")}</p>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-lg font-medium text-foreground">
+                  <span className="font-mono type-card-title text-foreground">
                     {createdCode.code}
                   </span>
                   <Button
@@ -576,17 +577,17 @@ export function AdminInviteCodesPage() {
                         <Check
                           className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />{t("Copied")}</>
+                        />{translateUi("Copied")}</>
                     ) : (
                       <>
-                        <Copy className="h-3 w-3" aria-hidden="true" />{t("Copy")}</>
+                        <Copy className="h-3 w-3" aria-hidden="true" />{translateUi("Copy")}</>
                     )}
                   </Button>
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">{t("Up to ")}{String(createdCode.max_uses)}{t(" registrations.")}</p>
+                <p className="mt-2 text-13 text-muted-foreground">{translateUi("Up to ")}{String(createdCode.max_uses)}{translateUi(" registrations.")}</p>
               </div>
               <DialogFooter>
-                <Button onClick={() => setCreateOpen(false)}>{t("Done")}</Button>
+                <Button onClick={() => setCreateOpen(false)}>{translateUi("Done")}</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -602,7 +603,7 @@ export function AdminInviteCodesPage() {
                   name="max_uses"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Max uses")}</FormLabel>
+                      <FormLabel>{translateUi("Max uses")}</FormLabel>
                       <FormControl>
                         <Input
                           type="number"
@@ -618,7 +619,7 @@ export function AdminInviteCodesPage() {
                           ref={field.ref}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">{t("Maximum number of registrations this code can grant (1-1000).")}</p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Maximum number of registrations this code can grant (1-1000).")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -628,15 +629,15 @@ export function AdminInviteCodesPage() {
                   name="note"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Note")}</FormLabel>
+                      <FormLabel>{translateUi("Note")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder={t("e.g. alice@corp")}
+                          placeholder={translateUi("e.g. alice@corp")}
                           maxLength={512}
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">{t("Optional reminder of who this code is for. Visible to admins only.")}</p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Optional reminder of who this code is for. Visible to admins only.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -646,12 +647,12 @@ export function AdminInviteCodesPage() {
                     type="button"
                     variant="outline"
                     onClick={() => setCreateOpen(false)}
-                  >{t("Cancel")}</Button>
+                  >{translateUi("Cancel")}</Button>
                   <Button
                     type="submit"
                     variant="primary"
                     isLoading={createMutation.isPending}
-                  >{t("Create Invite Code")}</Button>
+                  >{translateUi("Create Invite Code")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -668,20 +669,20 @@ export function AdminInviteCodesPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Deactivate invite code")}</DialogTitle>
+            <DialogTitle>{translateUi("Deactivate invite code")}</DialogTitle>
             <DialogDescription>
               {deactivateTarget
-                ? t("Deactivating {{code}} immediately blocks any further registrations with it. This cannot be undone — mint a new code if a user needs another attempt.", { code: deactivateTarget.code })
+                ? translateUi("Deactivating {{value1}} immediately blocks any further registrations with it. This cannot be undone — mint a new code if a user needs another attempt.", { value1: deactivateTarget.code })
                 : ""}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeactivateTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeactivateTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDeactivate()}
               isLoading={deactivateMutation.isPending}
-            >{t("Deactivate")}</Button>
+            >{translateUi("Deactivate")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -715,7 +716,7 @@ export function AdminInviteCodesPage() {
                   </SheetTitle>
                   {getStatusBadge(selectedCode)}
                 </div>
-                <SheetDescription>{t("Detailed usage and editable note for this invite code.")}</SheetDescription>
+                <SheetDescription>{translateUi("Detailed usage and editable note for this invite code.")}</SheetDescription>
                 <div className="flex items-center gap-2 pt-2">
                   <Button
                     variant="outline"
@@ -729,10 +730,10 @@ export function AdminInviteCodesPage() {
                         <Check
                           className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />{t("Copied")}</>
+                        />{translateUi("Copied")}</>
                     ) : (
                       <>
-                        <Copy className="h-3 w-3" aria-hidden="true" />{t("Copy code")}</>
+                        <Copy className="h-3 w-3" aria-hidden="true" />{translateUi("Copy code")}</>
                     )}
                   </Button>
                   <Button
@@ -747,31 +748,31 @@ export function AdminInviteCodesPage() {
                         <Check
                           className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />{t("Copied")}</>
+                        />{translateUi("Copied")}</>
                     ) : (
                       <>
-                        <Link2 className="h-3 w-3" aria-hidden="true" />{t("Copy invite link")}</>
+                        <Link2 className="h-3 w-3" aria-hidden="true" />{translateUi("Copy invite link")}</>
                     )}
                   </Button>
                 </div>
               </SheetHeader>
 
-              <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-sm">
+              <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-14">
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">{t("Uses")}</p>
+                  <p className="text-13 uppercase tracking-wider text-text-tertiary">{translateUi("Uses")}</p>
                   <p className="mt-1 tabular-nums">
                     {String(selectedCode.used_count)}/
                     {String(selectedCode.max_uses)}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">{t("Created")}</p>
+                  <p className="text-13 uppercase tracking-wider text-text-tertiary">{translateUi("Created")}</p>
                   <p className="mt-1 text-muted-foreground">
                     {formatDate(selectedCode.created_at)}
                   </p>
                 </div>
                 <div className="col-span-2">
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">{t("Created by")}</p>
+                  <p className="text-13 uppercase tracking-wider text-text-tertiary">{translateUi("Created by")}</p>
                   {(() => {
                     // Mirror the Redemptions list fallback chain: display_name →
                     // email → UUID. Use truthy checks + optional chaining so a
@@ -790,15 +791,15 @@ export function AdminInviteCodesPage() {
                       <>
                         <p
                           className={cn(
-                            "mt-1 truncate text-sm text-foreground",
+                            "mt-1 truncate text-14 text-foreground",
                             isUuidFallback &&
-                              "font-mono text-xs text-muted-foreground",
+                              "font-mono text-13 text-muted-foreground",
                           )}
                         >
                           {primary}
                         </p>
                         {showEmailLine && (
-                          <p className="truncate text-xs text-muted-foreground">
+                          <p className="truncate text-13 text-muted-foreground">
                             {creator.email}
                           </p>
                         )}
@@ -809,23 +810,22 @@ export function AdminInviteCodesPage() {
               </div>
 
               <div className="space-y-2">
-                <label
+                <Label
                   htmlFor="invite-code-note"
-                  className="text-sm font-medium"
-                >{t("Note")}</label>
+                >{translateUi("Note")}</Label>
                 <Input
                   id="invite-code-note"
                   value={noteDraft}
                   onChange={(e) => setNoteDraft(e.target.value)}
-                  placeholder={t("e.g. alice@corp")}
+                  placeholder={translateUi("e.g. alice@corp")}
                   maxLength={512}
                   readOnly={!canWrite}
                 />
                 <div className="flex items-center justify-between">
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {canWrite
-                      ? t("Visible to admins only. Leave blank to clear.")
-                      : t("Read-only — only admins can edit notes.")}
+                      ? translateUi("Visible to admins only. Leave blank to clear.")
+                      : translateUi("Read-only — only admins can edit notes.")}
                   </p>
                   {canWrite && (
                     <Button
@@ -833,19 +833,19 @@ export function AdminInviteCodesPage() {
                       onClick={() => void handleSaveNote()}
                       disabled={!noteHasChanges || isSaving}
                       isLoading={isSaving}
-                    >{t("Save")}</Button>
+                    >{translateUi("Save")}</Button>
                   )}
                 </div>
               </div>
 
               <div className="space-y-3">
                 <div className="flex items-baseline justify-between">
-                  <h3 className="text-sm font-medium">{t("Redemptions")}</h3>
-                  <span className="text-xs text-muted-foreground">
-                    {selectedCode.usages.length}{t(" total")}</span>
+                  <h3 className="type-row-title">{translateUi("Redemptions")}</h3>
+                  <span className="text-13 text-muted-foreground">
+                    {selectedCode.usages.length}{translateUi(" total")}</span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-11 text-text-tertiary">{t("No redemptions yet.")}</div>
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-13 text-text-tertiary">{translateUi("No redemptions yet.")}</div>
                 ) : (
                   <ul className="divide-y divide-border rounded-md border border-border">
                     {selectedCode.usages.map((usage) => {
@@ -862,20 +862,20 @@ export function AdminInviteCodesPage() {
                           className="flex items-start justify-between gap-4 px-3 py-2"
                         >
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm text-foreground">
+                            <p className="truncate text-14 text-foreground">
                               {primary}
                             </p>
                             {showEmailLine && (
-                              <p className="truncate text-xs text-muted-foreground">
+                              <p className="truncate text-13 text-muted-foreground">
                                 {usage.user_email}
                               </p>
                             )}
                             {usage.user_email === null &&
                               usage.user_display_name === null && (
-                                <p className="truncate font-mono text-xs text-muted-foreground">{t("account deleted")}</p>
+                                <p className="truncate font-mono text-13 text-muted-foreground">{translateUi("account deleted")}</p>
                               )}
                           </div>
-                          <span className="shrink-0 text-xs text-muted-foreground">
+                          <span className="shrink-0 text-13 text-muted-foreground">
                             {formatDate(usage.used_at)}
                           </span>
                         </li>
@@ -899,11 +899,11 @@ interface UserNameLinkProps {
 }
 
 function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   // A deleted account loses its users join, leaving both fields null.
   if (email === null) {
     return (
-      <span className="font-mono text-xs text-muted-foreground">{t("account deleted")}</span>
+      <span className="font-mono text-13 text-muted-foreground">{translateUi("account deleted")}</span>
     );
   }
 
@@ -911,7 +911,7 @@ function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
     <Link
       to="/admin/users/$userId"
       params={{ userId }}
-      className="inline-flex items-center gap-1 text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer"
+      className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer"
     >
       <span className="truncate max-w-[200px]">{displayName || email}</span>
       <ArrowUpRight className="h-3 w-3 shrink-0" />
@@ -930,7 +930,7 @@ function InviteCodesByUserView({
   onOpenCode,
   isSaving,
 }: InviteCodesByUserViewProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const redemptions = useMemo(
     () => flattenRedemptions(inviteCodes),
     [inviteCodes],
@@ -941,8 +941,8 @@ function InviteCodesByUserView({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-12 font-medium text-muted-foreground">{t("No redemptions found")}</p>
-          <p className="text-xs text-muted-foreground">{t("Invite codes will appear here once they are redeemed by users.")}</p>
+          <p className="type-row-title text-muted-foreground">{translateUi("No redemptions found")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Invite codes will appear here once they are redeemed by users.")}</p>
         </div>
       </div>
     );
@@ -968,7 +968,7 @@ function InviteCodesByUserView({
                   displayName={r.userDisplayName}
                 />
                 {r.userDisplayName && r.userEmail && (
-                  <p className="truncate text-xs text-muted-foreground max-w-[250px]">
+                  <p className="truncate text-13 text-muted-foreground max-w-[250px]">
                     {r.userEmail}
                   </p>
                 )}
@@ -976,18 +976,18 @@ function InviteCodesByUserView({
               <button
                 type="button"
                 onClick={() => onOpenCode(r.codeId)}
-                className="font-mono text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
+                className="font-mono type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
                 disabled={isSaving}
               >
                 {r.code}
               </button>
             </div>
-            <div className="mt-2 text-xs text-muted-foreground flex items-center justify-between">
+            <div className="mt-2 text-13 text-muted-foreground flex items-center justify-between">
               <div className="truncate flex-1 min-w-0 mr-4 text-left">
                 {r.note ? (
                   <span>{r.note}</span>
                 ) : (
-                  <span className="text-text-tertiary">{t("No note")}</span>
+                  <span className="text-text-tertiary">{translateUi("No note")}</span>
                 )}
               </div>
               <span className="shrink-0 tabular-nums">
@@ -1003,11 +1003,11 @@ function InviteCodesByUserView({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{t("Name")}</TableHead>
-              <TableHead>{t("Email")}</TableHead>
-              <TableHead>{t("Invite code")}</TableHead>
-              <TableHead>{t("Remarks")}</TableHead>
-              <TableHead>{t("Redeemed")}</TableHead>
+              <TableHead>{translateUi("Name")}</TableHead>
+              <TableHead>{translateUi("Email")}</TableHead>
+              <TableHead>{translateUi("Code")}</TableHead>
+              <TableHead>{translateUi("Remarks")}</TableHead>
+              <TableHead>{translateUi("Redeemed")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -1032,7 +1032,7 @@ function InviteCodesByUserView({
                   <button
                     type="button"
                     onClick={() => onOpenCode(r.codeId)}
-                    className="font-mono text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
+                    className="font-mono type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
                     disabled={isSaving}
                   >
                     {r.code}
@@ -1040,7 +1040,7 @@ function InviteCodesByUserView({
                 </TableCell>
                 <TableCell>
                   {r.note ? (
-                    <span className="text-11 text-text-tertiary">
+                    <span className="text-13 text-text-tertiary">
                       {r.note}
                     </span>
                   ) : (

@@ -3,7 +3,6 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, Bson, Document, doc, spec::BinarySubtype};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use url::Url;
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -197,13 +196,14 @@ pub fn validate_allowed_scopes_list(scopes: &[String]) -> AppResult<String> {
     validate_allowed_scopes(&scopes.join(" "))
 }
 
-/// Validate, trim, and deduplicate registered OAuth redirect URIs.
+/// Trim, validate and deduplicate registered OAuth redirect URIs. Preserve the
+/// trimmed spelling for exact execution-time OAuth redirect matching.
 ///
 /// Allows HTTPS, localhost HTTP, loopback/custom app schemes, and other
 /// schemes historically accepted by NyxID developer apps, but rejects obvious
-/// browser execution/local-file schemes and fragments. Returns the exact
-/// trimmed URI strings rather than `url`-serialized strings because OAuth
-/// redirect URI matching is exact.
+/// browser execution/local-file schemes and fragments. Returns the trimmed
+/// URI strings rather than `url`-serialized strings because OAuth redirect
+/// URI matching is exact.
 pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
     if redirect_uris.is_empty() {
         return Err(AppError::ValidationError(
@@ -222,25 +222,11 @@ pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>
             ));
         }
 
-        let parsed = Url::parse(uri).map_err(|_| {
-            AppError::ValidationError(format!("Invalid redirect_uri format: {uri}"))
-        })?;
+        crate::services::oauth_service::validate_redirect_uri_scheme(uri)
+            .map_err(|_| AppError::ValidationError("Unsupported redirect_uri".to_string()))?;
 
-        if matches!(parsed.scheme(), "javascript" | "data" | "file") {
-            return Err(AppError::ValidationError(format!(
-                "Unsupported redirect_uri scheme: {uri}"
-            )));
-        }
-
-        if parsed.fragment().is_some() {
-            return Err(AppError::ValidationError(format!(
-                "redirect_uri must not contain fragment: {uri}"
-            )));
-        }
-
-        let trimmed = uri.to_string();
-        if unique.insert(trimmed.clone()) {
-            validated.push(trimmed);
+        if unique.insert(uri.to_string()) {
+            validated.push(uri.to_string());
         }
     }
 
@@ -1243,13 +1229,19 @@ async fn apply_client_update(
         .to_owned();
     let mut session = db.client().start_session().await?;
     let db = db.clone();
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let db = &db;
         let result: AppResult<mongodb::results::UpdateResult> = async {
             let result = db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(filter.clone(),
                 doc! { "$set": set_doc.clone(), "$inc": { "machine_external_security_revision": 1_i64 } })
                 .session(&mut *session).await?;
             if result.matched_count != 0 {
+                if set_doc.get_bool("is_active").ok() == Some(false) {
+                    for collection in [CONSENTS,REFRESH_TOKENS,AUTH_CODES] {
+                        db.collection::<bson::Document>(collection).delete_many(doc! {"client_id":&client_id})
+                            .session(&mut *session).await?;
+                    }
+                }
                 super::machine_external_grant_service::invalidate_client_in_session(
                     db, &client_id, "oauth_client_security_changed", 100, session).await?;
             }
@@ -1443,9 +1435,7 @@ pub async fn admin_update_client(
         || update.allowed_scopes.is_some()
         || update.broker_capability_enabled.is_some();
 
-    if update.is_active == Some(false) {
-        cascade_client_deactivation(db, client_id).await?;
-    } else if clears_pending_auth_codes {
+    if update.is_active != Some(false) && clears_pending_auth_codes {
         delete_unused_authorization_codes(db, client_id).await?;
     }
 
@@ -1469,8 +1459,6 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
     if result.matched_count == 0 {
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
-
-    cascade_client_deactivation(db, client_id).await?;
 
     Ok(())
 }
@@ -1496,30 +1484,18 @@ pub async fn delete_client_for_creator(
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
 
-    cascade_client_deactivation(db, client_id).await?;
-
     Ok(())
 }
 
 // Mirrors org-delete cascade in org_service.rs so stale consents/refresh tokens
 // do not linger after a single client is deactivated (issue #498).
-async fn cascade_client_deactivation(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
-    db.collection::<bson::Document>(CONSENTS)
-        .delete_many(doc! { "client_id": client_id })
-        .await?;
-    db.collection::<bson::Document>(REFRESH_TOKENS)
-        .delete_many(doc! { "client_id": client_id })
-        .await?;
-    delete_unused_authorization_codes(db, client_id).await?;
-    Ok(())
-}
-
 async fn delete_unused_authorization_codes(
     db: &mongodb::Database,
     client_id: &str,
 ) -> AppResult<()> {
     db.collection::<bson::Document>(AUTH_CODES)
         .delete_many(doc! { "client_id": client_id, "used": false })
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     Ok(())
 }
@@ -2525,6 +2501,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_redirect_uris_rejects_non_exact_browser_normalization() {
+        for redirect_uri in [
+            "https://app.example\t/callback",
+            "https://app.example\n/callback",
+            "https://app.example\r\n/callback",
+            "custom:payload",
+        ] {
+            assert!(
+                validate_redirect_uris(&[redirect_uri.to_string()]).is_err(),
+                "redirect URI should be rejected: {redirect_uri:?}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_redirect_uris_preserves_exact_trimmed_strings() {
         let uris = validate_redirect_uris(&[
             " https://app.example ".to_string(),
@@ -3188,6 +3179,7 @@ mod tests {
             db.collection::<Consent>(CONSENTS)
                 .insert_one(&Consent {
                     revision: None,
+                    write_version: None,
                     issuance_fence: None,
                     id: format!("consent-{client_id}"),
                     user_id: "user-with-consent".to_string(),

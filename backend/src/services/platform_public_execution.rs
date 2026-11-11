@@ -1,5 +1,5 @@
 //! Public-only orchestration over the shared Responses decoder and frozen adapters.
-//! The production verifier currently refuses every call before network activity.
+//! Every execution requires persisted, scoped runtime verification.
 use super::{
     assistant_nyxagent::{ResponseStream, TurnError, TurnResult},
     platform_manager_contract::*,
@@ -20,7 +20,7 @@ pub(crate) async fn execute(
     input: TurnInput,
     events: mpsc::Sender<ExecutionEvent>,
 ) -> AppResult<()> {
-    policy::verified_context(&context)?;
+    policy::verified_context(db, &context).await?;
     let mut prepared = runtime.prepare(db, &context, input).await?;
     let authority = NyxAgentExecutionContext::Public(prepared.context.clone());
     let run = async {
@@ -139,7 +139,7 @@ pub(crate) async fn execute(
 }
 
 /// Required public wire extension, not a claim that the pinned upstream accepts
-/// it. verify_contract must bind acceptance/enforcement before any transport.
+/// it. Persisted scoped verification binds acceptance before any transport.
 fn body(prepared: &PreparedPublicTurn) -> AppResult<Value> {
     let context = &prepared.context;
     if prepared.input.text.len() > context.limits.max_input_bytes as usize
@@ -175,7 +175,9 @@ fn body(prepared: &PreparedPublicTurn) -> AppResult<Value> {
         "max_continuations":context.limits.max_continuations,"max_input_tokens":context.limits.max_input_tokens,
         "max_output_tokens":context.limits.max_output_tokens,"max_context_bytes":context.limits.max_context_bytes,
         "max_output_bytes":context.limits.max_output_bytes,"model_callbacks":callbacks,
-        "callback_contract":"nyxid-public-model.v1",
+        "callback_contract":"nyxid-public-model.v1","tool_contract":"nyxid-public-tools.v1",
+        "tools":super::platform_public_tools::definitions()["tools"],
+        "proof_record_id":context.proof_record_id,
     });
     Ok(value)
 }

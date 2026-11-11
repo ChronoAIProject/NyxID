@@ -1,33 +1,10 @@
-//! First-run consent resolver for the CLI.
-//!
-//! Implements the precedence ladder from `docs/TELEMETRY.md` §3, plus
-//! the industry-standard `DO_NOT_TRACK=1` signal honored by Homebrew,
-//! Netlify, GitHub CLI, and Meteor (see consoledonottrack.com).
-//! `resolve_consent` is pure — it only reads env vars + the config
-//! file, never prompts. `prompt_if_needed_interactive` handles the
-//! one-time interactive prompt on a real TTY and persists the answer.
-//!
-//! Resolution order (first match wins):
-//!   0. `DO_NOT_TRACK=1` (non-empty, non-zero) → off, never persisted.
-//!   1. `NYXID_TELEMETRY=off` env var → off (always wins over config).
-//!   2. `NYXID_TELEMETRY=on` env var → on (only if a DSN resolves).
-//!   3. `[telemetry] enabled=true` in `~/.nyxid/config.toml` → on.
-//!   4. `[telemetry] enabled=false AND asked=true` → off.
-//!   5. Config missing OR `asked=false` → `FirstRunPending`.
-//!
-//! `FirstRunPending` + TTY → prompt. `FirstRunPending` + non-TTY →
-//! treated as "No" for this invocation but NOT persisted, so the next
-//! interactive run re-prompts.
-//!
-//! `DO_NOT_TRACK` is checked before `NYXID_TELEMETRY` so a user who has
-//! opted out globally across all their dev tools is never overridden by
-//! a stale `NYXID_TELEMETRY=on` in the same environment.
+//! Environment/config narrowing for an explicit account/deployment-bound choice.
+//! No anonymous first-run analytics or automatic opt-in prompt. `env=on` only
+//! permits consulting the bound choice; it cannot grant server permission.
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use is_terminal::IsTerminal;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::validate_profile_name;
@@ -44,30 +21,25 @@ pub enum ConsentSource {
     DoNotTrack,
     /// `NYXID_TELEMETRY=off` (forced disable)
     EnvVarOff,
-    /// `NYXID_TELEMETRY=on` (forced enable)
+    /// `NYXID_TELEMETRY=on` (permits bound-choice lookup only)
     EnvVarOn,
     /// Config file says `enabled=true` and `asked=true`.
     ConfigEnabled,
     /// Config file says `enabled=false` and `asked=true`.
     ConfigDeclined,
     /// No durable choice yet — either `asked=false` or no config file.
-    /// On interactive TTY the user is prompted once; on non-TTY we
-    /// default to "off" but do not persist.
+    /// Defaults off until an explicit telemetry enable command.
     FirstRunPending,
 }
 
-/// Resolved telemetry consent state. `resolve_consent` is pure; the
-/// prompt flow is a separate function so tests (and non-interactive
-/// CLI paths) can inspect state without triggering IO.
+/// Resolved environment/config narrowing. Lookup never prompts or writes;
+/// explicit account/deployment-bound permission is checked separately.
 #[derive(Clone, Debug)]
 pub struct ConsentState {
     pub enabled: bool,
     pub source: ConsentSource,
     /// True iff the choice is already on disk (or baked into env).
     pub persisted: bool,
-    /// True iff `source == FirstRunPending` AND stdin is a TTY. The
-    /// caller should invoke [`prompt_if_needed_interactive`] to honor.
-    pub needs_prompt: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -98,9 +70,9 @@ struct NyxidConfig {
 ///      `asked=true`, honor that explicit historical choice.
 ///   3. Fall back to the default profile's config.
 ///
-/// Going forward, only the default profile is written to (by
-/// `nyxid telemetry enable|disable` and the first-run prompt), so
-/// step 2 only matches persisted choices from pre-v1 releases.
+/// Explicit telemetry commands persist the selected profile's narrowing choice.
+/// Historical positive choices alone never authorize collection: callers must
+/// also resolve an explicit account/deployment binding and live server consent.
 pub fn resolve_consent_preferring_profile(profile: Option<&str>) -> ConsentState {
     // Env overrides win regardless of profile — these are global
     // signals by design. `resolve_consent(None)` handles them at the
@@ -142,14 +114,12 @@ pub fn resolve_consent_preferring_profile(profile: Option<&str>) -> ConsentState
                 enabled: true,
                 source: ConsentSource::ConfigEnabled,
                 persisted: true,
-                needs_prompt: false,
             }
         } else {
             ConsentState {
                 enabled: false,
                 source: ConsentSource::ConfigDeclined,
                 persisted: true,
-                needs_prompt: false,
             }
         };
     }
@@ -174,7 +144,6 @@ pub fn resolve_consent(profile: Option<&str>) -> ConsentState {
                 enabled: false,
                 source: ConsentSource::DoNotTrack,
                 persisted: false,
-                needs_prompt: false,
             };
         }
     }
@@ -187,7 +156,6 @@ pub fn resolve_consent(profile: Option<&str>) -> ConsentState {
                     enabled: false,
                     source: ConsentSource::EnvVarOff,
                     persisted: true,
-                    needs_prompt: false,
                 };
             }
             "on" | "true" | "1" | "yes" => {
@@ -195,7 +163,6 @@ pub fn resolve_consent(profile: Option<&str>) -> ConsentState {
                     enabled: true,
                     source: ConsentSource::EnvVarOn,
                     persisted: true,
-                    needs_prompt: false,
                 };
             }
             _ => {} // fall through
@@ -210,73 +177,26 @@ pub fn resolve_consent(profile: Option<&str>) -> ConsentState {
                 enabled: true,
                 source: ConsentSource::ConfigEnabled,
                 persisted: true,
-                needs_prompt: false,
             }
         } else {
             ConsentState {
                 enabled: false,
                 source: ConsentSource::ConfigDeclined,
                 persisted: true,
-                needs_prompt: false,
             }
         };
     }
 
-    // Step 5: first-run pending. Default off until interactive consent
-    // (or explicit env var) flips it on. Prompt only on a TTY.
+    // Step 5: default off. Only an explicit telemetry command establishes
+    // the separate account/deployment-bound local choice.
     ConsentState {
         enabled: false,
         source: ConsentSource::FirstRunPending,
         persisted: false,
-        needs_prompt: std::io::stdin().is_terminal(),
     }
 }
 
-/// If `state.needs_prompt` is true, print a one-line consent question
-/// to stderr, read y/N from stdin, persist the answer to
-/// `~/.nyxid/config.toml`, and update `state` in place. Otherwise
-/// no-op.
-///
-/// Never bails the calling command — prompt refusal returns `Ok(())`
-/// and the command proceeds (just without telemetry).
-pub fn prompt_if_needed_interactive(profile: Option<&str>, state: &mut ConsentState) -> Result<()> {
-    if !state.needs_prompt {
-        return Ok(());
-    }
-
-    eprintln!();
-    eprintln!("NyxID collects anonymous usage telemetry to help us improve the CLI.");
-    eprintln!("We never capture credentials, command arguments, or file contents.");
-    eprintln!("This choice applies to this machine only — the web dashboard and");
-    eprintln!("mobile app manage their own telemetry settings.");
-    eprintln!("You can change this later with `nyxid telemetry enable|disable`.");
-    eprint!("Enable telemetry for this machine? [y/N] ");
-    std::io::stderr().flush().ok();
-
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        // User killed stdin — treat as declined but don't persist,
-        // so the next real interactive run still prompts.
-        return Ok(());
-    }
-    let answer = line.trim().to_ascii_lowercase();
-    let enabled = matches!(answer.as_str(), "y" | "yes");
-
-    persist_choice(profile, enabled)?;
-    state.enabled = enabled;
-    state.source = if enabled {
-        ConsentSource::ConfigEnabled
-    } else {
-        ConsentSource::ConfigDeclined
-    };
-    state.persisted = true;
-    state.needs_prompt = false;
-    Ok(())
-}
-
-/// Write `{enabled, asked=true}` to `~/.nyxid/config.toml`. Called by
-/// the `telemetry enable|disable` subcommand and by the interactive
-/// prompt flow.
+/// Persist legacy narrowing alongside the account-bound device control.
 pub fn persist_choice(profile: Option<&str>, enabled: bool) -> Result<()> {
     let path = config_path(profile).context("home directory not resolvable")?;
 
@@ -319,7 +239,7 @@ fn config_path(profile: Option<&str>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn with_temp_home<F: FnOnce()>(f: F) {
+    pub(super) fn with_temp_home<F: FnOnce()>(f: F) {
         let _guard = crate::test_support::env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -532,5 +452,112 @@ mod tests {
             assert_eq!(s.source, ConsentSource::ConfigDeclined);
             assert!(!s.enabled);
         });
+    }
+}
+
+#[cfg(test)]
+mod account_binding_tests {
+    use super::*;
+    use crate::telemetry::account_binding as binding;
+    use base64::Engine;
+    fn saved(account: &str, base: &str) {
+        let token = format!(
+            "e30.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                serde_json::json!({"sub":account,"exp":chrono::Utc::now().timestamp()+3600})
+                    .to_string()
+            )
+        );
+        crate::auth::save_tokens_for(None, &token, None).unwrap();
+        std::fs::write(
+            config_path(None)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("base_url"),
+            base,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn bound_choices_do_not_follow_legacy_positive_server_prefix_account_or_generation() {
+        super::tests::with_temp_home(|| {
+            let first = "11111111-2222-4333-8444-555555555555";
+            saved(first, "https://test.invalid/nyxid");
+            persist_choice(None, true).unwrap();
+            let a = binding::saved_identity(None).unwrap();
+            assert!(
+                binding::permitted_revision(None, &a).is_none(),
+                "legacy positive must not assign account choice"
+            );
+            binding::persist_choice(None, true).unwrap();
+            let revision = binding::permitted_revision(None, &a).unwrap();
+            let token = crate::auth::read_saved_token_for(None).unwrap();
+            assert_eq!(
+                binding::device_headers(None, "https://test.invalid/nyxid/", &token)["x-nyxid-analytics-account"],
+                first
+            );
+            assert!(binding::device_headers(None, "https://test.invalid/other", &token).is_empty());
+            saved(first, "https://test.invalid/other");
+            assert!(binding::permitted_revision(None, &a).is_none());
+            assert!(
+                binding::permitted_revision(None, &binding::saved_identity(None).unwrap())
+                    .is_none()
+            );
+            saved(
+                "22222222-2222-4333-8444-555555555555",
+                "https://test.invalid/nyxid",
+            );
+            assert!(
+                binding::permitted_revision(None, &binding::saved_identity(None).unwrap())
+                    .is_none()
+            );
+            saved(first, "https://test.invalid/nyxid");
+            std::fs::write(
+                config_path(None)
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("login_generation"),
+                "successor",
+            )
+            .unwrap();
+            assert!(
+                binding::permitted_revision(None, &a).is_none(),
+                "captured command login generation expired"
+            );
+            let next = binding::saved_identity(None).unwrap();
+            assert_eq!(
+                binding::permitted_revision(None, &next),
+                Some(revision.clone())
+            );
+            binding::persist_choice(None, false).unwrap();
+            // SAFETY: with_temp_home holds the process-wide environment mutex.
+            unsafe {
+                std::env::set_var("NYXID_TELEMETRY", "on");
+            }
+            assert!(binding::permitted_revision(None, &next).is_none());
+            binding::persist_choice(None, true).unwrap();
+            assert_ne!(binding::permitted_revision(None, &next), Some(revision));
+            unsafe {
+                std::env::set_var("DO_NOT_TRACK", "1");
+            }
+            assert!(binding::device_headers(None, "https://test.invalid/nyxid", &token).is_empty());
+        });
+    }
+    #[test]
+    fn deployment_binding_preserves_prefix_and_rejects_url_controls() {
+        assert_eq!(
+            binding::deployment_base("https://EXAMPLE.com/nyxid/"),
+            Some("https://example.com/nyxid".into())
+        );
+        for base in [
+            "https://x.test/a?token=bad",
+            "https://x.test/a#fragment",
+            "https://user:secret@x.test/a",
+            "file:///tmp/a",
+        ] {
+            assert!(binding::deployment_base(base).is_none());
+        }
     }
 }

@@ -141,6 +141,7 @@ fn test_node(id: &str) -> Node {
         status: NodeStatus::Offline,
         auth_token_hash: "auth-hash".to_string(),
         signing_secret_encrypted: None,
+        signing_secret_context_version: None,
         signing_secret_hash: "signing-hash".to_string(),
         last_heartbeat_at: None,
         connected_at: None,
@@ -163,12 +164,14 @@ fn proxy_request(request_id: &str) -> NodeProxyRequest {
         method: "GET".to_string(),
         path: "/v1/data".to_string(),
         query: None,
-        headers: vec![],
+        headers: vec![].into(),
         body: None,
     }
 }
 
-async fn next_outbound(outbound: &mut mpsc::Receiver<NodeOutboundMessage>) -> String {
+async fn next_outbound(
+    outbound: &mut mpsc::Receiver<NodeOutboundMessage>,
+) -> zeroize::Zeroizing<String> {
     let message = tokio::time::timeout(Duration::from_secs(3), outbound.recv())
         .await
         .expect("node outbound timeout")
@@ -207,6 +210,7 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
             proxy_upload_v1: false,
             http_cancellation: false,
             remote_credential_crypto_v1: true,
+            machine_execution_approval_v1: false,
             ..Default::default()
         },
     );
@@ -453,7 +457,7 @@ async fn remote_ssh_exec_and_duplex_sessions_forward_both_directions() {
                     host: "host.internal".to_string(),
                     port: 22,
                     principal: "user".to_string(),
-                    private_key_pem: "private".to_string(),
+                    private_key_pem: "private".to_string().into(),
                     certificate_openssh: "certificate".to_string(),
                     command: "id".to_string(),
                     timeout_secs: 5,
@@ -616,7 +620,7 @@ async fn remote_ws_passthrough_forwards_text_binary_and_close() {
                     base_url: "wss://socket.invalid".to_string(),
                     path: "/events".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     ws_frame_injections: vec![],
                 },
                 None,
@@ -702,7 +706,7 @@ async fn remote_ws_passthrough_preserves_large_binary_frames() {
                     base_url: "wss://socket.invalid".to_string(),
                     path: "/events".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     ws_frame_injections: vec![],
                 },
                 None,
@@ -778,6 +782,7 @@ async fn remote_credential_ack_and_admin_disconnect_reach_owner() {
             .send_credential_update_and_wait(
                 &node_id,
                 &CredentialUpdateParams {
+                    target_revision: None,
                     service_slug: "service".to_string(),
                     injection_method: "header".to_string(),
                     header_name: Some("Authorization".to_string()),
@@ -1118,4 +1123,87 @@ async fn machine_desktop_cross_replica_binary_relay_is_session_scoped() {
     assert_eq!(received, input);
     drop(stream);
     fixture.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn node_endpoint_2126_remote_metadata_ack_and_capability_fence() {
+    use crate::services::node_ws_manager::{NodeCapabilitiesFlags, NodeCapabilitiesMsg};
+    let mut fixture = two_replica_fixture("target_metadata_replicas")
+        .await
+        .unwrap();
+    let params = CredentialUpdateParams {
+        service_slug: "monitor".into(),
+        injection_method: "target_url".into(),
+        header_name: None,
+        header_value: None,
+        param_name: None,
+        param_value: None,
+        target_url: Some("http://new-monitor".into()),
+        target_revision: Some(1),
+    };
+    assert!(
+        fixture
+            .caller_dispatch
+            .send_credential_update_and_wait(&fixture.node_id, &params, Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    assert!(fixture.outbound.try_recv().is_err());
+    let node = fixture
+        .db
+        .collection::<Node>(NODES)
+        .find_one(doc! {"_id":&fixture.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let fence = node_owner_service::NodeOwnerFence::from_owner(
+        &fixture.node_id,
+        node.connection_owner.as_ref().unwrap(),
+    );
+    fixture.owner_manager.record_capabilities(
+        &fixture.node_id,
+        &NodeCapabilitiesMsg {
+            credential_target_update_v1: true,
+            credential_ack_correlation: true,
+            ..Default::default()
+        },
+    );
+    node_owner_service::record_capabilities(
+        &fixture.db,
+        &fence,
+        NodeCapabilitiesFlags {
+            credential_target_update_v1: true,
+            credential_ack_correlation: true,
+            ..Default::default()
+        },
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        fixture
+            .caller_dispatch
+            .session_info(&fixture.node_id)
+            .await
+            .capabilities
+            .credential_target_update_v1
+    );
+    let dispatch = fixture.caller_dispatch.clone();
+    let node_id = fixture.node_id.clone();
+    let task = tokio::spawn(async move {
+        dispatch
+            .send_credential_update_and_wait(&node_id, &params, Duration::from_secs(2))
+            .await
+    });
+    let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+    assert_eq!(frame["target_url"], "http://new-monitor");
+    assert_eq!(frame["target_revision"], 1);
+    assert!(frame.get("header_value").is_none());
+    fixture.owner_manager.deliver_credential_ack(
+        &fixture.node_id,
+        frame["request_id"].as_str().unwrap(),
+        CredentialAckOutcome::Ok,
+    );
+    task.await.unwrap().unwrap();
 }

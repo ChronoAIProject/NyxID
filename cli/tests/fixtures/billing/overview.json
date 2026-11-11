@@ -1,0 +1,886 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "slug": "api-twitter",
+    "name": "Twitter / X API",
+    "is_active": true,
+    "effective_metric": "requests",
+    "allowance_metrics": [
+      "requests"
+    ],
+    "effective": {
+      "fallback_metric": "requests",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": null,
+              "lago_metric_code": "platform_svc_api-twitter_pk",
+              "credits_per_unit": "0.05",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.05",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app"
+          ],
+          "lane": "byok",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": null,
+              "lago_metric_code": "platform_svc_api-twitter_byok",
+              "credits_per_unit": "0.05",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.05",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": "get_me",
+              "lago_metric_code": "platform_svc_api-twitter_byok_op_get_me",
+              "credits_per_unit": "0.01",
+              "source": "service",
+              "origin": "operation",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.01",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": "create_tweet",
+              "lago_metric_code": "platform_svc_api-twitter_byok_op_create_tweet",
+              "credits_per_unit": "0.015",
+              "source": "service",
+              "origin": "operation",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.015",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": "channel_dm_send",
+              "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_dm_send",
+              "credits_per_unit": "0.015",
+              "source": "service",
+              "origin": "operation",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.015",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": "channel_dm_received",
+              "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_dm_received",
+              "credits_per_unit": "0.01",
+              "source": "service",
+              "origin": "operation",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.01",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": "channel_chat_received",
+              "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_chat_received",
+              "credits_per_unit": "0.01",
+              "source": "service",
+              "origin": "operation",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.01",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": "channel_post_received",
+              "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_post_received",
+              "credits_per_unit": "0.005",
+              "source": "service",
+              "origin": "operation",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.005",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "nyxid_credentials_only",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "nyxid_credentials_only",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000002",
+    "slug": "chrono-llm-public",
+    "name": "Chrono LLM (public)",
+    "is_active": true,
+    "effective_metric": "input_tokens",
+    "allowance_metrics": [
+      "input_tokens",
+      "output_tokens",
+      "cache_read_tokens",
+      "cache_write_tokens",
+      "images"
+    ],
+    "effective": {
+      "fallback_metric": "requests",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "input_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_chrono-llm-public_pk",
+              "credits_per_unit": "0.000005",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.000005",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "output_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_chrono-llm-public_pk_output_tokens",
+              "credits_per_unit": "0.00002",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.00002",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "cache_read_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_chrono-llm-public_pk_cache_read_tokens",
+              "credits_per_unit": "0.0000008",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.0000008",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "cache_write_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_chrono-llm-public_pk_cache_write_tokens",
+              "credits_per_unit": "0.000006",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.000006",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "images",
+              "operation": null,
+              "lago_metric_code": "platform_svc_chrono-llm-public_pk_images",
+              "credits_per_unit": "0.2",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.2",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "slug": "llm-deepseek",
+    "name": "DeepSeek API",
+    "is_active": true,
+    "effective_metric": "tokens",
+    "allowance_metrics": [
+      "tokens"
+    ],
+    "effective": {
+      "fallback_metric": "tokens",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-deepseek_pk",
+              "credits_per_unit": "0.000001",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.000001",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000004",
+    "slug": "llm-openai",
+    "name": "OpenAI API",
+    "is_active": true,
+    "effective_metric": "voice_seconds",
+    "allowance_metrics": [
+      "voice_seconds",
+      "input_tokens",
+      "output_tokens",
+      "cache_read_tokens",
+      "cache_write_tokens",
+      "images"
+    ],
+    "effective": {
+      "fallback_metric": "tokens",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "voice_seconds",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-openai_pk",
+              "credits_per_unit": "0.00084",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.00084",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "input_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-openai_pk_input_tokens",
+              "credits_per_unit": "0.00001",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.00001",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "output_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-openai_pk_output_tokens",
+              "credits_per_unit": "0.00005",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.00005",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "cache_read_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-openai_pk_cache_read_tokens",
+              "credits_per_unit": "0.000001",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.000001",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "cache_write_tokens",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-openai_pk_cache_write_tokens",
+              "credits_per_unit": "0.0000125",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.0000125",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            },
+            {
+              "layer": "platform",
+              "metric": "images",
+              "operation": null,
+              "lago_metric_code": "platform_svc_llm-openai_pk_images",
+              "credits_per_unit": "0.00425",
+              "source": "service",
+              "origin": "lane_component",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.00425",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000005",
+    "slug": "tools-elevenlabs",
+    "name": "tools-elevenlabs",
+    "is_active": true,
+    "effective_metric": "requests",
+    "allowance_metrics": [
+      "requests"
+    ],
+    "effective": {
+      "fallback_metric": "requests",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": null,
+              "lago_metric_code": "platform_svc_tools-elevenlabs_pk",
+              "credits_per_unit": "0.1",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.1",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000006",
+    "slug": "tools-firecrawl",
+    "name": "tools-firecrawl",
+    "is_active": true,
+    "effective_metric": "requests",
+    "allowance_metrics": [
+      "requests"
+    ],
+    "effective": {
+      "fallback_metric": "requests",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": null,
+              "lago_metric_code": "platform_svc_tools-firecrawl_pk",
+              "credits_per_unit": "0.1",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.1",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000007",
+    "slug": "tools-twilio",
+    "name": "tools-twilio",
+    "is_active": true,
+    "effective_metric": "requests",
+    "allowance_metrics": [
+      "requests"
+    ],
+    "effective": {
+      "fallback_metric": "requests",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": null,
+              "lago_metric_code": "platform_svc_tools-twilio_pk",
+              "credits_per_unit": "0.1",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.1",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000008",
+    "slug": "tools-x",
+    "name": "tools-x",
+    "is_active": true,
+    "effective_metric": "requests",
+    "allowance_metrics": [
+      "requests"
+    ],
+    "effective": {
+      "fallback_metric": "requests",
+      "classes": [
+        {
+          "credential_classes": [
+            "nyxid_managed_master"
+          ],
+          "lane": "platform_key",
+          "platform_charged": true,
+          "source": "service",
+          "reason": "lane_synced",
+          "prices": [
+            {
+              "layer": "platform",
+              "metric": "requests",
+              "operation": null,
+              "lago_metric_code": "platform_svc_tools-x_pk",
+              "credits_per_unit": "0.1",
+              "source": "service",
+              "origin": "lane_primary",
+              "sync_status": "synced",
+              "sync_error": null,
+              "cached_rate": {
+                "credits_per_unit": "0.1",
+                "synced_at": "2026-10-19T17:16:07.081Z",
+                "stale": false,
+                "retired": false
+              }
+            }
+          ],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "nyxid_platform_oauth_app",
+            "user_owned",
+            "agent_override_user_owned",
+            "node_managed"
+          ],
+          "lane": "byok",
+          "platform_charged": false,
+          "source": "free",
+          "reason": "lane_not_configured",
+          "prices": [],
+          "pending": []
+        },
+        {
+          "credential_classes": [
+            "no_auth"
+          ],
+          "lane": null,
+          "platform_charged": false,
+          "source": "free",
+          "reason": "no_auth",
+          "prices": [],
+          "pending": []
+        }
+      ],
+      "resale": {
+        "configured": false,
+        "applied": false,
+        "source": "free"
+      }
+    }
+  }
+]

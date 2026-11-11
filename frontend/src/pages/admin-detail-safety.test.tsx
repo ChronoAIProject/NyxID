@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   fireEvent,
   render,
@@ -116,7 +117,8 @@ it.each([
   "cancels a %s review on a route identity switch",
   async (_, Component, label) => {
     const user = userEvent.setup();
-    const view = render(<Component />);
+    const client = new QueryClient({ defaultOptions: { queries: { enabled: false, retry: false } } });
+    const view = render(<Component />, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
     await user.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByLabelText(label), {
       target: { value: "A draft" },
@@ -139,7 +141,8 @@ it.each([
   "allows a name-only %s save when authorization is revoked concurrently",
   async (kind, Component) => {
     const user = userEvent.setup();
-    const view = render(<Component />);
+    const client = new QueryClient({ defaultOptions: { queries: { enabled: false, retry: false } } });
+    const view = render(<Component />, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
     await user.click(screen.getByRole("button", { name: "Edit" }));
     const editor = await screen.findByRole("dialog", {
       name: kind === "group" ? "Edit Group" : "Edit Role",
@@ -180,7 +183,8 @@ it.each([
   "blocks an observed %s authorization conflict but allows an unrelated rename",
   async (kind, Component, label, value) => {
     const user = userEvent.setup();
-    const view = render(<Component />);
+    const client = new QueryClient({ defaultOptions: { queries: { enabled: false, retry: false } } });
+    const view = render(<Component />, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
     await user.click(screen.getByRole("button", { name: "Edit" }));
     const editor = await screen.findByRole("dialog", {
       name: kind === "group" ? "Edit Group" : "Edit Role",

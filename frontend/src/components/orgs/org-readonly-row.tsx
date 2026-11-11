@@ -1,14 +1,15 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 interface OrgReadOnlyRowProps {
   readonly orgName: string;
 }
 
 export function OrgReadOnlyRow({ orgName }: OrgReadOnlyRowProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="rounded-lg border border-border bg-muted px-3 py-2">
-      <p className="text-xs uppercase tracking-wide text-text-tertiary">{t("Organization")}</p>
-      <p className="text-12 font-medium text-foreground">{orgName}</p>
+      <p className="text-13 uppercase tracking-wide text-text-tertiary">{translateUi("Organization")}</p>
+      <p className="type-row-title text-foreground">{orgName}</p>
     </div>
   );
 }

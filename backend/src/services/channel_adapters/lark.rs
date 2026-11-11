@@ -37,6 +37,61 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
 #[path = "lark_thread.rs"]
 mod thread;
 
+#[path = "lark_post.rs"]
+mod post;
+pub use post::{PostContent, parse_post};
+
+/// Read only the authenticated native post; normalized callback content stays unchanged.
+pub fn post_from_raw(raw: &serde_json::Value, bot_open_id: Option<&str>) -> Option<PostContent> {
+    let message = raw.pointer("/event/message")?;
+    if message.get("message_type")?.as_str()? != "post" {
+        return None;
+    }
+    let content: serde_json::Value =
+        serde_json::from_str(message.get("content")?.as_str()?).ok()?;
+    parse_post(
+        &content,
+        message
+            .get("mentions")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        bot_open_id,
+    )
+}
+
+fn embedded_attachments(
+    base_url: &str,
+    raw: &serde_json::Value,
+    message_id: &str,
+) -> (Vec<crate::models::channel_message::StoredAttachment>, usize) {
+    let Some(post) = post_from_raw(raw, None) else {
+        return (Vec::new(), 0);
+    };
+    let items = post
+        .attachments
+        .into_iter()
+        .map(|mut item| {
+            item.platform_message_id = Some(message_id.into());
+            let key = item.image_key.as_deref().or(item.file_key.as_deref());
+            if let Some(key) = key {
+                item.provider_ref = lark_resource_url(
+                    base_url,
+                    message_id,
+                    key,
+                    if item.content_type == "image" {
+                        "image"
+                    } else {
+                        "file"
+                    },
+                );
+            }
+            item
+        })
+        .collect();
+    (items, post.omitted)
+}
+
 use crate::services::channel_media_service as media;
 use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
 
@@ -142,16 +197,47 @@ impl LarkFamilyAdapter {
         http: &reqwest::Client,
         app_id: &str,
         app_secret: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        self.get_tenant_access_token_for(http, app_id, app_secret, false)
+            .await
+    }
+
+    async fn get_tenant_access_token_for(
+        &self,
+        http: &reqwest::Client,
+        app_id: &str,
+        app_secret: &str,
+        registration: bool,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
         let config = lark_family_token_exchange_config();
-        let credential_json = serde_json::json!({
-            "app_id": app_id,
-            "app_secret": app_secret,
-        })
-        .to_string();
+        let credential_json = zeroize::Zeroizing::new(
+            serde_json::json!({
+                "app_id": app_id,
+                "app_secret": app_secret,
+            })
+            .to_string(),
+        );
         let mut credential_map = serde_json::Map::new();
         credential_map.insert("app_id".to_string(), serde_json::json!(app_id));
         credential_map.insert("app_secret".to_string(), serde_json::json!(app_secret));
+
+        if registration {
+            let key = provider_token_exchange_service::cache_key(
+                &self.base_url,
+                &credential_json,
+                &config,
+            );
+            return self.token_exchange_cache.get_or_fetch(&key, || async {
+                provider_token_exchange_service::fetch_exchange_token_with_response_check(
+                    http, &self.base_url, &config, &credential_map,
+                    |response| super::check_token_verification_status(
+                        response,
+                        &format!("{} credential verification", self.platform),
+                        &format!("{} rejected the app credentials. Check the App ID and App Secret in the developer console and try again.", self.display_name()),
+                    ),
+                ).await
+            }).await;
+        }
 
         provider_token_exchange_service::get_cached_exchange_token(
             &self.token_exchange_cache,
@@ -595,6 +681,9 @@ fn parse_message_event(
     let attachments =
         extract_attachments(base_url, message_id, message_type, parsed_content.as_ref());
 
+    let (embedded_attachments, embedded_attachments_omitted) =
+        embedded_attachments(base_url, &raw, message_id);
+
     let sender = event.get("sender");
     let sender_id = sender
         .and_then(|s| s.get("sender_id"))
@@ -620,6 +709,8 @@ fn parse_message_event(
         .map(String::from);
 
     Some(InboundMessage {
+        embedded_attachments,
+        embedded_attachments_omitted,
         platform_message_id: message_id.to_string(),
         conversation_id: chat_id.to_string(),
         conversation_type: map_conversation_type(chat_type).to_string(),
@@ -675,6 +766,8 @@ fn parse_card_action_event(
         .map(String::from);
 
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: header.get("event_id").and_then(|v| v.as_str())?.to_string(),
         conversation_id: chat_id.to_string(),
         conversation_type: map_conversation_type(chat_type).to_string(),
@@ -901,6 +994,10 @@ impl PlatformAdapter for LarkFamilyAdapter {
         ))
     }
 
+    fn records_verification_result(&self) -> bool {
+        true
+    }
+
     fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
         if bot.lark_verification_token_encrypted.is_none() {
             return Err(AppError::ValidationError(format!(
@@ -1002,10 +1099,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
         let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
             return Ok(None);
         };
-        let token = zeroize::Zeroizing::new(
-            self.get_tenant_access_token(http, app_id, app_secret)
-                .await?,
-        );
+        let token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
         let response = media::response_json(
             http.get(format!("{}/open-apis/bot/v3/info", self.base_url))
                 .bearer_auth(token.as_str()),
@@ -1034,10 +1130,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
         let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
             return Ok(None);
         };
-        let token = zeroize::Zeroizing::new(
-            self.get_tenant_access_token(http, app_id, app_secret)
-                .await?,
-        );
+        let token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
         let response = media::response_json(
             http.get(format!(
                 "{}/open-apis/im/v1/chats/{conversation_id}",
@@ -1064,10 +1159,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .token
             .split_once(':')
             .ok_or_else(media::fetch_failed)?;
-        let token = zeroize::Zeroizing::new(
-            self.get_tenant_access_token(http, app_id, app_secret)
-                .await?,
-        );
+        let token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
         media::download(
             &attachment.url,
             &[host],
@@ -1102,10 +1196,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
                 .token
                 .split_once(':')
                 .ok_or_else(media::upload_failed)?;
-            let token = zeroize::Zeroizing::new(
-                self.get_tenant_access_token(http, app_id, app_secret)
-                    .await?,
-            );
+            let token = self
+                .get_tenant_access_token(http, app_id, app_secret)
+                .await?;
             let mut last = None;
             for attachment in &reply.attachments {
                 if let Some(caption) = &attachment.caption {
@@ -1205,9 +1298,10 @@ impl PlatformAdapter for LarkFamilyAdapter {
             self.base_url
         );
 
+        crate::services::channel_platform::mark_provider_attempt().await?;
         let resp: serde_json::Value = http
             .post(&url)
-            .header("Authorization", format!("Bearer {tenant_token}"))
+            .bearer_auth(tenant_token.as_str())
             .json(&body)
             .send()
             .await
@@ -1292,7 +1386,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
         };
 
         let resp: serde_json::Value = request
-            .header("Authorization", format!("Bearer {tenant_token}"))
+            .bearer_auth(tenant_token.as_str())
             .json(&body)
             .send()
             .await
@@ -1351,9 +1445,10 @@ impl PlatformAdapter for LarkFamilyAdapter {
             ))
         })?;
 
-        // This will fail with an API error if credentials are invalid
+        // Registration classifies HTTP rejections before parsing; runtime
+        // token exchange callers keep their existing error contract and cache.
         let _token = self
-            .get_tenant_access_token(http, app_id, app_secret)
+            .get_tenant_access_token_for(http, app_id, app_secret, true)
             .await?;
 
         Ok(BotIdentity {
@@ -1373,6 +1468,20 @@ mod tests {
     use super::*;
     use cbc::cipher::{BlockEncryptMut, block_padding::Pkcs7};
 
+    #[tokio::test]
+    async fn token_verification_classifies_http_rejections_before_json() {
+        for platform in ["lark", "feishu"] {
+            let server = wiremock::MockServer::start().await;
+            let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
+            super::super::assert_token_verification_statuses(
+                &adapter,
+                &server,
+                "app:private-token",
+                &format!("{platform} credential verification"),
+            )
+            .await;
+        }
+    }
     type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 
     /// Tests only exercise parsing/signature verification paths, so they
@@ -1492,6 +1601,7 @@ mod tests {
 
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -2492,6 +2602,81 @@ mod tests {
                     let expected: String = description.chars().take(200).collect();
                     assert!(matches!(error, AppError::ChannelPlatformError(detail)
                         if detail == format!("{platform} send failed: {expected}")));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod callback_golden_tests {
+    use super::*;
+    use crate::services::{channel_platform::PlatformAdapter, channel_relay_service};
+
+    #[tokio::test]
+    async fn lark_feishu_callback_bytes_text_image_file_post_sticker_stay_identical() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/services/channel_adapters/fixtures/lark_callback");
+        for platform in ["lark", "feishu"] {
+            let adapter = LarkFamilyAdapter::media_test_adapter(
+                if platform == "lark" {
+                    "https://open.larksuite.com"
+                } else {
+                    "https://open.feishu.cn"
+                },
+                platform,
+            );
+            for kind in ["text", "image", "file", "post", "sticker"] {
+                let bytes = std::fs::read(dir.join(format!("{platform}-{kind}-in.json"))).unwrap();
+                let messages = adapter.parse_inbound(&bytes).await.unwrap();
+                assert_eq!(messages.len(), 1);
+                let inbound = &messages[0];
+                let mut message = channel_relay_service::inbound_metadata(
+                    "bot",
+                    "route",
+                    "owner",
+                    platform,
+                    inbound,
+                    "route-key",
+                    "relay-receipt",
+                );
+                message.created_at = "2026-10-19T00:00:00Z".parse().unwrap();
+                let route = bson::from_document(bson::doc! {"_id":"route", "user_id":"owner", "channel_bot_id":"bot", "platform":platform, "platform_conversation_id":"*", "platform_conversation_type":"private", "agent_api_key_id":"route-key", "default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
+                let payload = channel_relay_service::build_callback_payload(
+                    &message,
+                    &route,
+                    "route-key",
+                    "route",
+                    inbound,
+                    None,
+                    "https://nyxid.example",
+                );
+                let actual = serde_json::to_string(&payload).unwrap();
+                let expected =
+                    std::fs::read_to_string(dir.join(format!("{platform}-{kind}-golden.json")))
+                        .unwrap();
+                assert_eq!(actual, expected.trim_end(), "{platform} {kind}");
+                if kind == "post" {
+                    assert!(message.attachments.is_empty());
+                    assert_eq!(message.embedded_attachments.len(), 1);
+                    assert!(message.embedded_attachments[0].provider_ref.starts_with(
+                        if platform == "lark" {
+                            "https://open.larksuite.com/"
+                        } else {
+                            "https://open.feishu.cn/"
+                        }
+                    ));
+                    assert_eq!(
+                        post_from_raw(&inbound.raw_data, None).unwrap().text,
+                        "Receipt\nDinner"
+                    );
+                    let mut legacy = bson::to_document(&message).unwrap();
+                    legacy.remove("embedded_attachments");
+                    legacy.remove("embedded_attachments_omitted");
+                    let old: crate::models::channel_message::ChannelMessage =
+                        bson::from_document(legacy).unwrap();
+                    assert!(old.embedded_attachments.is_empty());
+                    assert_eq!(old.embedded_attachments_omitted, 0);
                 }
             }
         }

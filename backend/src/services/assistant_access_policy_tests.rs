@@ -95,6 +95,18 @@ fn sample_card(
 
 fn chat(role: AgentRole, guest: bool, report_to: Option<&str>, with_nyxbot: bool) -> ChatAuthority {
     ChatAuthority {
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
+        channel_adapter_origin: None,
+        invocation_controlled: false,
+        invocation_id: None,
         platform_thread: false,
         platform_origin: None,
         org_agent_access: None,

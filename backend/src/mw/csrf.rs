@@ -109,10 +109,19 @@ pub async fn browser_csrf_middleware(
         ));
     };
 
-    let allowed = allowed_origins(
+    let mut allowed = allowed_origins(
         &state.config.frontend_url,
         &state.config.base_url,
         &state.config.csrf_trusted_origins,
+    );
+    allowed.extend(
+        state
+            .config
+            .domain_aliases
+            .frontend_urls
+            .iter()
+            .chain(&state.config.domain_aliases.base_urls)
+            .cloned(),
     );
     if allowed.contains(&request_origin) {
         return Ok(next.run(request).await);
@@ -133,6 +142,49 @@ pub async fn browser_csrf_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn domain_alias_csrf_only_trusts_explicit_browser_origins() {
+        use tower::ServiceExt;
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.frontend_url = "https://new.example".into();
+        for aliases in [false, true] {
+            state.config.domain_aliases.frontend_urls = if aliases {
+                vec!["https://old.example".into()]
+            } else {
+                vec![]
+            };
+            let app = axum::Router::new()
+                .route("/test", axum::routing::post(|| async {}))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    browser_csrf_middleware,
+                ));
+            for origin in [
+                "https://new.example",
+                "https://old.example",
+                "https://old.example.evil",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/test")
+                            .header("Origin", origin)
+                            .header("Cookie", "nyx_session=present")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status().is_success(),
+                    origin == "https://new.example" || (aliases && origin == "https://old.example")
+                );
+            }
+        }
+    }
 
     #[test]
     fn unsafe_method_matrix_matches_browser_csrf_rules() {

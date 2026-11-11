@@ -1,6 +1,7 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { ChatHeaderCompactContext } from "./chat-header-context";
 import {
   ExternalLink,
   Maximize2,
@@ -11,9 +12,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppForm } from "@/components/ui/form";
-import { usePublicConfig } from "@/hooks/use-public-config";
 import { useMachineContexts } from "@/hooks/use-machine-access";
-import { useMachineDesktops } from "@/hooks/use-machines";
+import { conversationDesktopKey, type MachineDesktopMetadata } from "@/hooks/use-machines";
+import { useNodes } from "@/hooks/use-nodes";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -31,6 +33,33 @@ import {
   type DesktopActivity,
 } from "@/lib/machine-desktop";
 
+/** Live (green), needs attention or connecting (amber), disconnected (red). */
+export type DesktopStatus = "live" | "attention" | "offline";
+
+const STATUS_LABEL: Record<DesktopStatus, string> = {
+  live: "Live",
+  attention: "Needs attention",
+  offline: "Disconnected",
+};
+
+const STATUS_DOT: Record<DesktopStatus, string> = {
+  live: "bg-success",
+  attention: "bg-warning",
+  offline: "bg-destructive",
+};
+
+function StatusDot({ status, label, pulse = false }: { readonly status: DesktopStatus; readonly label: string; readonly pulse?: boolean }) {
+  useUiTranslation();
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_DOT[status], pulse && "motion-safe:animate-pulse")}
+    />
+  );
+}
+
 export function MachineDesktopPanel({
   nodeId,
   conversationId,
@@ -39,6 +68,9 @@ export function MachineDesktopPanel({
   turnActive,
   initialDisplay = "secure",
   initialContextId,
+  pane = false,
+  leading,
+  onStatus,
 }: {
   readonly nodeId: string;
   readonly conversationId?: string;
@@ -47,18 +79,34 @@ export function MachineDesktopPanel({
   readonly turnActive?: boolean;
   readonly initialDisplay?: "secure" | "dev";
   readonly initialContextId?: string | null;
+  /** Docked in the machine column: always shown, never minimised. */
+  readonly pane?: boolean;
+  /**
+   * Opens the toolbar row in place of the machine's name (the machine tabs
+   * when there are several). Undefined shows the name; null shows nothing.
+   */
+  readonly leading?: ReactNode;
+  /** Reports the connection state so a tab can show it. */
+  readonly onStatus?: (status: DesktopStatus) => void;
 }) {
-  const { t } = useUiTranslation();
-  const collapseKey = conversationId
+  useUiTranslation();
+  const collapseKey = conversationId && !pane
     ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`
     : null;
-  const [collapsed, setCollapsed] = useState(() => {
+  const [storedCollapsed, setCollapsed] = useState(() => {
     try {
       return collapseKey ? localStorage.getItem(collapseKey) === "1" : false;
     } catch {
       return false;
     }
   });
+  const collapsed = !pane && storedCollapsed;
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    const sync = () => setFullscreen(Boolean(panel.current) && document.fullscreenElement === panel.current);
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
   const [activityAt, setActivityAt] = useState(0);
   const [machineName, setMachineName] = useState(name);
   const collapse = useCallback(
@@ -100,20 +148,46 @@ export function MachineDesktopPanel({
   const [controller, setController] = useState("agent");
   const [action, setAction] = useState("");
   const [error, setError] = useState<string>();
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    if (connected) return;
+    const timer = window.setTimeout(() => setStalled(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [connected, nodeId, conversationId, attempt, display, contextId]);
   const wasActive = useRef(Boolean(turnActive));
   useEffect(() => {
     if (turnActive) {
       wasActive.current = true;
       return;
     }
-    if (!wasActive.current || controls || controller === "requested") return;
+    if (pane || !wasActive.current || controls || controller === "requested") return;
     const timer = setTimeout(
       () => collapse(true),
       Math.max(0, 3000 - (Date.now() - activityAt)),
     );
     return () => clearTimeout(timer);
-  }, [turnActive, activityAt, controls, controller, collapse]);
-  const { data: config } = usePublicConfig();
+  }, [pane, turnActive, activityAt, controls, controller, collapse]);
+  const status: DesktopStatus = !connected
+    ? error
+      ? "offline"
+      : "attention"
+    : error || reason || controller === "requested" || controller === "owner"
+      ? "attention"
+      : "live";
+  const statusText = !connected
+    ? error
+      ? "Disconnected"
+      : "Connecting…"
+    : controls
+      ? "You are in control"
+      : controller === "owner"
+        ? "Owner in control in another tab"
+        : reason || controller === "requested"
+          ? "Needs you"
+          : "Watching the agent";
+  useEffect(() => {
+    onStatus?.(status);
+  }, [onStatus, status]);
   const contexts = useMachineContexts(nodeId);
   const control = useCallback((type: string, note?: string) => {
     if (socket.current?.readyState === WebSocket.OPEN)
@@ -121,14 +195,11 @@ export function MachineDesktopPanel({
   }, []);
   useEffect(() => {
     const target = canvas.current;
+    setConnected(false);
+    setError(undefined);
+    setStalled(false);
     const ws = new WebSocket(
-      desktopUrl(
-        nodeId,
-        conversationId,
-        config?.node_ws_url,
-        display,
-        contextId,
-      ),
+      desktopUrl(nodeId, conversationId, display, contextId),
     );
     session.current = "";
     sequence.current = 0n;
@@ -304,7 +375,7 @@ export function MachineDesktopPanel({
       ws.close();
       target?.getContext("2d")?.clearRect(0, 0, target.width, target.height);
     };
-  }, [nodeId, conversationId, config?.node_ws_url, attempt, display, contextId]);
+  }, [nodeId, conversationId, attempt, display, contextId]);
   const input = useCallback(
     (tool: string, args: Record<string, unknown>) => {
       if (
@@ -364,81 +435,64 @@ export function MachineDesktopPanel({
   return (
     <section
       ref={panel}
-      className="space-y-3 rounded-xl border border-border/50 bg-card p-3 text-12"
-      aria-label={t("Live machine desktop")}
+      className={cn(
+        "space-y-3 text-14",
+        !pane && "rounded-xl border border-border/50 bg-card p-3",
+        fullscreen && "overflow-auto bg-background p-4",
+      )}
+      aria-label={translateUi("Live machine desktop")}
       data-private="true"
       data-ph-no-capture
     >
-      <div
-        role="group"
-        aria-label={t("Desktop display")}
-        className="flex flex-wrap gap-1"
-      >
-        {(["secure", "dev"] as const).map((value) => (
-          <Button
-            key={value}
-            size="sm"
-            variant={display === value ? "secondary" : "ghost"}
-            aria-pressed={display === value}
-            disabled={controls && display !== value}
-            onClick={() => {
-              setConnected(false);
-              setDisplay(value);
-            }}
-          >
-            {value === "secure" ? t("Secure browser") : t("Dev browser")}
-          </Button>
-        ))}
-        {controls ? (
-          <span className="self-center text-muted-foreground">{t("Hand back to switch displays.")}</span>
-        ) : null}
-      </div>
+      {/* One row when it fits. Otherwise the machine tabs keep the first row
+          and the view controls move, together and still on one line, to a
+          second; a narrow row shrinks the workspace picker. */}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-muted-foreground">{t("Workspace and browser")}</span>
-        <Select
-          value={contextId ?? "legacy"}
-          onValueChange={(value) => {
-            setConnected(false);
-            setContextId(value === "legacy" ? undefined : value);
-          }}
-          disabled={controls}
+        {leading === undefined ? (
+          <span className="flex min-w-0 shrink items-center gap-2">
+            <StatusDot status={status} label={statusText} />
+            <span className="min-w-0 truncate font-medium">
+              {machineName ?? name ?? nodeId}
+            </span>
+          </span>
+        ) : leading}
+        {/* Connecting and disconnected show on the screen; once live, say who drives. */}
+        {connected ? <span className="sr-only" aria-live="polite">{statusText}</span> : null}
+        <div className="flex min-w-0 flex-1 basis-60 items-center gap-2">
+        <div
+          role="group"
+          aria-label={translateUi("Desktop display")}
+          title={controls ? translateUi("Hand back to switch displays") : undefined}
+          className="flex shrink-0 rounded-lg border border-hairline p-0.5"
         >
-          <SelectTrigger aria-label={t("Desktop context")} className="max-w-full sm:w-80">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="legacy">{t("Shared legacy desktop")}</SelectItem>
-            {(contexts.data ?? []).map((context) => (
-              <SelectItem key={context.context_id} value={context.context_id}>
-                {context.agent_name} · {context.actor_label}
-                {context.group_id ? t(" · group task") : ""}{t(" · generation ")}{context.generation}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {contexts.isError ? (
-          <span role="status" className="text-muted-foreground">{t("Separated contexts are unavailable on this machine.")}</span>
-        ) : null}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Monitor className="size-4" />
-        <span className="min-w-0 max-w-48 truncate font-medium">
-          {machineName ?? name ?? nodeId}
-        </span>
-        <span className="text-muted-foreground">
-          {!connected
-            ? t("Connecting…")
-            : controls
-              ? t("You are in control")
-              : controller === "owner"
-                ? t("Owner in control in another tab")
-                : t("Watching the agent")}
-        </span>
-        {conversationId ? (
+          {(["secure", "dev"] as const).map((value) => (
+            <Button
+              key={value}
+              size="sm"
+              variant="ghost"
+              aria-pressed={display === value}
+              aria-label={value === "secure" ? translateUi("Secure browser") : translateUi("Dev browser")}
+              title={value === "secure" ? translateUi("Secure browser") : translateUi("Dev browser")}
+              disabled={controls && display !== value}
+              className={cn(
+                "h-6 min-h-0 px-2 text-14",
+                display === value ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
+              )}
+              onClick={() => {
+                setConnected(false);
+                setDisplay(value);
+              }}
+            >
+              {value === "secure" ? translateUi("Secure") : translateUi("Dev")}
+            </Button>
+          ))}
+        </div>
+        {conversationId && !pane ? (
           <Button
             size="sm"
             variant="ghost"
-            aria-label={collapsed ? t("Show desktop") : t("Minimise desktop")}
+            className="h-7 w-7 shrink-0 px-0"
+            aria-label={collapsed ? translateUi("Show desktop") : translateUi("Minimise desktop")}
             aria-expanded={!collapsed}
             onClick={() => collapse(!collapsed)}
           >
@@ -446,47 +500,79 @@ export function MachineDesktopPanel({
           </Button>
         ) : null}
         {collapsed && action ? (
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">
-            {action}
-          </span>
+          <span className="min-w-0 truncate text-muted-foreground">{action}</span>
         ) : null}
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-label={t("Expand desktop")}
-          onClick={() => {
-            void panel.current?.requestFullscreen();
-          }}
-        >
-          <Maximize2 />
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-label={t("Pop out desktop")}
-          onClick={() =>
-            window.open(
-              `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}${contextId ? `&context_id=${encodeURIComponent(contextId)}` : ""}`,
-              "_blank",
-              "noopener,noreferrer",
-            )
-          }
-        >
-          <ExternalLink />
-        </Button>
+        {/* Never narrower than a shrunken picker (64px) plus the two buttons;
+            the machine tabs scroll before anything here is cut off. */}
+        <div className="ml-auto flex min-w-32 shrink items-center gap-1">
+          <Select
+            value={contextId ?? "legacy"}
+            onValueChange={(value) => {
+              setConnected(false);
+              setContextId(value === "legacy" ? undefined : value);
+            }}
+            disabled={controls}
+          >
+            <SelectTrigger
+              aria-label={translateUi("Desktop context")}
+              title={contexts.isError ? translateUi("Separated contexts are unavailable on this machine") : translateUi("Workspace and browser")}
+              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-14 [&>span]:min-w-0 [&>span]:truncate"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="legacy">{translateUi("Shared legacy desktop")}</SelectItem>
+              {(contexts.data ?? []).map((context) => (
+                <SelectItem key={context.context_id} value={context.context_id}>
+                  {context.agent_name} · {context.actor_label}
+                  {context.group_id ? translateUi(" · group task") : ""}{translateUi(" · generation ")}{context.generation}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {contexts.isError ? (
+            <span role="status" className="sr-only">{translateUi("Separated contexts are unavailable on this machine.")}</span>
+          ) : null}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 shrink-0 px-0"
+            aria-label={fullscreen ? translateUi("Exit fullscreen") : translateUi("Expand desktop")}
+            title={fullscreen ? translateUi("Exit fullscreen") : translateUi("Fullscreen")}
+            onClick={() => {
+              if (fullscreen) void document.exitFullscreen();
+              else void panel.current?.requestFullscreen();
+            }}
+          >
+            {fullscreen ? <Minimize2 /> : <Maximize2 />}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 shrink-0 px-0"
+            aria-label={translateUi("Pop out desktop")}
+            title={translateUi("Open in a new window")}
+            onClick={() =>
+              window.open(
+                `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}${contextId ? `&context_id=${encodeURIComponent(contextId)}` : ""}`,
+                "_blank",
+                "noopener,noreferrer",
+              )
+            }
+          >
+            <ExternalLink />
+          </Button>
+        </div>
+        </div>
       </div>
-      {(reason || controller === "requested") && !controls ? (
-        <p role="status" className="rounded-lg border border-warning/30 p-3">{t("NyxBot needs you on this machine: ")}{reason ?? t("Please take control.")}
-        </p>
-      ) : null}
-      <div hidden={collapsed}>
+      <div hidden={collapsed} className="relative">
         <canvas
           ref={canvas}
           width={1280}
           height={800}
           tabIndex={controls ? 0 : -1}
-          aria-label={t("Machine screen. Take control to use mouse and keyboard.")}
-          className={`block max-h-[65vh] w-full rounded-lg bg-background object-contain focus:outline-none focus:ring-1 focus:ring-primary ${controls ? "cursor-crosshair" : "cursor-default"}`}
+          aria-label={translateUi("Machine screen. Take control to use mouse and keyboard.")}
+          className={`block ${pane ? "" : "max-h-[65vh] "}w-full rounded-xl bg-background object-contain focus:outline-none focus:ring-1 focus:ring-primary ${controls ? "cursor-crosshair" : "cursor-default"}`}
           onPointerMove={(event) => {
             const position = point(event);
             if (
@@ -594,14 +680,30 @@ export function MachineDesktopPanel({
             else input("press_key", { key: desktopKey(event.key) });
           }}
         />
+        {/* What is wrong, or what is needed, shows on the screen itself. */}
+        {!connected || error ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/70 p-4 text-center backdrop-blur-[2px] dark:bg-black/60">
+            {error ? (
+              <>
+                <p role="alert" className="max-w-sm text-destructive">{translateUi(error)}</p>
+              </>
+            ) : (
+              <p className="flex items-center gap-2 text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-warning motion-safe:animate-pulse" aria-hidden="true" />{translateUi("Connecting…")}</p>
+            )}
+            {error || (!connected && stalled) ? (
+              <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>{translateUi("Reconnect")}</Button>
+            ) : null}
+            {reason ? <p role="status" className="max-w-sm text-warning">{translateUi("NyxBot needs you on this machine: ")}{reason}</p> : null}
+          </div>
+        ) : null}
+        {connected && !error && (reason || controller === "requested") && !controls ? (
+          <p role="status" className="absolute inset-x-3 top-3 rounded-lg bg-warning/15 px-3 py-2 text-warning backdrop-blur-sm light:bg-warning light:text-white">{translateUi("NyxBot needs you on this machine: ")}{reason ?? translateUi("Please take control.")}
+          </p>
+        ) : null}
       </div>
       {!collapsed && action && !controls && controller === "agent" ? (
-        <p className="text-muted-foreground" aria-live="polite">{t("Agent action: ")}{action}
-        </p>
-      ) : null}
-      {error ? (
-        <p role="alert" className="text-destructive">
-          {translateUi(error)}
+        <p className="text-muted-foreground" aria-live="polite">{translateUi("Agent action: ")}{action}
         </p>
       ) : null}
       <DesktopControls
@@ -609,10 +711,9 @@ export function MachineDesktopPanel({
         controls={controls}
         controller={controller}
         control={control}
-        reconnect={() => setAttempt((value) => value + 1)}
       />
       {controls ? (
-        <p className="text-muted-foreground">{t("The agent cannot use this machine while you control it. Screen frames and input are not recorded.")}</p>
+        <p className="text-muted-foreground">{translateUi("The agent cannot use this machine while you control it. Screen frames and input are not recorded.")}</p>
       ) : null}
     </section>
   );
@@ -622,82 +723,206 @@ function DesktopControls({
   controls,
   controller,
   control,
-  reconnect,
 }: {
   readonly connected: boolean;
   readonly controls: boolean;
   readonly controller: string;
   readonly control: (type: string, note?: string) => void;
-  readonly reconnect: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const form = useAppForm({ defaultValues: { note: "" } });
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      {!connected ? (
-        <Button onClick={() => reconnect()}>{t("Reconnect")}</Button>
-      ) : null}
+    <div className="flex min-w-0 items-center justify-end gap-2">
       {!controls ? (
         <Button
+          size="sm"
+          className="shrink-0"
           variant="primary"
           disabled={!connected || controller === "taking"}
           onClick={() => control("take_control")}
-        >{t("Take control")}</Button>
+        >{translateUi("Take control")}</Button>
       ) : (
         <form
-          className="flex flex-1 gap-2"
+          className="flex min-w-0 flex-1 gap-2"
           onSubmit={form.handleSubmit(({ note }) => {
             control("hand_back", note);
             form.reset();
           })}
         >
           <Input
-            aria-label={t("Hand-back note")}
-            placeholder={t("Optional note, e.g. logged in")}
+            className="h-8"
+            aria-label={translateUi("Hand-back note")}
+            placeholder={translateUi("Optional note, e.g. logged in")}
             maxLength={2000}
             {...form.register("note")}
           />
-          <Button type="submit" variant="primary">{t("Hand back")}</Button>
+          <Button type="submit" size="sm" className="shrink-0" variant="primary">{translateUi("Hand back")}</Button>
         </form>
       )}
       <Button
+        size="sm"
+        className="shrink-0"
         variant="destructive"
         disabled={!connected}
         onClick={() => control("stop")}
-      >{t("Stop")}</Button>
+      >{translateUi("Stop")}</Button>
     </div>
   );
 }
 
+/**
+ * A conversation's open desktops. One is shown at a time; with several, tabs
+ * switch between them and mark the ones the agent is using or that need you.
+ * Only the shown desktop streams.
+ */
+function MachineDesktopSwitcher({
+  conversationId,
+  desktops,
+  turnActive,
+  pane,
+}: {
+  readonly conversationId: string;
+  readonly desktops: readonly MachineDesktopMetadata[];
+  readonly turnActive?: boolean;
+  readonly pane: boolean;
+}) {
+  useUiTranslation();
+  const nodes = useNodes();
+  const [selected, setSelected] = useState<string>();
+  const [shownStatus, setShownStatus] = useState<DesktopStatus>("attention");
+  const shown = desktops.find((desktop) => conversationDesktopKey(desktop) === selected) ?? desktops[0];
+  if (!shown) return null;
+  const nodeName = (id: string) => nodes.data?.find((node) => node.id === id)?.name;
+  const label = (desktop: MachineDesktopMetadata) => {
+    const sameNode = desktops.filter((other) => other.node_id === desktop.node_id);
+    const parts = [nodeName(desktop.node_id) ?? desktop.node_id];
+    if (sameNode.some((other) => (other.display ?? "secure") !== (desktop.display ?? "secure"))) {
+      parts.push(desktop.display === "dev" ? "Dev browser" : "Secure browser");
+    }
+    if (sameNode.some((other) => other.context_id !== desktop.context_id) && desktop.context_id) {
+      parts.push(`context ${desktop.context_id.slice(0, 6)}`);
+    }
+    return parts.join(" · ");
+  };
+  const tabs = desktops.length > 1 ? (
+    <div role="tablist" aria-label={translateUi("Machines")} className="flex min-w-0 max-w-full shrink-0 gap-1 overflow-x-auto">
+      {desktops.map((desktop) => {
+        const key = conversationDesktopKey(desktop);
+        const active = desktop === shown;
+        const live = turnActive && desktop.status === "agent";
+        return (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => setSelected(key)}
+            className={cn(
+              "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-14 transition-colors",
+              active ? "bg-overlay-strong text-foreground" : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            )}
+          >
+            <Monitor aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{label(desktop)}</span>
+            {active ? (
+              <StatusDot status={shownStatus} label={STATUS_LABEL[shownStatus]} pulse={shownStatus === "live" && live} />
+            ) : desktop.reason ? (
+              <StatusDot status="attention" label={translateUi("Needs you")} />
+            ) : live ? (
+              <StatusDot status="live" label={translateUi("Agent working")} pulse />
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  ) : null;
+  return (
+    <div className="flex min-h-0 flex-col">
+      {/* The shell owns the preview stack's scrolling. Docked cards meet
+          the slab's right wall, with square corners on that side. */}
+      <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
+        <MachineDesktopPanel
+          key={conversationDesktopKey(shown)}
+          nodeId={shown.node_id}
+          name={nodeName(shown.node_id)}
+          conversationId={conversationId}
+          reason={shown.reason}
+          initialDisplay={shown.display}
+          initialContextId={shown.context_id}
+          turnActive={turnActive}
+          pane={pane}
+          leading={tabs}
+          onStatus={setShownStatus}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** A conversation's open desktops, inline above the transcript (narrow screens). */
 export function ConversationMachineDesktops({
   conversationId,
+  desktops,
   turnActive,
 }: {
   readonly conversationId: string;
+  readonly desktops: readonly MachineDesktopMetadata[];
   readonly turnActive?: boolean;
 }) {
-  const machines = useMachineDesktops(conversationId, turnActive);
-  const desktops = [
-    ...new Map(
-      (machines.data ?? []).map((machine) => [
-        `${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`,
-        machine,
-      ]),
-    ).values(),
-  ];
+  useUiTranslation();
   return desktops.length ? (
-    <div className="mx-auto w-full max-w-[758px] space-y-3 px-4 pb-3">
-      {desktops.map((machine) => (
-        <MachineDesktopPanel
-          key={`${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`}
-          nodeId={machine.node_id}
-          conversationId={conversationId}
-          reason={machine.reason}
-          initialDisplay={machine.display}
-          initialContextId={machine.context_id}
-          turnActive={turnActive}
-        />
-      ))}
+    <div className="mx-auto w-full max-w-[758px] px-4 pb-3">
+      <MachineDesktopSwitcher conversationId={conversationId} desktops={desktops} turnActive={turnActive} pane={false} />
     </div>
   ) : null;
+}
+
+/**
+ * The machine column docked beside the chat. The shell's divider sets its
+ * width; the chat's Machine button hides it. Each desktop can still go
+ * fullscreen or pop out.
+ */
+export function MachinePane({
+  conversationId,
+  desktops,
+  turnActive,
+}: {
+  readonly conversationId: string;
+  readonly desktops: readonly MachineDesktopMetadata[];
+  readonly turnActive?: boolean;
+}) {
+  useUiTranslation();
+  return <MachineDesktopSwitcher conversationId={conversationId} desktops={desktops} turnActive={turnActive} pane />;
+}
+
+/** The thread's machine button: shows or hides its desktops. */
+export function MachinePaneToggle({
+  open,
+  live,
+  onToggle,
+}: {
+  readonly open: boolean;
+  /** The agent is working on it right now. */
+  readonly live: boolean;
+  readonly onToggle: () => void;
+}) {
+  useUiTranslation();
+  const compact = useContext(ChatHeaderCompactContext);
+  return (
+    <Button
+      size={compact ? "icon" : "sm"}
+      variant="ghost"
+      aria-label={open ? translateUi("Hide machine") : translateUi("Show machine")}
+      aria-pressed={open}
+      title={open ? translateUi("Hide machine") : translateUi("Show machine")}
+      className={cn("relative", open && "bg-overlay-strong text-foreground")}
+      onClick={onToggle}
+    >
+      <Monitor aria-hidden="true" />
+      <span className={compact ? "sr-only" : undefined}>{translateUi("Machine")}</span>
+      {live ? (
+        <span aria-hidden="true" className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />
+      ) : null}
+    </Button>
+  );
 }

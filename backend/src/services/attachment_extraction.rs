@@ -30,6 +30,16 @@ pub struct Extracted {
     pub sections: Vec<Section>,
 }
 
+impl Drop for Extracted {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.text.zeroize();
+        for section in &mut self.sections {
+            section.label.zeroize();
+        }
+    }
+}
+
 fn bad(message: &'static str) -> AppError {
     AppError::BadRequest(message.into())
 }

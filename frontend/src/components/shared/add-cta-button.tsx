@@ -8,7 +8,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-interface AddCtaButtonProps {
+interface AddCtaButtonProps extends Pick<
+  React.ComponentProps<"button">,
+  "id" | "aria-expanded" | "aria-controls"
+> {
   readonly label: string;
   readonly onClick: () => void;
   readonly disabled?: boolean;
@@ -37,11 +40,13 @@ export function AddCtaButton({
   compactLabel,
   icon: Icon = Plus,
   variant = "primary",
+  ...disclosureProps
 }: AddCtaButtonProps) {
   useUiTranslation();
   if (variant === "primary") {
     const button = (
       <Button
+        {...disclosureProps}
         variant="primary"
         size={compact ? (compactLabel ? "default" : "icon") : "lg"}
         aria-label={label}
@@ -79,10 +84,11 @@ export function AddCtaButton({
 
   return (
     <button
+      {...disclosureProps}
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-all duration-300 hover:border-hairline-strong hover:text-muted-foreground disabled:pointer-events-none disabled:opacity-40"
+      className="flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 type-row-title text-text-tertiary transition-all duration-300 hover:border-hairline-strong hover:text-muted-foreground disabled:pointer-events-none disabled:opacity-40"
     >
       <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-hairline bg-overlay">
         <Icon className="h-3 w-3" />

@@ -72,11 +72,73 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
 }
 
 pub async fn purge_expired(db: &mongodb::Database) -> AppResult<u64> {
-    Ok(db.collection::<Document>(COLLECTION_NAME).update_many(
-        doc! { "expires_at": { "$lte": bson::DateTime::from_chrono(Utc::now()) }, "envelope_size": { "$gt": 0_i64 } },
-        doc! { "$set": { "encrypted_envelope": bson::Binary {
-            subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "envelope_size": 0_i64 } },
-    ).await?.modified_count)
+    let cutoff = bson::DateTime::now();
+    let mut after = None;
+    let mut total = 0;
+    loop {
+        let (changed, scanned, last) = purge_expired_batch(db, cutoff, after.as_deref()).await?;
+        total += changed;
+        if scanned < 256 {
+            return Ok(total);
+        }
+        after = Some(
+            last.ok_or_else(|| AppError::Internal("invalid saved-login cleanup cursor".into()))?,
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn purge_expired_batch(
+    db: &mongodb::Database,
+    cutoff: bson::DateTime,
+    after: Option<&str>,
+) -> AppResult<(u64, usize, Option<String>)> {
+    let mut filter = doc! {"expires_at":{"$lte":cutoff},"envelope_size":{"$gt":0_i64}};
+    if let Some(after) = after {
+        filter.insert("_id", doc! {"$gt":after});
+    }
+    let rows: Vec<Document> = db
+        .collection::<Document>(COLLECTION_NAME)
+        .find(filter)
+        .projection(doc! {"_id":1,"pool_id":1})
+        .sort(doc! {"_id":1})
+        .limit(256)
+        .await?
+        .try_collect()
+        .await?;
+    let scanned = rows.len();
+    let last = rows
+        .last()
+        .and_then(|row| row.get_str("_id").ok())
+        .map(str::to_owned);
+    let mut changed = 0;
+    for row in rows {
+        let (Ok(id), Ok(pool_id)) = (row.get_str("_id"), row.get_str("pool_id")) else {
+            continue;
+        };
+        let transaction_db = db.clone();
+        let id = id.to_owned();
+        let pool_id = pool_id.to_owned();
+        let mut session = db.client().start_session().await?;
+        changed += session.start_transaction().and_run((transaction_db, id, pool_id), |session, (db, id, pool_id)| Box::pin(async move {
+            let db = &*db;
+            let id = id.as_str();
+            let pool_id = pool_id.as_str();
+            let result: AppResult<u64> = async {
+                // Deletion owns physical removal; expiry can also clear envelopes
+                // under the same retained pool fence while cleanup is pending.
+                let pool = super::oracle_mutation_service::lookup_pool(db, session, pool_id, true).await?;
+                if pool.deleted_at.is_some() {
+                    db.collection::<Document>(crate::models::oracle_pool::COLLECTION_NAME).update_one(doc! {"_id":pool_id}, doc! {"$inc":{"worker_enrollment_epoch":1_i64}}).session(&mut *session).await?;
+                } else {
+                    super::oracle_mutation_service::lock_pool(db, session, pool_id).await?;
+                }
+                Ok(db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":id,"expires_at":{"$lte":bson::DateTime::now()},"envelope_size":{"$gt":0_i64}},doc! {"$set":{"encrypted_envelope":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},"envelope_size":0_i64}}).session(session).await?.modified_count)
+            }.await;
+            transactions::transaction_result(result)
+        })).await.map_err(transactions::map_transaction_error)?;
+    }
+    Ok((changed, scanned, last))
 }
 
 fn document(value: &impl serde::Serialize) -> AppResult<Document> {
@@ -84,8 +146,13 @@ fn document(value: &impl serde::Serialize) -> AppResult<Document> {
         .map_err(|_| AppError::Internal("saved login serialization failed".into()))
 }
 
-async fn check_pool(db: &mongodb::Database, pool: &OraclePool) -> AppResult<()> {
-    let live = oracle_pool_service::get_pool(db, &pool.id).await?;
+pub(super) async fn check_pool_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+) -> AppResult<()> {
+    let live =
+        super::oracle_mutation_service::lookup_pool(db, mongo_session, &pool.id, false).await?;
     if !live.is_active || live.worker_token_hash != pool.worker_token_hash {
         return Err(AppError::OracleWorkerTokenInvalid);
     }
@@ -110,7 +177,7 @@ fn conflict() -> AppError {
     AppError::Conflict("saved login changed; fetch the current profile before retrying".into())
 }
 
-fn aad(profile: &OracleLoginProfile) -> String {
+pub(crate) fn aad(profile: &OracleLoginProfile) -> String {
     format!(
         "oracle-login-profile:{}:{}:{}:{}:v{}",
         profile.pool_id, profile.id, profile.generation, profile.revision, profile.format_version
@@ -142,6 +209,7 @@ pub async fn list(db: &mongodb::Database, pool_id: &str) -> AppResult<Vec<LoginP
         .await?)
 }
 
+#[cfg(test)]
 pub async fn save(
     db: &mongodb::Database,
     keys: &EncryptionKeys,
@@ -150,12 +218,76 @@ pub async fn save(
     expected_generation: Option<&str>,
     input: CreateLoginSnapshotInput,
 ) -> AppResult<OracleLoginProfile> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_name = name.to_owned();
+    let transaction_expected_generation = expected_generation.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                keys,
+                transaction_pool,
+                transaction_name,
+                transaction_expected_generation,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                keys,
+                transaction_pool,
+                transaction_name,
+                transaction_expected_generation,
+                input,
+            )| {
+                Box::pin(async move {
+                    let keys = *keys;
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let name = transaction_name.as_str();
+                    let expected_generation = transaction_expected_generation.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        save_in_session(
+                            db,
+                            mongo_session,
+                            keys,
+                            pool,
+                            name,
+                            expected_generation,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn save_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    keys: &EncryptionKeys,
+    pool: &OraclePool,
+    name: &str,
+    expected_generation: Option<&str>,
+    input: CreateLoginSnapshotInput,
+) -> AppResult<OracleLoginProfile> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_name(name)?;
     validate_envelope(input.format_version, &input.sealed_envelope)?;
     verify_worker_token_hash(pool, &input.worker_token_sha256)?;
     let collection = db.collection::<OracleLoginProfile>(COLLECTION_NAME);
     let prior = collection
         .find_one(doc! { "pool_id": &pool.id, "name": name })
+        .session(&mut *mongo_session)
         .await?;
     if prior.as_ref().map(|p| p.generation.as_str()) != expected_generation {
         return Err(conflict());
@@ -182,7 +314,7 @@ pub async fn save(
     profile.encrypted_envelope = keys
         .encrypt_with_aad(&input.sealed_envelope, aad(&profile).as_bytes())
         .await?;
-    check_pool(db, pool).await?;
+    check_pool_in_session(db, mongo_session, pool).await?;
     // Preserve concurrent binding changes. The ID fence prevents a deleted profile
     // from being resurrected by an upload that began before revocation.
     if let Some(prior) = prior {
@@ -196,10 +328,15 @@ pub async fn save(
                 doc! { "$set": update },
             )
             .return_document(ReturnDocument::After)
+            .session(&mut *mongo_session)
             .await?
             .ok_or_else(conflict)
     } else {
-        match collection.insert_one(&profile).await {
+        match collection
+            .insert_one(&profile)
+            .session(&mut *mongo_session)
+            .await
+        {
             Ok(_) => Ok(profile),
             Err(error) if oracle_pool_service::is_duplicate_key(&error) => Err(conflict()),
             Err(error) => Err(error.into()),
@@ -207,16 +344,60 @@ pub async fn save(
     }
 }
 
-pub async fn delete(db: &mongodb::Database, pool_id: &str, name: &str) -> AppResult<()> {
+#[cfg(test)]
+pub async fn delete(db: &mongodb::Database, pool: &OraclePool, name: &str) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_name = name.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool, transaction_name),
+            |mongo_session, (transaction_db, transaction_pool, transaction_name)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let name = transaction_name.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        delete_in_session(db, mongo_session, pool, name).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn delete_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    name: &str,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, false)
+        .await?;
+    let pool_id = pool.id.as_str();
+
     validate_name(name)?;
     db.collection::<OracleLoginProfile>(COLLECTION_NAME)
         .delete_one(doc! { "pool_id": pool_id, "name": name })
+        .session(&mut *mongo_session)
         .await?;
     Ok(())
 }
 
-pub async fn unbind(db: &mongodb::Database, pool_id: &str, label: &str) -> AppResult<()> {
-    remove_binding(db, pool_id, label, false).await
+pub(crate) async fn unbind_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    label: &str,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, false)
+        .await?;
+    let pool_id = pool.id.as_str();
+
+    remove_binding_in_session(db, mongo_session, pool_id, label, false).await
 }
 
 #[cfg(test)]
@@ -225,52 +406,73 @@ pub async fn forget_binding_and_worker(
     pool_id: &str,
     label: &str,
 ) -> AppResult<()> {
-    remove_binding(db, pool_id, label, true).await
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let transaction_label = label.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool_id, transaction_label),
+            |mongo_session, (transaction_db, transaction_pool_id, transaction_label)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let label = transaction_label.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        forget_binding_and_worker_in_session(db, mongo_session, pool_id, label)
+                            .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
-async fn remove_binding(
+#[cfg(test)]
+pub(crate) async fn forget_binding_and_worker_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    label: &str,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    remove_binding_in_session(db, mongo_session, pool_id, label, true).await
+}
+
+pub(super) async fn remove_binding_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool_id: &str,
     label: &str,
     forget: bool,
 ) -> AppResult<()> {
-    let db = db.clone();
-    let pool_id = pool_id.to_string();
-    let label = label.to_string();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation: AppResult<()> = async {
-                db.collection::<Document>(WORKERS)
-                    .update_one(
-                        doc! { "_id": worker_doc_id(&pool_id, &label) },
-                        doc! { "$inc": { "login_binding_epoch": 1_i64 } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                db.collection::<Document>(COLLECTION_NAME)
-                    .update_many(
-                        doc! { "pool_id": &pool_id, "bindings.worker_label": &label },
-                        doc! { "$pull": { "bindings": { "worker_label": &label } } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if forget {
-                    db.collection::<Document>(WORKERS)
-                        .delete_one(doc! { "_id": worker_doc_id(&pool_id, &label) })
-                        .session(&mut *session)
-                        .await?;
-                }
-                Ok(())
-            }
-            .await;
-            transactions::transaction_result(operation)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)
+    db.collection::<Document>(WORKERS)
+        .update_one(
+            doc! { "_id": worker_doc_id(pool_id, label) },
+            doc! { "$inc": { "login_binding_epoch": 1_i64 } },
+        )
+        .session(&mut *mongo_session)
+        .await?;
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_many(
+            doc! { "pool_id": &pool_id, "bindings.worker_label": &label },
+            doc! { "$pull": { "bindings": { "worker_label": &label } } },
+        )
+        .session(&mut *mongo_session)
+        .await?;
+    if forget {
+        db.collection::<Document>(WORKERS)
+            .delete_one(doc! { "_id": worker_doc_id(pool_id, label) })
+            .session(&mut *mongo_session)
+            .await?;
+    }
+    Ok(())
 }
 
+#[cfg(test)]
 pub async fn bind(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -279,8 +481,73 @@ pub async fn bind(
     installation_id: Option<&str>,
     replace_existing: bool,
 ) -> AppResult<OracleLoginBinding> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_name = name.to_owned();
+    let transaction_label = label.to_owned();
+    let transaction_installation_id = installation_id.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_name,
+                transaction_label,
+                transaction_installation_id,
+                replace_existing,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_name,
+                transaction_label,
+                transaction_installation_id,
+                replace_existing,
+            )| {
+                Box::pin(async move {
+                    let replace_existing = *replace_existing;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let name = transaction_name.as_str();
+                    let label = transaction_label.as_str();
+                    let installation_id = transaction_installation_id.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        bind_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            name,
+                            label,
+                            installation_id,
+                            replace_existing,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn bind_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    name: &str,
+    label: &str,
+    installation_id: Option<&str>,
+    replace_existing: bool,
+) -> AppResult<OracleLoginBinding> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_name(name)?;
-    let worker = oracle_worker_service::get_worker(db, &pool.id, label).await?;
+    let worker =
+        oracle_worker_service::get_worker_in_session(db, mongo_session, &pool.id, label).await?;
     if worker.enrollment.is_some() {
         return Err(AppError::OracleWorkerCapabilityUnsupported(
             "contributed workers use their own browser login".into(),
@@ -299,6 +566,7 @@ pub async fn bind(
     let collection = db.collection::<OracleLoginProfile>(COLLECTION_NAME);
     let profile = collection
         .find_one(doc! { "pool_id": &pool.id, "name": name })
+        .session(&mut *mongo_session)
         .await?
         .ok_or_else(|| AppError::NotFound("saved login profile not found".into()))?;
     if profile.worker_token_hash != pool.worker_token_hash || profile.expires_at <= Utc::now() {
@@ -313,65 +581,62 @@ pub async fn bind(
         replace_existing,
     };
     let binding_doc = document(&binding)?;
-    let db = db.clone();
-    let pool = pool.clone();
-    let label = label.to_string();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation: AppResult<()> = async {
-                // Serialize all account switches for this worker, including ABA rebinds.
-                let locked = db
-                    .collection::<Document>(WORKERS)
-                    .update_one(
-                        doc! { "_id": &worker.id, "instance_id": &worker.instance_id, "enrollment": null },
-                        doc! { "$inc": { "login_binding_epoch": 1_i64 } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if locked.matched_count != 1 {
-                    return Err(conflict());
-                }
-                db.collection::<Document>(COLLECTION_NAME)
-                    .update_many(
-                        doc! { "pool_id": &pool.id, "bindings.worker_label": &label },
-                        doc! { "$pull": { "bindings": { "worker_label": &label } } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                let result = collection
-                    .update_one(
-                        doc! {
-                            "_id": &profile.id, "generation": &profile.generation,
-                            "worker_token_hash": &pool.worker_token_hash,
-                            "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
-                            "$expr": { "$lt": [{ "$size": "$bindings" }, MAX_BINDINGS as i64] },
-                        },
-                        doc! { "$push": { "bindings": &binding_doc } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if result.modified_count != 1 {
-                    return Err(conflict());
-                }
-                Ok(())
-            }
-            .await;
-            transactions::transaction_result(operation)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)?;
+
+    // Serialize all account switches for this worker, including ABA rebinds.
+    let locked = db
+        .collection::<Document>(WORKERS)
+        .update_one(
+            doc! { "_id": &worker.id, "instance_id": &worker.instance_id, "enrollment": null },
+            doc! { "$inc": { "login_binding_epoch": 1_i64 } },
+        )
+        .session(&mut *mongo_session)
+        .await?;
+    if locked.matched_count != 1 {
+        return Err(conflict());
+    }
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_many(
+            doc! { "pool_id": &pool.id, "bindings.worker_label": &label },
+            doc! { "$pull": { "bindings": { "worker_label": &label } } },
+        )
+        .session(&mut *mongo_session)
+        .await?;
+    let result = collection
+        .update_one(
+            doc! {
+                "_id": &profile.id, "generation": &profile.generation,
+                "worker_token_hash": &pool.worker_token_hash,
+                "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+                "$expr": { "$lt": [{ "$size": "$bindings" }, MAX_BINDINGS as i64] },
+            },
+            doc! { "$push": { "bindings": &binding_doc } },
+        )
+        .session(&mut *mongo_session)
+        .await?;
+    if result.modified_count != 1 {
+        return Err(conflict());
+    }
+
     Ok(binding)
 }
 
-async fn validate_worker(
+pub(super) async fn validate_worker_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool: &OraclePool,
     label: &str,
     instance: &str,
 ) -> AppResult<()> {
-    let worker = oracle_worker_service::get_worker(db, &pool.id, label).await?;
+    let worker =
+        oracle_worker_service::get_worker_in_session(db, mongo_session, &pool.id, label).await?;
+    if worker.enrollment.is_some() {
+        super::oracle_worker_enrollment_service::ensure_current_worker_in_session(
+            db,
+            mongo_session,
+            &worker,
+        )
+        .await?;
+    }
     if worker.instance_id.as_deref() != Some(instance) {
         return Err(AppError::OracleWorkerLabelUnavailable(label.into()));
     }
@@ -393,13 +658,56 @@ pub async fn current(
     label: &str,
     instance: &str,
 ) -> AppResult<Option<(OracleLoginProfile, OracleLoginBinding)>> {
-    validate_worker(db, pool, label, instance).await?;
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_label = label.to_owned();
+    let transaction_instance = instance.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_label,
+                transaction_instance,
+            ),
+            |mongo_session, context| {
+                let (transaction_db, transaction_pool, transaction_label, transaction_instance) =
+                    context;
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let label = transaction_label.as_str();
+                    let instance = transaction_instance.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        current_in_session(db, mongo_session, pool, label, instance).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn current_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    label: &str,
+    instance: &str,
+) -> AppResult<Option<(OracleLoginProfile, OracleLoginBinding)>> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    validate_worker_in_session(db, mongo_session, pool, label, instance).await?;
     let profile = db
         .collection::<OracleLoginProfile>(COLLECTION_NAME)
         .find_one(doc! {
             "pool_id": &pool.id,
             "bindings": { "$elemMatch": { "worker_label": label, "instance_id": instance } },
         })
+        .session(&mut *mongo_session)
         .await?;
     Ok(profile.and_then(|profile| {
         let binding = profile
@@ -437,12 +745,16 @@ pub async fn decrypt(
     keys: &EncryptionKeys,
     profile: &OracleLoginProfile,
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    Ok(Zeroizing::new(
-        keys.decrypt_with_aad(&profile.encrypted_envelope, aad(profile).as_bytes())
-            .await?,
-    ))
+    super::oracle_login_record_service::decrypt(
+        keys,
+        COLLECTION_NAME,
+        &bson::to_document(profile)
+            .map_err(|_| AppError::Internal("Invalid Oracle login envelope".into()))?,
+    )
+    .await
 }
 
+#[derive(Clone)]
 pub struct RefreshLoginInput {
     pub profile_id: String,
     pub binding_id: String,
@@ -461,7 +773,70 @@ pub async fn refresh(
     instance: &str,
     input: RefreshLoginInput,
 ) -> AppResult<OracleLoginProfile> {
-    validate_worker(db, pool, label, instance).await?;
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_label = label.to_owned();
+    let transaction_instance = instance.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                keys,
+                transaction_pool,
+                transaction_label,
+                transaction_instance,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                keys,
+                transaction_pool,
+                transaction_label,
+                transaction_instance,
+                input,
+            )| {
+                Box::pin(async move {
+                    let keys = *keys;
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let label = transaction_label.as_str();
+                    let instance = transaction_instance.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        refresh_in_session(
+                            db,
+                            mongo_session,
+                            keys,
+                            pool,
+                            label,
+                            instance,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn refresh_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    keys: &EncryptionKeys,
+    pool: &OraclePool,
+    label: &str,
+    instance: &str,
+    input: RefreshLoginInput,
+) -> AppResult<OracleLoginProfile> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    validate_worker_in_session(db, mongo_session, pool, label, instance).await?;
     validate_envelope(input.format_version, &input.sealed_envelope)?;
     if uuid::Uuid::parse_str(&input.publication_id).is_err()
         || input.publication_id == input.expected_revision
@@ -483,6 +858,7 @@ pub async fn refresh(
     let collection = db.collection::<OracleLoginProfile>(COLLECTION_NAME);
     let mut profile = collection
         .find_one(filter.clone())
+        .session(&mut *mongo_session)
         .await?
         .ok_or_else(conflict)?;
     if profile.revision == input.publication_id {
@@ -500,7 +876,7 @@ pub async fn refresh(
     profile.encrypted_envelope = keys
         .encrypt_with_aad(&input.sealed_envelope, aad(&profile).as_bytes())
         .await?;
-    check_pool(db, pool).await?;
+    check_pool_in_session(db, mongo_session, pool).await?;
     let mut update = document(&profile)?;
     for key in ["_id", "bindings", "created_at"] {
         update.remove(key);
@@ -508,8 +884,253 @@ pub async fn refresh(
     collection
         .find_one_and_update(filter, doc! { "$set": update })
         .return_document(ReturnDocument::After)
+        .session(&mut *mongo_session)
         .await?
         .ok_or_else(conflict)
+}
+
+pub async fn bind_for_manager(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    pool: &OraclePool,
+    name: &str,
+    label: &str,
+    installation_id: Option<&str>,
+    replace_existing: bool,
+) -> AppResult<OracleLoginBinding> {
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_pool = pool.clone();
+    let transaction_name = name.to_owned();
+    let transaction_label = label.to_owned();
+    let transaction_installation_id = installation_id.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_pool,
+                transaction_name,
+                transaction_label,
+                transaction_installation_id,
+                replace_existing,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_pool,
+                transaction_name,
+                transaction_label,
+                transaction_installation_id,
+                replace_existing,
+            )| {
+                Box::pin(async move {
+                    let replace_existing = *replace_existing;
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let pool = &*transaction_pool;
+                    let name = transaction_name.as_str();
+                    let label = transaction_label.as_str();
+                    let installation_id = transaction_installation_id.as_deref();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_manager(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            &pool.user_id,
+                        )
+                        .await?;
+                        bind_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            name,
+                            label,
+                            installation_id,
+                            replace_existing,
+                        )
+                        .await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn unbind_for_manager(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    pool: &OraclePool,
+    label: &str,
+) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_pool = pool.clone();
+    let transaction_label = label.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_pool,
+                transaction_label,
+            ),
+            |mongo_session, context| {
+                let (
+                    transaction_db,
+                    transaction_actor_user_id,
+                    transaction_pool,
+                    transaction_label,
+                ) = context;
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let pool = &*transaction_pool;
+                    let label = transaction_label.as_str();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_manager(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            &pool.user_id,
+                        )
+                        .await?;
+                        unbind_in_session(db, mongo_session, pool, label).await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn delete_for_manager(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    pool: &OraclePool,
+    name: &str,
+) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_pool = pool.clone();
+    let transaction_name = name.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_pool,
+                transaction_name,
+            ),
+            |mongo_session, context| {
+                let (transaction_db, transaction_actor_user_id, transaction_pool, transaction_name,) = context;
+            Box::pin(async move {
+            let db = &*transaction_db;
+            let actor_user_id = transaction_actor_user_id.as_str();
+            let pool = &*transaction_pool;
+            let name = transaction_name.as_str();
+            let result = async {
+                crate::services::oracle_mutation_service::lock_manager(
+                    db,
+                    mongo_session,
+                    actor_user_id,
+                    &pool.user_id,
+                )
+                .await?;
+                delete_in_session(db, mongo_session, pool, name).await
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+            })
+        },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn save_for_manager(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    keys: &EncryptionKeys,
+    pool: &OraclePool,
+    name: &str,
+    expected_generation: Option<&str>,
+    input: CreateLoginSnapshotInput,
+) -> AppResult<OracleLoginProfile> {
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_pool = pool.clone();
+    let transaction_name = name.to_owned();
+    let transaction_expected_generation = expected_generation.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                keys,
+                transaction_pool,
+                transaction_name,
+                transaction_expected_generation,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_actor_user_id,
+                keys,
+                transaction_pool,
+                transaction_name,
+                transaction_expected_generation,
+                input,
+            )| {
+                Box::pin(async move {
+                    let keys = *keys;
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let pool = &*transaction_pool;
+                    let name = transaction_name.as_str();
+                    let expected_generation = transaction_expected_generation.as_deref();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_manager(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            &pool.user_id,
+                        )
+                        .await?;
+                        save_in_session(
+                            db,
+                            mongo_session,
+                            keys,
+                            pool,
+                            name,
+                            expected_generation,
+                            input.clone(),
+                        )
+                        .await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
 #[cfg(test)]
@@ -532,6 +1153,13 @@ mod tests {
         )
         .await
         .unwrap();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &pool.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         (db, pool, test_encryption_keys())
     }
 
@@ -910,7 +1538,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fresh.bindings[0].binding_id, binding.binding_id);
-        delete(&db, &pool.id, "a").await.unwrap();
+        assert!(matches!(
+            delete(&db, &pool, "a").await,
+            Err(AppError::Conflict(_))
+        ));
+        delete(&db, &rotated, "a").await.unwrap();
         assert!(
             current(&db, &rotated, "worker", &instance)
                 .await
@@ -923,5 +1555,22 @@ mod tests {
         assert_ne!(replacement.id, a.id);
         assert!(replacement.bindings.is_empty());
         db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn oracle_profile_expiry_drains_multiple_bounded_batches() {
+        let (db, pool, _) = setup().await;
+        let expired = bson::DateTime::from_chrono(Utc::now() - Duration::days(1));
+        db.collection::<Document>(COLLECTION_NAME).insert_many((0..300).map(|n| doc! {
+            "_id":format!("profile-{n:04}"),"pool_id":&pool.id,"name":format!("profile-{n}"),
+            "expires_at":expired,"envelope_size":128_i64,"encrypted_envelope":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1;128]},
+        })).await.unwrap();
+        assert_eq!(purge_expired(&db).await.unwrap(), 300);
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {"envelope_size":{"$gt":0_i64}})
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

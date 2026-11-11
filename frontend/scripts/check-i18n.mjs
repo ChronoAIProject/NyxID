@@ -62,6 +62,8 @@ const displayProps = new Set([
   "searchPlaceholder", "heading", "subtitle", "triggerLabel", "desc",
   "compactLabel", "serviceName", "personalLabel", "itemLabel", "emptyLabel",
   "activeLabel", "inactiveLabel", "submitLabel", "copyLabel", "allLabel", "firstHeading", "error",
+  "footer", "caption", "saveLabel", "discardLabel", "tooltip",
+  "ackButtonLabel", "ownerLabel", "backLabel", "defaultLabel", "contentTitle", "actionLabel", "groupLabel", "currentLabel", "customPlaceholder", "activePlaceholder", "sendLabel", "connectionLabel", "showLabel", "subtitleTitle",
 ]);
 const isDisplayProp = (attribute) => displayProps.has(attribute.name.getText()) ||
   attribute.name.getText() === "value" &&
@@ -104,12 +106,14 @@ for (const file of files) {
   const visit = (node) => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
       /^toLocale(?:Date|Time)?String$/.test(node.expression.name.text) &&
-      (!node.arguments.length || ts.isArrayLiteralExpression(node.arguments[0]) && !node.arguments[0].elements.length)) {
+      (!node.arguments.length || node.arguments[0].getText(ast) === "undefined" ||
+        ts.isArrayLiteralExpression(node.arguments[0]) && !node.arguments[0].elements.length)) {
       report(node, "format displayed dates and numbers with the selected interface locale");
     }
-    if (ts.isNewExpression(node) && node.expression.getText(ast) === "Intl.NumberFormat" &&
-      !node.arguments?.length) {
-      report(node, "format displayed numbers with the selected interface locale");
+    if (ts.isNewExpression(node) && /^Intl\.(?:Number|DateTime|RelativeTime)Format$/.test(node.expression.getText(ast)) &&
+      (!node.arguments?.length || node.arguments[0].getText(ast) === "undefined" ||
+        ts.isArrayLiteralExpression(node.arguments[0]) && !node.arguments[0].elements.length)) {
+      report(node, "format displayed dates and numbers with the selected interface locale");
     }
     if (ts.isStringLiteral(node) && errorHelperFiles.has(file) &&
       /[A-Za-z]{3} [A-Za-z]{2}/.test(node.text) && !hasKey(node.text)) {

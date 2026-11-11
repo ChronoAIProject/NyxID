@@ -19,7 +19,11 @@ export function translateUi(key: string, options?: TOptions): string {
 }
 
 export function useUiTranslation() {
-  const { i18n } = useTranslation("common", { i18n: appI18n });
+  const { i18n } = useTranslation("common", {
+    i18n: appI18n,
+    useSuspense: false,
+    bindI18n: "languageChanged loaded",
+  });
   const language = i18n.resolvedLanguage;
   const t = useCallback(
     (key: string, options?: TOptions) =>

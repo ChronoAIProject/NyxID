@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { ArrowRight, ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -44,7 +45,7 @@ export function AssistantNodeTransferDialog({
   readonly params: AssistantNodeTransferParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -130,20 +131,20 @@ export function AssistantNodeTransferDialog({
         <DialogHeader>
           <DialogTitle>
             {result
-              ? t("Credential node transferred")
-              : t("Transfer credential node")}
+              ? translateUi("Credential node transferred")
+              : translateUi("Transfer credential node")}
           </DialogTitle>
           <DialogDescription>
             {result?.movedOutOfScope
-              ? t("The node is no longer readable from this account, confirming that ownership moved out of its access scope.")
+              ? translateUi("The node is no longer readable from this account, confirming that ownership moved out of its access scope.")
               : result
-                ? t("The canonical node projection confirms the new owner.")
-                : t("The new owner receives control of this node, its routing authority, and its active bindings.")}
+                ? translateUi("The canonical node projection confirms the new owner.")
+                : translateUi("The new owner receives control of this node, its routing authority, and its active bindings.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-3">
               <Badge
                 variant="secondary"
@@ -159,19 +160,19 @@ export function AssistantNodeTransferDialog({
                 {params.newOwnerUserId}
               </Badge>
             </div>
-            <label className="flex items-start gap-2">
+            <Label className="flex items-start gap-2">
               <Checkbox
                 checked={confirmed}
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{t("I understand the current owner will lose control of this node.")}</span>
-            </label>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{translateUi("I understand the current owner will lose control of this node.")}</span>
+            </Label>
           </div>
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -184,17 +185,17 @@ export function AssistantNodeTransferDialog({
                 onComplete(result.id);
                 close();
               }}
-            >{t("Done")}</Button>
+            >{translateUi("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting || !confirmed}
                 onClick={() => void submit()}
-              >{t("Transfer node")}</Button>
+              >{translateUi("Transfer node")}</Button>
             </>
           )}
         </DialogFooter>

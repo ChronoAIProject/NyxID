@@ -1,5 +1,6 @@
 //! Durable arbitration between the provider stream and asynchronous channel replies.
 //! Never reclaim a dispatch barrier: an interrupted external send is ambiguous.
+use crate::models::nyxbot_channel::{NyxbotChannel, NyxbotThread};
 use bson::doc;
 use chrono::Utc;
 use mongodb::{ClientSession, Database};
@@ -16,19 +17,198 @@ pub async fn bind_in_session(
     owner: &str,
     conversation: &str,
     turn: &str,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
     let bound = db
         .collection::<bson::Document>(EVENTS)
-        .update_one(
-            doc! {"_id": event, "user_id": owner, "status": "running",
-            "turn_id": bson::Bson::Null, "delivery.version": 1},
-            doc! {"$set": {"conversation_id": conversation, "turn_id": turn}},
+        .find_one_and_update(
+            doc! {"_id":event,"$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],"status":{"$in":["running","resuming","queued"]},
+            "turn_id":bson::Bson::Null,"media.interrupted":{"$ne":true},"delivery.version":1},
+            doc! {"$set":{"conversation_id":conversation,"turn_id":turn},"$unset":{"guest_setup_payload":""}},
         )
-        .session(session)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
+    super::nyxbot_admission_service::bind_in_session(db, session, &bound, turn).await?;
+    let replay = bound
+        .get_document("delivery")
+        .ok()
+        .and_then(|d| d.get_str("state").ok())
+        == Some("replay")
+        || bound.get_str("gateway_response_id").is_ok();
+    let transport_owner = bound
+        .get_str("user_id")
+        .map_err(|_| super::org_channel_service::denied())?;
+    if let Ok(delivery) = bound.get_document("delivery")
+        && let Ok(origin) = delivery.get_document("origin")
+        && origin.get_document("org_execution").is_ok()
+    {
+        let origin: crate::models::assistant_conversation::ChannelOrigin =
+            bson::from_document(origin.clone())
+                .map_err(|_| super::org_channel_service::denied())?;
+        let e = origin
+            .org_execution
+            .as_ref()
+            .ok_or_else(super::org_channel_service::denied)?;
+        Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            &origin,
+            owner,
+            &e.agent_id,
+            true,
+        ))
         .await?;
-    if bound.matched_count != 1 {
-        return Err(AppError::Conflict("Channel event already admitted".into()));
     }
+    bind_response(db, session, event, transport_owner, conversation, replay).await?;
+    Ok(bound.get_str("trace_request_id").ok().map(str::to_owned))
+}
+
+/// A guest waiting for model setup is still subject to the live source's
+/// audience. Fence these rows in the same transaction as its eventual turn;
+/// a settings change between the recovery read and admission must win safely.
+pub(crate) async fn validate_guest_setup_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    event: &str,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+) -> AppResult<()> {
+    use crate::models::nyxbot_channel::NyxbotEvent;
+    let Some(event) = db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":event,"$or":[{"user_id":&row.user_id},{"delivery.origin.org_execution.actor_id":&row.user_id}],"guest_setup_payload":{"$exists":true}})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let refused = || AppError::Forbidden("Queued visitor authority changed".into());
+    let delivery = event.delivery.as_ref().ok_or_else(refused)?;
+    if !row.guest_turn || !delivery.guest || event.expires_at <= Utc::now() {
+        return Err(refused());
+    }
+    let (channel, thread) = target_in_session(db, row, &delivery.origin, session, true)
+        .await?
+        .ok_or_else(refused)?;
+    let custom_binding_allowed = if let Some(binding_id) = event.custom_binding_id.as_deref() {
+        let binding = db
+            .collection::<crate::models::nyxbot_event_binding::NyxbotEventBinding>(
+                crate::models::nyxbot_event_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": binding_id, "user_id": &event.user_id})
+            .session(&mut *session)
+            .await?;
+        let destination = if let Some(binding) = binding.as_ref() {
+            db.collection::<NyxbotThread>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                .find_one(doc! {
+                    "channel_id": &channel.id,
+                    "user_id": &event.user_id,
+                    "partition": &binding.destination_partition,
+                    "last_message_id": {"$ne": bson::Bson::Null},
+                })
+                .session(&mut *session)
+                .await?
+        } else {
+            None
+        };
+        binding.as_ref().is_some_and(|binding| {
+            binding.active()
+                && binding.destination_channel_id == channel.id
+                && delivery.origin.partition.starts_with("custom:")
+                && destination.as_ref().is_some_and(|configured| {
+                    configured.platform_chat_id == thread.platform_chat_id
+                        && configured.platform_thread_id == thread.platform_thread_id
+                        && configured.relay_partition == thread.relay_partition
+                })
+        })
+    } else {
+        false
+    };
+    if channel.transport != delivery.transport
+        || channel.route_id != delivery.source_route_id
+        || delivery.source_route_api_key_id.as_deref() != Some(channel.route_api_key_id.as_str())
+        || (delivery.origin.thread.is_none()
+            && !custom_binding_allowed
+            && !guest_source_admitted(&channel, &thread, delivery))
+    {
+        return Err(refused());
+    }
+    // Followed children inherit their parent's audience and agent; admit_turn
+    // has already fenced that binding in this same transaction.
+    if delivery.origin.thread.is_none() && delivery.origin.org_execution.is_none() {
+        let agent_matches = match thread.agent_id.as_ref().or(channel.agent_id.as_ref()) {
+            Some(agent) => row.agent_id.as_ref() == Some(agent),
+            None => db.collection::<bson::Document>("assistant_agents")
+                .find_one(doc! {"_id":&row.agent_id,"user_id":&row.user_id,"kind":"nyxbot","destroyed_at":bson::Bson::Null})
+                .session(&mut *session).await?.is_some(),
+        };
+        if !agent_matches {
+            return Err(refused());
+        }
+    }
+    if db
+        .collection::<bson::Document>("channel_bots")
+        .update_one(
+            doc! {"_id":&channel.channel_bot_id,"is_active":true,"status":{"$ne":"suspended"}},
+            doc! {"$inc":{"channel_admission_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
+    }
+    if db.collection::<bson::Document>("api_keys").update_one(
+        doc!{"_id":&channel.route_api_key_id,"user_id":channel.bot_owner_id.as_deref().unwrap_or(&row.user_id),
+            "is_active":true,"$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
+        doc!{"$inc":{"channel_admission_revision":1_i64}}
+    ).session(session).await?.matched_count != 1 {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+async fn bind_response(
+    db: &Database,
+    session: &mut ClientSession,
+    event: &str,
+    owner: &str,
+    conversation: &str,
+    replay: bool,
+) -> AppResult<()> {
+    if !replay {
+        return Ok(());
+    }
+    use crate::models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse};
+    let response = db
+        .collection::<GatewayResponse>(RESPONSES)
+        .find_one(doc! {"event_key":event,"user_id":owner,
+        "terminal":false,"expires_at":{"$gt":bson::DateTime::now()}})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Native response authority changed".into()))?;
+    let live = db
+        .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&response.channel_id,"user_id":owner,"binding_id":&response.binding_id,
+            "transport":"gateway","status":"active",
+            "$or":[{"gateway_source":bson::Bson::Null},{"gateway_native_phase":"ready"}]},
+            doc! {"$inc":{"native_admission_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if live.matched_count != 1 {
+        return Err(AppError::Forbidden(
+            "Native source authority changed".into(),
+        ));
+    }
+    db.collection::<GatewayResponse>(RESPONSES)
+        .update_one(
+            doc! {"_id":&response.id},
+            doc! {"$set":{"conversation_id":conversation}},
+        )
+        .session(&mut *session)
+        .await?;
     Ok(())
 }
 
@@ -78,4 +258,723 @@ pub async fn finish(db: &Database, event: &str, claim: &str, status: &str) -> Ap
         )
         .await?;
     Ok(())
+}
+
+/// No external effect has started. Silence is terminal and cannot reclaim an
+/// ambiguous send or a stream whose frames may already have reached a provider.
+pub async fn silence(db: &Database, event: &str) -> AppResult<bool> {
+    Ok(db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id": event, "delivery.version": 1,
+            "delivery.state": {"$in": ["waiting", "pending"]}},
+            // A separate permission result may still need the same original
+            // capability. Never reopen the terminal delivery claim itself.
+            vec![doc! {"$set": {"delivery.state": "silent", "status": "completed",
+                "event_context_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_ciphertext","$$REMOVE"]},
+                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]}
+            }}],
+        )
+        .await?
+        .modified_count
+        == 1)
+}
+
+/// Admit one source-bound owner question, or join an identical question. Queue
+/// capacity, destination cap, event acceptance and turn binding commit together.
+/// The generic relay never participates in this assistant-owned queue.
+pub async fn enqueue(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    event: crate::models::assistant_conversation::AgentEvent,
+    public_text: Option<&str>,
+) -> AppResult<bool> {
+    use super::api_key_mutation_service as transactions;
+    let db = db.clone();
+    let owner = owner.to_owned();
+    let conversation = conversation.to_owned();
+    let public_text = public_text.map(str::to_owned);
+    let mut session = db.client().start_session().await?;
+    let admission = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                Box::pin(enqueue_in_session(
+                    &db,
+                    &owner,
+                    &conversation,
+                    &event,
+                    public_text.as_deref(),
+                    session,
+                ))
+                .await,
+            )
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
+    if let Some(turn) = admission.trace_turn {
+        if let Some(request) = admission.trace_request {
+            crate::turn_trace::source_link(&turn, &request);
+        }
+        if let Some(context) = crate::turn_trace::TurnContext::for_turn(&turn) {
+            crate::turn_trace::associate(context);
+        }
+    }
+    Ok(admission.accepted)
+}
+
+#[derive(Default)]
+pub(crate) struct EnqueueAdmission {
+    pub(crate) accepted: bool,
+    // Returned from the committed transaction, never emitted on a driver retry.
+    trace_turn: Option<String>,
+    trace_request: Option<String>,
+}
+
+/// Each driver retry receives immutable incoming work. Attempt-local queued
+/// flags may bypass expiry only after acceptance has actually committed.
+pub(crate) async fn enqueue_in_session(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    incoming: &crate::models::assistant_conversation::AgentEvent,
+    public_text: Option<&str>,
+    session: &mut ClientSession,
+) -> AppResult<EnqueueAdmission> {
+    use super::assistant_nyxagent as engine;
+    use crate::models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
+    };
+    let source = incoming
+        .source_event_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| AppError::Internal("Channel source unavailable".into()))?;
+    // Transaction retries must revalidate the original unaccepted
+    // origin. Never leak queued=true from an aborted attempt.
+    let mut event = incoming.clone();
+    let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let mut row = rows
+        .find_one(doc! {"_id": &conversation, "user_id": &owner})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+    for origin in &mut event.reply_to {
+        if let Some(binding) = origin.thread.as_mut() {
+            binding.queued = true;
+        }
+    }
+    let key = event.question_key.as_deref();
+    let matching = |other: Option<&str>| key.is_some() && key == other;
+    let active = engine::live_turn(&row, Utc::now())
+        .filter(|turn| {
+            !turn.stop_requested
+                && turn.invocation_id.is_none()
+                && !row.guest_turn
+                && row.group_id.is_none()
+                && turn.platform_origin.is_none()
+                && turn.channel_adapter_origin.is_none()
+                && turn.trigger_run_id.is_none()
+                && matching(turn.question_key.as_deref())
+                && (if turn.origin == crate::models::assistant_conversation::TurnOrigin::User {
+                    // A personal channel repeat may join the owner's app/home
+                    // answer without changing its primary destination or turn.
+                    row.channel.is_none()
+                        && row.platform_thread.is_none()
+                        && turn.asked_from.is_none()
+                        && event
+                            .reply_to
+                            .first()
+                            .is_some_and(|origin| origin.thread.is_none())
+                } else {
+                    matches!(
+                        turn.origin,
+                        crate::models::assistant_conversation::TurnOrigin::Channel
+                            | crate::models::assistant_conversation::TurnOrigin::Event
+                    ) && turn.channel_event_id.is_some()
+                        && compatible_sources(
+                            turn.asked_from.as_ref().or_else(|| {
+                                turn.events
+                                    .iter()
+                                    .find(|e| !e.source_event_ids.is_empty())
+                                    .and_then(|e| e.reply_to.first())
+                            }),
+                            event.reply_to.first(),
+                        )
+                })
+        })
+        .map(|turn| turn.turn_id.clone());
+    let mut bound_turn = None;
+    if let Some(turn) = active {
+        // Count durable destinations rather than ChannelOrigin equality:
+        // two messages in one chat still have different source targets.
+        let count = db
+            .collection::<bson::Document>(EVENTS)
+            .count_documents(doc! {
+            "$or":[{"user_id":&owner},{"delivery.origin.org_execution.actor_id":&owner}], "conversation_id": &conversation, "turn_id": &turn,
+            "delivery.version": 1,
+                            })
+            .session(&mut *session)
+            .await?;
+        if count >= (engine::MAX_ALSO_DELIVER + 1) as u64 {
+            return Ok(EnqueueAdmission::default());
+        }
+        // Fence settlement and concurrent destination admissions on the
+        // same conversation document, including repeated same-chat work.
+        rows.update_one(
+            doc! {"_id": &conversation, "user_id": &owner,
+            "active_turn.turn_id": &turn},
+            doc! {"$inc": {"channel_source_revision": 1}},
+        )
+        .session(&mut *session)
+        .await?;
+        bound_turn = Some(turn);
+    } else if let Some(pending) = row.pending_events.iter_mut().find(|e| {
+        e.invocation_id.is_none()
+            && !e.source_event_ids.is_empty()
+            && matching(e.question_key.as_deref())
+            && compatible_sources(e.reply_to.first(), event.reply_to.first())
+    }) {
+        if pending.source_event_ids.len() > engine::MAX_ALSO_DELIVER {
+            return Ok(EnqueueAdmission::default());
+        }
+        pending.source_event_ids.push(source.clone());
+        pending.channel_contexts.extend(
+            event
+                .channel_contexts
+                .iter()
+                .filter(|context| context.source_event_id == source)
+                .cloned(),
+        );
+    } else {
+        if row.pending_events.len() >= engine::MAX_PENDING_EVENTS {
+            return Ok(EnqueueAdmission::default());
+        }
+        row.pending_events.push(event.clone());
+    }
+    // Capacity refusal must not activate or extend a native follow. Validate
+    // and activate only after capacity succeeds, using the immutable incoming
+    // origin so an uncommitted queued flag never bypasses admission gates.
+    for origin in &incoming.reply_to {
+        super::channel_thread_follow_service::admit_turn(db, owner, origin, conversation, session)
+            .await?;
+    }
+    let replay = db
+        .collection::<bson::Document>(EVENTS)
+        .find_one(doc! {"_id":&source,"delivery.state":"replay"})
+        .session(&mut *session)
+        .await?
+        .is_some();
+    let accepted = db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {
+                "_id": &source, "$or":[{"user_id":&owner},{"delivery.origin.org_execution.actor_id":&owner}], "status": {"$in": ["running", "resuming"]},
+                "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
+            },
+            doc! {"$set": {"status": "queued", "conversation_id": &conversation,
+            "turn_id": bson::Bson::Null, "delivery.state": if replay {"replay"} else {"pending"}}},
+        )
+        .session(&mut *session)
+        .await?;
+    if accepted.matched_count != 1 {
+        return Err(AppError::Conflict("Channel event already admitted".into()));
+    }
+    let source_row = db
+        .collection::<bson::Document>(EVENTS)
+        .find_one(doc! {"_id":&source})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(super::org_channel_service::denied)?;
+    let transport_owner = source_row
+        .get_str("user_id")
+        .map_err(|_| super::org_channel_service::denied())?;
+    bind_response(db, session, &source, transport_owner, conversation, replay).await?;
+    // Validate the source while it is queued/unbound in this
+    // transaction, before binding a coalesced active destination.
+    let accepted_origin = queued_origin_in_session(db, owner, conversation, &source, session)
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Channel source authority changed".into()))?;
+    let trace_request = if let Some(turn) = &bound_turn {
+        bind_in_session(db, session, &source, owner, conversation, turn).await?
+    } else {
+        rows.update_one(
+            doc! {"_id": &conversation, "user_id": &owner},
+            doc! {"$set": {"pending_events": bson::to_bson(&row.pending_events)
+            .map_err(|_| AppError::Internal("Channel queue unavailable".into()))?}},
+        )
+        .session(&mut *session)
+        .await?;
+        None
+    };
+    if accepted_origin.org_execution.is_some()
+        && let Some(text) = public_text
+    {
+        // Publish the original question atomically with queue acceptance. The
+        // generated event instructions are private execution context. Bind the
+        // public copy to this source, not a previous reply preference/turn.
+        row.channel = Some(accepted_origin);
+        row.reply_channel = None;
+        row.active_turn = None;
+        super::org_channel_service::transcript::publish(
+            db,
+            session,
+            &row,
+            &format!("org-channel-source:{source}"),
+            text,
+            "user",
+        )
+        .await?;
+    }
+    Ok(EnqueueAdmission {
+        accepted: true,
+        trace_turn: bound_turn,
+        trace_request,
+    })
+}
+
+/// Home owner chats can share work across destinations. Native children retain
+/// their exact agent/generation/child authority, never a text-only match.
+fn compatible_sources(
+    a: Option<&crate::models::assistant_conversation::ChannelOrigin>,
+    b: Option<&crate::models::assistant_conversation::ChannelOrigin>,
+) -> bool {
+    if (a.and_then(|o| o.org_execution.as_ref()).is_some()
+        || b.and_then(|o| o.org_execution.as_ref()).is_some())
+        && a.zip(b).is_none_or(|(a, b)| {
+            a.org_execution != b.org_execution
+                || a.nyxbot_channel_id != b.nyxbot_channel_id
+                || a.partition != b.partition
+        })
+    {
+        return false;
+    }
+    match (a, b) {
+        (Some(a), Some(b)) => match (&a.thread, &b.thread) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                !a.guest
+                    && !b.guest
+                    && a.child_id == b.child_id
+                    && a.agent_id == b.agent_id
+                    && a.generation == b.generation
+                    && a.channel_generation == b.channel_generation
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Transactional admission revalidation for each queued destination, with
+/// revision writes fencing live authority. Callers terminalize ineligible
+/// sources independently, preserving other destinations of a repeat.
+pub async fn queued_origin_in_session(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    source: &str,
+    session: &mut ClientSession,
+) -> AppResult<Option<crate::models::assistant_conversation::ChannelOrigin>> {
+    use crate::models::{channel_bot::ChannelBot, nyxbot_channel::NyxbotEvent};
+    let Some(event) = db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {
+            "_id": source, "$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}], "conversation_id": conversation,
+            "status": "queued", "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
+            "delivery.guest": false, "delivery.state": {"$in":["pending","replay"]},
+            "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())},
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(d) = event.delivery else {
+        return Ok(None);
+    };
+    if d.origin.thread.is_some() {
+        return match super::channel_thread_follow_service::validate_in_session(
+            db,
+            owner,
+            &d.origin,
+            conversation,
+            true,
+            session,
+        )
+        .await
+        {
+            Ok(_) => {
+                // The source query proved durable queued acceptance, and live
+                // native authority has now been revalidated. Project that
+                // acceptance without changing the captured admission origin.
+                let mut origin = d.origin;
+                if let Some(binding) = origin.thread.as_mut() {
+                    binding.queued = true;
+                }
+                Ok(Some(origin))
+            }
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
+    let Some(row) = db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": conversation, "user_id": owner})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some((mut channel, thread)) = target_in_session(db, &row, &d.origin, session, true).await?
+    else {
+        return Ok(None);
+    };
+    if let Some(e) = &d.origin.org_execution {
+        if e.guest || e.actor_id != owner {
+            return Ok(None);
+        }
+        channel.owner_sender_ids = vec![d.sender_id.clone()];
+    }
+    if channel.transport != d.transport
+        || !matches!(
+            admission(&channel, &thread, &d.sender_id, Some(d.addressed)),
+            Admission::Owner
+        )
+    {
+        return Ok(None);
+    }
+    use crate::models::assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS};
+    let mut agent_filter = doc! {"user_id": d.origin.org_execution.as_ref().map_or(owner,|e|e.org_id.as_str()), "destroyed_at": bson::Bson::Null};
+    if let Some(id) = &row.agent_id {
+        agent_filter.insert("_id", id);
+    } else {
+        agent_filter.insert("kind", "nyxbot");
+    }
+    let Some(resolved) = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one_and_update(
+            agent_filter,
+            doc! {"$inc": {"channel_admission_revision": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if thread
+        .agent_id
+        .as_ref()
+        .or(channel.agent_id.as_ref())
+        .is_some_and(|id| id != &resolved.id)
+    {
+        return Ok(None);
+    }
+    // Serialize against bot platform adoption, deletion, and route revocation.
+    match super::platform_bot_authority::fence_personal_routes(
+        db,
+        &channel.channel_bot_id,
+        channel.bot_owner_id.as_deref().unwrap_or(owner),
+        session,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+
+    let Some(bot) = db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id": &channel.channel_bot_id,
+            "user_id": channel.bot_owner_id.as_deref().unwrap_or(owner),
+            "is_active": true, "status": {"$ne": "suspended"}},
+            doc! {"$inc": {"channel_admission_revision": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if super::channel_platform::canonical_platform(&bot.platform) != channel.platform {
+        return Ok(None);
+    }
+    // The bot fence serializes route management, but is not evidence that
+    // the original managed route still exists and belongs to this channel.
+    // Fence that exact route too: deletion/rebinding must win before tools run.
+    let (Some(route_id), Some(route_key)) = (
+        d.source_route_id.as_deref(),
+        d.source_route_api_key_id.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    if channel.route_id.as_deref() != Some(route_id) || channel.route_api_key_id != route_key {
+        return Ok(None);
+    }
+    let route = db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {
+                "_id": route_id,
+                "user_id": channel.bot_owner_id.as_deref().unwrap_or(owner),
+                "channel_bot_id": &channel.channel_bot_id, "platform": &bot.platform,
+                "agent_api_key_id": &channel.route_api_key_id,
+                "is_active": true, "retired_by_transfer": {"$ne": true},
+            },
+            doc! {"$inc": {"channel_admission_revision": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if route.is_none() {
+        return Ok(None);
+    }
+
+    let key = db.collection::<bson::Document>("api_keys").find_one_and_update(doc! {
+        "_id": &channel.route_api_key_id, "user_id": channel.bot_owner_id.as_deref().unwrap_or(owner), "is_active": true,
+        "$or": [{"expires_at": bson::Bson::Null}, {"expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}}],
+    }, doc! {"$inc": {"channel_admission_revision": 1_i64}}).session(&mut *session).await?;
+    let user = db
+        .collection::<bson::Document>("users")
+        .find_one_and_update(
+            doc! {
+                "_id": owner, "is_active": true,
+            },
+            doc! {"$inc": {"channel_admission_revision": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    Ok((key.is_some() && user.is_some()).then_some(d.origin))
+}
+
+/// Who an inbound chat message is from, as far as the agent is concerned.
+pub(crate) enum Admission {
+    /// The verified owner.
+    Owner,
+    /// Someone else the chat lets talk to the agent.
+    Guest,
+    /// A private chat with someone the bot does not answer.
+    Refuse,
+    /// Not for the agent (not addressed, or members may not talk).
+    Silent,
+    /// A member addressed the agent in a group the owner has not talked in
+    /// yet (and has not set who may talk).
+    Waiting,
+}
+
+pub(crate) fn admission(
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    sender_id: &str,
+    addressed: Option<bool>,
+) -> Admission {
+    let owner = row.owner_sender_ids.iter().any(|id| id == sender_id);
+    // When the platform cannot tell, the owner's messages count as addressed
+    // and nobody else's do.
+    let addressed = addressed.unwrap_or(owner);
+    if chat.kind.as_deref() == Some("private") {
+        return if owner {
+            Admission::Owner
+        } else if row.private_chats.as_deref() == Some("everyone") {
+            Admission::Guest
+        } else {
+            Admission::Refuse
+        };
+    }
+    if !(addressed
+        || chat.kind.as_deref() == Some("private")
+        || chat.reply_mode.as_deref() == Some("all"))
+    {
+        Admission::Silent
+    } else if owner {
+        Admission::Owner
+    } else if match chat.members.as_deref() {
+        Some("everyone") => true,
+        Some(_) => false,
+        None => chat.owner_seen,
+    } {
+        Admission::Guest
+    } else if chat.members.is_none() && addressed && chat.kind.as_deref() == Some("group") {
+        // A broadcast channel's posts come from the channel, never the owner:
+        // no promise that cannot come true.
+        Admission::Waiting
+    } else {
+        Admission::Silent
+    }
+}
+
+pub(crate) fn bot_guest_allowed(chat: &NyxbotThread, addressed: Option<bool>) -> bool {
+    chat.kind.as_deref() == Some("group")
+        && addressed == Some(true)
+        && match chat.members.as_deref() {
+            Some("everyone") => true,
+            Some(_) => false,
+            None => chat.owner_seen,
+        }
+}
+
+pub(crate) fn guest_source_admitted(
+    channel: &NyxbotChannel,
+    thread: &NyxbotThread,
+    delivery: &crate::models::nyxbot_channel::ChannelTurnDelivery,
+) -> bool {
+    delivery.guest
+        && if delivery.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
+            // A native bot stays a guest even when a legacy owner-ID row
+            // overlaps its ID. Recheck the same explicit group-mention policy.
+            bot_guest_allowed(thread, Some(delivery.addressed))
+        } else {
+            matches!(
+                admission(
+                    channel,
+                    thread,
+                    &delivery.sender_id,
+                    Some(delivery.addressed)
+                ),
+                Admission::Guest
+            )
+        }
+}
+
+/// Shared live target authority for late delivery and queued execution.
+/// Captured native/platform/service-adapter turns retain their separate paths.
+pub async fn target(
+    db: &Database,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &crate::models::assistant_conversation::ChannelOrigin,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    let mut session = db.client().start_session().await?;
+    target_in_session(db, row, origin, &mut session, false).await
+}
+
+async fn target_in_session(
+    db: &Database,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &crate::models::assistant_conversation::ChannelOrigin,
+    session: &mut ClientSession,
+    fence: bool,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    use crate::models::nyxbot_channel::{
+        COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as THREADS,
+    };
+    if origin.org_execution.is_some() {
+        let access = match Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            origin,
+            &row.user_id,
+            row.agent_id.as_deref().unwrap_or_default(),
+            fence,
+        ))
+        .await
+        {
+            Ok(access) => access,
+            Err(AppError::Forbidden(_)) => {
+                // Management keeps its flag-off 403. A saved delivery must use
+                // the transport classification before treating it as terminal.
+                if let Some(channel) = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &origin.nyxbot_channel_id, "status": "active"})
+                    .session(&mut *session)
+                    .await?
+                    && super::org_channel_service::transport_access(db, &channel).await?
+                        == super::org_channel_service::OrgAccess::Unavailable
+                {
+                    return Err(AppError::SecurityReadinessUnavailable);
+                }
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        if access.check_source_conversation(row).is_err() {
+            return Ok(None);
+        }
+        let channel = access.channel().clone();
+        let Some(thread)=db.collection::<NyxbotThread>(THREADS).find_one(doc!{"channel_id":&channel.id,"user_id":&channel.user_id,"partition":&origin.partition}).session(&mut *session).await? else {return Ok(None)};
+        if !super::platform_bot_authority::permits_personal_routes(db, &channel.channel_bot_id)
+            .await?
+        {
+            return Ok(None);
+        }
+        return Ok(Some((channel, thread)));
+    }
+    if fence {
+        db.collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id": &origin.nyxbot_channel_id, "user_id": &row.user_id},
+                doc! {"$inc": {"channel_admission_revision": 1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        db.collection::<bson::Document>(THREADS).update_one(
+            doc! {"channel_id": &origin.nyxbot_channel_id, "partition": &origin.partition, "user_id": &row.user_id},
+            doc! {"$inc": {"channel_admission_revision": 1_i64}},
+        ).session(&mut *session).await?;
+    }
+    let Some(channel) = db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {
+            "_id": &origin.nyxbot_channel_id, "user_id": &row.user_id, "status": "active",
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if !super::platform_bot_authority::permits_personal_routes(db, &channel.channel_bot_id).await? {
+        return Ok(None);
+    }
+    if let Some(org) = &channel.bot_owner_id {
+        let filter = doc! {"org_user_id": org, "member_user_id": &row.user_id,
+        "revoked_at": bson::Bson::Null, "role": "admin"};
+        let membership =
+            db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME);
+        let allowed = if fence {
+            membership
+                .find_one_and_update(filter, doc! {"$inc": {"channel_admission_revision": 1_i64}})
+                .session(&mut *session)
+                .await?
+                .is_some()
+        } else {
+            membership
+                .find_one(filter)
+                .session(&mut *session)
+                .await?
+                .is_some()
+        };
+        if !allowed {
+            return Ok(None);
+        }
+    }
+    let Some(thread) = db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {
+            "channel_id": &channel.id, "user_id": &row.user_id, "partition": &origin.partition,
+            "conversation_id": &row.id,
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let own_chat = row.channel.as_ref().is_some_and(|saved| {
+        saved == origin
+            || (super::nyxbot_gateway_source::ready(&channel)
+                && saved.nyxbot_channel_id == origin.nyxbot_channel_id
+                && saved.partition == origin.partition
+                && saved.platform == origin.platform
+                && saved.thread == origin.thread)
+    });
+    // Native origins also retain a per-message reply identity. That identity
+    // must not split one guild chat into separate conversations, or invalidate
+    // older accepted answers when a later message advances the origin. Replay
+    // and native sends independently verify their exact source event/binding.
+    let private_home = thread.kind.as_deref() == Some("private")
+        && thread.owner_chat
+        && row.group_id.is_none()
+        && row.platform_thread.is_none();
+    Ok((own_chat || private_home).then_some((channel, thread)))
 }

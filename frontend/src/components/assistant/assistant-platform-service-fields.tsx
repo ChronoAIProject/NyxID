@@ -25,7 +25,7 @@ export function AssistantPlatformServiceFields({
   const key = useApiKey(keyId ?? "");
   if (keyId && !key.data)
     return (
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {key.isError
           ? t("Could not load service scope.")
           : t("Loading service scope…")}

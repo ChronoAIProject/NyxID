@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -41,7 +42,7 @@ function formatTimestamp(value: string | null | undefined): string {
 }
 
 function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const broken = status.outcome === "broken";
   return (
     <Card>
@@ -52,73 +53,73 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
           ) : (
             <ShieldCheck className="h-5 w-5 text-emerald-500" />
           )}
-          <CardTitle className="text-base">
+          <CardTitle className="text-15">
             {CHAIN_LABELS[status.chain]}
           </CardTitle>
         </div>
         <Badge variant={broken ? "destructive" : "success"}>
           {broken
-            ? t("Broken")
+            ? translateUi("Broken")
             : status.chain === "billing_accounts" && status.break_detail
-              ? t("Pending settlements")
-              : t("Intact")}
+              ? translateUi("Pending settlements")
+              : translateUi("Intact")}
         </Badge>
       </CardHeader>
       <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           {CHAIN_DESCRIPTIONS[status.chain]}
         </p>
 
         {broken ? (
-          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
+          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-14">
             <p className="font-medium text-destructive">
               {status.chain === "billing_accounts"
-                ? t("Account balance mismatch")
-                : t("Integrity break at seq {{value}}", { value: status.break_seq ?? t("unknown") })}
-              {status.break_kind ? t(" ({{break_kind}})", { break_kind: status.break_kind }) : ""}
+                ? translateUi("Account balance mismatch")
+                : translateUi("Integrity break at seq {{value1}}", { value1: status.break_seq ?? "unknown" })}
+              {status.break_kind ? translateUi(" ({{break_kind}})", { break_kind: status.break_kind }) : ""}
             </p>
             {status.break_detail ? (
-              <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+              <p className="mt-1 break-all font-mono text-13 text-muted-foreground">
                 {status.break_detail}
               </p>
             ) : null}
             <p className="mt-2 text-muted-foreground">
               {status.chain === "billing_accounts"
-                ? t("A stored balance differs from its journal. Review the account and its settlement recovery state.")
-                : t("Stored history no longer matches its hash chain. Treat as possible tampering and investigate before trusting records at or after this seq.")}
+                ? translateUi("A stored balance differs from its journal. Review the account and its settlement recovery state.")
+                : translateUi("Stored history no longer matches its hash chain. Treat as possible tampering and investigate before trusting records at or after this seq.")}
             </p>
           </div>
         ) : null}
 
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-14 sm:grid-cols-3">
           <div>
-            <dt className="text-muted-foreground">{t("Chain head")}</dt>
-            <dd>{status.head_seq ?? t("empty")}</dd>
+            <dt className="text-muted-foreground">{translateUi("Chain head")}</dt>
+            <dd>{status.head_seq ?? translateUi("empty")}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground">{t("Last check")}</dt>
+            <dt className="text-muted-foreground">{translateUi("Last check")}</dt>
             <dd>{formatTimestamp(status.last_run_at)}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground">{t("Last full pass")}</dt>
+            <dt className="text-muted-foreground">{translateUi("Last full pass")}</dt>
             <dd>{formatTimestamp(status.last_full_pass_at)}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground">{t("Entries last check")}</dt>
+            <dt className="text-muted-foreground">{translateUi("Entries last check")}</dt>
             <dd>{status.checked_entries}</dd>
           </div>
           {status.chain === "billing_ledger" ? (
             <div>
-              <dt className="text-muted-foreground">{t("Head anchor")}</dt>
+              <dt className="text-muted-foreground">{translateUi("Head anchor")}</dt>
               <dd>
                 {status.anchor_seq == null
-                  ? t("none yet")
-                  : t("seq {{anchor_seq}}{{value}}", { anchor_seq: status.anchor_seq, value: status.anchor_valid === false ? t(" (invalid)") : "" })}
+                  ? translateUi("none yet")
+                  : translateUi("seq {{value1}}{{value2}}", { value1: status.anchor_seq, value2: status.anchor_valid === false ? " (invalid)" : "" })}
               </dd>
             </div>
           ) : (
             <div>
-              <dt className="text-muted-foreground">{t("Pre-chain rows")}</dt>
+              <dt className="text-muted-foreground">{translateUi("Pre-chain rows")}</dt>
               <dd>{status.pre_chain_count ?? 0}</dd>
             </div>
           )}
@@ -133,7 +134,7 @@ function StartupDiagnostics({
 }: {
   readonly diagnostics: readonly StartupDiagnostic[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (diagnostics.length === 0) return null;
 
   return (
@@ -141,18 +142,18 @@ function StartupDiagnostics({
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <div className="flex items-center gap-2">
           <ShieldAlert className="h-5 w-5 text-destructive" />
-          <CardTitle className="text-base">{t("Startup diagnostics")}</CardTitle>
+          <CardTitle className="text-15">{translateUi("Startup diagnostics")}</CardTitle>
         </div>
-        <Badge variant="destructive">{t("Action required")}</Badge>
+        <Badge variant="destructive">{translateUi("Action required")}</Badge>
       </CardHeader>
       <CardContent className="space-y-4">
         {diagnostics.map((diagnostic) => (
-          <div key={diagnostic.code} className="space-y-2 text-sm">
+          <div key={diagnostic.code} className="space-y-2 text-14">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <p className="font-medium text-destructive">
                 {diagnostic.summary}
               </p>
-              <span className="text-xs text-muted-foreground">
+              <span className="text-13 text-muted-foreground">
                 {formatTimestamp(diagnostic.detected_at)}
               </span>
             </div>
@@ -166,7 +167,7 @@ function StartupDiagnostics({
 }
 
 export function AdminIntegrityPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data, isLoading, error } = useChainVerification();
   const runVerification = useRunChainVerification();
   const currentUser = useAuthStore((s) => s.user);
@@ -182,21 +183,21 @@ export function AdminIntegrityPage() {
           toast.success(translateUi("Verification passed: both chains intact"));
         } else {
           toast.error(
-            translateUi("Integrity break detected in {{value}}", { value: broken
+            translateErrorMessage(`Integrity break detected in ${broken
               .map((chain) => CHAIN_LABELS[chain.chain])
-              .join(", ") }),
+              .join(", ")}`),
           );
         }
       },
-      onError: () => toast.error(translateUi("Verification run failed")),
+      onError: () => toast.error(translateErrorMessage("Verification run failed")),
     });
   };
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t("Integrity")}
-        description={t("Tamper-evidence status of the audit log and billing ledger hash chains, re-verified automatically in the background.")}
+        title={translateUi("Integrity")}
+        description={translateUi("Tamper-evidence status of the audit log and billing ledger hash chains, re-verified automatically in the background.")}
         actions={
           canWrite ? (
             <Button
@@ -210,7 +211,7 @@ export function AdminIntegrityPage() {
                     ? "mr-2 h-4 w-4 animate-spin"
                     : "mr-2 h-4 w-4"
                 }
-              />{t("Run check now")}</Button>
+              />{translateUi("Run check now")}</Button>
           ) : undefined
         }
       />
@@ -221,7 +222,7 @@ export function AdminIntegrityPage() {
 
       {error ? (
         <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">{t("Failed to load chain verification status.")}</CardContent>
+          <CardContent className="py-8 text-center text-14 text-muted-foreground">{translateUi("Failed to load chain verification status.")}</CardContent>
         </Card>
       ) : isLoading ? (
         <div className="space-y-4">
@@ -238,7 +239,7 @@ export function AdminIntegrityPage() {
         </div>
       ) : (
         <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">{t("No verification runs recorded yet. The background sweep runs on an interval after startup; use Run check now to verify immediately.")}</CardContent>
+          <CardContent className="py-8 text-center text-14 text-muted-foreground">{translateUi("No verification runs recorded yet. The background sweep runs on an interval after startup; use Run check now to verify immediately.")}</CardContent>
         </Card>
       )}
     </div>

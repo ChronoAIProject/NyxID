@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useAuthStore } from "@/stores/auth-store";
 import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
 import { canWriteTool } from "@/types/api";
@@ -54,6 +54,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { RoutingSection } from "@/components/dashboard/routing-section";
+import { IdentityResyncSection } from "@/components/dashboard/identity-resync-section";
 import { useMyProviderTokens, useProvider } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
@@ -122,7 +123,7 @@ const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function ServiceDetailPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
@@ -144,7 +145,7 @@ export function ServiceDetailPage() {
       toast.success(translateUi("Service deleted successfully"));
       void navigate({ to: "/services" });
     } catch {
-      toast.error(translateUi("Failed to delete service"));
+      toast.error(translateErrorMessage("Failed to delete service"));
     }
   }
 
@@ -152,7 +153,7 @@ export function ServiceDetailPage() {
     if (!service?.ssh_config) return;
     const principal = service.ssh_config.allowed_principals[0];
     if (!principal) {
-      toast.error(translateUi("No SSH principal is configured for this service"));
+      toast.error(translateErrorMessage("No SSH principal is configured for this service"));
       return;
     }
     try {
@@ -177,12 +178,12 @@ export function ServiceDetailPage() {
   if (error || !service) {
     return (
       <div className="space-y-8">
-        <PageHeader title={t("Service Not Found")} />
+        <PageHeader title={translateUi("Service Not Found")} />
         <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : t("The service you are looking for does not exist or has been deleted.")
+              : translateUi("The service you are looking for does not exist or has been deleted.")
           }
           onRetry={refetch}
         />
@@ -250,7 +251,7 @@ export function ServiceDetailPage() {
               >
                 <ButtonIcon>
                   <Terminal className="h-3 w-3" />
-                </ButtonIcon>{t("Terminal")}</Button>
+                </ButtonIcon>{translateUi("Terminal")}</Button>
             )}
             <Button
               variant="outline"
@@ -264,7 +265,7 @@ export function ServiceDetailPage() {
             >
               <ButtonIcon>
                 <Pencil className="h-3 w-3" />
-              </ButtonIcon>{t("Edit")}</Button>
+              </ButtonIcon>{translateUi("Edit")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
@@ -272,22 +273,22 @@ export function ServiceDetailPage() {
             >
               <ButtonIcon variant="destructive">
                 <Trash2 className="h-3 w-3 text-destructive" />
-              </ButtonIcon>{t("Delete")}</Button>
+              </ButtonIcon>{translateUi("Delete")}</Button>
           </>
         }
       />
 
-      <DetailSection title={t("General")}>
-        <DetailRow label={t("Slug")} value={service.slug} />
+      <DetailSection title={translateUi("General")}>
+        <DetailRow label={translateUi("Slug")} value={service.slug} />
         <DetailRow
-          label={t("Service Type")}
+          label={translateUi("Service Type")}
           value={
             SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type
           }
           badge
         />
         <DetailRow
-          label={t("Category")}
+          label={translateUi("Category")}
           value={
             SERVICE_CATEGORY_LABELS[service.service_category] ??
             service.service_category
@@ -295,7 +296,7 @@ export function ServiceDetailPage() {
           badge
         />
         <DetailRow
-          label={t("Visibility")}
+          label={translateUi("Visibility")}
           value={
             service.visibility === "private"
               ? "Private (only visible to you)"
@@ -308,7 +309,7 @@ export function ServiceDetailPage() {
         />
         {service.developer_app_ids && service.developer_app_ids.length > 0 && (
           <div className="space-y-1 py-2">
-            <p className="text-12 text-muted-foreground">{t("Developer App Scoping")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Developer App Scoping")}</p>
             <div className="flex flex-wrap gap-1.5">
               {service.developer_app_ids.map((appId) => {
                 const app = appsData?.clients?.find((c) => c.id === appId);
@@ -319,27 +320,27 @@ export function ServiceDetailPage() {
                 );
               })}
             </div>
-            <p className="text-xs text-muted-foreground">{t("Users who consent to these apps will have this service auto-provisioned.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Users who consent to these apps will have this service auto-provisioned.")}</p>
           </div>
         )}
         {!isSshService && (
           <>
-            <DetailRow label={t("Base URL")} value={service.base_url} copyable />
+            <DetailRow label={translateUi("Base URL")} value={service.base_url} copyable />
             <DetailRow
-              label={t("Auth Type")}
+              label={translateUi("Auth Type")}
               value={getAuthTypeLabel(service)}
               badge
             />
           </>
         )}
         <DetailRow
-          label={t("Status")}
+          label={translateUi("Status")}
           value={service.is_active ? "Active" : "Inactive"}
           badge
           badgeVariant={service.is_active ? "success" : "secondary"}
         />
-        <DetailRow label={t("Created")} value={formatDate(service.created_at)} />
-        <DetailRow label={t("Updated")} value={formatDate(service.updated_at)} />
+        <DetailRow label={translateUi("Created")} value={formatDate(service.created_at)} />
+        <DetailRow label={translateUi("Updated")} value={formatDate(service.updated_at)} />
       </DetailSection>
 
       {/*
@@ -369,22 +370,22 @@ export function ServiceDetailPage() {
       {isSshService ? (
         <>
           <Separator />
-          <DetailSection title={t("SSH Configuration")}>
+          <DetailSection title={translateUi("SSH Configuration")}>
             {service.ssh_config ? (
               <>
                 <DetailRow
-                  label={t("Target")}
+                  label={translateUi("Target")}
                   value={`${service.ssh_config.host}:${String(service.ssh_config.port)}`}
                   copyable
                 />
                 <DetailRow
-                  label={t("SSH Auth Mode")}
+                  label={translateUi("SSH Auth Mode")}
                   value={SSH_AUTH_MODE_LABELS[sshAuthMode] ?? "Proxy Only"}
                   badge
                   badgeVariant={getSshAuthModeBadgeVariant(sshAuthMode)}
                 />
                 <DetailRow
-                  label={t("Certificate Auth")}
+                  label={translateUi("Certificate Auth")}
                   value={
                     service.ssh_config.certificate_auth_enabled
                       ? "Enabled"
@@ -400,19 +401,19 @@ export function ServiceDetailPage() {
                 {service.ssh_config.certificate_auth_enabled && (
                   <>
                     <DetailRow
-                      label={t("Certificate TTL")}
+                      label={translateUi("Certificate TTL")}
                       value={`${String(service.ssh_config.certificate_ttl_minutes)} minutes`}
                     />
                   </>
                 )}
                 <DetailRow
-                  label={t("Allowed Principals")}
+                  label={translateUi("Allowed Principals")}
                   value={service.ssh_config.allowed_principals.join(", ")}
                   copyable
                 />
                 {service.ssh_config.ca_public_key && (
                   <CopyableField
-                    label={t("SSH CA Public Key")}
+                    label={translateUi("SSH CA Public Key")}
                     value={service.ssh_config.ca_public_key}
                   />
                 )}
@@ -424,19 +425,19 @@ export function ServiceDetailPage() {
                       size="sm"
                       onClick={() => void handleTestSshConnection()}
                       isLoading={testSshMutation.isPending}
-                    >{t("Test Connection")}</Button>
+                    >{translateUi("Test Connection")}</Button>
                   </div>
                 )}
               </>
             ) : (
-              <p className="text-12 text-muted-foreground">{t("SSH configuration is missing for this service.")}</p>
+              <p className="text-14 text-muted-foreground">{translateUi("SSH configuration is missing for this service.")}</p>
             )}
           </DetailSection>
 
           {service.ssh_config && (
             <>
               <Separator />
-              <DetailSection title={t("Connection Instructions")}>
+              <DetailSection title={translateUi("Connection Instructions")}>
                 <SshServiceInstructions
                   serviceId={service.id}
                   serviceSlug={service.slug}
@@ -451,7 +452,7 @@ export function ServiceDetailPage() {
           {oidc && (
             <>
               <Separator />
-              <DetailSection title={t("OIDC Configuration")}>
+              <DetailSection title={translateUi("OIDC Configuration")}>
                 <OidcCredentialsSection
                   serviceId={service.id}
                   oauthClientId={service.oauth_client_id}
@@ -463,7 +464,7 @@ export function ServiceDetailPage() {
           {isConnectable(service) && !oidc && (
             <>
               <Separator />
-              <DetailSection title={t("API Endpoints")}>
+              <DetailSection title={translateUi("API Endpoints")}>
                 <EndpointList
                   service={service}
                   serviceId={service.id}
@@ -477,7 +478,7 @@ export function ServiceDetailPage() {
               </DetailSection>
 
               <Separator />
-              <DetailSection title={t("MCP Connection")}>
+              <DetailSection title={translateUi("MCP Connection")}>
                 <McpConnectionInfo />
               </DetailSection>
             </>
@@ -487,9 +488,9 @@ export function ServiceDetailPage() {
             service.identity_propagation_mode !== "none" && (
               <>
                 <Separator />
-                <DetailSection title={t("Identity Propagation")}>
+                <DetailSection title={translateUi("Identity Propagation")}>
                   <DetailRow
-                    label={t("Mode")}
+                    label={translateUi("Mode")}
                     value={
                       PROPAGATION_MODE_LABELS[
                         service.identity_propagation_mode
@@ -499,7 +500,7 @@ export function ServiceDetailPage() {
                   />
                   {service.identity_include_user_id && (
                     <DetailRow
-                      label={t("User ID")}
+                      label={translateUi("User ID")}
                       value="Included"
                       badge
                       badgeVariant="success"
@@ -507,7 +508,7 @@ export function ServiceDetailPage() {
                   )}
                   {service.identity_include_email && (
                     <DetailRow
-                      label={t("Email")}
+                      label={translateUi("Email")}
                       value="Included"
                       badge
                       badgeVariant="success"
@@ -515,7 +516,7 @@ export function ServiceDetailPage() {
                   )}
                   {service.identity_include_name && (
                     <DetailRow
-                      label={t("Display Name")}
+                      label={translateUi("Display Name")}
                       value="Included"
                       badge
                       badgeVariant="success"
@@ -523,7 +524,7 @@ export function ServiceDetailPage() {
                   )}
                   {service.identity_jwt_audience && (
                     <DetailRow
-                      label={t("JWT Audience")}
+                      label={translateUi("JWT Audience")}
                       value={service.identity_jwt_audience}
                     />
                   )}
@@ -534,9 +535,9 @@ export function ServiceDetailPage() {
           {service.forward_access_token && (
             <>
               <Separator />
-              <DetailSection title={t("Forward Access Token")}>
+              <DetailSection title={translateUi("Forward Access Token")}>
                 <DetailRow
-                  label={t("Status")}
+                  label={translateUi("Status")}
                   value="Enabled"
                   badge
                   badgeVariant="success"
@@ -548,20 +549,22 @@ export function ServiceDetailPage() {
           {service.inject_delegation_token && (
             <>
               <Separator />
-              <DetailSection title={t("Delegation Token Injection")}>
+              <DetailSection title={translateUi("Delegation Token Injection")}>
                 <DetailRow
-                  label={t("Status")}
+                  label={translateUi("Status")}
                   value="Enabled"
                   badge
                   badgeVariant="success"
                 />
                 <DetailRow
-                  label={t("Token Scope")}
+                  label={translateUi("Token Scope")}
                   value={service.delegation_token_scope || "llm:proxy"}
                 />
               </DetailSection>
             </>
           )}
+
+          <IdentityResyncSection service={service} />
 
           {(service.homepage_url ||
             service.repository_url ||
@@ -576,61 +579,61 @@ export function ServiceDetailPage() {
             service.capabilities) && (
             <>
               <Separator />
-              <DetailSection title={t("Service Metadata")}>
+              <DetailSection title={translateUi("Service Metadata")}>
                 {service.homepage_url && (
                   <DetailRow
-                    label={t("Homepage")}
+                    label={translateUi("Homepage")}
                     value={service.homepage_url}
                     copyable
                   />
                 )}
                 {service.repository_url && (
                   <DetailRow
-                    label={t("Repository")}
+                    label={translateUi("Repository")}
                     value={service.repository_url}
                     copyable
                   />
                 )}
                 {service.issues_url && (
                   <DetailRow
-                    label={t("Issues")}
+                    label={translateUi("Issues")}
                     value={service.issues_url}
                     copyable
                   />
                 )}
                 {service.examples_url && (
                   <DetailRow
-                    label={t("Skills & Examples")}
+                    label={translateUi("Skills & Examples")}
                     value={service.examples_url}
                     copyable
                   />
                 )}
                 {service.auth_notes && (
-                  <DetailRow label={t("Auth Notes")} value={service.auth_notes} />
+                  <DetailRow label={translateUi("Auth Notes")} value={service.auth_notes} />
                 )}
                 {service.known_limitations && (
                   <DetailRow
-                    label={t("Known Limitations")}
+                    label={translateUi("Known Limitations")}
                     value={service.known_limitations}
                   />
                 )}
                 {service.required_permissions &&
                   service.required_permissions.length > 0 && (
                     <DetailRow
-                      label={t("Required Permissions")}
+                      label={translateUi("Required Permissions")}
                       value={service.required_permissions.join(", ")}
                     />
                   )}
                 {service.recommended_skills &&
                   service.recommended_skills.length > 0 && (
                     <DetailRow
-                      label={t("Recommended Skills")}
+                      label={translateUi("Recommended Skills")}
                       value={service.recommended_skills.join(", ")}
                     />
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-12 text-muted-foreground">{t("Capabilities")}</p>
+                    <p className="text-14 text-muted-foreground">{translateUi("Capabilities")}</p>
                     <div className="flex flex-wrap gap-1.5">
                       {Object.entries(service.capabilities)
                         .filter(([, v]) => v === true)
@@ -642,7 +645,7 @@ export function ServiceDetailPage() {
                       {Object.entries(service.capabilities).every(
                         ([, v]) => v !== true,
                       ) && (
-                        <span className="text-xs text-muted-foreground">{t("None configured")}</span>
+                        <span className="text-13 text-muted-foreground">{translateUi("None configured")}</span>
                       )}
                     </div>
                   </div>
@@ -652,11 +655,11 @@ export function ServiceDetailPage() {
           )}
 
           <Separator />
-          <DetailSection title={t("Default request headers")}>
+          <DetailSection title={translateUi("Default request headers")}>
             {service.default_request_headers &&
             service.default_request_headers.length > 0 ? (
               <div className="space-y-2 p-4">
-                <p className="text-xs text-muted-foreground">{t("Injected on every proxied request. Non-overridable entries replace caller-supplied values; overridable ones yield to them.")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Injected on every proxied request. Non-overridable entries replace caller-supplied values; overridable ones yield to them.")}</p>
                 <DefaultHeadersEditor
                   value={service.default_request_headers.map((h) => ({ ...h }))}
                   onChange={() => {
@@ -666,7 +669,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">{t("No default headers configured for this service.")}</div>
+              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground">{translateUi("No default headers configured for this service.")}</div>
             )}
           </DetailSection>
 
@@ -674,7 +677,7 @@ export function ServiceDetailPage() {
           <AnonymousEndpointsSection key={service.id} serviceId={service.id} />
 
           <Separator />
-          <DetailSection title={t("Provider Requirements")}>
+          <DetailSection title={translateUi("Provider Requirements")}>
             <ServiceRequirementsView
               serviceId={service.id}
               userTokenProviderIds={
@@ -736,7 +739,7 @@ function ServiceCredentialPushSection({
 }: {
   readonly service: import("@/types/api").DownstreamService;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const nodeId = service.node_id ?? "";
   const pushCredentialMutation = usePushNodeCredential(nodeId);
   const initialMethod = injectionMethodForService(service);
@@ -777,7 +780,7 @@ function ServiceCredentialPushSection({
   }
 
   return (
-    <DetailSection title={t("Push credential")}>
+    <DetailSection title={translateUi("Push credential")}>
       <Form {...form}>
         <form
           className="space-y-4 p-5"
@@ -785,14 +788,14 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-          <p className="text-12 text-muted-foreground">{t("Create pending metadata for the node, then encrypt the secret in the browser on the accept page.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("Create pending metadata for the node, then encrypt the secret in the browser on the accept page.")}</p>
           <div className="grid gap-4 md:grid-cols-2">
             <FormField
               control={form.control}
               name="injection_method"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Injection method")}</FormLabel>
+                  <FormLabel>{translateUi("Injection method")}</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(value) => {
@@ -822,10 +825,10 @@ function ServiceCredentialPushSection({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="header">{t("Header")}</SelectItem>
-                      <SelectItem value="query-param">{t("Query param")}</SelectItem>
-                      <SelectItem value="path-prefix">{t("Path prefix")}</SelectItem>
-                      <SelectItem value="ifttt-webhook">{t("IFTTT Webhooks")}</SelectItem>
+                      <SelectItem value="header">{translateUi("Header")}</SelectItem>
+                      <SelectItem value="query-param">{translateUi("Query param")}</SelectItem>
+                      <SelectItem value="path-prefix">{translateUi("Path prefix")}</SelectItem>
+                      <SelectItem value="ifttt-webhook">{translateUi("IFTTT Webhooks")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -837,7 +840,7 @@ function ServiceCredentialPushSection({
               name="field_name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Field name")}</FormLabel>
+                  <FormLabel>{translateUi("Field name")}</FormLabel>
                   <FormControl>
                     <Input
                       readOnly={
@@ -855,7 +858,7 @@ function ServiceCredentialPushSection({
               name="target_url"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Target URL")}</FormLabel>
+                  <FormLabel>{translateUi("Target URL")}</FormLabel>
                   <FormControl>
                     <Input {...field} value={field.value ?? ""} />
                   </FormControl>
@@ -868,7 +871,7 @@ function ServiceCredentialPushSection({
               name="label"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Label")}</FormLabel>
+                  <FormLabel>{translateUi("Label")}</FormLabel>
                   <FormControl>
                     <Input {...field} value={field.value ?? ""} />
                   </FormControl>
@@ -886,7 +889,7 @@ function ServiceCredentialPushSection({
             >
               <ButtonIcon variant="primary">
                 <Send className="h-3 w-3" />
-              </ButtonIcon>{t("Push")}</Button>
+              </ButtonIcon>{translateUi("Push")}</Button>
           </div>
         </form>
       </Form>
@@ -899,7 +902,7 @@ function AnonymousEndpointsSection({
 }: {
   readonly serviceId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: endpoints, isLoading } = useAnonymousEndpoints(serviceId);
   const createMutation = useCreateAnonymousEndpoint(serviceId);
   const updateMutation = useUpdateAnonymousEndpoint(serviceId);
@@ -976,11 +979,11 @@ function AnonymousEndpointsSection({
   }
 
   return (
-    <DetailSection title={t("Anonymous endpoints")}>
+    <DetailSection title={translateUi("Anonymous endpoints")}>
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
           <Globe2 className="h-4 w-4 text-primary-text" />
-          <span className="text-13 font-medium">{t("Public proxy rules")}</span>
+          <span className="type-card-title">{translateUi("Public proxy rules")}</span>
         </div>
 
         <Form {...form}>
@@ -993,7 +996,7 @@ function AnonymousEndpointsSection({
               name="method"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Method")}</FormLabel>
+                  <FormLabel>{translateUi("Method")}</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(value) => field.onChange(value)}
@@ -1020,7 +1023,7 @@ function AnonymousEndpointsSection({
               name="path_pattern"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Path")}</FormLabel>
+                  <FormLabel>{translateUi("Path")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -1033,7 +1036,7 @@ function AnonymousEndpointsSection({
               name="daily_quota"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Daily quota")}</FormLabel>
+                  <FormLabel>{translateUi("Daily quota")}</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
@@ -1059,7 +1062,7 @@ function AnonymousEndpointsSection({
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3 w-3" />
-                </ButtonIcon>{t("Add")}</Button>
+                </ButtonIcon>{translateUi("Add")}</Button>
             </div>
           </form>
         </Form>
@@ -1069,7 +1072,7 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("No anonymous endpoints configured.")}</div>
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No anonymous endpoints configured.")}</div>
           )}
           {endpoints?.map((rule) => (
             <AnonymousEndpointRow
@@ -1105,13 +1108,13 @@ const PUBLIC_METHODS = [
  * prompts the admin to confirm the exposure is intentional.
  */
 function WideOpenAnonymousWarning() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-12 text-warning">
+    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-14 text-warning">
       <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
         <AlertTriangle className="h-3.5 w-3.5" />
       </span>
-      <p>{t("This pattern (")}<code className="font-mono">/**</code>{t(") matches every path and exposes the entire downstream service unauthenticated. Scope it to a specific prefix (e.g. ")}<code className="font-mono">/public/**</code>{t(") unless full public access is intended.")}</p>
+      <p>{translateUi("This pattern (")}<code className="font-mono">/**</code>{translateUi(") matches every path and exposes the entire downstream service unauthenticated. Scope it to a specific prefix (e.g. ")}<code className="font-mono">/public/**</code>{translateUi(") unless full public access is intended.")}</p>
     </div>
   );
 }
@@ -1135,7 +1138,7 @@ function AnonymousEndpointRow({
   readonly isUpdating: boolean;
   readonly isDeleting: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const projection = (value: AnonymousEndpointRule) => ({
     enabled: value.enabled,
     method: value.method,
@@ -1210,7 +1213,7 @@ function AnonymousEndpointRow({
             disabled={isUpdating || review.saving}
           />
           <Badge variant={rule.enabled ? "success" : "secondary"}>
-            {rule.enabled ? t("Enabled") : t("Draft")}
+            {rule.enabled ? translateUi("Enabled") : translateUi("Draft")}
           </Badge>
         </div>
         <Select
@@ -1273,7 +1276,7 @@ function AnonymousEndpointRow({
               ...describeChanges(baseline, data),
             ]);
           }}
-        >{t("Save")}</Button>
+        >{translateUi("Save")}</Button>
         <Button
           size="sm"
           variant="destructive"
@@ -1291,7 +1294,7 @@ function AnonymousEndpointRow({
         >
           <ButtonIcon variant="destructive">
             <Trash2 className="h-3 w-3 text-destructive" />
-          </ButtonIcon>{t("Delete")}</Button>
+          </ButtonIcon>{translateUi("Delete")}</Button>
       </div>
       {showWideOpenWarning && <WideOpenAnonymousWarning />}
     </div>
@@ -1324,7 +1327,7 @@ function YourRoutingSection({
   >;
   readonly onBindClick: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const count = service.your_binding_count ?? 0;
   const userServiceId = service.your_user_service_id ?? null;
 
@@ -1333,8 +1336,8 @@ function YourRoutingSection({
       <RoutingSection
         nodeId={service.node_id ?? null}
         serviceId={userServiceId}
-        title={t("Your Routing")}
-        description={t("Your personal routing for this service. Other users have their own.")}
+        title={translateUi("Your Routing")}
+        description={translateUi("Your personal routing for this service. Other users have their own.")}
       />
     );
   }
@@ -1345,26 +1348,26 @@ function YourRoutingSection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Router className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">{t("Your Routing")}</CardTitle>
+            <CardTitle className="text-15">{translateUi("Your Routing")}</CardTitle>
           </div>
           <Button
             variant="outline"
             className="text-text-tertiary hover:text-muted-foreground"
             onClick={onBindClick}
           >
-            {count === 0 ? t("Bind in AI Services") : t("Manage in AI Services")}
+            {count === 0 ? translateUi("Bind in AI Services") : translateUi("Manage in AI Services")}
             <ButtonIcon>
               <ExternalLink className="h-3 w-3" />
             </ButtonIcon>
           </Button>
         </div>
-        <CardDescription>{t("Your personal routing for this service. Other users have their own.")}</CardDescription>
+        <CardDescription>{translateUi("Your personal routing for this service. Other users have their own.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {count === 0 ? (
-          <p className="text-xs text-muted-foreground">{t("You haven't bound this service to your account yet, so there's no routing to configure here.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("You haven't bound this service to your account yet, so there's no routing to configure here.")}</p>
         ) : (
-          <p className="text-xs text-muted-foreground">{t("You have ")}{String(count)}{t(" personal bindings for this service. Manage each one's routing in AI Services.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("You have ")}{String(count)}{translateUi(" personal bindings for this service. Manage each one's routing in AI Services.")}</p>
         )}
       </CardContent>
     </Card>

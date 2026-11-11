@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -61,7 +61,7 @@ import { toast } from "sonner";
 const PER_PAGE = 20;
 
 export function AdminUsersPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState("");
@@ -126,11 +126,11 @@ export function AdminUsersPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("User Management")}
-        description={t("View and manage all registered users.")}
+        title={translateUi("User Management")}
+        description={translateUi("View and manage all registered users.")}
         actions={
           canWrite ? (
-            <AddCtaButton label={t("Create User")} onClick={openCreateDialog} />
+            <AddCtaButton label={translateUi("Create User")} onClick={openCreateDialog} />
           ) : null
         }
       />
@@ -139,13 +139,13 @@ export function AdminUsersPage() {
         <div className="relative max-w-sm flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder={t("Search by email...")}
+            placeholder={translateUi("Search by email...")}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="pl-9"
           />
         </div>
-        <Button type="submit" variant="outline" size="sm">{t("Search")}</Button>
+        <Button type="submit" variant="outline" size="sm">{translateUi("Search")}</Button>
         {search && (
           <Button
             type="button"
@@ -156,7 +156,7 @@ export function AdminUsersPage() {
               setSearch("");
               setPage(1);
             }}
-          >{t("Clear")}</Button>
+          >{translateUi("Clear")}</Button>
         )}
       </form>
 
@@ -170,17 +170,17 @@ export function AdminUsersPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("Failed to load users")}</p>
-            <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("Failed to load users")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
           </div>
         </div>
       ) : users.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No users found")}</p>
-            <p className="text-xs text-muted-foreground">
-              {search ? t("No users match your search.") : t("There are no users to display.")}
+            <p className="type-row-title text-muted-foreground">{translateUi("No users found")}</p>
+            <p className="text-13 text-muted-foreground">
+              {search ? translateUi("No users match your search.") : translateUi("There are no users to display.")}
             </p>
           </div>
         </div>
@@ -199,20 +199,20 @@ export function AdminUsersPage() {
                   onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/admin/users/$userId", params: { userId: user.id } }); }}
                   className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
                 >
-                  <p className="text-13 font-semibold text-foreground truncate">{user.display_name ?? user.email}</p>
+                  <p className="type-card-title text-foreground truncate">{user.display_name ?? user.email}</p>
                   {user.display_name && (
-                    <p className="text-11 text-muted-foreground truncate">{user.email}</p>
+                    <p className="text-13 text-muted-foreground truncate">{user.email}</p>
                   )}
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <Badge variant={user.is_active ? "success" : "destructive"}>
-                      {user.is_active ? t("Active") : t("Disabled")}
+                      {user.is_active ? translateUi("Active") : translateUi("Disabled")}
                     </Badge>
-                    {role === "admin" && <Badge variant="default">{t("Admin")}</Badge>}
-                    {role === "operator" && <Badge variant="secondary">{t("Operator")}</Badge>}
-                    {user.mfa_enabled && <Badge variant="success">{t("MFA")}</Badge>}
+                    {role === "admin" && <Badge variant="default">{translateUi("Admin")}</Badge>}
+                    {role === "operator" && <Badge variant="secondary">{translateUi("Operator")}</Badge>}
+                    {user.mfa_enabled && <Badge variant="success">{translateUi("MFA")}</Badge>}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-                    <span>{user.email_verified ? t("Verified") : t("Unverified")}</span>
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
+                    <span>{user.email_verified ? translateUi("Verified") : translateUi("Unverified")}</span>
                     <span>{formatDate(user.last_login_at)}</span>
                   </div>
                 </div>
@@ -225,14 +225,14 @@ export function AdminUsersPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Email")}</TableHead>
-                  <TableHead>{t("Name")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{t("Role")}</TableHead>
-                  <TableHead>{t("Verified")}</TableHead>
-                  <TableHead>{t("MFA")}</TableHead>
-                  <TableHead>{t("Created")}</TableHead>
-                  <TableHead>{t("Last Login")}</TableHead>
+                  <TableHead>{translateUi("Email")}</TableHead>
+                  <TableHead>{translateUi("Name")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Role")}</TableHead>
+                  <TableHead>{translateUi("Verified")}</TableHead>
+                  <TableHead>{translateUi("MFA")}</TableHead>
+                  <TableHead>{translateUi("Created")}</TableHead>
+                  <TableHead>{translateUi("Last Login")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -258,7 +258,7 @@ export function AdminUsersPage() {
                       }
                     }}
                   >
-                    <TableCell className="font-medium">{user.email}</TableCell>
+                    <TableCell className="font-normal">{user.email}</TableCell>
                     <TableCell>
                       {user.display_name ?? (
                         <span className="text-muted-foreground">--</span>
@@ -268,29 +268,29 @@ export function AdminUsersPage() {
                       <Badge
                         variant={user.is_active ? "success" : "destructive"}
                       >
-                        {user.is_active ? t("Active") : t("Disabled")}
+                        {user.is_active ? translateUi("Active") : translateUi("Disabled")}
                       </Badge>
                     </TableCell>
                     <TableCell>
                       {(() => {
                         const role = resolvePlatformRole(user);
                         if (role === "admin")
-                          return <Badge variant="default">{t("Admin")}</Badge>;
+                          return <Badge variant="default">{translateUi("Admin")}</Badge>;
                         if (role === "operator")
-                          return <Badge variant="secondary">{t("Operator")}</Badge>;
-                        return <Badge variant="secondary">{t("User")}</Badge>;
+                          return <Badge variant="secondary">{translateUi("Operator")}</Badge>;
+                        return <Badge variant="secondary">{translateUi("User")}</Badge>;
                       })()}
                     </TableCell>
                     <TableCell>
                       <Badge
                         variant={user.email_verified ? "success" : "warning"}
                       >
-                        {user.email_verified ? t("Verified") : t("Unverified")}
+                        {user.email_verified ? translateUi("Verified") : translateUi("Unverified")}
                       </Badge>
                     </TableCell>
                     <TableCell>
                       <Badge variant={user.mfa_enabled ? "success" : "secondary"}>
-                        {user.mfa_enabled ? t("On") : t("Off")}
+                        {user.mfa_enabled ? translateUi("On") : translateUi("Off")}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -306,26 +306,26 @@ export function AdminUsersPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-11 text-text-tertiary">{t("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
-              {String(Math.min(page * PER_PAGE, total))}{t(" of ")}{String(total)}{" "}{t("users")}</p>
+            <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
+              {String(Math.min(page * PER_PAGE, total))}{translateUi(" of ")}{String(total)}{" "}{translateUi("users")}</p>
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
                 size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                aria-label={t("Previous page")}
+                aria-label={translateUi("Previous page")}
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-11 text-text-tertiary">{t("Page ")}{String(page)}{t(" of ")}{String(totalPages)}
+              <span className="text-13 text-text-tertiary">{translateUi("Page ")}{String(page)}{translateUi(" of ")}{String(totalPages)}
               </span>
               <Button
                 variant="outline"
                 size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
-                aria-label={t("Next page")}
+                aria-label={translateUi("Next page")}
               >
                 <ChevronRight className="h-3 w-3" />
               </Button>
@@ -337,8 +337,8 @@ export function AdminUsersPage() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Create User")}</DialogTitle>
-            <DialogDescription>{t("Create a new user account. The account will be active and email-verified immediately.")}</DialogDescription>
+            <DialogTitle>{translateUi("Create User")}</DialogTitle>
+            <DialogDescription>{translateUi("Create a new user account. The account will be active and email-verified immediately.")}</DialogDescription>
           </DialogHeader>
           <Form {...createForm}>
             <form
@@ -352,11 +352,11 @@ export function AdminUsersPage() {
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Email")}</FormLabel>
+                    <FormLabel>{translateUi("Email")}</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
-                        placeholder={t("user@example.com")}
+                        placeholder={translateUi("user@example.com")}
                         {...field}
                       />
                     </FormControl>
@@ -369,12 +369,12 @@ export function AdminUsersPage() {
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Password")}</FormLabel>
+                    <FormLabel>{translateUi("Password")}</FormLabel>
                     <FormControl>
                       <div className="relative">
                         <Input
                           type={showPassword ? "text" : "password"}
-                          placeholder={t("Minimum 8 characters")}
+                          placeholder={translateUi("Minimum 8 characters")}
                           className="pr-9"
                           {...field}
                         />
@@ -383,7 +383,7 @@ export function AdminUsersPage() {
                           tabIndex={-1}
                           onClick={() => setShowPassword((v) => !v)}
                           className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showPassword ? t("Hide password") : t("Show password")}
+                          aria-label={showPassword ? translateUi("Hide password") : translateUi("Show password")}
                         >
                           {showPassword ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
                         </button>
@@ -398,9 +398,9 @@ export function AdminUsersPage() {
                 name="display_name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Display Name")}</FormLabel>
+                    <FormLabel>{translateUi("Display Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Optional")} {...field} />
+                      <Input placeholder={translateUi("Optional")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -411,17 +411,17 @@ export function AdminUsersPage() {
                 name="role"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Role")}</FormLabel>
+                    <FormLabel>{translateUi("Role")}</FormLabel>
                     <Select value={field.value} onValueChange={field.onChange}>
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder={t("Select role")} />
+                          <SelectValue placeholder={translateUi("Select role")} />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="user">{t("User")}</SelectItem>
-                        <SelectItem value="operator">{t("Operator (read-only platform admin)")}</SelectItem>
-                        <SelectItem value="admin">{t("Admin")}</SelectItem>
+                        <SelectItem value="user">{translateUi("User")}</SelectItem>
+                        <SelectItem value="operator">{translateUi("Operator (read-only platform admin)")}</SelectItem>
+                        <SelectItem value="admin">{translateUi("Admin")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -433,8 +433,8 @@ export function AdminUsersPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setCreateOpen(false)}
-                >{t("Cancel")}</Button>
-                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{t("Create User")}</Button>
+                >{translateUi("Cancel")}</Button>
+                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>{translateUi("Create User")}</Button>
               </DialogFooter>
             </form>
           </Form>

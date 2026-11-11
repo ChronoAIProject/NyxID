@@ -1,4 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { creditUnit } from "@/lib/platform-onboarding";
 import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
@@ -55,6 +57,7 @@ const fieldLabels = {
   assistant_instructions: "Public assistant instructions",
 } as const;
 export function SetupStatusBadge({ setup }: { setup: PlatformSetup }) {
+  useUiTranslation();
   const status = setup.effective_state ?? setup.state;
   return (
     <Badge variant={status === "active" ? "success" : "secondary"}>
@@ -64,7 +67,7 @@ export function SetupStatusBadge({ setup }: { setup: PlatformSetup }) {
 }
 
 export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const needsReview = ["awaiting_approval", "awaiting_child_review"].includes(
     setup.state,
   );
@@ -103,14 +106,14 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
   )
     return null;
   return (
-    <DetailSection title={t("Provisioning and activation")}>
-      <div className="space-y-3 p-4 text-12">
+    <DetailSection title={translateUi("Provisioning and activation")}>
+      <div className="space-y-3 p-4 text-14">
         {approval.error && <ErrorBanner message={approval.error.message} />}
         {mutation.error && <ErrorBanner message={mutation.error.message} />}
         {needsReview && approval.data && (
           <>
             <div className="space-y-2 rounded-lg border p-3">
-              <p>{t("Saved approval snapshot · revision")}{" "}
+              <p>{translateUi("Saved approval snapshot · revision")}{" "}
                 {approval.data.reviewed_revision}
               </p>
               <dl className="space-y-2">
@@ -126,36 +129,37 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                               .map(
                                 (entry) => `${entry.question}: ${entry.answer}`,
                               )
-                              .join("\n") || t("None")
-                          : value || t("None")}
+                              .join("\n") || translateUi("None")
+                          : value || translateUi("None")}
                       </dd>
                     </div>
                   ),
                 )}
               </dl>
-              <p>{t("Daily cap ")}{approval.data.setup.limits.daily_credits}{" "}
+              <p>{translateUi("Daily cap ")}{approval.data.setup.limits.daily_credits}{" "}
                 {creditUnit(approval.data.setup.limits.daily_credits)};{" "}
-                {approval.data.setup.limits.turns_per_hour}{t(" turns/hour;")}{" "}
-                {approval.data.setup.limits.concurrent_turns}{t(" concurrent;")}{" "}
-                {approval.data.setup.limits.max_input_chars}{t(" input characters;")}{" "}
-                {approval.data.setup.limits.max_output_tokens}{t(" output tokens.")}</p>
-              <p>{t("Specialist:")}{" "}
+                {approval.data.setup.limits.turns_per_hour}{translateUi(" turns/hour;")}{" "}
+                {approval.data.setup.limits.concurrent_turns}{translateUi(" concurrent;")}{" "}
+                {approval.data.setup.limits.max_input_chars}{translateUi(" input characters;")}{" "}
+                {approval.data.setup.limits.max_output_tokens}{translateUi(" output tokens.")}</p>
+              <p>{translateUi("Specialist:")}{" "}
                 {approval.data.specialist_name ??
-                  approval.data.setup.facts.name}{t(". Customer payer:")}{" "}
-                {approval.data.funding_owner_name ?? t("Your account")}{t(" (personal wallet). Model service:")}{" "}
+                  approval.data.setup.facts.name}
+                . Customer payer:{" "}
+                {approval.data.funding_owner_name ?? translateUi("Your account")}{translateUi(" (personal wallet). Model service:")}{" "}
                 {approval.data.model_service_name ??
-                  t("Configured platform inference service")}
+                  translateUi("Configured platform inference service")}
                 .
               </p>
               <details className="break-all">
-                <summary>{t("Exact resource identifiers")}</summary>
-                <p>{t("Specialist: ")}{approval.data.agent_id}{t(". Creation request:")}{" "}
-                  {approval.data.creation_request_id}{t(". Inference service:")}{" "}
-                  {approval.data.model_service_id}{t(". Customer payer:")}{" "}
+                <summary>{translateUi("Exact resource identifiers")}</summary>
+                <p>{translateUi("Specialist: ")}{approval.data.agent_id}. Creation request:{" "}
+                  {approval.data.creation_request_id}. Inference service:{" "}
+                  {approval.data.model_service_id}. Customer payer:{" "}
                   {approval.data.funding_owner_user_id}.
                 </p>
               </details>
-              <p>{t("Creates or resumes only your reviewed specialist and Telegram installation. No connector grants, machine access, private account context or account management are authorized.")}</p>
+              <p>{translateUi("Creates or resumes only your reviewed specialist and Telegram installation. No connector grants, machine access, private account context or account management are authorized.")}</p>
             </div>
             <Button
               disabled={approval.isFetching}
@@ -163,24 +167,27 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                 setReview(null);
                 void approval.refetch();
               }}
-            >{t("Refresh approval snapshot")}</Button>
+            >{translateUi("Refresh approval snapshot")}</Button>
 
-            <p>{t("Model: ")}{approval.data.model_id}{t(". Your account funds customer replies. No connectors, private account context or machine access are enabled.")}</p>
+            <p>{translateUi("Model: ")}{approval.data.model_id}. Your account funds customer
+              replies. No connectors, private account context or machine access
+              are enabled.
+            </p>
             {approval.data.child_bot_id !== null && (
-              <p>{t("Telegram bot: @")}{approval.data.child_username ?? t("unknown")} (
-                {approval.data.child_bot_id}{t("), management revision")}{" "}
+              <p>{translateUi("Telegram bot: @")}{approval.data.child_username ?? translateUi("unknown")} (
+                {approval.data.child_bot_id}{translateUi("), management revision")}{" "}
                 {approval.data.manager_revision}.
               </p>
             )}
-            <label className="flex gap-2">
+            <Label className="flex gap-2">
               <Checkbox
                 checked={currentReview}
                 onCheckedChange={(checked) =>
                   setReview(checked === true ? approval.data! : null)
                 }
               />
-              <span>{t("I approve these exact saved facts, limits, model and bot identity.")}</span>
-            </label>
+              <span>{translateUi("I approve these exact saved facts, limits, model and bot identity.")}</span>
+            </Label>
             <Button
               disabled={!actor || !currentReview || mutation.isPending}
               onClick={() => {
@@ -193,12 +200,12 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                     review,
                   });
               }}
-            >{t("Approve reviewed setup")}</Button>
+            >{translateUi("Approve reviewed setup")}</Button>
           </>
         )}
         {setup.state === "provisioning" && (
           <>
-            <p>{t("Open the manager chat to create your Telegram bot. Return here to review the created identity before registration proceeds.")}</p>
+            <p>{translateUi("Open the manager chat to create your Telegram bot. Return here to review the created identity before registration proceeds.")}</p>
             <Button
               disabled={!actor || mutation.isPending}
               onClick={() =>
@@ -217,20 +224,20 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                   },
                 )
               }
-            >{t("Prepare Telegram creation link")}</Button>
+            >{translateUi("Prepare Telegram creation link")}</Button>
             {launchUrl && (
               <a
                 href={launchUrl}
                 rel="noreferrer"
                 className="block underline"
                 data-sensitive
-              >{t("Open Telegram manager")}</a>
+              >{translateUi("Open Telegram manager")}</a>
             )}
           </>
         )}
         {setup.state === "ready_for_test" && (
           <>
-            <p>{t("Ask an independent customer to send /test to the child bot, then reply to its test message with the challenge it supplies. Your owner chat cannot establish customer delivery.")}</p>
+            <p>{translateUi("Ask an independent customer to send /test to the child bot, then reply to its test message with the challenge it supplies. Your owner chat cannot establish customer delivery.")}</p>
             <Button
               disabled={!actor || !setup.delivery_tested || mutation.isPending}
               onClick={() =>
@@ -239,11 +246,11 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                   revision: setup.revision,
                 })
               }
-            >{t("Activate customer replies")}</Button>
+            >{translateUi("Activate customer replies")}</Button>
           </>
         )}
         {setup.state === "active" && (
-          <p>{t("Active installations do not expire with draft retention or onboarding-link expiry. Pause, unlink, ownership changes or platform changes revoke their approved authority.")}</p>
+          <p>{translateUi("Active installations do not expire with draft retention or onboarding-link expiry. Pause, unlink, ownership changes or platform changes revoke their approved authority.")}</p>
         )}
       </div>
     </DetailSection>
@@ -251,7 +258,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
 }
 
 function SetupEditor({ setup }: { setup: PlatformSetup }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const mutation = useSetupMutation(setup.id);
   const bindings = useOwnedBindings();
   const [bindingId, setBindingId] = useState("");
@@ -287,13 +294,13 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
   return (
     <div className="space-y-6">
       {stale && (
-        <div className="space-y-2 rounded-lg border border-border p-4 text-12">
-          <p>{t("A newer revision is available. Reload it before saving or reviewing.")}</p>
-          <Button onClick={() => accept(setup)}>{t("Reload latest revision")}</Button>
+        <div className="space-y-2 rounded-lg border border-border p-4 text-14">
+          <p>{translateUi("A newer revision is available. Reload it before saving or reviewing.")}</p>
+          <Button onClick={() => accept(setup)}>{translateUi("Reload latest revision")}</Button>
         </div>
       )}
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
-      <DetailSection title={t("Draft answers")}>
+      <DetailSection title={translateUi("Draft answers")}>
         <Form {...form}>
           <form
             className="space-y-4 p-4"
@@ -344,7 +351,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
               ))}
               {setup.template === "restaurant-starter" && (
                 <div className="space-y-3">
-                  <h3 className="text-13 font-semibold">{t("Frequently asked questions")}</h3>
+                  <h3 className="type-card-title">{translateUi("Frequently asked questions")}</h3>
                   {form.watch("facts.faq").map((_, index) => (
                     <div
                       key={index}
@@ -355,7 +362,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                         name={`facts.faq.${index}.question`}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{t("Question ")}{index + 1}</FormLabel>
+                            <FormLabel>{translateUi("Question ")}{index + 1}</FormLabel>
                             <FormControl>
                               <Input {...field} />
                             </FormControl>
@@ -368,7 +375,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                         name={`facts.faq.${index}.answer`}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{t("Answer ")}{index + 1}</FormLabel>
+                            <FormLabel>{translateUi("Answer ")}{index + 1}</FormLabel>
                             <FormControl>
                               <Textarea {...field} />
                             </FormControl>
@@ -386,7 +393,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                               .filter((_, at) => at !== index),
                           )
                         }
-                      >{t("Remove question")}</Button>
+                      >{translateUi("Remove question")}</Button>
                     </div>
                   ))}
                   <Button
@@ -398,11 +405,11 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                         { question: "", answer: "" },
                       ])
                     }
-                  >{t("Add question")}</Button>
+                  >{translateUi("Add question")}</Button>
                 </div>
               )}
-              <h3 className="text-13 font-semibold">{t("Runtime limits")}</h3>
-              <p className="text-12 text-muted-foreground">{t("These caps are reviewed separately from activation. Public restaurant requests require staff confirmation.")}</p>
+              <h3 className="type-card-title">{translateUi("Runtime limits")}</h3>
+              <p className="text-14 text-muted-foreground">{translateUi("These caps are reviewed separately from activation. Public restaurant requests require staff confirmation.")}</p>
               <div className="grid gap-4 sm:grid-cols-2">
                 {(
                   [
@@ -457,29 +464,29 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                   onClick={() =>
                     form.reset({ facts: setup.facts, limits: setup.limits })
                   }
-                >{t("Discard edits")}</Button>
+                >{translateUi("Discard edits")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   disabled={!form.formState.isDirty}
                   isLoading={mutation.isPending}
-                >{t("Save draft")}</Button>
+                >{translateUi("Save draft")}</Button>
               </div>
             </fieldset>
           </form>
         </Form>
       </DetailSection>
-      <DetailSection title={t("Review the saved revision")}>
-        <div className="space-y-3 p-4 text-12">
-          <p>{t("Revision ")}{setup.revision} · {setupStatus[setup.state]} ·{" "}
-            {setup.approved ? t("Approval recorded") : t("Approval required")}
+      <DetailSection title={translateUi("Review the saved revision")}>
+        <div className="space-y-3 p-4 text-14">
+          <p>{translateUi("Revision ")}{setup.revision} · {setupStatus[setup.state]} ·{" "}
+            {setup.approved ? translateUi("Approval recorded") : translateUi("Approval required")}
           </p>
-          <p className="text-muted-foreground">{t("Saving changes invalidates earlier approval and customer testing. Login and editing never approve resource creation.")}</p>
+          <p className="text-muted-foreground">{translateUi("Saving changes invalidates earlier approval and customer testing. Login and editing never approve resource creation.")}</p>
           <div className="space-y-2 rounded-lg border border-border p-3">
             {fields.map((name) => (
               <p key={name} className="break-words">
                 <strong>{fieldLabels[name]}:</strong>{" "}
-                {setup.facts[name] || t("Not provided")}
+                {setup.facts[name] || translateUi("Not provided")}
               </p>
             ))}
             {setup.facts.faq.map((faq, index) => (
@@ -489,25 +496,25 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
               </div>
             ))}
           </div>
-          <p>{t("Daily cap: ")}{setup.limits.daily_credits}{" "}
+          <p>{translateUi("Daily cap: ")}{setup.limits.daily_credits}{" "}
             {creditUnit(setup.limits.daily_credits)} ·{" "}
-            {setup.limits.turns_per_hour}{t(" turns/hour ·")}{" "}
-            {setup.limits.concurrent_turns}{t(" concurrent ·")}{" "}
-            {setup.limits.max_input_chars}{t(" input characters ·")}{" "}
-            {setup.limits.max_output_tokens}{t(" output tokens.")}</p>
-          <p>{t("No connector grants.")}{" "}
+            {setup.limits.turns_per_hour}{translateUi(" turns/hour ·")}{" "}
+            {setup.limits.concurrent_turns}{translateUi(" concurrent ·")}{" "}
+            {setup.limits.max_input_chars}{translateUi(" input characters ·")}{" "}
+            {setup.limits.max_output_tokens}{translateUi(" output tokens.")}</p>
+          <p>{translateUi("No connector grants.")}{" "}
             {setup.delivery_tested
-              ? t("Customer receipt verified.")
-              : t("Customer receipt has not been verified.")}
+              ? translateUi("Customer receipt verified.")
+              : translateUi("Customer receipt has not been verified.")}
           </p>
-          <label className="flex items-start gap-2">
+          <Label className="flex items-start gap-2">
             <Checkbox
               checked={reviewed}
               onCheckedChange={(value) => setReviewed(value === true)}
               disabled={terminal || stale || form.formState.isDirty}
             />
-            <span>{t("I reviewed every saved answer and limit in this revision.")}</span>
-          </label>
+            <span>{translateUi("I reviewed every saved answer and limit in this revision.")}</span>
+          </Label>
           <div className="flex flex-wrap justify-end gap-2">
             <Button
               disabled={
@@ -518,7 +525,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                 form.formState.isDirty
               }
               onClick={() => action("review")}
-            >{t("Prepare approval review")}</Button>
+            >{translateUi("Prepare approval review")}</Button>
             <Button
               disabled={
                 !reviewed ||
@@ -528,9 +535,9 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                 form.formState.isDirty
               }
               onClick={() => action("publish")}
-            >{t("Save reviewed public snapshot")}</Button>
+            >{translateUi("Save reviewed public snapshot")}</Button>
           </div>
-          <p className="text-muted-foreground">{t("A reviewed snapshot stays private until the installation passes setup, customer testing and activation.")}</p>
+          <p className="text-muted-foreground">{translateUi("A reviewed snapshot stays private until the installation passes setup, customer testing and activation.")}</p>
         </div>
       </DetailSection>
       <ProvisioningControls
@@ -538,25 +545,25 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
         setup={setup}
       />
       {!terminal && (
-        <DetailSection title={t("Link this setup to Telegram")}>
-          <div className="space-y-3 p-4 text-12">
-            <p>{t("Only the selected manager chat receives progress for this setup. Your other account setups remain private.")}</p>
+        <DetailSection title={translateUi("Link this setup to Telegram")}>
+          <div className="space-y-3 p-4 text-14">
+            <p>{translateUi("Only the selected manager chat receives progress for this setup. Your other account setups remain private.")}</p>
             {bindings.error && (
-              <ErrorBanner message={t("Could not load your bindings.")} />
+              <ErrorBanner message={translateUi("Could not load your bindings.")} />
             )}
-            <label className="block space-y-2">{t("Your linked private Telegram account")}<select
-                className="h-8 w-full rounded-lg border border-input bg-background px-3 text-12"
+            <Label className="block space-y-2">{translateUi("Your linked private Telegram account")}<select
+                className="h-8 w-full rounded-lg border border-input bg-background px-3 text-14"
                 value={bindingId}
                 onChange={(event) => setBindingId(event.target.value)}
               >
-                <option value="">{t("Choose a binding")}</option>
+                <option value="">{translateUi("Choose a binding")}</option>
                 {bindings.data?.map((binding) => (
-                  <option key={binding.id} value={binding.id}>{t("Manager ")}{binding.manager_bot_id}{t(" · sender")}{" "}
+                  <option key={binding.id} value={binding.id}>{translateUi("Manager ")}{binding.manager_bot_id}{translateUi(" · sender")}{" "}
                     {binding.telegram_sender_id}
                   </option>
                 ))}
               </select>
-            </label>
+            </Label>
             <Button
               disabled={
                 !bindingId ||
@@ -584,32 +591,32 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                     },
                   );
               }}
-            >{t("Link selected Telegram account")}</Button>
+            >{translateUi("Link selected Telegram account")}</Button>
           </div>
         </DetailSection>
       )}
       {!terminal && (
-        <DetailSection title={t("Pause or cancel")}>
-          <div className="space-y-3 p-4 text-12">
-            <p>{t("Pause blocks new work. Cancellation retains your created resources and invalidates this setup's approval.")}</p>
+        <DetailSection title={translateUi("Pause or cancel")}>
+          <div className="space-y-3 p-4 text-14">
+            <p>{translateUi("Pause blocks new work. Cancellation retains your created resources and invalidates this setup's approval.")}</p>
             <div className="flex flex-wrap gap-2">
               <Button
                 disabled={stale || mutation.isPending}
                 onClick={() => action("pause")}
-              >{t("Pause setup")}</Button>
+              >{translateUi("Pause setup")}</Button>
               <Button
                 disabled={stale || mutation.isPending}
                 onClick={() => setCancelReview(true)}
-              >{t("Review cancellation")}</Button>
+              >{translateUi("Review cancellation")}</Button>
             </div>
             {cancelReview && (
               <div className="space-y-2">
-                <p>{t("Cancel this setup? Existing Telegram bots and client resources remain yours.")}</p>
+                <p>{translateUi("Cancel this setup? Existing Telegram bots and client resources remain yours.")}</p>
                 <Button
                   variant="destructive"
                   isLoading={mutation.isPending}
                   onClick={() => action("cancel")}
-                >{t("Confirm cancellation")}</Button>
+                >{translateUi("Confirm cancellation")}</Button>
               </div>
             )}
           </div>
@@ -619,7 +626,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
   );
 }
 export function PlatformSetupDetailPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const params = useParams({ strict: false }) as { setupId?: string };
   const actor = useAuthStore((s) => s.user?.id);
   const validId = z.uuid().safeParse(params.setupId).success;
@@ -628,32 +635,32 @@ export function PlatformSetupDetailPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={query.data?.facts.name ?? t("Bot setup")}
-        description={t("Your saved answers, review and runtime limits.")}
+        title={query.data?.facts.name ?? translateUi("Bot setup")}
+        description={translateUi("Your saved answers, review and runtime limits.")}
         actions={
           <div className="flex items-center gap-2">
             <Button
               disabled={!validId || query.isFetching}
               onClick={() => void query.refetch()}
-            >{t("Refresh status")}</Button>
+            >{translateUi("Refresh status")}</Button>
             {query.data && <SetupStatusBadge setup={query.data} />}
           </div>
         }
       />
       {!validId && (
-        <ErrorBanner message={t("This setup is unavailable. Choose a saved setup from your list.")} />
+        <ErrorBanner message={translateUi("This setup is unavailable. Choose a saved setup from your list.")} />
       )}
       {query.data?.runtime_notice && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           {query.data.runtime_notice}
         </p>
       )}
       {validId && query.isPending && (
-        <p role="status" className="text-12">{t("Loading setup…")}</p>
+        <p role="status" className="text-14">{translateUi("Loading setup…")}</p>
       )}
       {query.error && (
         <ErrorBanner
-          message={t("This setup is unavailable to your account.")}
+          message={translateUi("This setup is unavailable to your account.")}
           onRetry={() => void query.refetch()}
         />
       )}

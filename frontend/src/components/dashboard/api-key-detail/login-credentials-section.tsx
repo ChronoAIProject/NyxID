@@ -1,5 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { Ban } from "lucide-react";
 import {
@@ -20,7 +21,7 @@ import {
 import { ErrorBanner } from "@/components/shared/error-banner";
 
 const timestamp = (value: string | null) =>
-  value ? new Date(value).toLocaleString(getFormattingLocale()) : translateUi("Never");
+  value ? new Date(value).toLocaleString(getFormattingLocale()) : "Never";
 
 export function LoginCredentialsSection({
   keyId,
@@ -29,7 +30,7 @@ export function LoginCredentialsSection({
   keyId: string;
   canWrite: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const credentials = useLoginCredentials(keyId);
   const revoke = useRevokeLoginCredential(keyId);
   const [selected, setSelected] = useState<LoginCredential | null>(null);
@@ -41,20 +42,20 @@ export function LoginCredentialsSection({
   return (
     <section className="space-y-4 border-t border-border/50 pt-6">
       <div>
-        <h2 className="text-15 font-semibold">{t("Login credentials")}</h2>
-        <p className="mt-1 text-12 text-muted-foreground">{t("Revoking or rotating this key also invalidates all its login credentials.")}</p>
+        <h2 className="type-card-title">{translateUi("Login credentials")}</h2>
+        <p className="mt-1 text-14 text-muted-foreground">{translateUi("Revoking or rotating this key also invalidates all its login credentials.")}</p>
       </div>
       {credentials.isLoading && (
-        <p role="status" className="text-12 text-muted-foreground">{t("Loading credentials...")}</p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading credentials...")}</p>
       )}
       {credentials.error && (
         <ErrorBanner
-          message={t("Could not load login credentials.")}
+          message={translateUi("Could not load login credentials.")}
           onRetry={credentials.refetch}
         />
       )}
       {credentials.data?.length === 0 && (
-        <p className="text-12 text-muted-foreground">{t("No login credentials.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("No login credentials.")}</p>
       )}
       <div className="divide-y divide-border/50">
         {credentials.data?.map((credential) => {
@@ -64,7 +65,7 @@ export function LoginCredentialsSection({
           return (
             <article
               key={credential.id}
-              className="flex flex-wrap items-start justify-between gap-3 py-3 text-12"
+              className="flex flex-wrap items-start justify-between gap-3 py-3 text-14"
             >
               <div className="min-w-0 space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
@@ -75,27 +76,27 @@ export function LoginCredentialsSection({
                     }
                   >
                     {!credential.is_active
-                      ? t("Revoked")
+                      ? translateUi("Revoked")
                       : expired
-                        ? t("Expired")
-                        : t("Active")}
+                        ? translateUi("Expired")
+                        : translateUi("Active")}
                   </Badge>
                 </div>
                 <p className="font-mono">{credential.secret_prefix}</p>
                 <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 [&_dt]:text-muted-foreground [&_dd]:break-words">
-                  <dt>{t("Issued")}</dt>
+                  <dt>{translateUi("Issued")}</dt>
                   <dd>{timestamp(credential.created_at)}</dd>
-                  <dt>{t("Last used")}</dt>
+                  <dt>{translateUi("Last used")}</dt>
                   <dd>{timestamp(credential.last_used_at)}</dd>
-                  <dt>{t("Expires")}</dt>
+                  <dt>{translateUi("Expires")}</dt>
                   <dd>
                     {credential.expires_at
                       ? timestamp(credential.expires_at)
-                      : t("No expiry")}
+                      : translateUi("No expiry")}
                   </dd>
                   {credential.revoked_reason && (
                     <>
-                      <dt>{t("Revoked reason")}</dt>
+                      <dt>{translateUi("Revoked reason")}</dt>
                       <dd>{credential.revoked_reason.replaceAll("_", " ")}</dd>
                     </>
                   )}
@@ -109,7 +110,7 @@ export function LoginCredentialsSection({
                     setSelected(credential);
                   }}
                 >
-                  <Ban className="size-3" />{t("Revoke")}</Button>
+                  <Ban className="size-3" />{translateUi("Revoke")}</Button>
               )}
             </article>
           );
@@ -123,17 +124,17 @@ export function LoginCredentialsSection({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Revoke login credential")}</DialogTitle>
-            <DialogDescription>{t("Revoke the login credential for ")}{selected?.label}{t("? This CLI will need to authorize again.")}</DialogDescription>
+            <DialogTitle>{translateUi("Revoke login credential")}</DialogTitle>
+            <DialogDescription>{translateUi("Revoke the login credential for ")}{selected?.label}{translateUi("? This CLI will need to authorize again.")}</DialogDescription>
           </DialogHeader>
           {revoke.error && (
-            <ErrorBanner message={t("Could not revoke this login credential. Try again.")} />
+            <ErrorBanner message={translateUi("Could not revoke this login credential. Try again.")} />
           )}
           <DialogFooter>
             <Button
               disabled={revoke.isPending}
               onClick={() => setSelected(null)}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={revoke.isPending}
@@ -146,7 +147,7 @@ export function LoginCredentialsSection({
                     .catch(() => {});
               }}
             >
-              <Ban className="size-3" />{t("Revoke")}</Button>
+              <Ban className="size-3" />{translateUi("Revoke")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

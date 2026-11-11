@@ -204,6 +204,8 @@ function presentForegroundNotification(
  * Must be called at module-load time (index.ts), BEFORE registerRootComponent.
  * Sets up notification handler + background task + Android channels so that
  * FCM messages arriving when the app is killed still produce visible alerts.
+ * This pre-gate setup only configures native delivery and persists signals;
+ * API registration and refresh start in App after DomainGate selects domains.
  */
 export function bootstrapNotificationInfrastructure() {
   if (isBootstrapped) return;
@@ -222,7 +224,6 @@ async function ensureAndroidChannels() {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#9775fa",
-    sound: "default",
     enableVibrate: true,
     showBadge: true,
   });
@@ -233,7 +234,6 @@ async function ensureAndroidChannels() {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#9775fa",
-    sound: "default",
     enableVibrate: true,
     showBadge: true,
   });

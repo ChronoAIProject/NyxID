@@ -129,6 +129,6 @@ const createStyles = (c: ThemeColors) =>
     },
     actionText: {
       ...typeScale.label,
-      color: c.primary,
+      color: c.primaryOnTint,
     },
   });

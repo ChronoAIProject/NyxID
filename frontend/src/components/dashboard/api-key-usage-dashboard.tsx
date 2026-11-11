@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Area, AreaChart } from "recharts";
 import { useApiKeysUsage } from "@/hooks/use-api-keys";
@@ -37,10 +38,10 @@ function MiniLineChart({
     readonly error_count: number;
   }[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (buckets.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">{t("No recent activity.")}</p>
+      <p className="text-13 text-muted-foreground">{translateUi("No recent activity.")}</p>
     );
   }
 
@@ -76,7 +77,7 @@ export function ApiKeyUsageDashboard({
 }: {
   readonly viewMode?: "grid" | "table";
 } = {}) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useApiKeysUsage(7);
 
@@ -85,7 +86,7 @@ export function ApiKeyUsageDashboard({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-13 font-semibold text-foreground">{t("Agent Activity")}</h3>
+          <h3 className="type-card-title text-foreground">{translateUi("Agent Activity")}</h3>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }, (_, index) => (
@@ -101,9 +102,9 @@ export function ApiKeyUsageDashboard({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-13 font-semibold text-foreground">{t("Agent Activity")}</h3>
+          <h3 className="type-card-title text-foreground">{translateUi("Agent Activity")}</h3>
         </div>
-        <ErrorBanner message={t("Failed to load agent activity.")} onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load agent activity.")} onRetry={refetch} />
       </div>
     );
   }
@@ -116,7 +117,7 @@ export function ApiKeyUsageDashboard({
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-4 w-4 text-muted-foreground" />
-        <h3 className="text-13 font-semibold text-foreground">{t("Agent Activity")}</h3>
+        <h3 className="type-card-title text-foreground">{translateUi("Agent Activity")}</h3>
       </div>
 
       {viewMode === "table" ? (
@@ -124,11 +125,11 @@ export function ApiKeyUsageDashboard({
           <Table>
             <TableHeader>
               <TableRow className="border-border/50 hover:bg-transparent">
-                <TableHead className="w-[25%]">{t("Agent")}</TableHead>
-                <TableHead className="w-[15%]">{t("Platform")}</TableHead>
-                <TableHead className="w-[15%]">{t("Requests")}</TableHead>
-                <TableHead className="w-[30%]">{t("Trend")}</TableHead>
-                <TableHead className="w-[15%]">{t("Last Used")}</TableHead>
+                <TableHead className="w-[25%]">{translateUi("Agent")}</TableHead>
+                <TableHead className="w-[15%]">{translateUi("Platform")}</TableHead>
+                <TableHead className="w-[15%]">{translateUi("Requests")}</TableHead>
+                <TableHead className="w-[30%]">{translateUi("Trend")}</TableHead>
+                <TableHead className="w-[15%]">{translateUi("Last Used")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -145,10 +146,10 @@ export function ApiKeyUsageDashboard({
                   </TableCell>
                   <TableCell>
                     <Badge variant="secondary">
-                      {usage.platform ?? t("agent")}
+                      {usage.platform ?? translateUi("agent")}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-foreground font-semibold">
+                  <TableCell className="text-foreground font-normal">
                     {usage.request_count}
                   </TableCell>
                   <TableCell>
@@ -157,7 +158,7 @@ export function ApiKeyUsageDashboard({
                   <TableCell className="text-muted-foreground">
                     {usage.last_used_at
                       ? formatRelativeTime(usage.last_used_at)
-                      : t("never")}
+                      : translateUi("never")}
                   </TableCell>
                 </TableRow>
               ))}
@@ -175,27 +176,27 @@ export function ApiKeyUsageDashboard({
               <Card className="h-full transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/30">
                 <CardContent className="space-y-3 p-4">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-12 font-medium text-foreground">
+                    <p className="truncate type-row-title text-foreground">
                       {usage.api_key_name}
                     </p>
                     <Badge variant={usage.platform ? "secondary" : "secondary"}>
-                      {usage.platform ?? t("agent")}
+                      {usage.platform ?? translateUi("agent")}
                     </Badge>
                   </div>
 
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-24 font-bold leading-none text-foreground">
+                    <span className="break-all type-metric text-foreground">
                       {usage.request_count}
                     </span>
-                    <span className="text-11 text-muted-foreground">{t("requests")}</span>
+                    <span className="text-13 text-muted-foreground">{translateUi("requests")}</span>
                   </div>
 
                   <MiniLineChart buckets={usage.daily_buckets} />
 
-                  <p className="text-11 text-muted-foreground">{t("Last used")}{" "}
+                  <p className="text-13 text-muted-foreground">{translateUi("Last used")}{" "}
                     {usage.last_used_at
                       ? formatRelativeTime(usage.last_used_at)
-                      : t("never")}
+                      : translateUi("never")}
                   </p>
                 </CardContent>
               </Card>

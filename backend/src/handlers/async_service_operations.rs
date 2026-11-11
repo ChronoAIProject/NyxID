@@ -4,7 +4,7 @@ use super::*;
 use crate::models::async_service_operation::AsyncServiceOperation;
 use crate::services::async_service_operation as watches;
 
-async fn call(
+pub(super) async fn call(
     state: &AppState,
     watch: &AsyncServiceOperation,
     name: &str,
@@ -30,9 +30,37 @@ async fn call(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = authenticate_mcp(state, &headers, false)
-        .await
-        .map_err(|_| denied())?;
+    let mut auth = if watch.shared_execution.is_some() || watch.execution_task.is_some() {
+        let key =
+            crate::services::key_service::get_api_key(&state.db, &watch.user_id, &watch.api_key_id)
+                .await?;
+        let auth = crate::mw::auth::api_key_auth_user_for_watch(&state.db, &key, watch).await?;
+        McpAuthContext::from_watch_auth(auth)
+    } else {
+        authenticate_mcp(state, &headers, false)
+            .await
+            .map_err(|_| denied())?
+    };
+    // Old watches never borrow a newer foreground turn's enrollment or task.
+    if watch.execution_task.is_none() {
+        auth.execution_permission = None;
+        if let Some(chat) = auth.chat.as_mut() {
+            chat.execution_permission = None;
+        }
+    }
+    let permission_admission = if auth.execution_permission.is_some() {
+        let mut user = super::permission_dispatch_auth(&auth)?;
+        let admitted = crate::services::execution_permission_dispatch::proposals::v2::watch::admit(
+            state, &mut user, watch, name,
+        )
+        .await?;
+        auth.execution_permission = user.execution_permission;
+        auth.chat = user.assistant_chat.map(|c| (*c).clone());
+        if let crate::services::execution_permission_dispatch::proposals::v2::watch::Admission::Result(result)=admitted{return Ok(result);}
+        admitted
+    } else {
+        crate::services::execution_permission_dispatch::proposals::v2::watch::Admission::Fresh
+    };
     // This watch was admitted only for an owner turn. A later guest message
     // on the same thread neither owns nor changes this background request.
     if let Some(chat) = auth.chat.as_mut() {
@@ -60,86 +88,187 @@ async fn call(
     {
         return Err(denied());
     }
-    let catalog = mcp_service::load_operation_catalog(
-        &state.db,
-        state.node_ws_manager.as_ref(),
-        &auth.user_id,
-        mcp_node_scope(&auth),
-        mcp_service_scope(&auth),
-    )
-    .await?;
-    let service = catalog
-        .services
-        .iter()
-        .find(|s| s.service_id == watch.service_id)
-        .ok_or_else(denied)?;
-    ensure_service_in_scope(&auth, service, None).map_err(|_| denied())?;
-    let submit = service
-        .endpoints
-        .iter()
-        .find(|e| e.endpoint_id == watch.submit_endpoint_id)
-        .ok_or_else(denied)?;
-    if submit.async_operation.as_ref() != Some(&watch.contract) {
-        return Err(denied());
-    }
-    watches::validate_endpoints(&watch.contract, service, submit).map_err(|_| denied())?;
-    let endpoint = service
-        .endpoints
-        .iter()
-        .find(|e| e.name == name)
-        .ok_or_else(denied)?;
-    if endpoint.target_id != submit.target_id
-        || (name != watch.contract.cancel_operation.as_deref().unwrap_or("")
-            && endpoint.method != "GET")
-        || (Some(name) == watch.contract.cancel_operation.as_deref() && endpoint.method != "POST")
-    {
-        return Err(denied());
-    }
-    let id = watch.operation_id.as_deref().ok_or_else(denied)?;
-    let args = serde_json::json!({watch.contract.id_parameter.clone():id});
-    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?;
-    prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
-    authorize_mcp_tool_operation(
-        state,
-        &auth,
-        service,
-        &prepared.operation_descriptor(),
-        None,
-    )
-    .await
-    .map_err(|_| denied())?;
-    // There is deliberately no synthetic live chat turn: this durable watch is
-    // permission to poll only these exact operations, not arbitrary execution.
-    let permit = crate::services::billing::route_inventory::enforce_billing_egress_classification(
-        Some(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+    let outcome = async {
+        let catalog = mcp_service::load_operation_catalog(
+            &state.db,
+            state.node_ws_manager.as_ref(),
+            &auth.user_id,
+            mcp_node_scope(&auth),
+            mcp_service_scope(&auth),
+        )
+        .await?;
+        let service = catalog
+            .services
+            .iter()
+            .find(|s| s.service_id == watch.service_id)
+            .ok_or_else(denied)?;
+        ensure_service_in_scope(&auth, service, None).map_err(|_| denied())?;
+        let submit = service
+            .endpoints
+            .iter()
+            .find(|e| e.endpoint_id == watch.submit_endpoint_id)
+            .ok_or_else(denied)?;
+        if submit.async_operation.as_ref() != Some(&watch.contract) {
+            return Err(denied());
+        }
+        watches::validate_endpoints(&watch.contract, service, submit).map_err(|_| denied())?;
+        if crate::services::generated_artifacts::admitted(watch) {
+            let trusted = crate::services::generated_artifacts::trusted_sandbox_catalog(
+                &state.db, service, submit,
+            )
+            .await?;
+            if trusted.is_none() || trusted != watch.artifact_catalog_service_id {
+                return Err(AppError::Conflict("artifact_source_changed".into()));
+            }
+        }
+        let endpoint = service
+            .endpoints
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(denied)?;
+        if endpoint.target_id != submit.target_id
+            || (name != watch.contract.cancel_operation.as_deref().unwrap_or("")
+                && endpoint.method != "GET")
+            || (Some(name) == watch.contract.cancel_operation.as_deref()
+                && endpoint.method != "POST")
+        {
+            return Err(denied());
+        }
+        let id = crate::services::cma_operation::poll_id(watch).ok_or_else(denied)?;
+        let args = serde_json::json!({watch.contract.id_parameter.clone():id});
+        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?
+            .with_async_continuation(
+                crate::services::assistant_service_execution::AsyncContinuation::new(
+                    watch,
+                    endpoint,
+                    state.node_ws_manager.clone(),
+                )?,
+            );
+        prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
+        if auth.execution_permission.is_some() {
+            let user = super::permission_dispatch_auth(&auth)?;
+            prepared
+                .admit_execution_permission(state, &user, service, endpoint)
+                .await?;
+        }
+        authorize_mcp_tool_operation(
+            state,
+            &auth,
+            service,
+            &prepared.operation_descriptor(),
+            None,
+        )
+        .await
+        .map_err(|_| denied())?;
+        // There is deliberately no synthetic live chat turn: this durable watch is
+        // permission to poll only these exact operations, not arbitrary execution.
+        let permit =
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::route_inventory::BillingIngress::Mcp,
+                    ),
+                ),
                 crate::services::billing::route_inventory::BillingIngress::Mcp,
-            ),
-        ),
-        crate::services::billing::route_inventory::BillingIngress::Mcp,
-    )?;
-    let mut exec = mcp_exec_context(&auth);
-    exec.response_body_limit = Some(watches::RESULT_BYTES);
-    mcp_service::execute_tool_response(
-        &state.http_client,
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &state.billing,
-        &auth.user_id,
-        auth.billing_principal_user_id(),
-        service,
-        endpoint,
-        prepared,
-        &state.jwt_keys,
-        &state.config,
-        &state.connection_expiry_notifier,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        &exec,
-        permit,
+            )?;
+        let mut exec = mcp_exec_context(&auth);
+        exec.response_body_limit = Some(
+            if crate::services::generated_artifacts::admitted(watch)
+                && name == watch.contract.result_operation
+            {
+                if !crate::services::generated_artifacts::sandbox_contract(service, submit) {
+                    return Err(denied());
+                }
+                exec.strict_response_utf8 = true;
+                crate::services::generated_artifacts::sandbox::RESPONSE_BYTES
+            } else {
+                watches::RESULT_BYTES
+            },
+        );
+        mcp_service::execute_tool_response(
+            &state.http_client,
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &state.billing,
+            &auth.user_id,
+            auth.billing_principal_user_id(),
+            service,
+            endpoint,
+            prepared,
+            &state.jwt_keys,
+            &state.config,
+            &state.connection_expiry_notifier,
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            &exec,
+            permit,
+        )
+        .await
+    }
+    .await;
+    crate::services::execution_permission_dispatch::proposals::v2::watch::complete(
+        state,
+        watch,
+        permission_admission,
+        outcome,
     )
     .await
+}
+
+// The contract does not promise that a successful cancel response means stopped.
+// Only a bounded, declared read of a terminal state can confirm settlement.
+fn terminal_contract_status(
+    contract: &crate::models::async_service_operation::AsyncOperationContract,
+    text: &str,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(phase) = value
+        .pointer(&contract.status_field)
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    contract
+        .success_states
+        .iter()
+        .chain(&contract.failure_states)
+        .any(|state| state == phase)
+}
+
+async fn tracked_cancel_outcome<F, Fut, V, Verified>(
+    operation_id: Option<&str>,
+    cancel_operation: Option<&str>,
+    timeout: Duration,
+    dispatch: F,
+    verify: V,
+) -> (bool, &'static str)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = crate::errors::AppResult<u16>>,
+    V: FnOnce() -> Verified,
+    Verified: std::future::Future<Output = crate::errors::AppResult<bool>>,
+{
+    if operation_id.is_none() {
+        return (false, "cancellation_operation_id_missing");
+    }
+    if cancel_operation.is_none() {
+        return (false, "cancellation_unsupported");
+    }
+    let outcome = tokio::time::timeout(timeout, async {
+        let status = dispatch().await?;
+        if !(200..300).contains(&status) {
+            return Ok(false);
+        }
+        verify().await
+    })
+    .await;
+    match outcome {
+        Ok(Ok(true)) => (true, "cancelled"),
+        _ => (false, "cancellation_unknown"),
+    }
 }
 
 async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::AppResult<()> {
@@ -152,15 +281,49 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         return Ok(());
     }
     if w.state == "cancelling" {
-        if w.operation_id.is_none()
+        if crate::services::cma_operation::poll_id(w).is_none()
             && chrono::Utc::now() < w.created_at + chrono::Duration::minutes(2)
         {
             return watches::defer(&state.db, w).await;
         }
+        if w.delivery.invocation_id.is_some() {
+            if !watches::begin_tracked_cancellation(&state.db, w).await? {
+                return watches::finish_tracked_cancellation(
+                    &state.db,
+                    w,
+                    false,
+                    "cancellation_unknown",
+                )
+                .await;
+            }
+            let (confirmed, reason) = tracked_cancel_outcome(
+                w.operation_id.as_deref(),
+                w.contract.cancel_operation.as_deref(),
+                Duration::from_secs(5),
+                || async {
+                    let name = w
+                        .contract
+                        .cancel_operation
+                        .as_deref()
+                        .expect("validated operation");
+                    Ok(call(state, w, name).await?.status)
+                },
+                || async {
+                    let status = call(state, w, &w.contract.status_operation).await?;
+                    Ok((200..300).contains(&status.status)
+                        && status.text.len() <= watches::RESULT_BYTES
+                        && terminal_contract_status(&w.contract, &status.text))
+                },
+            )
+            .await;
+            return watches::finish_tracked_cancellation(&state.db, w, confirmed, reason).await;
+        }
         if let Some(name) = w.contract.cancel_operation.as_deref()
             && w.operation_id.is_some()
+            && let Ok(Err(error @ crate::errors::AppError::ApprovalRequired { .. })) =
+                tokio::time::timeout(Duration::from_secs(5), call(state, w, name)).await
         {
-            let _ = tokio::time::timeout(Duration::from_secs(5), call(state, w, name)).await;
+            return Err(error);
         }
         return watches::cancelled(&state.db, w, &state.config.frontend_url).await;
     }
@@ -168,9 +331,36 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         return watches::ready(&state.db, w, None, "timeout", None).await;
     }
     if w.state == "submitting" {
+        if watches::submission_in_progress(&state.db, w).await? {
+            // The first poll can precede the end of a streaming submit. Keep
+            // its receipt writable; defer's lease/state fence preserves a
+            // concurrent submitted() or Stop transition.
+            return watches::defer(&state.db, w).await;
+        }
         return watches::ready(&state.db, w, None, "submission_uncertain", None).await;
     }
+    if w.execution_task.is_some()
+        && state
+            .db
+            .collection::<bson::Document>("assistant_async_operations")
+            .find_one(doc! {"_id":&w.id,"execution_pending.operation":&w.contract.result_operation})
+            .await?
+            .is_some()
+    {
+        let result = call(state, w, &w.contract.result_operation).await?;
+        return watches::ready(
+            &state.db,
+            w,
+            Some(&state.encryption_keys),
+            "completed",
+            Some(&result.text),
+        )
+        .await;
+    }
     let status = call(state, w, &w.contract.status_operation).await?;
+    if status.status == 410 && crate::services::generated_artifacts::admitted(w) {
+        return watches::ready(&state.db, w, None, "result_expired", None).await;
+    }
     if matches!(status.status, 401 | 403 | 404 | 410) {
         return watches::ready(&state.db, w, None, "authority_lost", None).await;
     }
@@ -180,16 +370,49 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     if status.text.len() > watches::RESULT_BYTES {
         return watches::ready(&state.db, w, None, "result_too_large", None).await;
     }
-    let parsed: serde_json::Value = serde_json::from_str(&status.text).map_err(|_| {
-        crate::errors::AppError::ValidationError("Invalid async operation status".into())
-    })?;
+    let parsed: serde_json::Value = match serde_json::from_str(&status.text) {
+        Ok(value) => value,
+        Err(_) if crate::services::generated_artifacts::admitted(w) => {
+            // Generated-artifact status is a bounded, server-owned lifecycle
+            // contract. A successful response that is not JSON cannot become
+            // a retrying defer: settle it terminally before any result fetch.
+            return watches::ready(&state.db, w, None, "artifact_invalid", None).await;
+        }
+        Err(_) => {
+            // Preserve ordinary async operation behavior and error contract.
+            return Err(crate::errors::AppError::ValidationError(
+                "Invalid async operation status".into(),
+            ));
+        }
+    };
     // The result is a separate proxy call and must acquire its own slot.
     drop(status);
     let phase = parsed
         .pointer(&w.contract.status_field)
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    let observation = crate::services::cma_operation::record_observation(state, w, &parsed).await?;
+    if observation.approval_enqueued {
+        crate::handlers::assistant_team::wake(state, &w.user_id, &w.conversation_id).await;
+    }
+    if crate::services::cma_operation::response_cancelled(
+        w.cma.as_ref(),
+        w.operation_id.as_deref(),
+        &parsed,
+    ) {
+        return watches::ready(
+            &state.db,
+            w,
+            Some(&state.encryption_keys),
+            "operation_cancelled",
+            Some(&parsed.to_string()),
+        )
+        .await;
+    }
     if w.contract.failure_states.iter().any(|s| s == phase) {
+        if crate::services::generated_artifacts::admitted(w) {
+            return watches::ready(&state.db, w, None, "operation_failed", None).await;
+        }
         // Error payloads are equally untrusted; retain only bounded encrypted data.
         let detail = w
             .contract
@@ -206,8 +429,18 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         )
         .await;
     }
-    if !w.contract.success_states.iter().any(|s| s == phase) {
+    if observation.awaiting_activity || !w.contract.success_states.iter().any(|s| s == phase) {
         return watches::defer(&state.db, w).await;
+    }
+    if crate::services::generated_artifacts::admitted(w) {
+        return crate::services::generated_artifacts::acquisition::acquire(
+            &state.db,
+            &state.encryption_keys,
+            w,
+            &parsed,
+            |name| async move { call(state, w, &name).await },
+        )
+        .await;
     }
     let result = call(state, w, &w.contract.result_operation).await?;
     if !(200..300).contains(&result.status) {
@@ -244,6 +477,12 @@ async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
+            Ok(Err(AppError::Conflict(reason)))
+                if crate::services::generated_artifacts::admitted(&w)
+                    && reason == "artifact_source_changed" =>
+            {
+                watches::ready(&state.db, &w, None, "artifact_source_changed", None).await?;
+            }
             Ok(Err(
                 AppError::Forbidden(_)
                 | AppError::Unauthorized(_)
@@ -299,4 +538,141 @@ pub(crate) fn spawn_sweep(state: AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod invocation_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn invocation_async_cancel_outcomes_do_not_claim_accepted_or_failed_requests_stopped() {
+        let budget = Duration::from_millis(10);
+        for (operation, endpoint, reason) in [
+            (None, Some("cancel"), "cancellation_operation_id_missing"),
+            (Some("id"), None, "cancellation_unsupported"),
+        ] {
+            let result = tracked_cancel_outcome(
+                operation,
+                endpoint,
+                budget,
+                || async { panic!("must not dispatch") },
+                || async { panic!("must not verify") },
+            )
+            .await;
+            assert_eq!(result, (false, reason));
+        }
+        for (status, confirmed) in [
+            (200, true),
+            (204, true),
+            (202, true),
+            (400, false),
+            (503, false),
+        ] {
+            assert_eq!(
+                tracked_cancel_outcome(
+                    Some("id"),
+                    Some("cancel"),
+                    budget,
+                    || async { Ok(status) },
+                    || async { Ok(true) }
+                )
+                .await
+                .0,
+                confirmed
+            );
+        }
+        for status in [200, 202, 204] {
+            assert!(
+                !tracked_cancel_outcome(
+                    Some("id"),
+                    Some("cancel"),
+                    budget,
+                    || async { Ok(status) },
+                    || async { Ok(false) }
+                )
+                .await
+                .0
+            );
+        }
+        assert!(
+            !tracked_cancel_outcome(
+                Some("id"),
+                Some("cancel"),
+                budget,
+                std::future::pending,
+                || async { Ok(true) }
+            )
+            .await
+            .0
+        );
+    }
+}
+
+#[cfg(test)]
+mod invocation_cancel_http_tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    #[tokio::test]
+    async fn invocation_async_cancel_requires_terminal_declared_status_after_http_acceptance() {
+        let contract = serde_json::from_value(serde_json::json!({
+            "status_operation":"status","result_operation":"result","cancel_operation":"cancel",
+            "id_field":"/id","id_parameter":"id","status_field":"/status",
+            "success_states":["done"],"failure_states":["failed","cancelled"],"error_field":null
+        }))
+        .unwrap();
+        for (code, phase, expected) in [
+            (200, "running", false),
+            (200, "cancelling", false),
+            (202, "running", false),
+            (202, "cancelled", true),
+            (204, "done", true),
+            (200, "failed", true),
+            (503, "done", false),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/cancel"))
+                .respond_with(ResponseTemplate::new(code))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/status"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":phase})),
+                )
+                .expect(if code < 300 { 1 } else { 0 })
+                .mount(&server)
+                .await;
+            let client = reqwest::Client::new();
+            let cancel = format!("{}/cancel", server.uri());
+            let status = format!("{}/status", server.uri());
+            let outcome = tracked_cancel_outcome(
+                Some("fixture"),
+                Some("cancel"),
+                Duration::from_secs(2),
+                || async {
+                    let response = client.post(&cancel).send().await.map_err(|_| {
+                        crate::errors::AppError::Internal("Loopback cancel failed".into())
+                    })?;
+                    Ok(response.status().as_u16())
+                },
+                || async {
+                    let response = client.get(&status).send().await.map_err(|_| {
+                        crate::errors::AppError::Internal("Loopback status failed".into())
+                    })?;
+                    let text = response.text().await.map_err(|_| {
+                        crate::errors::AppError::Internal("Loopback status failed".into())
+                    })?;
+                    Ok(terminal_contract_status(&contract, &text))
+                },
+            )
+            .await;
+            assert_eq!(outcome.0, expected);
+            server.verify().await;
+        }
+    }
 }

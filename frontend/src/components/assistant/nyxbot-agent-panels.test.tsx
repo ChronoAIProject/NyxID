@@ -1,41 +1,11 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
-import { PendingEventsNote, TeamStrip, ThreadHeader, WaitingNote } from "./nyxbot-agent-panels";
+import { PendingEventsNote, ThreadHeader, WaitingNote } from "./nyxbot-agent-panels";
 
 afterEach(cleanup);
 
 const at = "2026-09-28T00:00:00Z";
-const thread = `nyxa-${"b".repeat(32)}`;
-
-function agent(fields: Partial<AssistantAgent>): AssistantAgent {
-  return {
-    id: "agent-nyxbot",
-    kind: "nyxbot",
-    name: "NyxBot",
-    description: "",
-    display_name: null,
-    persona: null,
-    specialty: null,
-    created_by: "user",
-    status: "idle",
-    services: [],
-    account_read: true,
-    guest_access: {},
-    pending_requests: [],
-    last_reply: null,
-    home_conversation_id: null,
-    memory_count: 0,
-    created_at: at,
-    last_active_at: at,
-    destroyed_at: null,
-    pending_acknowledgements: 0,
-    channels: [],
-    ...fields,
-  };
-}
-
 it("names the thread's agent with its kind and opens its details", async () => {
   const open = vi.fn();
   render(<ThreadHeader name="researcher" kind="specialist" destroyed={false} onOpenDetails={open} />);
@@ -56,57 +26,12 @@ it("shows NyxBot's kind badge", () => {
   expect(screen.getAllByText("NyxBot")).toHaveLength(2);
 });
 
-it("lists live specialists with their latest reply and opens a request's thread", async () => {
-  const open = vi.fn();
-  render(
-    <TeamStrip
-      agents={[
-        agent({}),
-        agent({
-          id: "agent-researcher",
-          kind: "specialist",
-          name: "researcher",
-          status: "running",
-          home_conversation_id: thread,
-          last_reply: { seq: 2, status: "completed", text: "Found 3 urgent issues.", created_at: at },
-          pending_requests: [
-            {
-              request_id: "r1",
-              agent: "researcher",
-              agent_id: "agent-researcher",
-              conversation_id: thread,
-              kind: "service",
-              service_slug: "slack",
-              summary: "Use Slack",
-              requested_by: null,
-              expires_at: at,
-            },
-          ],
-        }),
-        agent({ id: "agent-old", kind: "specialist", name: "old", status: "destroyed", destroyed_at: at }),
-      ]}
-      onOpenConversation={open}
-    />,
-  );
-  const strip = screen.getByRole("region", { name: "Team" });
-  const toggle = within(strip).getByRole("button", { expanded: true });
-  expect(toggle).toHaveTextContent("1 specialist · 1 working");
-  expect(strip).toHaveTextContent("1 request");
-  expect(strip).toHaveTextContent("Found 3 urgent issues.");
-  expect(strip).not.toHaveTextContent("old");
-  const user = userEvent.setup();
-  await user.click(
-    within(strip).getByRole("button", { name: "Review researcher's request: Use Slack" }),
-  );
-  expect(open).toHaveBeenCalledWith(thread);
-  await user.click(toggle);
-  expect(toggle).toHaveAttribute("aria-expanded", "false");
-  expect(strip).not.toHaveTextContent("Found 3 urgent issues.");
-});
-
-it("renders no team strip without live specialists", () => {
-  const view = render(<TeamStrip agents={[agent({})]} onOpenConversation={vi.fn()} />);
-  expect(view.container).toBeEmptyDOMElement();
+it("reserves the loading agent's space without showing a NyxBot identity", () => {
+  const view = render(<ThreadHeader name="Loading agent…" kind="nyxbot" loading destroyed={false} title="Morning briefing" />);
+  expect(screen.getByRole("heading", { name: "Morning briefing" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Loading agent…" })).toBeVisible();
+  expect(screen.queryByText("NyxBot")).not.toBeInTheDocument();
+  expect(view.container.querySelector("svg")).toBeNull();
 });
 
 it("notes queued updates only when there are some", () => {
@@ -147,4 +72,23 @@ it("shows what the thread is waiting for and that the agent continues by itself"
   expect(note).toHaveTextContent("verify your Telegram account with @helper_bot");
   expect(note).toHaveTextContent("NyxID has not received any message from this bot yet.");
   expect(note).toHaveTextContent("NyxBot continues here by itself when this happens");
+});
+
+it("shows the thread title beside the agent and renames it in place", async () => {
+  const user = userEvent.setup();
+  const rename = vi.fn().mockResolvedValue(undefined);
+  render(
+    <ThreadHeader name="NyxBot" kind="nyxbot" destroyed={false} title="Morning briefing" onRenameTitle={rename} />,
+  );
+  await user.click(screen.getByRole("button", { name: "Rename chat" }));
+  const field = screen.getByRole("textbox", { name: "Chat title" });
+  await user.clear(field);
+  await user.type(field, "Daily plan{Enter}");
+  expect(rename).toHaveBeenCalledWith("Daily plan");
+});
+
+it("shows a read-only title when the thread cannot be renamed", () => {
+  render(<ThreadHeader name="researcher" kind="specialist" destroyed title="Old notes" />);
+  expect(screen.getByText("Old notes")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Rename chat" })).not.toBeInTheDocument();
 });

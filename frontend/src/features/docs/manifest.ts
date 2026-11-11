@@ -113,6 +113,7 @@ export const DOCS_TABS: readonly DocTab[] = [
       {
         group: "Command reference",
         pages: [
+          { slug: "cli/reference/nyxbot", title: "nyxid nyxbot" },
           { slug: "cli/reference/service", title: "nyxid service" },
           { slug: "cli/reference/api-key", title: "nyxid api-key" },
           { slug: "cli/reference/node", title: "nyxid node" },

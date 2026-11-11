@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
@@ -34,7 +35,7 @@ export function AssistantAccountMfaSetupDialog({
   readonly actionRequestId: string;
   readonly onComplete: (userId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const startRef = useRef(false);
   const confirmRef = useRef(false);
   const [stage, setStage] = useState<"start" | "confirm" | "complete">("start");
@@ -78,12 +79,12 @@ export function AssistantAccountMfaSetupDialog({
   return (
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
-        <DialogHeader><DialogTitle>{stage === "start" ? t("Set up MFA") : stage === "confirm" ? t("Verify MFA setup") : t("MFA enabled")}</DialogTitle><DialogDescription>{stage === "start" ? t("NyxID will show the authenticator secret once in this browser.") : stage === "confirm" ? t("Enter the six-digit code from your authenticator. Recovery codes are shown once.") : t("The account projection confirms MFA is enabled.")}</DialogDescription></DialogHeader>
-        {stage === "start" ? <p className="text-12 text-muted-foreground">{t("No setup request is sent until you click Start setup.")}</p> : null}
-        {stage === "confirm" && setupValue ? <div className="space-y-3 border-y border-border py-4"><div><p className="mb-1 text-11 text-muted-foreground">{t("One-time authenticator secret")}</p><code className="block break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs">{setupValue}</code></div><label htmlFor="assistant-mfa-code" className="text-12 font-medium">{t("Authenticator code")}</label><Input id="assistant-mfa-code" inputMode="numeric" maxLength={6} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} /></div> : null}
-        {stage === "complete" && recoveryValues ? <div className="space-y-2 border-y border-border py-4"><p className="text-11 text-muted-foreground">{t("Save these recovery codes now. They are not sent to the assistant.")}</p><div className="grid grid-cols-2 gap-2">{recoveryValues.map((value) => <code key={value} className="rounded-lg border border-border bg-muted px-2 py-1 text-center font-mono text-xs">{value}</code>)}</div></div> : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{translateUi(error)}</p> : null}
-        <DialogFooter>{stage === "start" ? <><Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button><Button type="button" variant="primary" isLoading={submitting} disabled={submitting} onClick={() => void start()}>{t("Start setup")}</Button></> : stage === "confirm" ? <><Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button><Button type="button" variant="primary" isLoading={submitting} disabled={submitting || code.length !== 6} onClick={() => void confirm()}>{t("Enable MFA")}</Button></> : <Button type="button" variant="primary" onClick={() => { if (userId) onComplete(userId); close(); }}>{t("I have saved them")}</Button>}</DialogFooter>
+        <DialogHeader><DialogTitle>{stage === "start" ? translateUi("Set up MFA") : stage === "confirm" ? translateUi("Verify MFA setup") : translateUi("MFA enabled")}</DialogTitle><DialogDescription>{stage === "start" ? translateUi("NyxID will show the authenticator secret once in this browser.") : stage === "confirm" ? translateUi("Enter the six-digit code from your authenticator. Recovery codes are shown once.") : translateUi("The account projection confirms MFA is enabled.")}</DialogDescription></DialogHeader>
+        {stage === "start" ? <p className="text-14 text-muted-foreground">{translateUi("No setup request is sent until you click Start setup.")}</p> : null}
+        {stage === "confirm" && setupValue ? <div className="space-y-3 border-y border-border py-4"><div><p className="mb-1 text-13 text-muted-foreground">{translateUi("One-time authenticator secret")}</p><code className="block break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-14">{setupValue}</code></div><Label htmlFor="assistant-mfa-code">{translateUi("Authenticator code")}</Label><Input id="assistant-mfa-code" inputMode="numeric" maxLength={6} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} /></div> : null}
+        {stage === "complete" && recoveryValues ? <div className="space-y-2 border-y border-border py-4"><p className="text-13 text-muted-foreground">{translateUi("Save these recovery codes now. They are not sent to the assistant.")}</p><div className="grid grid-cols-2 gap-2">{recoveryValues.map((value) => <code key={value} className="rounded-lg border border-border bg-muted px-2 py-1 text-center font-mono text-14">{value}</code>)}</div></div> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{translateUi(error)}</p> : null}
+        <DialogFooter>{stage === "start" ? <><Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button><Button type="button" variant="primary" isLoading={submitting} disabled={submitting} onClick={() => void start()}>{translateUi("Start setup")}</Button></> : stage === "confirm" ? <><Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button><Button type="button" variant="primary" isLoading={submitting} disabled={submitting || code.length !== 6} onClick={() => void confirm()}>{translateUi("Enable MFA")}</Button></> : <Button type="button" variant="primary" onClick={() => { if (userId) onComplete(userId); close(); }}>{translateUi("I have saved them")}</Button>}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

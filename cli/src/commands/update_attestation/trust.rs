@@ -5,47 +5,253 @@ use futures::TryStreamExt;
 use sigstore::trust::sigstore::SigstoreTrustRoot;
 use tough::{IntoVec, Transport, TransportError, TransportErrorKind};
 
+#[path = "cache.rs"]
+mod cache;
+
+/// Only constructed after TUF authentication (or from pinned test fixtures).
+/// Retired log keys remain available for historical verification. The upstream
+/// accessor filters them by wall-clock time rather than the signed event time.
+#[derive(Debug)]
+pub(super) struct Root {
+    fulcio: Vec<Authority>,
+    rekor: Vec<LogKey>,
+    ctfe: Vec<LogKey>,
+}
+
+#[derive(Debug)]
+struct Authority {
+    certs: Vec<Vec<u8>>,
+    start: Option<chrono::DateTime<chrono::Utc>>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+type ValidityInterval = (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
+fn validity(value: &serde_json::Value) -> Result<ValidityInterval> {
+    anyhow::ensure!(
+        value.is_null() || value.is_object(),
+        "Invalid trust validity interval"
+    );
+    let date = |field: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        match &value[field] {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(s) => Ok(Some(
+                chrono::DateTime::parse_from_rfc3339(s)?.with_timezone(&chrono::Utc),
+            )),
+            _ => anyhow::bail!("Invalid trust validity timestamp"),
+        }
+    };
+    let (start, end) = (date("start")?, date("end")?);
+    anyhow::ensure!(
+        start.zip(end).is_none_or(|(s, e)| s <= e),
+        "Reversed trust validity interval"
+    );
+    Ok((start, end))
+}
+
+#[derive(Debug)]
+pub(super) struct LogKey {
+    pub id: String,
+    pub der: Vec<u8>,
+    pub origin: String,
+    start: Option<chrono::DateTime<chrono::Utc>>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl LogKey {
+    pub fn check_time(&self, seconds: u64) -> Result<()> {
+        let time = i64::try_from(seconds)
+            .ok()
+            .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+            .context("Log timestamp out of range")?;
+        self.check_datetime(time)
+    }
+
+    pub fn check_millis(&self, millis: u64) -> Result<()> {
+        let time = i64::try_from(millis)
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .context("Log timestamp out of range")?;
+        self.check_datetime(time)
+    }
+
+    fn check_datetime(&self, time: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        anyhow::ensure!(
+            self.start.is_none_or(|s| time >= s) && self.end.is_none_or(|e| time <= e),
+            "Log key was not valid at signed event time"
+        );
+        Ok(())
+    }
+}
+
+impl Root {
+    pub(super) fn from_authenticated_json(bytes: &[u8]) -> Result<Self> {
+        use base64::Engine;
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        let logs = |field: &str| -> Result<Vec<LogKey>> {
+            value[field]
+                .as_array()
+                .context("Trust root missing log list")?
+                .iter()
+                .map(|log| {
+                    let decode = |v: &serde_json::Value| -> Result<Vec<u8>> {
+                        Ok(base64::engine::general_purpose::STANDARD
+                            .decode(v.as_str().context("Missing log key bytes")?)?)
+                    };
+                    let der = decode(&log["publicKey"]["rawBytes"])?;
+                    let id = hex::encode(decode(&log["logId"]["keyId"])?);
+                    // TUF binds each format-specific ID to its key. Rekor v2 uses
+                    // a note-key ID, which is not SHA256(SPKI); its presence must
+                    // not invalidate a trust root also containing supported v1 logs.
+                    anyhow::ensure!(id.len() == 64, "Invalid log key ID length");
+                    let url: url::Url = log["baseUrl"]
+                        .as_str()
+                        .context("Missing log origin")?
+                        .parse()?;
+                    let (start, end) = validity(&log["publicKey"]["validFor"])?;
+                    Ok(LogKey {
+                        id,
+                        der,
+                        origin: url.host_str().context("Missing log hostname")?.to_owned(),
+                        start,
+                        end,
+                    })
+                })
+                .collect()
+        };
+        // Also retain upstream schema validation after TUF target authentication.
+        SigstoreTrustRoot::from_trusted_root_json_unchecked(bytes)?;
+        let fulcio = value["certificateAuthorities"]
+            .as_array()
+            .context("Missing Fulcio authorities")?
+            .iter()
+            .map(|ca| {
+                let (start, end) = validity(&ca["validFor"])?;
+                let certs = ca["certChain"]["certificates"]
+                    .as_array()
+                    .context("Missing Fulcio chain")?
+                    .iter()
+                    .map(|cert| {
+                        Ok(base64::engine::general_purpose::STANDARD.decode(
+                            cert["rawBytes"]
+                                .as_str()
+                                .context("Missing Fulcio certificate")?,
+                        )?)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Authority { certs, start, end })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            fulcio,
+            rekor: logs("tlogs")?,
+            ctfe: logs("ctlogs")?,
+        })
+    }
+
+    pub fn rekor_key(&self, id: &str) -> Result<&LogKey> {
+        self.rekor
+            .iter()
+            .find(|k| k.id == id)
+            .context("Unknown Rekor log key")
+    }
+
+    pub fn ctfe_key(&self, id: &str) -> Result<&LogKey> {
+        self.ctfe
+            .iter()
+            .find(|k| k.id == id)
+            .context("Unknown CT log key")
+    }
+
+    pub fn fulcio_certs(
+        &self,
+        signing_time: pki_types::UnixTime,
+    ) -> Result<Vec<pki_types::CertificateDer<'_>>> {
+        use x509_cert::der::Decode;
+        let seconds = signing_time.as_secs();
+        let time = i64::try_from(seconds)
+            .ok()
+            .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+            .context("Signing time out of range")?;
+        let mut certs = Vec::new();
+        for ca in &self.fulcio {
+            if ca.start.is_some_and(|s| time < s) || ca.end.is_some_and(|e| time > e) {
+                continue;
+            }
+            for der in &ca.certs {
+                let cert = x509_cert::Certificate::from_der(der)?;
+                let validity = cert.tbs_certificate.validity;
+                // webpki deliberately does not validate trust-anchor expiry.
+                if seconds >= validity.not_before.to_unix_duration().as_secs()
+                    && seconds <= validity.not_after.to_unix_duration().as_secs()
+                {
+                    certs.push(pki_types::CertificateDer::from(der.as_slice()));
+                }
+            }
+        }
+        anyhow::ensure!(
+            !certs.is_empty(),
+            "No Fulcio authority valid at authenticated signing time"
+        );
+        Ok(certs)
+    }
+}
+
 const ROOT: &[u8] = include_bytes!("../../../resources/sigstore-root.json");
 const METADATA: &str = "https://tuf-repo-cdn.sigstore.dev/";
 const TARGETS: &str = "https://tuf-repo-cdn.sigstore.dev/targets/";
 
-pub(super) async fn load() -> Result<SigstoreTrustRoot> {
+pub(super) fn prepare_datastore(path: &std::path::Path) -> Result<()> {
+    cache::prepare_datastore(path)
+}
+
+pub(super) async fn load() -> Result<Root> {
     // Match tough's timeouts and default headers. In particular, never reuse
     // github_client: it may carry a GitHub token in its default Authorization.
     let client = crate::tls::client_builder()?
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    load_from(client, METADATA.parse()?, TARGETS.parse()?).await
+    load_from(
+        client,
+        METADATA.parse()?,
+        TARGETS.parse()?,
+        &cache::native_path()?,
+    )
+    .await
 }
 
 pub(super) async fn load_github(
     client: reqwest::Client,
     datastore: Option<&std::path::Path>,
-) -> Result<SigstoreTrustRoot> {
+) -> Result<Root> {
     let base = "https://raw.githubusercontent.com/sigstore/root-signing/main/";
-    let loader = tough::RepositoryLoader::new(
-        &ROOT,
+    let native;
+    let datastore = match datastore {
+        Some(path) => path,
+        None => {
+            native = cache::native_path()?;
+            &native
+        }
+    };
+    let repository = cache::load(
+        ROOT,
+        GithubTransport(CliTransport(client)),
         format!("{base}metadata/").parse()?,
         format!("{base}targets/").parse()?,
+        datastore,
     )
-    .transport(GithubTransport(CliTransport(client)))
-    .expiration_enforcement(tough::ExpirationEnforcement::Safe);
-    // Scratch/read-only companions supply their private update-volume store.
-    // Native CLI/server callers retain tough's temporary datastore behavior.
-    let loader = match datastore {
-        Some(path) => loader.datastore(path),
-        None => loader,
-    };
-    let repository = loader.load().await?;
+    .await?;
     let bytes = repository
         .read_target(&tough::TargetName::new("trusted_root.json")?)
         .await?
         .context("Missing authenticated trust root")?
         .into_vec()
         .await?;
-    SigstoreTrustRoot::from_trusted_root_json_unchecked(&bytes)
-        .context("Invalid authenticated trust root")
+    Root::from_authenticated_json(&bytes).context("Invalid authenticated trust root")
 }
 
 #[derive(Clone, Debug)]
@@ -86,11 +292,9 @@ async fn load_from(
     client: reqwest::Client,
     metadata: url::Url,
     targets: url::Url,
-) -> Result<SigstoreTrustRoot> {
-    let repository = tough::RepositoryLoader::new(&ROOT, metadata, targets)
-        .transport(CliTransport(client))
-        .expiration_enforcement(tough::ExpirationEnforcement::Safe)
-        .load()
+    datastore: &std::path::Path,
+) -> Result<Root> {
+    let repository = cache::load(ROOT, CliTransport(client), metadata, targets, datastore)
         .await
         .context("Failed to verify Sigstore TUF metadata")?;
     let target = tough::TargetName::new("trusted_root.json")?;
@@ -102,8 +306,7 @@ async fn load_from(
         .await?;
     // The unchecked constructor only parses: tough has authenticated these bytes
     // against the signed target metadata above, rooted in the embedded TUF root.
-    SigstoreTrustRoot::from_trusted_root_json_unchecked(&data)
-        .context("Invalid authenticated Sigstore trust root")
+    Root::from_authenticated_json(&data).context("Invalid authenticated Sigstore trust root")
 }
 
 #[derive(Clone, Debug)]
@@ -235,6 +438,51 @@ impl Download {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fulcio_authority_trust_and_certificate_validity_use_signed_time() {
+        let mut value: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/sigstore/trusted_root.json"
+        ))
+        .unwrap();
+        let seconds = 1_792_042_636;
+        let date = chrono::DateTime::from_timestamp(seconds, 0)
+            .unwrap()
+            .to_rfc3339();
+        for ca in value["certificateAuthorities"].as_array_mut().unwrap() {
+            ca["validFor"] = serde_json::json!({"start":date,"end":date});
+        }
+        let root = Root::from_authenticated_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let time = |s| pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(s));
+        assert!(!root.fulcio_certs(time(seconds as u64)).unwrap().is_empty());
+        assert!(root.fulcio_certs(time(seconds as u64 - 1)).is_err());
+        assert!(root.fulcio_certs(time(seconds as u64 + 1)).is_err());
+        // With no configured interval, expired anchors still cannot authorize
+        // signatures beyond their own X.509 validity (webpki skips this check).
+        for ca in value["certificateAuthorities"].as_array_mut().unwrap() {
+            ca["validFor"] = serde_json::Value::Null;
+        }
+        let root = Root::from_authenticated_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(root.fulcio_certs(time(4_102_444_800)).is_err());
+    }
+
+    #[test]
+    fn historical_log_keys_are_checked_at_authenticated_event_time() {
+        let mut value: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/sigstore/trusted_root.json"
+        ))
+        .unwrap();
+        value["tlogs"][0]["publicKey"]["validFor"] =
+            serde_json::json!({"start": "2020-01-01T00:00:00Z", "end": "2021-01-01T00:00:00Z"});
+        let root = Root::from_authenticated_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let key = &root.rekor[0];
+        key.check_time(1_600_000_000).unwrap();
+        assert!(key.check_time(1_500_000_000).is_err());
+        assert!(key.check_time(1_700_000_000).is_err());
+        assert!(key.check_millis(1_609_459_200_001).is_err());
+        value["tlogs"][0]["publicKey"]["validFor"]["end"] = 0.into();
+        assert!(Root::from_authenticated_json(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
     #[tokio::test]
     #[ignore = "Live GitHub TUF mirror; explicit release validation"]
     async fn github_tuf_mirror_verifies_root_rotation_expiry_and_target_hash() {
@@ -244,7 +492,11 @@ mod tests {
             .user_agent("nyxid-update-validation")
             .build()
             .unwrap();
-        load_github(client, None).await.unwrap();
+        let state = cache::test_directory();
+        load_github(client.clone(), Some(state.path()))
+            .await
+            .unwrap();
+        load_github(client, Some(state.path())).await.unwrap();
     }
 
     #[tokio::test]
@@ -272,11 +524,13 @@ mod tests {
             .no_proxy()
             .build()
             .unwrap();
+        let state = cache::test_directory();
         assert!(
             load_from(
                 client,
                 format!("{}/", server.uri()).parse().unwrap(),
-                format!("{}/targets/", server.uri()).parse().unwrap()
+                format!("{}/targets/", server.uri()).parse().unwrap(),
+                state.path()
             )
             .await
             .is_err()

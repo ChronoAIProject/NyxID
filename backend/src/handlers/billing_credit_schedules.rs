@@ -25,6 +25,12 @@ use crate::services::{audit_service, billing};
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateCreditScheduleRequest {
+    pub amount: Option<crate::models::credits::Credits>,
+    #[serde(default)]
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
+    /// Legacy whole-credit input. Exact `amount`, when present, takes precedence.
+    #[serde(default)]
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
     pub expiry: CreditExpiryPolicy,
@@ -44,6 +50,8 @@ pub struct CreateCreditScheduleRequest {
 #[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateCreditScheduleRequest {
+    pub amount: Option<crate::models::credits::Credits>,
+    pub service_limits: Option<Vec<crate::models::credit_service_limit::CreditServiceLimitInput>>,
     pub amount_credits: Option<i64>,
     pub expiry: Option<CreditExpiryPolicy>,
     pub target_kind: Option<BillingTargetKind>,
@@ -62,6 +70,7 @@ pub struct UpdateCreditScheduleRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreditSchedulePeriodResponse {
+    pub service_limits: Vec<super::billing_credits::ServiceLimitResponse>,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
     pub target_org_ids: Vec<String>,
@@ -86,6 +95,7 @@ pub struct CreditScheduleRecipientResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreditScheduleResponse {
+    pub service_limits: Vec<super::billing_credits::ServiceLimitResponse>,
     pub id: String,
     pub amount_credits: i64,
     pub amount_micros: i64,
@@ -129,9 +139,15 @@ pub async fn create_schedule(
     Json(body): Json<CreateCreditScheduleRequest>,
 ) -> AppResult<Json<CreditScheduleResponse>> {
     require_admin(&state, &auth_user).await?;
+    if !body.service_limits.is_empty() {
+        super::billing_credits::require_allocation_capability(&state)?;
+    }
     let schedule = billing::schedules::create_schedule(
         &state.db,
         billing::schedules::CreateScheduleInput {
+            amount: body.amount,
+            service_limits: body.service_limits,
+            request_id: body.request_id,
             amount_credits: body.amount_credits,
             recurrence: body.recurrence,
             expiry: body.expiry,
@@ -199,10 +215,15 @@ pub async fn update_schedule(
     Json(body): Json<UpdateCreditScheduleRequest>,
 ) -> AppResult<Json<CreditScheduleResponse>> {
     require_admin(&state, &auth_user).await?;
+    if body.service_limits.is_some() {
+        super::billing_credits::require_allocation_capability(&state)?;
+    }
     let schedule = billing::schedules::update_schedule(
         &state.db,
         &schedule_id,
         billing::schedules::UpdateScheduleInput {
+            amount: body.amount,
+            service_limits: body.service_limits,
             amount_credits: body.amount_credits,
             expiry: body.expiry,
             target_kind: body.target_kind,
@@ -283,6 +304,11 @@ fn schedule_response(
         amount_credits: schedule.amount_credits,
         amount_micros: schedule.amount.display_micros(),
         amount: schedule.amount.to_string(),
+        service_limits: schedule
+            .service_limits
+            .iter()
+            .map(super::billing_credits::ServiceLimitResponse::from)
+            .collect(),
         recurrence: schedule.recurrence,
         expiry: schedule.expiry,
         target_kind: schedule.target_kind,
@@ -309,6 +335,11 @@ fn schedule_response(
             disbursed_count: period.disbursed_count,
             amount_micros: period.amount.display_micros(),
             amount: period.amount.to_string(),
+            service_limits: period
+                .service_limits
+                .iter()
+                .map(super::billing_credits::ServiceLimitResponse::from)
+                .collect(),
             expires_at: period.expires_at,
             completed_at: period.completed_at,
         }),
@@ -396,6 +427,9 @@ mod tests {
         targets: Vec<String>,
     ) -> CreateCreditScheduleRequest {
         CreateCreditScheduleRequest {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
             expiry: CreditExpiryPolicy::EndOfPeriod,
@@ -550,6 +584,9 @@ mod tests {
         billing::grants::issue_grants(
             &state.db,
             IssueCreditGrantInput {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![user_id],
@@ -597,3 +634,23 @@ mod tests {
 
 #[cfg(test)]
 mod target_tests;
+
+#[utoipa::path(post, path = "/api/v1/admin/credits/allocations/schedules", tag = "Admin Credits", request_body = CreateCreditScheduleRequest, responses((status = 200, body = CreditScheduleResponse)), security(("bearer_auth" = [])))]
+pub async fn allocate_recurring(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateCreditScheduleRequest>,
+) -> AppResult<Json<CreditScheduleResponse>> {
+    super::billing_credits::require_allocation_capability(&state)?;
+    create_schedule(State(state), auth, Json(body)).await
+}
+#[utoipa::path(patch, path = "/api/v1/admin/credits/allocations/schedules/{schedule_id}", tag = "Admin Credits", params(("schedule_id" = String, Path)), request_body = UpdateCreditScheduleRequest, responses((status = 200, body = CreditScheduleResponse)), security(("bearer_auth" = [])))]
+pub async fn edit_allocation_recurring(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateCreditScheduleRequest>,
+) -> AppResult<Json<CreditScheduleResponse>> {
+    super::billing_credits::require_allocation_capability(&state)?;
+    update_schedule(State(state), auth, Path(id), Json(body)).await
+}

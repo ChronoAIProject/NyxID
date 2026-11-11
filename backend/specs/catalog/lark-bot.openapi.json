@@ -20,7 +20,7 @@
       "post": {
         "operationId": "im_message_create",
         "summary": "Send a message as the bot",
-        "description": "Sends a message to a user or chat. `content` is a JSON-encoded string matching `msg_type` (e.g. {\"text\":\"hello\"} for msg_type=text).",
+        "description": "Send message content with exactly one of text (plain text, msg_type=text) or content (a JSON object or a JSON-encoded object string). NyxID serializes typed text and structured post/interactive content once. Existing valid content strings are preserved verbatim. Use uuid for provider idempotency; split text into separate calls if necessary.",
         "x-aevatar-tool": {
           "name": "im_message_create",
           "description": "Send a Lark/Feishu message to a user or chat as the bot.",
@@ -54,8 +54,7 @@
                 "type": "object",
                 "required": [
                   "receive_id",
-                  "msg_type",
-                  "content"
+                  "msg_type"
                 ],
                 "additionalProperties": false,
                 "properties": {
@@ -68,14 +67,48 @@
                     "description": "Message type, e.g. text, post, interactive, image."
                   },
                   "content": {
-                    "type": "string",
-                    "description": "JSON-encoded message content string matching msg_type."
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    ],
+                    "description": "Advanced raw content: JSON object or JSON-encoded object string matching msg_type; mutually exclusive with text. Post and interactive accept structured objects."
                   },
                   "uuid": {
                     "type": "string",
                     "description": "Optional client-generated idempotency key."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Plain text for msg_type=text. Real newlines remain newlines; literal backslash-n stays literal. Mutually exclusive with content."
                   }
-                }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ],
+                    "not": {
+                      "required": [
+                        "content"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "content"
+                    ],
+                    "not": {
+                      "required": [
+                        "text"
+                      ]
+                    }
+                  }
+                ]
               }
             }
           }
@@ -92,6 +125,9 @@
               }
             }
           }
+        },
+        "x-nyxid-message-content": {
+          "version": 1
         }
       },
       "get": {
@@ -550,8 +586,7 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "msg_type",
-                  "content"
+                  "msg_type"
                 ],
                 "properties": {
                   "msg_type": {
@@ -559,14 +594,48 @@
                     "description": "Message type, e.g. text, post, interactive."
                   },
                   "content": {
-                    "type": "string",
-                    "description": "JSON-encoded message content string matching msg_type."
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    ],
+                    "description": "Advanced raw content: JSON object or JSON-encoded object string matching msg_type; mutually exclusive with text. Post and interactive accept structured objects."
                   },
                   "uuid": {
                     "type": "string",
                     "description": "Optional client-generated idempotency key."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Plain text for msg_type=text. Real newlines remain newlines; literal backslash-n stays literal. Mutually exclusive with content."
                   }
-                }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ],
+                    "not": {
+                      "required": [
+                        "content"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "content"
+                    ],
+                    "not": {
+                      "required": [
+                        "text"
+                      ]
+                    }
+                  }
+                ]
               }
             }
           }
@@ -583,7 +652,11 @@
               }
             }
           }
-        }
+        },
+        "x-nyxid-message-content": {
+          "version": 1
+        },
+        "description": "Send message content with exactly one of text (plain text, msg_type=text) or content (a JSON object or a JSON-encoded object string). NyxID serializes typed text and structured post/interactive content once. Existing valid content strings are preserved verbatim. Use uuid for provider idempotency; split text into separate calls if necessary."
       }
     },
     "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}": {
@@ -691,6 +764,355 @@
         "responses": {
           "200": {
             "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive/v1/medias/upload_all": {
+      "post": {
+        "operationId": "bitable_media_upload",
+        "summary": "Upload a conversation attachment to Lark Base",
+        "description": "Upload one live-chat attachment and return its file_token. Creates no Base record. Requires docs:document.media:upload and access to the destination Base.",
+        "x-aevatar-tool": {
+          "name": "bitable_media_upload",
+          "description": "Upload a conversation attachment to a Base; returns a file_token without creating a record.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "x-nyxid-attachment-input": {
+          "field": "file",
+          "size_field": "size",
+          "filename_field": "file_name",
+          "version": 1
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "file_name",
+                  "parent_type",
+                  "parent_node",
+                  "size",
+                  "extra",
+                  "file"
+                ],
+                "properties": {
+                  "file_name": {
+                    "type": "string",
+                    "description": "Filename; defaults to the sanitized attachment label."
+                  },
+                  "parent_type": {
+                    "type": "string",
+                    "enum": [
+                      "bitable_image",
+                      "bitable_file"
+                    ]
+                  },
+                  "parent_node": {
+                    "type": "string",
+                    "description": "Destination Base app token."
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Byte length, derived by NyxID; a supplied value must match."
+                  },
+                  "extra": {
+                    "type": "string",
+                    "description": "JSON string containing drive_route_token equal to parent_node; derived by NyxID."
+                  },
+                  "file": {
+                    "type": "string",
+                    "description": "Materialized by NyxID from attachment_id in a live owner chat."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "code 0 and data.file_token on success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bitable/v1/apps/{app_token}/tables/{table_id}/fields": {
+      "get": {
+        "operationId": "bitable_fields_list",
+        "summary": "List Base table fields",
+        "x-aevatar-tool": {
+          "name": "bitable_fields_list",
+          "description": "List Base field types and select options before writing a record.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lark API response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nyxid/managed/bitable/apps/{app_token}/tables/{table_id}/records": {
+      "post": {
+        "operationId": "bitable_record_create_with_attachments",
+        "summary": "Create one Base record with conversation attachments",
+        "description": "NyxID managed operation: validate fields, upload all attachments, then create at most one record for the retained photo identity. Owner chat only.",
+        "x-aevatar-tool": {
+          "name": "bitable_record_create_with_attachments",
+          "description": "Create a Base record after every required attachment has uploaded successfully.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "x-nyxid-managed-operation": {
+          "kind": "lark_bitable_record_with_attachments",
+          "version": 1,
+          "fields_operation": "bitable_fields_list",
+          "upload_operation": "bitable_media_upload",
+          "create_operation": "bitable_record_create"
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "fields",
+                  "attachments"
+                ],
+                "properties": {
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "attachments": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lark API response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/im/v1/images": {
+      "post": {
+        "operationId": "im_image_create",
+        "summary": "Upload a message image",
+        "description": "Upload a PNG, JPEG, GIF or WebP image and return image_key for im_message_create or im_message_reply. NyxID converts exactly one image_url (public HTTPS, no redirects) or image_base64 (standard base64) into multipart image_type=message. Maximum 10 MiB of actual image bytes; MIME must agree with the image. Requires im:resource. Available through NyxID hosted MCP, not the legacy /mcp/config bridge.",
+        "x-nyxid-managed-operation": {
+          "kind": "lark_im_image",
+          "version": 1
+        },
+        "x-nyxid-changes-existing": false,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "image_url": {
+                    "type": "string",
+                    "maxLength": 8192
+                  },
+                  "image_base64": {
+                    "type": "string",
+                    "maxLength": 13981016
+                  },
+                  "filename": {
+                    "type": "string",
+                    "maxLength": 255
+                  },
+                  "mime_type": {
+                    "type": "string",
+                    "enum": [
+                      "image/png",
+                      "image/jpeg",
+                      "image/gif",
+                      "image/webp"
+                    ]
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "image_url"
+                    ],
+                    "not": {
+                      "required": [
+                        "image_base64"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "image_base64"
+                    ],
+                    "not": {
+                      "required": [
+                        "image_url"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Uploaded message image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "image_key"
+                  ],
+                  "properties": {
+                    "image_key": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/wiki/v2/spaces/get_node": {
+      "get": {
+        "operationId": "wiki_get_node",
+        "summary": "Resolve a Lark/Feishu wiki document link to its underlying document or Base",
+        "description": "Resolve a normal Lark/Feishu document link from My document library or a knowledge space: for https://<tenant>/wiki/<node-token>, pass only <node-token> as token. Read data.node.obj_type and obj_token; on the SAME connection call docx_raw_content with document_id=obj_token for docx, or bitable_tables_list then bitable_records_list/search with app_token=obj_token for bitable. Sheets (sheet), legacy doc, mindnote, file and slides have no reader in these overlays: report lark_wiki_unsupported_type, never guess or pass their tokens to docx. Requires wiki:wiki:readonly (or wiki:wiki; Feishu also supports wiki:node:read), plus node read ACL for the connected user or tenant application. The channel bot identity and possession of a URL grant no access. Docx reading separately requires docx:document:readonly and document ACL. Missing connection: use nyx__connect_service for an owner-hosted setup link; specialists need the owner to grant that connection in their Grants page. Never ask for a hidden docx link or public sharing.",
+        "x-aevatar-tool": {
+          "name": "wiki_get_node",
+          "description": "Resolve a normal Lark/Feishu document link from My document library or a knowledge space: for https://<tenant>/wiki/<node-token>, pass only <node-token> as token. Read data.node.obj_type and obj_token; on the SAME connection call docx_raw_content with document_id=obj_token for docx, or bitable_tables_list then bitable_records_list/search with app_token=obj_token for bitable. Sheets (sheet), legacy doc, mindnote, file and slides have no reader in these overlays: report lark_wiki_unsupported_type, never guess or pass their tokens to docx. Requires wiki:wiki:readonly (or wiki:wiki; Feishu also supports wiki:node:read), plus node read ACL for the connected user or tenant application. The channel bot identity and possession of a URL grant no access. Docx reading separately requires docx:document:readonly and document ACL. Missing connection: use nyx__connect_service for an owner-hosted setup link; specialists need the owner to grant that connection in their Grants page. Never ask for a hidden docx link or public sharing.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "description": "The node token after /wiki/ in the owner-provided link, without the URL or query string.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Node metadata, including data.node.obj_type, obj_token and space_id. code must be zero before using the result.",
             "content": {
               "application/json": {
                 "schema": {

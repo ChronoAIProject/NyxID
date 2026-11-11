@@ -48,17 +48,22 @@ pub enum NodeIntent {
 
 #[derive(Clone, Debug)]
 pub struct BillingRouteContext {
+    pub(crate) model_tariff: Option<Box<super::model_tariffs::SelectedTariff>>,
+    pub(crate) org_channel_guest: Option<crate::services::org_channel_service::GuestPayer>,
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
     /// An internal durable public call reservation; never accepted from HTTP.
     pub(crate) public_admission: Option<PublicBillingAdmission>,
+    /// Internal readiness probe uses the same durable funding transaction.
+    pub(crate) public_probe: bool,
     pub(crate) managed_admission: Option<ManagedBillingAdmission>,
     pub(crate) managed_billing: Option<ServiceBilling>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
     pub api_key_id: Option<String>,
+    pub(crate) assistant_source: Option<String>,
     pub user_service_id: Option<String>,
     pub catalog_service_id: Option<String>,
     pub service_slug: Option<String>,
@@ -106,6 +111,61 @@ pub(crate) struct ManagedBillingAdmission {
 }
 
 impl BillingRouteContext {
+    /// Platform inference is funded at the inner gateway. Keep distinct non-token
+    /// orchestration prices, but never charge the outer copy of model usage.
+    pub(crate) fn with_platform_model_orchestration(
+        mut self,
+        _proof: &crate::services::assistant_platform_model::Orchestration,
+    ) -> Self {
+        if self.platform_metric.is_token_family() || self.platform_metric == BillingMetric::Images {
+            self.platform_billable = false;
+            self.service_platform_billable = false;
+        }
+        self.platform_components
+            .retain(|c| !c.metric.is_token_family() && c.metric != BillingMetric::Images);
+        self
+    }
+
+    /// Called after normal resource authorization/payer resolution, before
+    /// reservation. Personal-agent guests consume their owner's budget even
+    /// for org connections; the typed org-channel guest instead retains its
+    /// verified org payer and exact binding budget. The chat authority
+    /// comes from the live thread key, never a channel sender or request body.
+    pub(crate) fn with_assistant_payer(
+        mut self,
+        chat: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    ) -> Self {
+        self.org_channel_guest = chat
+            .and_then(|c| c.org_agent_access.as_ref())
+            .and_then(|a| a.channel())
+            .and_then(|c| c.guest_payer());
+        if self.org_channel_guest.is_none()
+            && let Some(chat) = chat.filter(|c| c.guest)
+        {
+            self.billing_owner_id.clone_from(&chat.user_id);
+        }
+        self
+    }
+
+    pub(crate) fn with_assistant_provenance(
+        mut self,
+        verified: bool,
+        orchestration: bool,
+        model_execution: bool,
+    ) -> Self {
+        self.assistant_source = Some(
+            if orchestration {
+                "orchestration"
+            } else if verified {
+                if model_execution { "model" } else { "tool" }
+            } else {
+                "other"
+            }
+            .into(),
+        );
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ingress: BillingIngress,
@@ -187,6 +247,7 @@ impl BillingRouteContext {
         }
         Self {
             public_admission: None,
+            public_probe: false,
             managed_admission: None,
             managed_billing: service_billing
                 .filter(|billing| billing.managed_execution.is_some())
@@ -198,6 +259,8 @@ impl BillingRouteContext {
             billing_owner_id,
             actor_user_id,
             api_key_id,
+            assistant_source: Some("other".into()),
+            org_channel_guest: None,
             user_service_id,
             catalog_service_id,
             service_slug,
@@ -227,6 +290,7 @@ impl BillingRouteContext {
                             })
                     })
                 }),
+            model_tariff: None,
             request_bytes: 0,
             native_text_bound: None,
             requested_images: 1,
@@ -238,6 +302,57 @@ impl BillingRouteContext {
             platform_metered: false,
             platform_billable: false,
         }
+    }
+
+    /// A validated model replaces the complete lane. No base/operation/resale
+    /// price survives. Finite per-code bounds are reserved without estimates.
+    pub fn with_model_tariff(
+        mut self,
+        selected: super::model_tariffs::SelectedTariff,
+    ) -> crate::errors::AppResult<Self> {
+        let t = selected.tariff();
+        if self.catalog_service_id.as_deref() != Some(&t.service_id)
+            || self.resale.is_some()
+            || self.pool_attempt.is_some()
+            || self.public_admission.is_some()
+            || self.managed_admission.is_some()
+            || !matches!(
+                (BillingLane::for_credential(self.credential_class), t.lane),
+                (
+                    Some(BillingLane::Byok),
+                    crate::models::platform_model_tariff::TariffLane::Byok
+                ) | (
+                    Some(BillingLane::PlatformKey),
+                    crate::models::platform_model_tariff::TariffLane::PlatformKey
+                )
+            )
+        {
+            return Err(super::model_tariffs::unavailable("incompatible_route"));
+        }
+        let first = t
+            .components
+            .first()
+            .ok_or_else(|| super::model_tariffs::unavailable("empty_tariff"))?;
+        self.platform_metric = first.metric;
+        self.platform_lago_metric_code = first.lago_metric_code.clone();
+        self.platform_components = t
+            .components
+            .iter()
+            .skip(1)
+            .map(|c| ResaleSpec {
+                metric: c.metric,
+                lago_metric_code: c.lago_metric_code.clone(),
+            })
+            .collect();
+        self.operation = None;
+        self.operation_prices.clear();
+        self.capture_tokens = t.contract.tokens;
+        self.service_platform_billable = selected.paid();
+        self.lane_pricing_configured = true;
+        self.platform_metered = true;
+        self.platform_billable = selected.paid();
+        self.model_tariff = Some(Box::new(selected));
+        Ok(self)
     }
 
     /// Whether the selected lane prices any operation, so callers resolve
@@ -346,7 +461,15 @@ impl BillingRouteContext {
                 BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
                 BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
                 // Machine runtime is reserved only by dedicated admission.
-                BillingMetric::MachineRunningSeconds => 0,
+                BillingMetric::ReasoningTokens
+                | BillingMetric::ImageInputTokens
+                | BillingMetric::ImageOutputTokens
+                | BillingMetric::AudioInputTokens
+                | BillingMetric::AudioOutputTokens
+                | BillingMetric::MachineRunningSeconds
+                | BillingMetric::SandboxCpuMillisSeconds
+                | BillingMetric::SandboxMemoryMibSeconds
+                | BillingMetric::SandboxDiskGibSeconds => 0,
             };
         }
         if self.requested_voice_seconds > 0 {
@@ -363,7 +486,15 @@ impl BillingRouteContext {
             BillingMetric::Images => self.requested_images,
             BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
             // Dedicated Machine admission reserves a finite runtime window.
-            BillingMetric::MachineRunningSeconds => 0,
+            BillingMetric::ReasoningTokens
+            | BillingMetric::ImageInputTokens
+            | BillingMetric::ImageOutputTokens
+            | BillingMetric::AudioInputTokens
+            | BillingMetric::AudioOutputTokens
+            | BillingMetric::MachineRunningSeconds
+            | BillingMetric::SandboxCpuMillisSeconds
+            | BillingMetric::SandboxMemoryMibSeconds
+            | BillingMetric::SandboxDiskGibSeconds => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens
@@ -398,6 +529,156 @@ mod tests {
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
     use crate::services::billing::route_inventory::BillingIngress;
 
+    #[test]
+    fn guest_1995_payer_is_agent_owner_and_owner_resource_billing_is_unchanged() {
+        use crate::services::assistant_acknowledgement_service::ChatAuthority;
+        let mut chat = ChatAuthority {
+            platform_model_context: None,
+            automation_work: None,
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_voice_task: false,
+            execution_task: None,
+            execution_permission: None,
+            business_system_success: false,
+            collaboration_thread: false,
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
+            platform_thread: false,
+            platform_origin: None,
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "thread".into(),
+            user_id: "actor-1".into(),
+            api_key_id: "api-key-1".into(),
+            role: crate::models::assistant_conversation::AgentRole::Subagent,
+            agent_id: "agent".into(),
+            agent_name: "specialist".into(),
+            guest: false,
+            confirmation_policy: None,
+            report_to: None,
+            with_nyxbot: false,
+        };
+        for credential in [
+            CredentialClass::NyxidManagedMaster,
+            CredentialClass::UserOwned,
+        ] {
+            let resolved = context_for(credential);
+            assert_eq!(
+                resolved.clone().with_assistant_payer(None).billing_owner_id,
+                "owner-1"
+            );
+            chat.guest = false;
+            assert_eq!(
+                resolved
+                    .clone()
+                    .with_assistant_payer(Some(&chat))
+                    .billing_owner_id,
+                "owner-1"
+            );
+            chat.guest = true;
+            for ingress in [
+                BillingIngress::Proxy,
+                BillingIngress::LlmGateway,
+                BillingIngress::LlmProvider,
+                BillingIngress::Mcp,
+            ] {
+                let mut guest = resolved.clone();
+                guest.ingress = ingress;
+                let guest = guest.with_assistant_payer(Some(&chat));
+                let row = crate::services::billing::meter::reserved_row(
+                    &guest,
+                    crate::models::usage_meter::BillingLayer::Platform,
+                    BillingMetric::Requests,
+                    "requests".into(),
+                    None,
+                    None,
+                );
+                assert_eq!(row.billing_owner_id, chat.user_id);
+                assert_eq!(row.actor_user_id, resolved.actor_user_id);
+                assert_eq!(row.credential_class, credential);
+                assert_eq!(row.user_service_id, resolved.user_service_id);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_recipient_never_uses_guest_owner_payer_override() {
+        use crate::services::assistant_acknowledgement_service::ChatAuthority;
+        let chat = ChatAuthority {
+            platform_model_context: None,
+            automation_work: None,
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_voice_task: false,
+            execution_task: None,
+            execution_permission: None,
+            business_system_success: false,
+            collaboration_thread: false,
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
+            platform_thread: false,
+            platform_origin: None,
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "thread".into(),
+            user_id: "recipient-1".into(),
+            api_key_id: "api-key-1".into(),
+            role: crate::models::assistant_conversation::AgentRole::Subagent,
+            agent_id: "agent".into(),
+            agent_name: "specialist".into(),
+            guest: false,
+            confirmation_policy: None,
+            report_to: None,
+            with_nyxbot: false,
+        };
+        for ingress in [
+            BillingIngress::Proxy,
+            BillingIngress::LlmGateway,
+            BillingIngress::LlmProvider,
+            BillingIngress::Mcp,
+        ] {
+            let mut context = context_for(CredentialClass::UserOwned);
+            context.ingress = ingress;
+            assert_eq!(
+                context.with_assistant_payer(Some(&chat)).billing_owner_id,
+                "owner-1",
+                "shared recipients must use the resolver's caller payer"
+            );
+        }
+    }
+
+    #[test]
+    fn nyxbot_provenance_uses_trusted_context_and_keeps_orchestration_separate() {
+        for (verified, parent, execution, expected) in [
+            (true, false, true, "model"),
+            (true, false, false, "tool"),
+            (false, true, true, "orchestration"),
+            (false, false, true, "other"),
+        ] {
+            let ctx = context_for(CredentialClass::UserOwned)
+                .with_assistant_provenance(verified, parent, execution);
+            let row = crate::services::billing::meter::reserved_row(
+                &ctx,
+                crate::models::usage_meter::BillingLayer::Platform,
+                BillingMetric::Requests,
+                "requests".into(),
+                None,
+                None,
+            );
+            assert_eq!(row.assistant_source.as_deref(), Some(expected));
+        }
+    }
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
             managed_execution: None,
@@ -468,6 +749,7 @@ mod tests {
     fn lane_selection_uses_final_credential_and_supersedes_legacy() {
         use crate::models::service_billing::{LanePricing, PricingSyncStatus};
         let lane = |metric, code: &str| LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: Vec::new(),
             metric,

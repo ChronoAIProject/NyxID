@@ -10,7 +10,7 @@ export function DecisionContinuation({
   return (
     <p
       role="status"
-      className={cn("px-[7px] text-11 text-muted-foreground", className)}
+      className={cn("px-[7px] text-12 text-muted-foreground", className)}
     >
       {t("Continuing after your decision")}
     </p>

@@ -20,24 +20,42 @@ use crate::services::{
     org_service,
 };
 
-pub fn credential_expiry(
+/// Resolve only a NEW child. Omission always gets a finite default, bounded
+/// by the selected parent's existing policy; it never changes that parent.
+pub fn resolve_new_credential_expiry(
     parent: Option<DateTime<Utc>>,
     requested: Option<DateTime<Utc>>,
-) -> AppResult<Option<DateTime<Utc>>> {
-    let expires = requested.or(parent);
-    if expires.is_some_and(|expiry| expiry <= Utc::now()) {
+    created_at: DateTime<Utc>,
+) -> AppResult<DateTime<Utc>> {
+    let default = created_at
+        + chrono::Duration::days(super::api_key_validation::DEFAULT_NEW_KEY_LIFETIME_DAYS);
+    let expires = requested.unwrap_or_else(|| parent.map_or(default, |value| value.min(default)));
+    validate_stored_credential_expiry(parent, Some(expires), created_at)?;
+    let expires = bson::DateTime::from_chrono(expires).to_chrono();
+    validate_stored_credential_expiry(parent, Some(expires), created_at)?;
+    Ok(expires)
+}
+
+/// Validation of stored policy has no issuance defaults. In particular a
+/// legacy None stays None during delivery/authentication.
+pub fn validate_stored_credential_expiry(
+    parent: Option<DateTime<Utc>>,
+    child: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    if child.is_some_and(|expiry| expiry <= now) {
         return Err(AppError::ValidationError(
             "credential_expires_at must be in the future".into(),
         ));
     }
-    if let (Some(parent), Some(child)) = (parent, expires)
+    if let (Some(parent), Some(child)) = (parent, child)
         && child > parent
     {
         return Err(AppError::ValidationError(
             "credential_expires_at cannot exceed the key expiry".into(),
         ));
     }
-    Ok(expires)
+    Ok(())
 }
 
 pub fn generate_secret() -> Zeroizing<String> {
@@ -56,14 +74,14 @@ pub async fn issue(
     id: &str,
     login_request_id: &str,
     label: &str,
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: DateTime<Utc>,
     secret: &str,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     super::key_service::require_ordinary_purpose(parent.purpose)?;
     let secret_prefix = agent_key_display_prefix(secret)
         .ok_or_else(|| AppError::ValidationError("Invalid Agent Key credential prefix".into()))?;
-    let expires_at = credential_expiry(parent.expires_at, expires_at)?;
+    validate_stored_credential_expiry(parent.expires_at, Some(expires_at), Utc::now())?;
     let row = ApiKeyCredential {
         id: id.into(),
         api_key_id: parent.id.clone(),
@@ -76,7 +94,7 @@ pub async fn issue(
         is_active: false,
         revoked_at: None,
         revoked_reason: None,
-        expires_at,
+        expires_at: Some(expires_at),
         last_used_at: None,
         created_at: Utc::now(),
     };

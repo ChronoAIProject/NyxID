@@ -1,5 +1,6 @@
 import { orgListResponseSchema } from "@/schemas/orgs";
-import type { ChannelBotListResponse } from "@/types/channels";
+import { useMemo } from "react";
+
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { apiClient } from "@/lib/api-client";
@@ -104,6 +105,7 @@ export function useSetupMutation(id?: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       input:
         | {
@@ -178,12 +180,23 @@ export function useRevokeBinding() {
   });
 }
 export function useBindingPreview(code: string) {
+  const request = useMemo(
+    () => (code ? crypto.randomUUID() : undefined),
+    [code],
+  );
   return useQuery({
-    queryKey: ["onboarding-link-preview", code],
+    queryKey: ["onboarding-link-preview", request],
     enabled: !!code,
     retry: false,
     gcTime: 0,
     staleTime: 0,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) =>
+      query.state.dataUpdateCount + query.state.errorUpdateCount < 120 &&
+      query.state.data?.state === "awaiting_chat_confirmation" &&
+      Date.parse(query.state.data.expires_at) > Date.now()
+        ? 3000
+        : false,
     queryFn: async () =>
       bindingPreviewSchema.parse(
         await apiClient("/onboarding/link/preview", {
@@ -197,9 +210,11 @@ export function useBindingDecision(code: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
+    retry: false,
     mutationFn: async (input: {
       approve: boolean;
-      matched_code: string;
+      matched_code?: string;
       replace_existing: boolean;
     }) =>
       bindingPreviewSchema.parse(
@@ -217,7 +232,7 @@ export function useBindingDecision(code: string) {
         ),
       ),
     onSuccess: () =>
-      client.invalidateQueries({ queryKey: ["onboarding-link-preview", code] }),
+      client.invalidateQueries({ queryKey: ["onboarding-link-preview"] }),
   });
 }
 export function useAdminPlatformProfiles(before?: string) {
@@ -235,16 +250,32 @@ export function useAdminPlatformProfiles(before?: string) {
       ),
   });
 }
+export function useAdminPlatformProfile(profile?: PlatformProfile) {
+  const user = useAuthStore((s) => s.user);
+  return useQuery({
+    queryKey: ["admin-platform-profile", user?.id, profile?.id],
+    enabled: !!profile && canAdminWrite(user),
+    gcTime: 0,
+    initialData: profile,
+    queryFn: async () =>
+      platformProfileSchema.parse(
+        await apiClient(`/admin/platform-bots/${profile!.id}`, {
+          authorityGuard: actorGuard(user?.id, true),
+        }),
+      ),
+  });
+}
 export function useAdminPlatformAction() {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       input:
         | {
             action: "convert";
             channel_bot_id: string;
-            funding_owner_user_id: string;
+            funding_owner_user_id?: string;
           }
         | {
             action: "pause" | "verify" | "repair" | "retire";
@@ -270,30 +301,55 @@ export function useAdminPlatformAction() {
         }),
       );
     },
-    onSuccess: () =>
-      client.invalidateQueries({ queryKey: ["admin-platform-profiles"] }),
+    onSuccess: () => {
+      for (const queryKey of [
+        ["admin-platform-profiles"],
+        ["admin-platform-profile"],
+        ["admin-platform-targets"],
+        ["platform-runtime"],
+      ])
+        void client.invalidateQueries({ queryKey });
+    },
   });
 }
 
-export function useAdminPlatformTargets() {
+export function useAdminPlatformTargets(includeOrganizations = false) {
   const user = useAuthStore((s) => s.user);
   return useQuery({
-    queryKey: ["admin-platform-targets", user?.id],
+    queryKey: ["admin-platform-targets", user?.id, includeOrganizations],
     enabled: canAdminWrite(user),
     gcTime: 0,
     queryFn: async () => {
       const guard = actorGuard(user?.id, true);
       const [bots, orgs] = await Promise.all([
-        apiClient<ChannelBotListResponse>("/channel-bots?scope=all", {
-          authorityGuard: guard,
-        }),
-        apiClient("/orgs", { authorityGuard: guard }),
+        (async () => {
+          const bots: {
+            id: string;
+            platform: string;
+            label: string;
+            platform_bot_username: string;
+            credential_source: string;
+          }[] = [];
+          let before: string | undefined;
+          do {
+            const page = await apiClient<{
+              bots: typeof bots;
+              next_before_id: string | null;
+            }>(
+              `/admin/platform-bots/targets${before ? `?before_id=${before}` : ""}`,
+              { authorityGuard: guard },
+            );
+            bots.push(...page.bots);
+            before = page.next_before_id ?? undefined;
+          } while (before);
+          return { bots };
+        })(),
+        includeOrganizations
+          ? apiClient("/orgs", { authorityGuard: guard })
+          : Promise.resolve({ orgs: [] }),
       ]);
       return {
-        bots: bots.bots.filter(
-          (bot) =>
-            bot.credential_source === "telegram_manager" && bot.is_active,
-        ),
+        bots: bots.bots,
         orgs: orgListResponseSchema
           .parse(orgs)
           .orgs.filter(
@@ -515,27 +571,58 @@ export function useGatewayCleanup(profile: PlatformProfile) {
   const actor = useAuthStore((s) => s.user?.id);
   const admin = useAuthStore((s) => canAdminWrite(s.user));
   return useQuery({
-    queryKey: ["admin", actor, "platform-bots", profile.id, profile.generation, "cleanup"],
+    queryKey: [
+      "admin",
+      actor,
+      "platform-bots",
+      profile.id,
+      profile.generation,
+      "cleanup",
+    ],
     enabled: !!actor && admin,
     gcTime: 0,
-    queryFn: async () => z.array(gatewayCleanupTaskSchema).parse(await apiClient(`/admin/platform-bots/${profile.id}/cleanup`, {
-      authorityGuard: actorGuard(actor, true),
-    })),
+    queryFn: async () =>
+      z.array(gatewayCleanupTaskSchema).parse(
+        await apiClient(`/admin/platform-bots/${profile.id}/cleanup`, {
+          authorityGuard: actorGuard(actor, true),
+        }),
+      ),
   });
 }
 export function useGatewayCleanupAction(profile: PlatformProfile) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { task: string; action: "inspect" } | { task: string; action: "retry_original" | "preserve_changed" | "confirm_missing"; review: GatewayCleanupReview }) => {
-      const result = await apiClient(`/admin/platform-bots/${profile.id}/cleanup/${input.task}/${input.action === "inspect" ? "inspect" : "resolve"}`, {
-        method: "POST",
-        body: input.action === "inspect" ? {} : { profile_generation: input.review.profile_generation, captured_version: input.review.captured_version,
-          observed_version: input.review.observed_version, action: input.action },
-        authorityGuard: actorGuard(actor, true),
-      });
-      return input.action === "inspect" ? gatewayCleanupReviewSchema.parse(result) : null;
+    mutationFn: async (
+      input:
+        | { task: string; action: "inspect" }
+        | {
+            task: string;
+            action: "retry_original" | "preserve_changed" | "confirm_missing";
+            review: GatewayCleanupReview;
+          },
+    ) => {
+      const result = await apiClient(
+        `/admin/platform-bots/${profile.id}/cleanup/${input.task}/${input.action === "inspect" ? "inspect" : "resolve"}`,
+        {
+          method: "POST",
+          body:
+            input.action === "inspect"
+              ? {}
+              : {
+                  profile_generation: input.review.profile_generation,
+                  captured_version: input.review.captured_version,
+                  observed_version: input.review.observed_version,
+                  action: input.action,
+                },
+          authorityGuard: actorGuard(actor, true),
+        },
+      );
+      return input.action === "inspect"
+        ? gatewayCleanupReviewSchema.parse(result)
+        : null;
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", actor, "platform-bots"] }),
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: ["admin", actor, "platform-bots"] }),
   });
 }

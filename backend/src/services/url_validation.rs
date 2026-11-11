@@ -18,9 +18,18 @@ pub const MAX_URL_LEN: usize = 2048;
 /// the server should not persist internal routing hints supplied from a
 /// different trust boundary.
 pub async fn validate_public_http_url(url: &str, field_name: &str) -> AppResult<()> {
-    if url.len() > 2048 {
+    validate_public_http_url_with_limit(url, field_name, MAX_URL_LEN).await
+}
+
+/// Media URLs can contain long provider signatures while retaining the same host boundary.
+pub(crate) async fn validate_public_http_url_with_limit(
+    url: &str,
+    field_name: &str,
+    max_len: usize,
+) -> AppResult<()> {
+    if url.len() > max_len {
         return Err(AppError::ValidationError(format!(
-            "{field_name} must not exceed 2048 characters"
+            "{field_name} must not exceed {max_len} characters"
         )));
     }
 

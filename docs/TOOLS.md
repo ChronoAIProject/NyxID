@@ -223,8 +223,10 @@ A Tool with a legacy provider requirement is ineligible for manager writes.
 The API reports a secret-free tools_manager_eligible boolean; frontend and CLI
 manager planning consume that server decision and fail closed if it is absent.
 
-Identity resync uses the same parent/live-Admin fence while journaling instance
-updates and auditing the recovery transaction. A stale authority/identity
+Identity resync uses the same parent fence, requiring a live Admin whenever the
+caller acted as Admin (always for Tools, whose identity fields are Admin-only),
+while journaling only the instances it rewrites and auditing the recovery
+transaction. A stale authority/identity
 snapshot returns Conflict and requires reload. OIDC credentials, redirects and
 secret regeneration are incompatible with Tools. The OIDC mutation helpers
 fence their non-Tool parent and actor before changing the client/service, so a

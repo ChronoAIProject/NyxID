@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { AlertTriangle, Check, KeyRound, Loader2 } from "lucide-react";
@@ -55,7 +56,7 @@ export interface CreatedKey {
 
 interface ConnectVerifyStepProps {
   readonly createdKey: CreatedKey;
-  readonly isNodeRouted: boolean;
+  readonly nodeId: string | null;
   readonly onDone: () => void;
 }
 
@@ -84,12 +85,10 @@ function proxyBaseUrl(slug: string): string {
  */
 export function ConnectVerifyStep({
   createdKey,
-  isNodeRouted,
+  nodeId,
   onDone,
 }: ConnectVerifyStepProps) {
-  const { t } = useUiTranslation();
-  void isNodeRouted; // kept in props so the parent's data flow stays stable
-
+  useUiTranslation();
   const createApiKey = useCreateApiKey();
   const [phase, setPhase] = useState<Phase>("connected");
   const [agentKey, setAgentKey] = useState<ApiKeyCreateResponse | null>(null);
@@ -105,7 +104,8 @@ export function ConnectVerifyStep({
         scopes: ["proxy"],
         allow_all_services: false,
         allowed_service_ids: [createdKey.id],
-        allow_all_nodes: true,
+        allow_all_nodes: false,
+        allowed_node_ids: nodeId ? [nodeId] : [],
       },
       {
         onSuccess: (key) => {
@@ -175,11 +175,11 @@ export function ConnectVerifyStep({
       <StepHeader
         slug={createdKey.catalogSlug}
         title={
-          <>{t("Service ")}<span className="text-muted-foreground">&ldquo;</span>
+          <>{translateUi("Service ")}<span className="text-muted-foreground">&ldquo;</span>
             {createdKey.serviceName}
-            <span className="text-muted-foreground">&rdquo;</span>{t(" connected")}</>
+            <span className="text-muted-foreground">&rdquo;</span>{translateUi(" connected")}</>
         }
-        description={t("Connect your AI tools to this service through NyxID.")}
+        description={translateUi("Connect your AI tools to this service through NyxID.")}
       />
       <Body
         phase={phase}
@@ -215,7 +215,7 @@ function Body({
   readonly probe: ProbeOutcome | null;
   readonly testable: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (phase === "connected") {
     return (
       <div className="flex items-start gap-3 rounded-xl border border-border/50 bg-card p-4">
@@ -223,15 +223,15 @@ function Body({
           className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
           aria-hidden
         />
-        <p className="text-12 leading-relaxed text-muted-foreground">{t("Your AI tools need an")}{" "}
-          <span className="font-medium text-foreground">{t("Agent Key")}</span>{t(" to call ")}<span className="font-medium text-foreground">{createdKey.serviceName}</span>{" "}{t("through NyxID. NyxID injects your stored credentials server-side — your tool never sees the original secret.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Your AI tools need an")}{" "}
+          <span className="font-medium text-foreground">{translateUi("Agent Key")}</span>{translateUi(" to call ")}<span className="font-medium text-foreground">{createdKey.serviceName}</span>{" "}{translateUi("through NyxID. NyxID injects your stored credentials server-side — your tool never sees the original secret.")}</p>
       </div>
     );
   }
 
   if (phase === "minting") {
     return (
-      <InlineStatus icon={<Spinner />}>{t("Creating your Agent Key…")}</InlineStatus>
+      <InlineStatus icon={<Spinner />}>{translateUi("Creating your Agent Key…")}</InlineStatus>
     );
   }
 
@@ -241,7 +241,7 @@ function Body({
         tone="warn"
         icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
       >
-        {mintError ?? t("The server didn't accept the request.")}{" "}{t("Retry, or create one later at")}{" "}
+        {mintError ?? translateUi("The server didn't accept the request.")}{" "}{translateUi("Retry, or create one later at")}{" "}
         <span className="font-medium">/keys → Agent Keys → Create</span>.
       </InlineStatus>
     );
@@ -266,14 +266,14 @@ function Body({
       {phase === "key_ready" && !testable && (
         <InlineStatus
           icon={<KeyRound className="h-4 w-4 text-muted-foreground" aria-hidden />}
-        >{t("Automatic testing isn't supported for")}{" "}
+        >{translateUi("Automatic testing isn't supported for")}{" "}
           <span className="font-medium text-foreground">
             {createdKey.serviceName}
-          </span>{" "}{t("— we don't have a suitable status endpoint we can rely on for this service. Verify by running one real call from your AI tool once you've wired the env vars above.")}</InlineStatus>
+          </span>{" "}{translateUi("— we don't have a suitable status endpoint we can rely on for this service. Verify by running one real call from your AI tool once you've wired the env vars above.")}</InlineStatus>
       )}
 
       {phase === "probing" && (
-        <InlineStatus icon={<Spinner />}>{t("Calling ")}{createdKey.serviceName}{t(" with your Agent Key — the same path your AI tool will take.")}</InlineStatus>
+        <InlineStatus icon={<Spinner />}>{translateUi("Calling ")}{createdKey.serviceName}{translateUi(" with your Agent Key — the same path your AI tool will take.")}</InlineStatus>
       )}
 
       {phase === "probe_success" && probe && (
@@ -304,6 +304,7 @@ function Body({
 }
 
 function Spinner() {
+  useUiTranslation();
   return (
     <Loader2
       className="h-4 w-4 animate-spin text-muted-foreground"
@@ -331,7 +332,7 @@ function InlineStatus({
   return (
     <div className="flex items-start gap-2">
       <span className="mt-0.5 shrink-0">{icon}</span>
-      <p className={`text-12 leading-relaxed ${toneClass}`}>{children}</p>
+      <p className={`text-14 ${toneClass}`}>{children}</p>
     </div>
   );
 }
@@ -345,24 +346,24 @@ function AgentKeyPanel({
   readonly createdKey: CreatedKey;
   readonly showOpenAiEnvSnippet: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const proxyUrl = proxyBaseUrl(createdKey.slug);
   return (
     <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="space-y-1">
-        <p className="text-12 font-semibold text-foreground">{t("Your new Agent Key")}</p>
-        <p className="text-11 text-muted-foreground">{t("Save this now. The full secret is only shown here once. Scoped to")}{" "}
+        <p className="type-body-strong text-foreground">{translateUi("Your new Agent Key")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Save this now. The full secret is only shown here once. Scoped to")}{" "}
           <span className="font-medium text-foreground">
             {createdKey.serviceName}
-          </span>{" "}{t("only, with the ")}<code>proxy</code>{t(" scope.")}</p>
+          </span>{" "}{translateUi("only, with the ")}<code>proxy</code>{translateUi(" scope.")}</p>
       </div>
-      <CopyableField label={t("Agent Key")} value={agentKey.full_key} />
-      <CopyableField label={t("Base URL")} value={proxyUrl} />
+      <CopyableField label={translateUi("Agent Key")} value={agentKey.full_key} />
+      <CopyableField label={translateUi("Base URL")} value={proxyUrl} />
       {showOpenAiEnvSnippet && (
         <>
-          <p className="text-11 text-muted-foreground pt-1">{t("Most OpenAI-compatible tools (openai-python, Cursor, Continue.dev, …) read these two env vars.")}</p>
+          <p className="text-13 text-muted-foreground pt-1">{translateUi("Most OpenAI-compatible tools (openai-python, Cursor, Continue.dev, …) read these two env vars.")}</p>
           <CopyableField
-            label={t("Shell env")}
+            label={translateUi("Shell env")}
             value={`export OPENAI_API_KEY="${agentKey.full_key}"\nexport OPENAI_BASE_URL="${proxyUrl}/v1"`}
           />
         </>
@@ -386,7 +387,7 @@ function Footer({
   readonly onProbe: () => void;
   readonly onDone: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const config = footerConfig(phase, testable);
   // Dispatch INVOKES the mapped handler. Do NOT refactor back to
   // `(a) => a === "onMint" ? onMint : …` — that returns the function
@@ -409,7 +410,7 @@ function Footer({
         className={config.secondaryLabel === null ? "invisible" : ""}
         aria-hidden={config.secondaryLabel === null}
       >
-        {config.secondaryLabel ?? t("placeholder")}
+        {config.secondaryLabel ?? translateUi("placeholder")}
       </Button>
       <Button
         variant="primary"

@@ -1,5 +1,6 @@
-//! Manifest-only OAuth playbook evidence. None of these fields reaches the API.
-use anyhow::{Result, anyhow, bail};
+//! OAuth playbook evidence, provider capability validation and readiness reports.
+//! Evidence stays manifest-only; provider capability fields also reach the API.
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -71,8 +72,42 @@ pub(super) fn operations(row: &Value) -> Result<Vec<Operation>> {
         })
         .unwrap_or_else(|| Ok(vec![]))
 }
+pub(super) fn validate_authorization_nonce(provider: &Value) -> Result<()> {
+    if let Some(required) = provider.get("authorization_nonce_required") {
+        if !required.is_boolean() {
+            bail!("authorization_nonce_required must be a boolean");
+        }
+        if required == true
+            && provider
+                .get("provider_type")
+                .is_some_and(|kind| kind != "oauth2")
+        {
+            bail!("authorization_nonce_required is only supported for hosted oauth2 providers");
+        }
+        if required == true {
+            if provider["client_id_param_name"]
+                .as_str()
+                .is_some_and(|name| name.trim() == "nonce")
+            {
+                bail!(
+                    "client_id_param_name cannot be nonce when authorization_nonce_required is enabled"
+                );
+            }
+            if let Some(value) = provider["authorization_url"].as_str() {
+                let url = url::Url::parse(value).context("Invalid authorization_url")?;
+                if url.fragment().is_some() || url.query_pairs().any(|(key, _)| key == "nonce") {
+                    bail!(
+                        "Enabled authorization nonce requires an authorization_url without nonce or fragment"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
 pub(super) fn validate(provider: &Value, service: bool) -> Result<()> {
     if !service {
+        validate_authorization_nonce(provider)?;
         if let Some(value) = provider.get("playbook") {
             let playbook: Playbook = serde_json::from_value(value.clone())
                 .map_err(|_| anyhow!("Invalid playbook fields"))?;

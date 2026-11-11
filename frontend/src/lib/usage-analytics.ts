@@ -37,33 +37,23 @@ export const INTERVAL_LABELS = {
   get month() { return translateUi("Monthly"); },
 };
 export const MEASURE_DESCRIPTIONS: Record<AnalyticsPanel["measure"], string> = {
-  cost: "Total usage cost before grants and allowances, in credits.",
-  requests:
-    "Metered platform requests, counted once across billing components. Unmetered activity is not included.",
-  events: "Metering records. One request can produce several billing events.",
-  exact_cost_events: "Billing events with recorded settlement costs.",
-  legacy_cost_events:
-    "Historical billing events with estimated or unavailable cost. These can overlap uncosted events.",
-  unknown_cost_events:
-    "Billing events whose cost could not be determined. These leave gaps in cost charts.",
-  total_tokens:
-    "Provider-reported input + output tokens. Cache counts can overlap input; they are not added again.",
-  prompt_tokens:
-    "Provider-reported input tokens. Some providers include cached input here.",
-  completion_tokens: "Provider-reported output tokens.",
-  cached_tokens:
-    "Provider-reported cached input reads. This can overlap input tokens.",
-  cache_creation_tokens:
-    "Provider-reported cache writes. Provider accounting varies; do not add this to total tokens.",
-  audio_input_tokens:
-    "Provider-reported audio input tokens from realtime voice and audio chat. Already included in input tokens; not priced separately.",
-  audio_output_tokens:
-    "Provider-reported audio output tokens from realtime voice and audio chat. Already included in output tokens; not priced separately.",
-  quantity:
-    "Sum of metered units in the selected billing metric. These can differ from provider-reported tokens.",
-  wallet_cost: "Usage cost funded by purchased wallet credits.",
-  grant_cost: "Usage cost covered by credit grants.",
-  allowance_cost: "Usage cost covered by allowance units.",
+  get cost() { return translateUi("Total usage cost before grants and allowances, in credits."); },
+  get requests() { return translateUi("Metered platform requests, counted once across billing components. Unmetered activity is not included."); },
+  get events() { return translateUi("Metering records. One request can produce several billing events."); },
+  get exact_cost_events() { return translateUi("Billing events with recorded settlement costs."); },
+  get legacy_cost_events() { return translateUi("Historical billing events with estimated or unavailable cost. These can overlap uncosted events."); },
+  get unknown_cost_events() { return translateUi("Billing events whose cost could not be determined. These leave gaps in cost charts."); },
+  get total_tokens() { return translateUi("Provider-reported input + output tokens. Cache counts can overlap input; they are not added again."); },
+  get prompt_tokens() { return translateUi("Provider-reported input tokens. Some providers include cached input here."); },
+  get completion_tokens() { return translateUi("Provider-reported output tokens."); },
+  get cached_tokens() { return translateUi("Provider-reported cached input reads. This can overlap input tokens."); },
+  get cache_creation_tokens() { return translateUi("Provider-reported cache writes. Provider accounting varies; do not add this to total tokens."); },
+  get audio_input_tokens() { return translateUi("Provider-reported audio input tokens from realtime voice and audio chat. Already included in input tokens; not priced separately."); },
+  get audio_output_tokens() { return translateUi("Provider-reported audio output tokens from realtime voice and audio chat. Already included in output tokens; not priced separately."); },
+  get quantity() { return translateUi("Sum of metered units in the selected billing metric. These can differ from provider-reported tokens."); },
+  get wallet_cost() { return translateUi("Usage cost funded by purchased wallet credits."); },
+  get grant_cost() { return translateUi("Usage cost covered by credit grants."); },
+  get allowance_cost() { return translateUi("Usage cost covered by allowance units."); },
 };
 export function panelSpan(panel: AnalyticsPanel): 1 | 2 | 3 {
   return panel.span ?? (panel.wide ? 3 : 1);
@@ -102,6 +92,7 @@ export function partialBucket(bucket: string, data: AnalyticsResult): boolean {
 }
 export const BREAKDOWN_LABELS = {
   get service() { return translateUi("Service"); },
+  get model() { return translateUi("Model"); },
   get user() { return translateUi("Acting user"); },
   get owner() { return translateUi("Billing account"); },
   get credential_class() { return translateUi("Credential class"); },
@@ -198,7 +189,8 @@ export function newView(
               top: 10,
             }),
             newPanel({
-              title: "Token distribution",
+              title: "Tokens by model",
+              breakdown: "model",
               measure: "total_tokens",
               chart: "pie",
             }),

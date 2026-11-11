@@ -192,6 +192,7 @@ interface CreateApiKeyPayload {
   readonly name: string;
   readonly scopes: string;
   readonly expires_at: string | null;
+  readonly never_expires?: boolean;
   readonly description?: string;
   readonly allowed_service_ids?: readonly string[];
   readonly allowed_node_ids?: readonly string[];
@@ -212,14 +213,18 @@ export function useCreateApiKey() {
       data: CreateApiKeyFormData,
     ): Promise<ApiKeyCreateResponse> => {
       // Backend expects scopes as a space-separated string, not an array.
-      // expires_at must be ISO 8601 datetime (not bare date like "2026-03-25").
-      const allowAllServices = data.allow_all_services ?? true;
-      const allowAllNodes = data.allow_all_nodes ?? true;
+      // Normalize date-only input while preserving an already absolute expiry.
+      if (data.never_expires && data.expires_at) {
+        throw new Error("Choose either an expiry date or no expiry");
+      }
+      const allowAllServices = data.allow_all_services ?? false;
+      const allowAllNodes = data.allow_all_nodes ?? false;
       const payload: CreateApiKeyPayload = {
         name: data.name,
         scopes: data.scopes.join(" "),
         expires_at: data.expires_at
-          ? new Date(`${data.expires_at}T23:59:59Z`).toISOString()
+          ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(data.expires_at)
+              ? `${data.expires_at}T23:59:59Z` : data.expires_at).toISOString()
           : null,
         description: data.description ?? undefined,
         allowed_service_ids: allowAllServices
@@ -236,7 +241,9 @@ export function useCreateApiKey() {
         callback_url: data.callback_url ?? undefined,
         target_org_id: data.target_org_id ?? undefined,
       };
-      return api.post<ApiKeyCreateResponse>("/api-keys", payload);
+      return api.post<ApiKeyCreateResponse>("/api-keys", {
+        ...payload, ...(data.never_expires ? { never_expires: true } : {}),
+      });
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });

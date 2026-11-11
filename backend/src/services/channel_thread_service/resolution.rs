@@ -52,7 +52,7 @@ pub(super) async fn eligible_source_live(
         .find_one(doc! {
             "channel_bot_id": &bot.id, "route_api_key_id": key,
             "status": "active",
-            "$or": [{"transport":"direct"}, {"transport":"gateway", "gateway_threads.version":1}],
+            "$or": [{"transport":"direct"}, {"transport":"gateway", "gateway_threads.version":1}, {"transport":"gateway","gateway_source.type":"discord","gateway_native_phase":"ready"}],
         })
         .await?
     else {
@@ -85,7 +85,7 @@ pub(super) async fn eligible_source(
         .find_one(doc! {
             "channel_bot_id": &bot.id, "route_api_key_id": &source.agent_api_key_id,
             "status": "active",
-            "$or": [{"transport":"direct"}, {"transport":"gateway", "gateway_threads.version":1}],
+            "$or": [{"transport":"direct"}, {"transport":"gateway", "gateway_threads.version":1}, {"transport":"gateway","gateway_source.type":"discord","gateway_native_phase":"ready"}],
         })
         .await?
     else {

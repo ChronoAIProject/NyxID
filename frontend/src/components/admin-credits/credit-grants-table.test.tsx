@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AdminCreditGrant } from "@/schemas/billing-credits";
@@ -28,6 +28,74 @@ function grant(overrides: Partial<AdminCreditGrant> = {}): AdminCreditGrant {
     ...overrides,
   };
 }
+
+function history(row: AdminCreditGrant) {
+  return render(
+    <CreditGrantsTable
+      grants={[row]}
+      allocationPolicies
+      canWrite
+      revokePending={false}
+      page={1}
+      perPage={50}
+      total={1}
+      fetching={false}
+      onPageChange={vi.fn()}
+      onRevoke={vi.fn()}
+    />,
+  );
+}
+it.each(["revoked", "expired"] as const)(
+  "does not infer spent value from old %s API rows lacking terminal detail",
+  (status) => {
+    history(grant({ status, remaining_micros: 0 }));
+    expect(
+      screen.getByText("Unavailable from this server"),
+    ).toBeInTheDocument();
+  },
+);
+it("shows exact used, reclaimed and matching group held value inline", () => {
+  history(
+    grant({
+      amount: "1000",
+      remaining: "0",
+      terminal_amount: "100",
+      reclaimed: "100",
+      status: "revoked",
+      service_limits: [
+        {
+          key: "group",
+          service_ids: ["a", "b"],
+          service_slugs: ["openai", "anthropic"],
+          label: "LLM",
+          limit: "300",
+          consumed: "299.999999999999",
+          reserved: "0",
+          held: "0.000000000001",
+        },
+      ],
+    }),
+  );
+  const used = screen.getByText("Used:").parentElement!;
+  expect(within(used).getByText("900 credits")).toBeInTheDocument();
+  expect(screen.getByText(/LLM: openai, anthropic/)).toBeInTheDocument();
+  expect(screen.getByText(/held 0.000000000001/)).toBeInTheDocument();
+  expect(screen.getByText("Reclaimed:")).toBeInTheDocument();
+});
+it("updates wall-clock expiry on an open history without remount", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-19T00:00:00Z"));
+  try {
+    history(grant({ expires_at: "2026-10-19T00:00:01Z" }));
+    expect(screen.getByText("active")).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(15_000);
+    });
+    expect(screen.getByText("Expired")).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 describe("CreditGrantsTable", () => {
   it("distinguishes pending activation and explains rollout-hidden grants", async () => {

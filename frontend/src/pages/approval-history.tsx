@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
@@ -13,6 +13,7 @@ import {
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
+import { ApprovalAction, ApprovalIdentity } from "@/components/shared/approval-history-fields";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -45,6 +46,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Wrench,
+  RefreshCw,
 } from "lucide-react";
 import { SeoKeywordIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
@@ -73,7 +75,7 @@ function getStatusBadge(status: string) {
 }
 
 export function ApprovalHistoryPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
   const [decideTarget, setDecideTarget] = useState<{
@@ -104,9 +106,9 @@ export function ApprovalHistoryPage() {
         approved: decideTarget.action === "approve",
       });
       toast.success(
-        decideTarget.action === "approve"
+        translateUi(decideTarget.action === "approve"
           ? "Request approved"
-          : "Request rejected",
+          : "Request rejected"),
       );
     } catch (err) {
       toast.error(
@@ -120,11 +122,14 @@ export function ApprovalHistoryPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="shell-page-stack">
       <PageHeader
-        title={t("Approval History")}
-        description={t("View past and pending approval requests.")}
+        title={translateUi("Approval History")}
+        description={translateUi("Review pending requests before they expire. Refresh to discover new requests or decisions.")}
         actions={
+          <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => void refetch()} disabled={isLoading}>
+            <ButtonIcon><RefreshCw className="h-4 w-4" /></ButtonIcon>{translateUi("Refresh")}</Button>
           <Select
             value={statusFilter}
             onValueChange={(value) => {
@@ -143,6 +148,7 @@ export function ApprovalHistoryPage() {
               ))}
             </SelectContent>
           </Select>
+          </div>
         }
       />
 
@@ -153,13 +159,13 @@ export function ApprovalHistoryPage() {
           ))}
         </div>
       ) : error ? (
-        <ErrorBanner message={t("Failed to load approval history. Please try again.")} onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load approval history. Please try again.")} onRetry={refetch} />
       ) : requests.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SeoKeywordIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No Approval Requests")}</p>
-            <p className="text-12 text-muted-foreground">{t("No approval requests match the current filter.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("No Approval Requests")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("No approval requests match the current filter.")}</p>
           </div>
         </div>
       ) : (
@@ -173,40 +179,40 @@ export function ApprovalHistoryPage() {
                     {isToolApproval(request) ? (
                       <div className="flex items-center gap-1.5">
                         <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <p className="text-13 font-semibold text-foreground truncate">{request.tool_name}</p>
+                        <ApprovalIdentity className="truncate">{request.tool_name}</ApprovalIdentity>
                       </div>
                     ) : (
-                      <p className="text-13 font-semibold text-foreground truncate">{request.service_name}</p>
+                      <ApprovalIdentity className="block truncate">{request.service_name}</ApprovalIdentity>
                     )}
-                    <p className="text-11 text-muted-foreground truncate">
+                    <p className="text-13 text-muted-foreground truncate">
                       {request.requester_label ?? request.requester_type}
                     </p>
                   </div>
                   {getStatusBadge(request.status)}
                 </div>
-                <p className="mt-1.5 text-11 text-muted-foreground line-clamp-2">
+                <ApprovalAction className="mt-1.5 line-clamp-2">
                   {isToolApproval(request)
-                    ? request.tool_arguments ?? t("Tool execution approval")
+                    ? request.tool_arguments ?? translateUi("Tool execution approval")
                     : primaryActionLabel(request)}
-                </p>
+                </ApprovalAction>
                 {shouldShowRawIdentityLine(request) && (
-                  <p className="mt-1 text-11 text-muted-foreground">
+                  <p className="mt-1 text-13 text-muted-foreground">
                     {operationIdentityLabel(request)}
                   </p>
                 )}
                 {request.is_destructive && (
-                  <Badge variant="destructive" className="mt-1.5">{t("Destructive")}</Badge>
+                  <Badge variant="destructive" className="mt-1.5">{translateUi("Destructive")}</Badge>
                 )}
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                   <span>{formatDate(request.created_at)}</span>
-                  {request.decided_at && <span>{t("Decided ")}{formatDate(request.decided_at)}</span>}
+                  {request.decided_at && <span>{translateUi("Decided ")}{formatDate(request.decided_at)}</span>}
                 </div>
                 {request.status === "pending" && (
                   <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
                     <Button
                       variant="outline"
                       size="sm"
-                      className="flex-1 h-8 text-xs"
+                      className="flex-1 h-8 text-14"
                       onClick={() =>
                         setDecideTarget({
                           id: request.id,
@@ -216,11 +222,11 @@ export function ApprovalHistoryPage() {
                         })
                       }
                     >
-                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{t("Approve")}</Button>
+                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{translateUi("Approve")}</Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      className="flex-1 h-8 text-xs"
+                      className="flex-1 h-8 text-14"
                       onClick={() =>
                         setDecideTarget({
                           id: request.id,
@@ -230,7 +236,7 @@ export function ApprovalHistoryPage() {
                         })
                       }
                     >
-                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Reject")}</Button>
+                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
                   </div>
                 )}
               </div>
@@ -242,14 +248,14 @@ export function ApprovalHistoryPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Service")}</TableHead>
-                  <TableHead>{t("Requester")}</TableHead>
-                  <TableHead>{t("Action")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{t("Requested")}</TableHead>
-                  <TableHead>{t("Decided")}</TableHead>
+                  <TableHead>{translateUi("Service")}</TableHead>
+                  <TableHead>{translateUi("Requester")}</TableHead>
+                  <TableHead>{translateUi("Action")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Requested")}</TableHead>
+                  <TableHead>{translateUi("Decided")}</TableHead>
                   {requests.some((r) => r.status === "pending") && (
-                    <TableHead className="w-[100px]">{t("Actions")}</TableHead>
+                    <TableHead className="w-[100px]">{translateUi("Actions")}</TableHead>
                   )}
                 </TableRow>
               </TableHeader>
@@ -261,20 +267,20 @@ export function ApprovalHistoryPage() {
                         <div className="flex flex-col gap-1">
                           <div className="flex items-center gap-1.5">
                             <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
-                            <span className="font-medium">
+                            <ApprovalIdentity>
                               {request.tool_name}
-                            </span>
+                            </ApprovalIdentity>
                           </div>
                           {request.is_destructive && (
-                            <Badge variant="destructive">{t("Destructive")}</Badge>
+                            <Badge variant="destructive">{translateUi("Destructive")}</Badge>
                           )}
                         </div>
                       ) : (
                         <div className="flex flex-col gap-0.5">
-                          <span className="font-medium">
+                          <ApprovalIdentity>
                             {request.service_name}
-                          </span>
-                          <span className="text-11 text-muted-foreground">
+                          </ApprovalIdentity>
+                          <span className="text-13 text-muted-foreground">
                             {request.service_slug}
                           </span>
                         </div>
@@ -285,7 +291,7 @@ export function ApprovalHistoryPage() {
                         <span>
                           {request.requester_label ?? request.requester_type}
                         </span>
-                        <span className="text-11 text-muted-foreground">
+                        <span className="text-13 text-muted-foreground">
                           {request.requester_type}
                         </span>
                       </div>
@@ -294,26 +300,26 @@ export function ApprovalHistoryPage() {
                       <div className="flex flex-col gap-0.5">
                         {isToolApproval(request) ? (
                           <>
-                            <span>{t("Tool execution approval")}</span>
+                            <ApprovalAction>{translateUi("Tool execution approval")}</ApprovalAction>
                             {request.tool_arguments && (
-                              <span className="max-w-[300px] truncate text-11 text-muted-foreground">
+                              <span className="max-w-[300px] truncate text-13 text-muted-foreground">
                                 {request.tool_arguments}
                               </span>
                             )}
                           </>
                         ) : (
                           <>
-                            <span>
+                            <ApprovalAction>
                               {primaryActionLabel(request)}
-                            </span>
+                            </ApprovalAction>
                             {request.action_description &&
                               request.operation_summary && (
-                                <span className="text-11 text-muted-foreground">
+                                <span className="text-13 text-muted-foreground">
                                   {request.operation_summary}
                                 </span>
                               )}
                             {shouldShowRawIdentityLine(request) && (
-                              <span className="text-11 text-muted-foreground">
+                              <span className="text-13 text-muted-foreground">
                                 {operationIdentityLabel(request)}
                               </span>
                             )}
@@ -336,7 +342,7 @@ export function ApprovalHistoryPage() {
                           <div className="flex justify-end gap-1">
                             <Button
                               variant="ghost"
-                              className="h-7 text-xs"
+                              className="h-7 text-14"
                               onClick={() =>
                                 setDecideTarget({
                                   id: request.id,
@@ -346,10 +352,10 @@ export function ApprovalHistoryPage() {
                                 })
                               }
                             >
-                              <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{t("Approve")}</Button>
+                              <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{translateUi("Approve")}</Button>
                             <Button
                               variant="ghost"
-                              className="h-7 text-xs"
+                              className="h-7 text-14"
                               onClick={() =>
                                 setDecideTarget({
                                   id: request.id,
@@ -359,7 +365,7 @@ export function ApprovalHistoryPage() {
                                 })
                               }
                             >
-                              <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Reject")}</Button>
+                              <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
                           </div>
                         )}
                       </TableCell>
@@ -373,8 +379,8 @@ export function ApprovalHistoryPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-11 text-text-tertiary">{t("Showing ")}{String((page - 1) * perPage + 1)}-
-                {String(Math.min(page * perPage, total))}{t(" of ")}{String(total)}
+              <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((page - 1) * perPage + 1)}-
+                {String(Math.min(page * perPage, total))}{translateUi(" of ")}{String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
@@ -382,18 +388,18 @@ export function ApprovalHistoryPage() {
                   size="icon"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  aria-label={t("Previous page")}
+                  aria-label={translateUi("Previous page")}
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-11 text-text-tertiary">{t("Page ")}{String(page)}{t(" of ")}{String(totalPages)}
+                <span className="text-13 text-text-tertiary">{translateUi("Page ")}{String(page)}{translateUi(" of ")}{String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
                   size="icon"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  aria-label={t("Next page")}
+                  aria-label={translateUi("Next page")}
                 >
                   <ChevronRight className="h-3 w-3" />
                 </Button>
@@ -414,19 +420,19 @@ export function ApprovalHistoryPage() {
           <DialogHeader>
             <DialogTitle>
               {decideTarget?.action === "approve"
-                ? t("Approve Request")
-                : t("Reject Request")}
+                ? translateUi("Approve Request")
+                : translateUi("Reject Request")}
             </DialogTitle>
             <DialogDescription>
               {decideTarget?.action === "approve"
                 ? decideTarget.approvalMode === "grant"
-                  ? t("Are you sure you want to approve access to \"{{value}}\"? A reusable approval grant will be created using your configured expiry.", { value: decideTarget?.service ?? "" })
-                  : t("Are you sure you want to approve access to \"{{value}}\"? This approval applies only to the current request.", { value: decideTarget?.service ?? "" })
-                : t("Are you sure you want to reject access to \"{{value}}\"?", { value: decideTarget?.service ?? "" })}
+                  ? translateUi("Are you sure you want to approve access to \"{{value1}}\"? A reusable approval grant will be created using your configured expiry.", { value1: decideTarget?.service ?? "" })
+                  : translateUi("Are you sure you want to approve access to \"{{value1}}\"? This approval applies only to the current request.", { value1: decideTarget?.service ?? "" })
+                : translateUi("Are you sure you want to reject access to \"{{value1}}\"?", { value1: decideTarget?.service ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDecideTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDecideTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant={
                 decideTarget?.action === "approve" ? "default" : "destructive"
@@ -434,7 +440,7 @@ export function ApprovalHistoryPage() {
               onClick={() => void handleDecide()}
               isLoading={decideMutation.isPending}
             >
-              {decideTarget?.action === "approve" ? t("Approve") : t("Reject")}
+              {decideTarget?.action === "approve" ? translateUi("Approve") : translateUi("Reject")}
             </Button>
           </DialogFooter>
         </DialogContent>

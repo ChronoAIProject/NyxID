@@ -228,6 +228,18 @@ export function automationDefaults(
   };
 }
 export const runSchema = z.object({
+  execution_outcome: z.enum(["pending", "started", "waiting", "completed", "failed", "skipped"]).nullish(),
+  notification_delivery: z.object({
+    state: z.string(),
+    reason: z.string().nullish(),
+    message: z.string().nullish(),
+    attempts: z.number().int(),
+    http_status: z.number().int().nullish(),
+    retry_at: instant.nullish(),
+  }).nullish(),
+  coordinator_deadline: instant.nullish(),
+  wait_kind: z.string().nullish(),
+  can_cancel: z.boolean().optional(),
   id: z.string(),
   scheduled_at: instant,
   started_at: instant.nullable(),
@@ -244,6 +256,15 @@ export const runSchema = z.object({
     .object({ count: z.number(), from: instant, through: instant })
     .nullish(),
   reason: z.string().nullable(),
+  failure_reason: z
+    .object({
+      source: z.string(),
+      stage: z.string(),
+      code: z.string(),
+      http_status: z.number().int().nullish(),
+      nyxid_error_code: z.number().int().nullish(),
+    })
+    .nullish(),
   thread_id: z.string().nullable(),
   duration_ms: z.number().nullable(),
   attempts: z.number().int().nonnegative().nullish(),

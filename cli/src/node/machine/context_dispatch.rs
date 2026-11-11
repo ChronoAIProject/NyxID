@@ -3,11 +3,11 @@
 //! recovery path. Parent jobs/gateway/authority fences remain node-wide.
 use super::{
     Runtime,
-    context_runtime::{Store, protect_legacy_roots},
-    cua, files, process,
+    context_runtime::{Store, protect_legacy_browser_home, protect_legacy_roots},
+    cua, files,
 };
 use anyhow::{Context, Result, ensure};
-use nyxid_machine::{authority::Authority, context::Support};
+use nyxid_machine::authority::Authority;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, thiserror::Error)]
@@ -61,45 +61,6 @@ impl Runtime {
             None
         }?;
         self.contexts.lock().await.runtimes.get(id).cloned()
-    }
-    pub(super) async fn context_support(&self) -> Support {
-        let abi = process::context_sandbox::abi()
-            .ok()
-            .and_then(|a| u32::try_from(a).ok());
-        let reason = if abi.is_none_or(|a| a < 6) {
-            Some("separated_requires_landlock_abi_6")
-        } else if unsafe { libc::geteuid() } != 0
-            || self.identity.uid == 0
-            || self.identity.gid == 0
-            || self.browser_identity.uid == 0
-            || self.browser_identity.gid == 0
-            || self.identity.uid == self.browser_identity.uid
-            || self.identity.gid == self.browser_identity.gid
-            || self.dev_identity.as_ref().is_none_or(|d| {
-                d.uid == 0
-                    || d.gid == 0
-                    || d.uid == self.identity.uid
-                    || d.uid == self.browser_identity.uid
-                    || d.gid == self.identity.gid
-                    || d.gid == self.browser_identity.gid
-            })
-        {
-            Some("separated_requires_separate_users")
-        } else if self.config.managed_browser.is_none() {
-            Some("separated_requires_managed_browser")
-        } else if process::context_sandbox::probe(&self.identity)
-            .await
-            .is_err()
-        {
-            Some("separated_landlock_probe_failed")
-        } else {
-            None
-        };
-        Support {
-            available: reason.is_none(),
-            landlock_abi: abi,
-            reason: reason.map(str::to_owned),
-        }
     }
     pub(super) async fn quarantine_profiles(
         &self,
@@ -231,10 +192,17 @@ impl Runtime {
             roots.push(self.identity.home.clone());
         }
         let legacy = self.identity.clone();
+        let browsers = [
+            Some(self.browser_identity.clone()),
+            self.dev_identity.clone(),
+        ];
         let a = authority.clone();
         let store = contexts.store.take();
         let (store, prepared) = tokio::task::spawn_blocking(move || -> Result<_> {
             protect_legacy_roots(&roots, &legacy).context(Stage("legacy_roots"))?;
+            for browser in browsers.into_iter().flatten() {
+                protect_legacy_browser_home(&browser).context(Stage("legacy_browser_home"))?;
+            }
             let mut store = match store {
                 Some(s) => s,
                 None => Store::open(&directory, &node).context(Stage("allocation_store"))?,
@@ -271,8 +239,19 @@ impl Runtime {
             .as_ref()
             .is_some_and(|c| c.container)
         {
-            super::context_policy::prepare(std::path::Path::new("/"), context.dev.uid)
-                .context(Stage("native_policy"))?;
+            super::context_policy::prepare(
+                std::path::Path::new("/"),
+                super::browser_layout::Layout::detect(
+                    &self
+                        .config
+                        .managed_browser
+                        .as_ref()
+                        .context("managed browser missing")?
+                        .binary,
+                )?,
+                context.dev.uid,
+            )
+            .context(Stage("native_policy"))?;
         }
         let resources = context
             .browsers(self.browser_identity.gid, dev_policy.gid)
@@ -302,6 +281,7 @@ impl Runtime {
         let mut runtime =
             Runtime::new(&config, &self.node_id, &state).context(Stage("context_runtime"))?;
         let target = Arc::get_mut(&mut runtime).context("context_runtime_unavailable")?;
+        target.custody = Arc::new(self.custody.for_context());
         target.runtime_id = self.runtime_id.clone();
         target.identity = context.command;
         target.browser_identity = context.secure;
@@ -333,6 +313,8 @@ impl Runtime {
         if let Some(gateway) = self.gateway.get() {
             let _ = target.gateway.set(gateway.clone());
         }
+        target.refresh_custody().await;
+        target.require_custody()?;
         // Child runtime cannot create a nested context; only this parent routes.
         let sender = self
             .desktop

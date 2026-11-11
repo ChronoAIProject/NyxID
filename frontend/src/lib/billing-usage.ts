@@ -39,7 +39,9 @@ export function groupRows(
         : dimension === "operation"
           ? `${row.service_id ?? row.service_slug ?? "unknown"}:${row.operation ?? ""}`
           : dimension === "agent"
-            ? (row.api_key_id ?? "unrecorded")
+            ? row.org_channel_guest
+              ? `org-channel:${row.org_channel_guest.channel_id}`
+              : (row.api_key_id ?? "unrecorded")
             : dimension === "model"
               ? (row.model ?? "unrecorded")
               : dimension === "layer"
@@ -49,12 +51,16 @@ export function groupRows(
       dimension === "service"
         ? serviceName(catalog, row.service_slug)
         : dimension === "operation"
-          ? `${serviceName(catalog, row.service_slug)} · ${row.operation ?? translateUi("Base price")}`
+          ? `${serviceName(catalog, row.service_slug)} · ${row.operation ?? "Base price"}`
           : dimension === "agent"
-            ? (row.api_key_name ??
-              (row.api_key_id ? translateUi("Unnamed agent key") : translateUi("No agent key recorded")))
+            ? row.org_channel_guest
+              ? `Channel guests · ${row.org_channel_guest.channel_id.slice(0, 8)}`
+              : (row.api_key_name ??
+                (row.api_key_id
+                  ? "Unnamed agent key"
+                  : "No agent key recorded"))
             : dimension === "model"
-              ? (row.model ?? translateUi("No model recorded"))
+              ? (row.model ?? "No model recorded")
               : dimension === "layer"
                 ? layerName(row.layer)
                 : billingMetricLabel(row.metric);
@@ -107,7 +113,18 @@ export function usageStatus(rows: BillingUsageRow[]) {
 }
 
 export function metricFamily(metric: string) {
-  if (["tokens", "input_tokens", "output_tokens"].includes(metric))
+  if (
+    [
+      "tokens",
+      "input_tokens",
+      "output_tokens",
+      "reasoning_tokens",
+      "image_input_tokens",
+      "image_output_tokens",
+      "audio_input_tokens",
+      "audio_output_tokens",
+    ].includes(metric)
+  )
     return "Tokens";
   if (["cache_read_tokens", "cache_write_tokens"].includes(metric))
     return "Cache";

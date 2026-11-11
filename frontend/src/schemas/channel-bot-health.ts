@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+const gatewayStateSchema = z.string();
+
+/** Optional list/detail metadata; older servers and native gateways omit it. */
+export const channelBotGatewaySchema = z.object({
+  gateway_state: gatewayStateSchema.optional(),
+});
+export type ChannelBotGateway = z.infer<typeof channelBotGatewaySchema>;
+
+export const discordIntakeSchema = z.object({
+  receiving_side: z.string(),
+  state: z.string(),
+  code: z.string().nullable(),
+  block_reason: z.string().nullable(),
+  handed_over_at: z.string().nullable(),
+  last_inbound_at: z.string().nullable(),
+});
+
 const errorSchema = z.object({
   code: z.string(),
   /** Stable failure code (`rate_limited`, `scopes_missing`, ...). */
@@ -8,6 +25,14 @@ const errorSchema = z.object({
 });
 
 export const channelBotDiagnosticsSchema = z.object({
+  last_callback_challenge_at: z.string().nullish(),
+  last_route_at: z.string().nullish(),
+  last_route_result: z.string().nullish(),
+  discord_gateway: z.object({
+    state: gatewayStateSchema,
+    reason: z.string().nullable(),
+    updated_at: z.string(),
+  }).optional(),
   last_inbound_at: z.string().nullable(),
   last_inbound_source: z.string().nullable(),
   last_outbound_at: z.string().nullable(),
@@ -38,6 +63,7 @@ export const RECOMMENDED_ACTIONS = [
 ] as const;
 
 export const channelBotHealthSchema = z.object({
+  discord_intake: discordIntakeSchema.optional(),
   id: z.string(),
   platform: z.string(),
   label: z.string(),

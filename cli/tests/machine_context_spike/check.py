@@ -21,9 +21,12 @@ parser.add_argument('--disposable', action='store_true', required=True,
                     help='Confirm this is an expendable container/VM, never an owner node')
 parser.add_argument('--native-profile', action='store_true')
 parser.add_argument('--probes-only', action='store_true')
+parser.add_argument('--launcher', default='/usr/local/bin/nyxid-context-spike',
+                    help='Absolute path to the fixture built from the current production modules')
 args = parser.parse_args()
 assert os.getuid() == 0
-launcher = '/usr/local/bin/nyxid-context-spike'
+launcher = args.launcher
+assert Path(launcher).is_absolute() and Path(launcher).is_file()
 base = Path('/var/lib/nyxid-machine/m13-profile/contexts' if args.native_profile else '/var/lib/nyxid-machine/contexts')
 assert not base.exists(), 'Use a fresh, expendable container/VM for each run'
 uid_a, uid_b = 21001, 21002

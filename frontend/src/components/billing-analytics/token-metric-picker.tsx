@@ -1,4 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { ChevronDown, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -25,20 +27,20 @@ export function TokenOverlapHint({
 }: {
   selected: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (!hasRedundantTokenSelection(selected)) return null;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label={t("How selected token counts are calculated")}
+          aria-label={translateUi("How selected token counts are calculated")}
           className="inline-flex size-4 shrink-0 items-center justify-center align-middle text-muted-foreground hover:text-foreground"
         >
           <Info className="size-3.5" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-64">{t("Total tokens is input + output. Selected input, output, and cache counts are shown but not added again; cache counts can overlap input.")}</TooltipContent>
+      <TooltipContent className="max-w-64">{translateUi("Total tokens is input + output. Selected input, output, and cache counts are shown but not added again; cache counts can overlap input.")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -48,8 +50,9 @@ export function TokenMetricCaption({
 }: {
   selected: readonly TokenMetric[];
 }) {
+  useUiTranslation();
   return (
-    <div className="mt-2 flex min-w-0 items-start text-10 leading-relaxed text-muted-foreground">
+    <div className="mt-2 flex min-w-0 items-start text-12 text-muted-foreground">
       <span className="min-w-0 break-words">
         {selected.map((metric) => MEASURE_LABELS[metric]).join(" · ")}
         {hasRedundantTokenSelection(selected) && (
@@ -76,6 +79,7 @@ export function TokenMetricPicker({
   compact?: boolean;
   allLabel?: string;
 }) {
+  useUiTranslation();
   const allSelected = selected.length === TOKEN_METRICS.length;
   const custom = selected.length > 1 && !(allSelected && allLabel);
   const name =
@@ -103,7 +107,7 @@ export function TokenMetricPicker({
           className={cn(
             "min-w-0 justify-between",
             compact
-              ? "h-6 w-full border-0 px-0 text-10 uppercase shadow-none"
+              ? "h-6 w-full border-0 px-0 text-14 uppercase shadow-none"
               : "w-full sm:w-auto sm:min-w-40",
           )}
         >
@@ -111,7 +115,7 @@ export function TokenMetricPicker({
           {custom && (
             <>
               {" "}
-              <span className="shrink-0 rounded border border-border px-1 text-10 leading-4">
+              <span className="shrink-0 rounded border border-border px-1 text-12">
                 ({selected.length})
               </span>
             </>
@@ -121,9 +125,9 @@ export function TokenMetricPicker({
       </PopoverTrigger>
       <PopoverContent align="end" className="w-52 space-y-0.5 p-2">
         {TOKEN_METRICS.map((metric) => (
-          <label
+          <Label
             key={metric}
-            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-12 hover:bg-overlay"
+            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-overlay"
           >
             <Checkbox
               checked={selected.includes(metric)}
@@ -131,7 +135,7 @@ export function TokenMetricPicker({
               disabled={selected.length === 1 && selected[0] === metric}
             />
             {MEASURE_LABELS[metric]}
-          </label>
+          </Label>
         ))}
       </PopoverContent>
     </Popover>

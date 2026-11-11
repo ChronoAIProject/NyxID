@@ -117,6 +117,12 @@ export const bindingSchema = z.object({
   expires_at: z.string(),
 });
 export const bindingPreviewSchema = z.object({
+  manager_username: z.string().nullable().optional(),
+  confirmation_command: z
+    .string()
+    .regex(/^\/confirm O-[A-F0-9]{32}$/)
+    .nullable()
+    .optional(),
   request_id: z.uuid(),
   manager_bot_id: z.string(),
   requesting_sender_id: z.string(),
@@ -140,11 +146,17 @@ export const guideConfigurationSchema = z.object({
   platform_concurrent_turns: z.number().int().min(1).max(32),
 });
 export const platformProfileSchema = z.object({
+  display_name: z.string().optional(),
   guide: guideConfigurationSchema.nullish(),
   id: z.uuid(),
   channel_bot_id: z.uuid(),
   manager_bot_id: z.string(),
-  execution_profile: z.literal("platform_onboarding"),
+  execution_profile: z.enum(["platform_onboarding", "native_entry"]),
+  platform: z
+    .enum(["telegram", "discord", "slack", "whatsapp", "lark", "feishu", "x"])
+    .optional(),
+  transport: z.enum(["direct", "gateway"]).optional(),
+  supported_transports: z.array(z.enum(["direct", "gateway"])).optional(),
   generation: z.number().int(),
   enabled: z.boolean(),
   funding_owner_user_id: z.uuid(),

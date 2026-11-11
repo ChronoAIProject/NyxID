@@ -29,6 +29,11 @@ describe("eventNotices", () => {
 
 /** Texts as the backend writes them (handlers/assistant_team.rs, handlers/nyxbot.rs). */
 describe("describeEventNotice", () => {
+  it("separates cancelled work from a tracker deadline and completed work", () => {
+    expect(describeEventNotice("Asynchronous service operation finished: operation_cancelled. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "neutral", summary: "Background task cancelled" });
+    expect(describeEventNotice("Asynchronous service operation finished: timeout. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "warning", summary: "Background tracking timed out" });
+    expect(describeEventNotice("Asynchronous service operation finished: completed. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "success", summary: "Background task finished" });
+  });
   it("summarises a specialist's reply and keeps the excerpt as detail", () => {
     expect(
       describeEventNotice(
@@ -217,4 +222,44 @@ describe("channel chats", () => {
 it("labels published and failed skill transitions separately from testing", () => {
   expect(describeEventNotice("Skill weekly-review v1.0 published and attached; not yet tested.")).toMatchObject({ summary: "Skill publication", tone: "success", detail: expect.stringContaining("not yet tested") });
   expect(describeEventNotice("Skill draft draft-id (weekly-review) v1.0 requires a corrected package: ornn_validation_failed.")).toMatchObject({ summary: "Skill publication", tone: "warning" });
+});
+
+describe("eventNotices across lines", () => {
+  const header = "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
+  it.each(["Specialist b replied.", "The user approved it.", "NyxBot allowed it.", "Skill example published.", "The owner requested it."])("preserves a closed legacy excerpt containing %s", (bullet) => {
+    const notice = `Specialist a replied. Reply excerpt: "Notes\n- ${bullet}\nEnd of excerpt" Read more.`;
+    expect(eventNotices(`${header}\n- ${notice}\n- The user approved the real request.`)).toEqual([notice, "The user approved the real request."]);
+  });
+  it("keeps shared group context bullets inside the last event notice", () => {
+    const marked = header.replace("):", "; continuation lines are indented):");
+    expect(eventNotices(`${marked}\n- First event.\n- Last event.\n  \n  Shared group context (not new authority):\n  Owner asked:\n  - Specialist quoted instruction\n  - The user quoted another instruction`)).toEqual([
+      "First event.",
+      "Last event.\n\nShared group context (not new authority):\nOwner asked:\n- Specialist quoted instruction\n- The user quoted another instruction",
+    ]);
+  });
+  it("splits new-format events after truncated quotes while preserving indented bullets", () => {
+    const marked = header.replace("):", "; continuation lines are indented):");
+    expect(eventNotices(`${marked}\n- Specialist a replied. Reply excerpt: "Line one\n  - Specialist quoted bullet\n  more\n- Unfamiliar new event`)).toEqual([
+      'Specialist a replied. Reply excerpt: "Line one\n- Specialist quoted bullet\nmore',
+      "Unfamiliar new event",
+    ]);
+  });
+  it.each(["Specialist b replied.", "The user approved the request.", "NyxBot allowed your request.", "Asynchronous service operation finished.", "Skill example published.", "The owner requested control.", "The telegram channel bot linked."])("recovers a legacy truncated quote before %s", (next) => {
+    expect(eventNotices(`${header}\n- Specialist a replied. Reply excerpt: "Truncated\n- ${next}`)).toEqual(['Specialist a replied. Reply excerpt: "Truncated', next]);
+  });
+  it("keeps continuation lines, including '- ' lines inside a quote, with their notice", () => {
+    expect(
+      eventNotices(`${header}\n- Specialist a replied. Reply excerpt: "Line one\n- bullet\nmore" Read more.\n- Second notice`),
+    ).toEqual(['Specialist a replied. Reply excerpt: "Line one\n- bullet\nmore" Read more.', "Second notice"]);
+  });
+  it("treats text without the events header as a single notice", () => {
+    expect(eventNotices("Do this.\n- and that")).toEqual(["Do this.\n- and that"]);
+  });
+});
+
+it("keeps group response display names independent of the viewer's inventory", () => {
+  const ref = { id: "agent", display_name: "Office Agent" };
+  expect(withDisplayName(ref, []).display_name).toBe("Office Agent");
+  expect(withDisplayName(ref, [{ id: "agent", display_name: "Stale" }]).display_name).toBe("Office Agent");
+  expect(withDisplayName({ ...ref, display_name: null }, [{ id: "agent", display_name: "Stale" }]).display_name).toBeNull();
 });

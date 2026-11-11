@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,7 +38,7 @@ export function ManagedOAuthConnect({
   botId,
   fullPage = false,
 }: ManagedFlowProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const link = useChannelConnectLinkContext();
   const [stage, setStage] = useState<
     "starting" | "authorizing" | "completing" | null
@@ -171,7 +171,7 @@ export function ManagedOAuthConnect({
     <div className="space-y-3">
       {error && <ErrorBanner message={error} />}
       {canRetry && (
-        <p role="status" className="text-xs text-muted-foreground">{t("Finish authorization in the sign-in window. If you closed it, retry the connection.")}</p>
+        <p role="status" className="text-13 text-muted-foreground">{translateUi("Finish authorization in the sign-in window. If you closed it, retry the connection.")}</p>
       )}
       {link?.connectionId && stage === null && (
         <Button type="button" variant="outline" onClick={() => {
@@ -181,7 +181,7 @@ export function ManagedOAuthConnect({
             .then(onConnected)
             .catch((error: unknown) => setError(error instanceof Error ? error.message : "Unable to finish authorization"))
             .finally(() => setStage(null));
-        }}>{t("Finish authorized connection")}</Button>
+        }}>{translateUi("Finish authorized connection")}</Button>
       )}
       <div className="flex flex-wrap gap-2">
         <Button
@@ -196,17 +196,17 @@ export function ManagedOAuthConnect({
         >
           <ExternalLink className="size-3" />
           {canRetry
-            ? t("Retry connection")
+            ? translateUi("Retry connection")
             : stage === "starting"
-              ? t("Opening sign-in...")
+              ? translateUi("Opening sign-in...")
               : stage === "authorizing"
-                ? t("Waiting for authorization...")
+                ? translateUi("Waiting for authorization...")
                 : stage === "completing"
-                  ? t("Connecting account...")
+                  ? translateUi("Connecting account...")
                   : botId
-                    ? t("Reconnect")
+                    ? translateUi("Reconnect")
                     : (descriptor.connectLabel ??
-                      t("Connect {{label}}", { label: descriptor.label }))}
+                      translateUi("Connect {{value1}}", { value1: descriptor.label }))}
         </Button>
         {stage && !fullPage && (
           <Button
@@ -217,7 +217,7 @@ export function ManagedOAuthConnect({
               setCanRetry(false);
               setStage(null);
             }}
-          >{t("Cancel")}</Button>
+          >{translateUi("Cancel")}</Button>
         )}
       </div>
     </div>
@@ -225,36 +225,36 @@ export function ManagedOAuthConnect({
 }
 
 export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
-    <DetailSection title={t("Connected account")}>
+    <DetailSection title={translateUi("Connected account")}>
       <ChannelBotHealthCard botId={bot.id} />
-      <DetailRow label={t("Handle")} value={bot.platform_bot_username} />
+      <DetailRow label={translateUi("Handle")} value={bot.platform_bot_username} />
       <DetailRow
-        label={t("Connection")}
+        label={translateUi("Connection")}
         value={bot.connection_id ?? "Missing"}
         copyable
       />
       <DetailRow
-        label={t("Message delivery")}
+        label={translateUi("Message delivery")}
         value={bot.webhook_registered ? "Real-time webhooks" : "Polling"}
       />
       {!bot.webhook_registered && (
         <>
           <DetailRow
-            label={t("Last polled")}
+            label={translateUi("Last polled")}
             value={bot.last_polled_at ?? "Not yet polled"}
           />
-          <DetailRow label={t("Next poll")} value={bot.next_poll_at ?? "Paused"} />
+          <DetailRow label={translateUi("Next poll")} value={bot.next_poll_at ?? "Paused"} />
           <DetailRow
-            label={t("Cursor")}
+            label={translateUi("Cursor")}
             value={bot.poll_cursor ?? "Not initialized"}
             copyable
           />
           <DetailRow
-            label={t("Consecutive errors")}
+            label={translateUi("Consecutive errors")}
             value={String(bot.poll_error_count ?? 0)}
           />
         </>
@@ -262,14 +262,14 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
       <div className="space-y-3 py-3">
         {bot.platform === "x" && <XEventsSettings bot={bot} />}
         {!bot.webhook_registered && bot.last_poll_notice && (
-          <p role="status" className="text-xs text-warning">
+          <p role="status" className="text-13 text-warning">
             {bot.last_poll_notice}
           </p>
         )}
         {bot.error && <ErrorBanner message={bot.error} />}
         {bootstrap.isError && (
           <ErrorBanner
-            message={t("Unable to load account connection settings")}
+            message={translateUi("Unable to load account connection settings")}
             onRetry={bootstrap.refetch}
           />
         )}
@@ -284,7 +284,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
           />
         )}
         {bootstrap.data && !bootstrap.data.available && (
-          <p className="text-xs text-muted-foreground">{t("Account connection is not available until an admin configures")}{" "}
+          <p className="text-13 text-muted-foreground">{translateUi("Account connection is not available until an admin configures")}{" "}
             {getPlatform(bot.platform).label}.
           </p>
         )}

@@ -130,6 +130,23 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
                 doc! { "slug": slug, "inference": { "$type": "object" }, "inference.voice": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
                 doc! { "$set": { "inference.voice": bson::to_bson(&voice).expect("voice serialization") } },
             ).await?;
+            // This new required conversation field had no previous admin choice.
+            // Fill only absent fields, including older customized catalogs; keep
+            // explicit null (dictation-only) and explicit model choices intact.
+            if let Some(model) = &voice.delegation_model {
+                db.collection::<DownstreamService>(COLLECTION_NAME)
+                    .update_many(
+                        doc! {"slug":slug,"inference.voice.protocol":"openai_live",
+                        "inference.voice.delegation_model":{"$exists":false}},
+                        doc! {"$set":{"inference.voice.delegation_model":model}},
+                    )
+                    .await?;
+                db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
+                    doc! {"slug":slug,"inference.voice.protocol":"openai_live",
+                        "inference_admin_modified":{"$ne":true}},
+                    doc! {"$set":{"inference.voice.billing_metrics":bson::to_bson(&voice.billing_metrics).expect("voice metrics serialization")}},
+                ).await?;
+            }
         }
     }
     Ok(())
@@ -175,6 +192,7 @@ mod tests {
         };
         // A non-X service, such as an overlay with its own `get_me`.
         let view = LanePricingView::from(&LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "1".into(),
             lago_metric_code: "platform_svc_api-reddit_byok".into(),

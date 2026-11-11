@@ -1,14 +1,50 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useState } from "react";
+import { X } from "lucide-react";
 
-/** Kept outside the transcript scroller so failures stay visible above the chat. */
-export function AssistantErrorNotice({ message }: { readonly message?: string }) {
-  const { t } = useUiTranslation();
-  if (!message) return null;
+/**
+ * A failure the person may need to act on, kept outside the transcript
+ * scroller. Dismissing hides that message only; a different one shows again.
+ * `docked` sits it on the chat column just above the composer instead of
+ * across the top of the page.
+ */
+export function AssistantErrorNotice({
+  message,
+  docked = false,
+}: {
+  readonly message?: string;
+  readonly docked?: boolean;
+}) {
+  useUiTranslation();
+  const [dismissed, setDismissed] = useState<string>();
+  if (!message || dismissed === message) return null;
   return (
-    <div className="shrink-0 px-4 pt-3 sm:px-6">
-      <p role="alert" className="mx-auto w-full max-w-[758px] whitespace-pre-line break-words rounded-xl border border-destructive/25 bg-destructive/5 px-4 py-3 text-12 text-destructive">
-        {t(message)}
-      </p>
+    <div
+      className={docked ? "px-4 pb-2 sm:px-6" : "shrink-0 px-4 pt-3 sm:px-6"}
+      style={docked ? { width: "calc(100% - var(--assistant-content-inset, 0px))" } : undefined}
+    >
+      {/* Docked over the transcript, the tint sits on an opaque surface. */}
+      <div
+        className={`mx-auto w-full rounded-xl ${
+          docked ? "max-w-[var(--chat-content-width,758px)] bg-background shadow-sm" : "max-w-[758px]"
+        }`}
+      >
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/5 py-2.5 pl-4 pr-2 text-14 text-destructive"
+        >
+          <p className="min-w-0 flex-1 whitespace-pre-line break-words py-0.5">{translateUi(message)}</p>
+          <button data-icon-button=""
+            type="button"
+            aria-label={translateUi("Dismiss")}
+            onClick={() => setDismissed(message)}
+            className="flex shrink-0 items-center justify-center rounded-md text-destructive/70 transition-colors hover:bg-destructive/10 hover:text-destructive"
+          >
+            <X aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

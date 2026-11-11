@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
@@ -106,7 +106,7 @@ export function AssistantKeyUpdateDialog({
   readonly params: AssistantKeyUpdateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [platformGrant, setPlatformGrant] = useState(
     params.allowAutoConnectedServices,
   );
@@ -245,19 +245,19 @@ export function AssistantKeyUpdateDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultKeyId ? t("API key updated") : t("Update API key")}
+            {resultKeyId ? translateUi("API key updated") : translateUi("Update API key")}
           </DialogTitle>
           <DialogDescription>
             {resultKeyId
-              ? t("NyxID updated this exact key. The assistant receives only the safe key reference.")
-              : t("Confirm the key settings and service access.")}
+              ? translateUi("NyxID updated this exact key. The assistant receives only the safe key reference.")
+              : translateUi("Confirm the key settings and service access.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultKeyId ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Key")}</span>
+              <span className="text-muted-foreground">{translateUi("Key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -267,7 +267,7 @@ export function AssistantKeyUpdateDialog({
             </div>
             {params.name ? (
               <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">{t("Name")}</span>
+                <span className="text-muted-foreground">{translateUi("Name")}</span>
                 <span className="min-w-0 truncate font-medium">
                   {params.name}
                 </span>
@@ -275,7 +275,7 @@ export function AssistantKeyUpdateDialog({
             ) : null}
             {params.platform ? (
               <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">{t("Platform")}</span>
+                <span className="text-muted-foreground">{translateUi("Platform")}</span>
                 <Badge variant="secondary" className="max-w-[70%] truncate">
                   {params.platform}
                 </Badge>
@@ -296,26 +296,26 @@ export function AssistantKeyUpdateDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-11 text-success">{t("Exact key metadata verified.")}</p>
+          <p className="text-13 text-success">{translateUi("Exact key metadata verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!resultKeyId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void updateKey()}
-              >{t("Update key")}</Button>
+              >{translateUi("Update key")}</Button>
             </>
           ) : (
             <>
@@ -330,7 +330,7 @@ export function AssistantKeyUpdateDialog({
                     void verifyUpdate(resultKeyId, expected);
                   }}
                 >
-                  <RefreshCw />{t("Retry verification")}</Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -341,7 +341,7 @@ export function AssistantKeyUpdateDialog({
                   close();
                 }}
               >
-                {replayed ? t("Report existing key") : t("Done")}
+                {replayed ? translateUi("Report existing key") : translateUi("Done")}
               </Button>
             </>
           )}

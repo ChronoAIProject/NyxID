@@ -64,7 +64,7 @@ export function WizardLanguagePicker() {
             onClick={() => void i18n.changeLanguage(code)}
             onKeyDown={(event) => handleKeyDown(event, index)}
             className={cn(
-              "h-7 min-w-9 cursor-pointer rounded-md px-2 text-12 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              "h-7 min-w-9 cursor-pointer rounded-md px-2 type-secondary-emphasis transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
               selected.code === code
                 ? "bg-primary text-white shadow-sm"
                 : "text-muted-foreground hover:bg-overlay-strong hover:text-foreground",

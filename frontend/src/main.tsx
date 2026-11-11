@@ -1,5 +1,7 @@
-import "./lib/platform-personal-handoff";
+import "./lib/zod-csp";
 import { appLanguageReady } from "./i18n";
+import "./lib/platform-personal-handoff";
+import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -17,6 +19,9 @@ import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
 import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
+import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
+
+installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
 // fetched, *before* the failure becomes a React.lazy rejection — so it catches
@@ -43,6 +48,7 @@ const queryClient = new QueryClient({
 subscribeAssistantIdentity(() => {
   queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
   queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
+  queryClient.removeQueries({ queryKey: ["cma-session"] });
 });
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
@@ -50,6 +56,9 @@ subscribeAssistantIdentity(() => {
 // Stripped from production builds with the rest of the DEV branch.
 if (import.meta.env.DEV) {
   (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
+  // Use the instances mounted below, not a fresh module import: Vite's HMR
+  // timestamps can otherwise give browser drivers a second, idle router/store.
+  (window as { __nyxApp?: { router: typeof router; authStore: typeof useAuthStore } }).__nyxApp = { router, authStore: useAuthStore };
 }
 
 function isLoginApprovalPage() {
@@ -69,6 +78,7 @@ function Root() {
     [],
   );
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
 
@@ -119,16 +129,16 @@ function Root() {
     if (isAuthenticated && user?.id) {
       telemetryIdentify(user.id);
     }
-  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin]);
+  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
   // When auth resolves, redirect as needed:
-  // - Authenticated user on landing → dashboard
+  // - Authenticated user on landing → assistant
   // - Unauthenticated user on protected route → login
   useEffect(() => {
     if (!ready) return;
     const path = window.location.pathname;
     if (isAuthenticated && path === "/") {
-      router.navigate({ to: "/dashboard" });
+      router.navigate({ to: "/assistant" });
     } else if (!isAuthenticated) {
       // Send unauthenticated users on a real protected route to login,
       // but let a genuinely-unmatched path fall through to the router's
@@ -176,12 +186,10 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-void appLanguageReady.then(() => {
-  createRoot(rootElement).render(
-    <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <Root />
-      </QueryClientProvider>
-    </StrictMode>,
-  );
-});
+void appLanguageReady.then(() => createRoot(rootElement).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <Root />
+    </QueryClientProvider>
+  </StrictMode>,
+));

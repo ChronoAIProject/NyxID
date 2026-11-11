@@ -10,6 +10,37 @@ use super::metrics::NodeMetrics;
 use super::signing::{self, ReplayGuard};
 use super::ws_client::NodeWsMessage;
 
+/// Header names do not classify credentials: defaults may carry arbitrary
+/// secret names. Redact every transported value in request Debug output.
+pub(crate) fn sensitive_header_value(
+    value: &str,
+) -> std::result::Result<reqwest::header::HeaderValue, reqwest::header::InvalidHeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(value)?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+fn with_sensitive_header(
+    builder: reqwest::RequestBuilder,
+    name: &str,
+    value: &str,
+) -> reqwest::RequestBuilder {
+    match sensitive_header_value(value) {
+        Ok(value) => builder.header(name, value),
+        // Keep reqwest's deferred invalid-header failure; it never installs
+        // the invalid value in the transport's header map.
+        Err(_) => builder.header(name, value),
+    }
+}
+fn transport_error_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "Downstream request timed out"
+    } else if error.is_connect() {
+        "Downstream connection failed"
+    } else {
+        "Downstream request failed"
+    }
+}
+
 /// Maximum chunk size for streaming responses (64 KB raw bytes).
 const MAX_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -306,7 +337,7 @@ async fn execute_proxy_request_inner(
                         request_id,
                         &format!(
                             "No target URL configured for service '{service_slug}'. \
-                             Run on the node-agent machine: nyxid node credentials add --service {service_slug} --url <URL> ... \
+                             Run on the node-agent machine: nyxid node credentials set-url --service {service_slug} --url <URL> (owner login required; existing local secret is preserved) \
                              (`nyxid node credentials` is node-side only, not available on the user-side CLI)."
                         ),
                         502,
@@ -486,7 +517,7 @@ async fn execute_proxy_request_inner(
                         continue;
                     }
                 }
-                req_builder = req_builder.header(name.as_str(), v);
+                req_builder = with_sensitive_header(req_builder, name, v);
                 forwarded_headers.push((name.clone(), v.to_string()));
             }
         }
@@ -512,7 +543,7 @@ async fn execute_proxy_request_inner(
         req_builder =
             req_builder.basic_auth("x-access-token", Some(token.trim_start_matches("Bearer ")));
     } else if let Some((hdr_name, hdr_value)) = cred.header() {
-        req_builder = req_builder.header(hdr_name, hdr_value);
+        req_builder = with_sensitive_header(req_builder, hdr_name, hdr_value);
     }
 
     // 6. Decode the body up front so the SigV4 path can hash it before
@@ -568,7 +599,7 @@ async fn execute_proxy_request_inner(
             }
         };
         for header in signed {
-            req_builder = req_builder.header(&header.name, &header.value);
+            req_builder = with_sensitive_header(req_builder, &header.name, header.value.as_str());
         }
     }
 
@@ -616,13 +647,13 @@ async fn execute_proxy_request_inner(
                         )
                         .await;
                     }
-                    Err(e) => {
+                    Err(_) => {
                         metrics.record_error();
                         let _ = send_ws_message(
                             tx,
                             proxy_error_response(
                                 request_id,
-                                &format!("Failed to read response body: {e}"),
+                                "Downstream response body failed",
                                 502,
                                 false,
                             ),
@@ -632,16 +663,11 @@ async fn execute_proxy_request_inner(
                 }
             }
         }
-        Err(e) => {
+        Err(error) => {
             metrics.record_error();
             let _ = send_ws_message(
                 tx,
-                proxy_error_response(
-                    request_id,
-                    &format!("Downstream request failed: {e}"),
-                    502,
-                    false,
-                ),
+                proxy_error_response(request_id, transport_error_category(&error), 502, false),
             )
             .await;
         }
@@ -747,11 +773,11 @@ async fn stream_proxy_response(
                     break;
                 }
             }
-            Err(e) => {
+            Err(_) => {
                 let err_msg = serde_json::json!({
                     "type": "proxy_error",
                     "request_id": request_id,
-                    "error": format!("Stream error: {e}"),
+                    "error": "Downstream response stream failed",
                     "status": 502,
                 });
                 let _ = send_ws_message(tx, err_msg.to_string()).await;
@@ -864,6 +890,114 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::append_query_param;
+
+    #[test]
+    fn http_and_ws_requests_redact_custom_defaults_and_sigv4_material() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let client = reqwest::Client::new();
+        let credentials = super::AwsCredentials {
+            access_key_id: "distinctive-aws-key-id".to_owned().into(),
+            secret_access_key: "distinctive-aws-signing-secret".to_owned().into(),
+            session_token: Some("distinctive-aws-session-token".to_owned().into()),
+            region: "us-east-1".to_owned(),
+            service: "execute-api".to_owned(),
+        };
+        let mut builder = super::with_sensitive_header(
+            client.get("https://example.test/"),
+            "x-unfamiliar-capability",
+            "distinctive-default-secret",
+        );
+        builder =
+            super::with_sensitive_header(builder, "x-custom-auth", "distinctive-credential-secret");
+        for header in
+            super::aws_sigv4::sign_request("GET", "https://example.test/", &[], &[], &credentials)
+                .unwrap()
+        {
+            builder = super::with_sensitive_header(builder, &header.name, header.value.as_str());
+        }
+        let request = builder.build().unwrap();
+        assert!(request.headers().values().all(|value| value.is_sensitive()));
+        let debug = format!("{request:?}");
+        let mut ws = "wss://example.test/".into_client_request().unwrap();
+        ws.headers_mut().insert(
+            "x-unfamiliar-capability",
+            super::sensitive_header_value("distinctive-default-secret").unwrap(),
+        );
+        ws.headers_mut().insert(
+            "authorization",
+            super::sensitive_header_value("Bearer distinctive-credential-secret").unwrap(),
+        );
+        let ws_debug = format!("{ws:?}");
+        for secret in [
+            "distinctive-default-secret",
+            "distinctive-credential-secret",
+            "distinctive-aws-key-id",
+            "distinctive-aws-session-token",
+        ] {
+            assert!(!debug.contains(secret));
+            assert!(!ws_debug.contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_server_target_wins_over_stale_local_target() {
+        use super::super::{config::NodeConfig, secret_backend::SecretBackend};
+        use super::*;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+        let old = MockServer::start().await;
+        let new = MockServer::start().await;
+        let secret = uuid::Uuid::new_v4().to_string();
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&old)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .and(header("Authorization", secret.as_str()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&new)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let mut config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"ws://localhost"},"node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+        config
+            .add_header_credential_via(
+                "monitor",
+                "Authorization",
+                &secret,
+                Some(&old.uri()),
+                &backend,
+            )
+            .unwrap();
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let request = serde_json::json!({"request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "base_url":new.uri(), "method":"GET", "path":"/health", "headers":{}});
+        let (tx, mut rx) = mpsc::channel(8);
+        execute_proxy_request(
+            &request,
+            &credentials,
+            None,
+            &tokio::sync::Mutex::new(ReplayGuard::new()),
+            &NodeMetrics::new(),
+            &tx,
+            false,
+            &build_http_client().unwrap(),
+        )
+        .await;
+        let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {
+            panic!("expected proxy response")
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["status"], 200);
+    }
 
     #[tokio::test]
     async fn selected_request_without_base_url_never_uses_local_credential_target() {

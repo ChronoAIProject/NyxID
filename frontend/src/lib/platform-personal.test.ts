@@ -1,5 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { personalLinkApi, personalActorGuard } from "./platform-personal";
+import {
+  personalLinkApi,
+  personalActorGuard,
+  telegramConfirmationUrl,
+} from "./platform-personal";
 import { useAuthStore } from "@/stores/auth-store";
 import { apiClient, ApiError } from "./api-client";
 vi.mock("./api-client", async (original) => ({
@@ -64,4 +68,20 @@ it("sanitizes echoed server errors so tokens and commands do not reach diagnosti
   await expect(personalLinkApi.review("secret", "owner")).rejects.toThrow(
     "This review changed.",
   );
+});
+
+it("builds a purpose-bound Telegram return only from the reviewed bot and current confirmation", () => {
+  const url = telegramConfirmationUrl("/confirm P-ABCD-1234", "manager_bot");
+  expect(url).toBe("https://t.me/manager_bot?start=nyxpersonal_P-ABCD-1234");
+  expect(new URL(url!).searchParams.get("start")).toMatch(
+    /^[A-Za-z0-9_-]{1,64}$/,
+  );
+  for (const [command, username] of [
+    ["/confirm P-ABCD-1234", "manager/evil"],
+    ["/confirm P-ABCD-1234 extra", "manager_bot"],
+    ["/nyx confirm code:P-ABCD-1234", "manager_bot"],
+    [undefined, "manager_bot"],
+    ["/confirm P-ABCD-1234", null],
+  ] as const)
+    expect(telegramConfirmationUrl(command, username)).toBeUndefined();
 });

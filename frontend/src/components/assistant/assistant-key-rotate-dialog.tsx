@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -121,7 +122,7 @@ function KeyRotationResult({
   readonly onRetryVerification: () => void;
   readonly onFinish: (keyId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
   const hasSecret = !result.replayed && Boolean(result.fullKey);
@@ -144,10 +145,10 @@ function KeyRotationResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-13 font-medium">
-              {result.replayed ? t("Existing replacement key") : t("Assistant key rotated")}
+            <p className="type-card-title">
+              {result.replayed ? translateUi("Existing replacement key") : translateUi("Assistant key rotated")}
             </p>
-            <p className="break-all font-mono text-12 text-muted-foreground">
+            <p className="break-all font-mono text-14 text-muted-foreground">
               {result.resource.keyId}
             </p>
           </div>
@@ -155,31 +156,31 @@ function KeyRotationResult({
       ) : (
         <div className="space-y-4 border-y border-border py-4">
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-12">
+            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-14">
               {!result.replayed ? result.fullKey : null}
             </code>
             <Button
               type="button"
               variant="outline"
               size="icon"
-              title={t("Copy replacement API key")}
-              aria-label={t("Copy replacement API key")}
+              title={translateUi("Copy replacement API key")}
+              aria-label={translateUi("Copy replacement API key")}
               onClick={() => void copySecret()}
             >
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-12">
+          <Label className="flex cursor-pointer items-start gap-2">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
             />
-            <span>{t("I saved this replacement key in a secure location.")}</span>
-          </label>
+            <span>{translateUi("I saved this replacement key in a secure location.")}</span>
+          </Label>
         </div>
       )}
       {verified ? (
-        <p className="text-11 text-success">{t("Exact rotation lineage verified.")}</p>
+        <p className="text-13 text-success">{translateUi("Exact rotation lineage verified.")}</p>
       ) : null}
       <DialogFooter>
         {!verified ? (
@@ -189,7 +190,7 @@ function KeyRotationResult({
             isLoading={verifying}
             onClick={onRetryVerification}
           >
-            <RefreshCw />{t("Retry verification")}</Button>
+            <RefreshCw />{translateUi("Retry verification")}</Button>
         ) : null}
         <Button
           type="button"
@@ -197,7 +198,7 @@ function KeyRotationResult({
           disabled={!verified || (hasSecret && !saved)}
           onClick={() => onFinish(result.resource.keyId)}
         >
-          {hasSecret ? t("I have saved it") : t("Report replacement key")}
+          {hasSecret ? translateUi("I have saved it") : translateUi("Report replacement key")}
         </Button>
       </DialogFooter>
     </>
@@ -221,7 +222,7 @@ export function AssistantKeyRotateDialog({
   readonly params: AssistantKeyRotateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -340,23 +341,23 @@ export function AssistantKeyRotateDialog({
       >
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? t("API key already rotated") : t("Rotate API key")}
+            {result?.replayed ? translateUi("API key already rotated") : translateUi("Rotate API key")}
           </DialogTitle>
           <DialogDescription>
             {result
               ? result.replayed
-                ? t("The original one-time replacement secret is no longer available.")
+                ? translateUi("The original one-time replacement secret is no longer available.")
                 : result.fullKey
-                  ? t("This replacement key is shown only once. Copy and store it securely now.")
-                  : t("NyxID has securely stored the replacement key for the assistant.")
-              : t("Confirm the exact predecessor before replacing its credential.")}
+                  ? translateUi("This replacement key is shown only once. Copy and store it securely now.")
+                  : translateUi("NyxID has securely stored the replacement key for the assistant.")
+              : translateUi("Confirm the exact predecessor before replacing its credential.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Predecessor")}</span>
+              <span className="text-muted-foreground">{translateUi("Predecessor")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -364,26 +365,26 @@ export function AssistantKeyRotateDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-11 leading-relaxed text-muted-foreground">{t("NyxID preserves the key's authority and disables this exact predecessor atomically.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("NyxID preserves the key's authority and disables this exact predecessor atomically.")}</p>
           </div>
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {!result ? (
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+            <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               disabled={submitting}
               onClick={() => void rotateKey()}
-            >{t("Rotate key")}</Button>
+            >{translateUi("Rotate key")}</Button>
           </DialogFooter>
         ) : null}
         {result ? (

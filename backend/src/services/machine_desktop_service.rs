@@ -491,6 +491,14 @@ mod tests {
     async fn display_control_is_independent_and_legacy_rows_keep_node_identity() {
         let db =
             crate::test_utils::connect_transaction_test_database("machine_display_control").await;
+        // Node registration fences the live issuing account.
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                "owner",
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let secure = open(&db, "owner", "machine", Some("thread")).await.unwrap();
         let dev = open_display(&db, "owner", "machine", Some("thread"), Display::Dev)
             .await

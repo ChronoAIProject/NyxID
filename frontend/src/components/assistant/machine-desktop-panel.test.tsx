@@ -41,8 +41,42 @@ beforeEach(() => {
   } as unknown as CanvasRenderingContext2D);
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+it("uses the browser's authenticated origin even when node ingress is on another host", () => {
+  render(<MachineDesktopPanel nodeId="node" conversationId="thread" />);
+  const url = new URL(Socket.instances[0]!.url);
+  expect(url.host).toBe(window.location.host);
+  expect(url.pathname).toBe("/api/v1/assistant/nyxagent/machines/node/desktop");
+  expect(url.searchParams.get("conversation_id")).toBe("thread");
+});
+it("can manually reconnect when the initial connection never finishes", () => {
+  vi.useFakeTimers();
+  render(<MachineDesktopPanel nodeId="node" />);
+  const stalled = Socket.instances[0]!;
+  expect(screen.getByText("Connecting…")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+  act(() => vi.advanceTimersByTime(7999));
+  expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+  act(() => vi.advanceTimersByTime(1));
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  expect(stalled.close).toHaveBeenCalledOnce();
+  expect(Socket.instances).toHaveLength(2);
+  expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+  act(() => Socket.instances[1]!.message({ type: "connected", session_id: "id", controller: "agent" }));
+  expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+});
+it("offers reconnect immediately on an error and cancels the stall timer on connection", () => {
+  vi.useFakeTimers();
+  render(<MachineDesktopPanel nodeId="node" />);
+  act(() => Socket.instances[0]!.onerror?.());
+  expect(screen.getByRole("button", { name: "Reconnect" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  act(() => Socket.instances[1]!.message({ type: "connected", session_id: "id", controller: "agent" }));
+  act(() => vi.advanceTimersByTime(9000));
+  expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
 });
 it("watches, requests control, protects owner input, and hands back with a note", async () => {
   const view = render(

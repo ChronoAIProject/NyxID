@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import type { z } from "zod";
 import { parseCredits } from "@/lib/credits";
@@ -18,46 +19,50 @@ function useObservationTime() {
 
 export function RemoteMachineQuota({
   quota,
+  grouped = false,
 }: {
+  readonly grouped?: boolean;
   readonly quota?: z.infer<typeof remoteMachineQuotaSchema> | null;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const now = useObservationTime();
   const stale = !quota?.valid_until || Date.parse(quota.valid_until) <= now;
   return (
     <section
-      aria-label={t("Platform quota preflight")}
-      className="space-y-1 text-12 text-muted-foreground"
+      aria-label={translateUi("Platform quota preflight")}
+      className={grouped ? "space-y-1" : "space-y-1 text-14 text-muted-foreground"}
     >
-      <p>{t("Namespace quota: ")}{quota ? quota.status.replaceAll("_", " ") : t("Unknown")}
-        {stale ? t(" (no fresh observation)") : ""}.
+      <p>{translateUi("Namespace quota: ")}{quota ? quota.status.replaceAll("_", " ") : translateUi("Unknown")}
+        {stale ? translateUi(" (no fresh observation)") : ""}.
       </p>
       {quota && (
         <>
           <p>
             {quota.operation === "retained_volume_resume"
-              ? t("Resume demand reuses the retained workspace volume.")
-              : t("Create demand includes a new workspace volume.")}{" "}
+              ? translateUi("Resume demand reuses the retained workspace volume.")
+              : translateUi("Create demand includes a new workspace volume.")}{" "}
             {quota.reason.replaceAll("_", " ")}.
           </p>
           {quota.additional_profiles_upper_bound !== null && (
-            <p>{t("Observed quota upper bound:")}{" "}
-              {quota.additional_profiles_upper_bound}{t(" additional fixed profiles.")}</p>
+            <p>{translateUi("Observed quota upper bound:")}{" "}
+              {quota.additional_profiles_upper_bound}{translateUi(" additional fixed profiles.")}</p>
           )}
         </>
       )}
-      <p>{t("Quota headroom is not a capacity guarantee. Controller-reported usage may lag; scheduling and storage availability are checked during provisioning. Temporary disk capacity and per-Machine quota demand remain unknown; the absence of a fixed declaration does not establish available node disk space.")}</p>
+      <p>{translateUi("Quota headroom is not a capacity guarantee. Controller-reported usage may lag; scheduling and storage availability are checked during provisioning. Temporary disk capacity and per-Machine quota demand remain unknown; the absence of a fixed declaration does not establish available node disk space.")}</p>
     </section>
   );
 }
 
 export function RemoteMachineBillingPreflight({
   preflight,
+  grouped = false,
   quoteProfile,
   quoteRate,
   quotePrice,
   now,
 }: {
+  readonly grouped?: boolean;
   readonly preflight?: z.infer<
     typeof remoteMachineBillingPreflightSchema
   > | null;
@@ -66,7 +71,7 @@ export function RemoteMachineBillingPreflight({
   readonly quotePrice?: string | null;
   readonly now?: number;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const observedNow = useObservationTime();
   const matches =
     (!quoteProfile || preflight?.profile_version === quoteProfile) &&
@@ -80,25 +85,25 @@ export function RemoteMachineBillingPreflight({
   const funds = matches && fresh ? preflight?.funds : undefined;
   return (
     <section
-      aria-label={t("Paid runtime prerequisites")}
-      className="space-y-2 text-12 text-muted-foreground"
+      aria-label={translateUi("Paid runtime prerequisites")}
+      className={grouped ? "space-y-1" : "space-y-2 text-14 text-muted-foreground"}
     >
-      <p>{t("Billing preflight:")}{" "}
+      <p>{translateUi("Billing preflight:")}{" "}
         {!preflight || !matches
-          ? t("Unknown for this quote")
+          ? translateUi("Unknown for this quote")
           : !fresh
-            ? t("Stale; submit checks current state")
+            ? translateUi("Stale; submit checks current state")
             : preflight.ready
-              ? t("Prerequisites observed ready")
-              : t("Not ready")}
+              ? translateUi("Prerequisites observed ready")
+              : translateUi("Not ready")}
         .
       </p>
       {preflight && matches && (
         <>
-          <p>{t("Wallet: ")}{preflight.wallet}{t(". Subscription:")}{" "}
-            {preflight.subscription.replaceAll("_", " ")}{t(". Provider:")}{" "}
-            {preflight.provider}{t(". Exact accounting:")}{" "}
-            {preflight.exact_ready ? t("ready") : t("not ready")}{t(". Pricing:")}{" "}
+          <p>{translateUi("Wallet: ")}{preflight.wallet}. Subscription:{" "}
+            {preflight.subscription.replaceAll("_", " ")}. Provider:{" "}
+            {preflight.provider}. Exact accounting:{" "}
+            {preflight.exact_ready ? translateUi("ready") : translateUi("not ready")}. Pricing:{" "}
             {preflight.pricing}.
           </p>
           {preflight.reason && <p>{preflight.reason.replaceAll("_", " ")}.</p>}
@@ -106,18 +111,18 @@ export function RemoteMachineBillingPreflight({
       )}
       {funds ? (
         <>
-          <p>{t("Quote-specific wallet available: ")}{funds.wallet_available}{t(" Credits. Reserved: ")}{funds.wallet_reserved}{t(" Credits. Pending debits:")}{" "}
-            {funds.pending_debits}{t(" Credits. Pending expiry:")}{" "}
-            {funds.pending_expiry}{t(" Credits.")}</p>
-          <p>{t("Applicable benefits: ")}{funds.matching_allowance_seconds}{t(" running seconds and ")}{funds.available_grants}{t(" grant Credits.")}</p>
-          <p>{t("Estimated runtime at this rate: ")}{funds.estimated_seconds}{t(" seconds.")}</p>
+          <p>{translateUi("Quote-specific wallet available: ")}{funds.wallet_available}{translateUi(" Credits. Reserved: ")}{funds.wallet_reserved}{translateUi(" Credits. Pending debits:")}{" "}
+            {funds.pending_debits}{translateUi(" Credits. Pending expiry:")}{" "}
+            {funds.pending_expiry}{translateUi(" Credits.")}</p>
+          <p>{translateUi("Applicable benefits: ")}{funds.matching_allowance_seconds}{translateUi(" running seconds and ")}{funds.available_grants}{translateUi(" grant Credits.")}</p>
+          <p>{translateUi("Estimated runtime at this rate: ")}{funds.estimated_seconds}{translateUi(" seconds.")}</p>
         </>
       ) : (
-        <p>{t("Quote-specific benefits and runtime estimate: unavailable.")}{" "}
+        <p>{translateUi("Quote-specific benefits and runtime estimate: unavailable.")}{" "}
           {preflight?.funds_reason?.replaceAll("_", " ")}
         </p>
       )}
-      <p>{t("Other Machines and services share these funds. The estimate reserves nothing and does not guarantee a duration; submission repeats live eligibility, subscription, provider and funding checks.")}</p>
+      <p>{translateUi("Other Machines and services share these funds. The estimate reserves nothing and does not guarantee a duration; submission repeats live eligibility, subscription, provider and funding checks.")}</p>
     </section>
   );
 }

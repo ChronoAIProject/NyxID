@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { RotateCcw, SkipForward, StopCircle } from "lucide-react";
 import { ActionCard } from "@/components/assistant/blocks/action-card";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
@@ -74,7 +75,7 @@ export function ChatActorControls({
   readonly onBlockAction: (actionRequestId: string, note: string) => void;
   readonly onResolveAction: (report: ActionReport) => Promise<void>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (!projection) return null;
   const actions = [...projection.actions.values()];
   const controllableSteps = [...projection.steps.values()].filter(
@@ -91,9 +92,9 @@ export function ChatActorControls({
   if (!hasControls) return null;
 
   return (
-    <section aria-label={t("Actor controls")} className="space-y-3">
+    <section aria-label={translateUi("Actor controls")} className="space-y-3">
       {disabled ? (
-        <p role="status" className="text-11 text-muted-foreground">{t("Waiting for current state before controls can be used.")}</p>
+        <p role="status" className="text-13 text-muted-foreground">{translateUi("Waiting for current state before controls can be used.")}</p>
       ) : null}
       {projection.task ? (
         <TaskPlanCard
@@ -144,7 +145,7 @@ export function ChatActorControls({
 
       {controllableSteps.map((step) => (
         <section key={step.stepId} className="rounded-lg border border-border bg-card px-3 py-2.5">
-          <div className="text-12 font-medium text-foreground">
+          <div className="type-row-title text-foreground">
             {step.description || step.stepId}
           </div>
           <div className="mt-2 flex gap-2">
@@ -156,7 +157,7 @@ export function ChatActorControls({
                 disabled={disabled}
                 onClick={() => void onControlStep("step.retry", step)}
               >
-                <RotateCcw />{t(" Retry")}</Button>
+                <RotateCcw />{translateUi(" Retry")}</Button>
             ) : null}
             {step.availableActions.skip ? (
               <Button
@@ -166,7 +167,7 @@ export function ChatActorControls({
                 disabled={disabled}
                 onClick={() => void onControlStep("step.skip", step)}
               >
-                <SkipForward />{t(" Skip")}</Button>
+                <SkipForward />{translateUi(" Skip")}</Button>
             ) : null}
             {step.availableActions.stop ? (
               <Button
@@ -176,7 +177,7 @@ export function ChatActorControls({
                 disabled={disabled}
                 onClick={() => void onStop()}
               >
-                <StopCircle />{t(" Stop")}</Button>
+                <StopCircle />{translateUi(" Stop")}</Button>
             ) : null}
           </div>
         </section>

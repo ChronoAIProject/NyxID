@@ -1,6 +1,11 @@
 //! Trigger schedules: derived leased work, durable UUID-v5 occurrence identity,
 //! and admission fenced in the same transaction as an assistant turn.
 pub mod compute;
+pub mod continuation;
+pub mod direct;
+pub mod group;
+pub mod notification_delivery;
+pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
 use super::assistant_engine_policy as policy;
 use crate::models::trigger_run::RunOutcome;
@@ -43,6 +48,12 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name, ttl) in [
         (WORK, doc! { "at": 1, "_id": 1 }, "trigger_work_due", false),
         (
+            WORK,
+            doc! { "trigger_id": 1, "_id": 1 },
+            "trigger_work_parent",
+            false,
+        ),
+        (
             RUNS,
             doc! { "trigger_id": 1, "scheduled_at": -1, "_id": -1 },
             "trigger_run_history",
@@ -55,6 +66,13 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (RUNS, doc! { "expires_at": 1 }, "trigger_run_ttl", true),
+        // The transcript names an automation turn's automation by its turn.
+        (
+            RUNS,
+            doc! { "user_id": 1, "turn_id": 1 },
+            "trigger_run_turn",
+            false,
+        ),
         (
             BUDGETS,
             doc! { "expires_at": 1 },
@@ -82,6 +100,41 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             .create_index(IndexModel::builder().keys(keys).options(options).build())
             .await?;
     }
+    for (collection, keys, name, ttl) in [
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"user_id": 1, "run_id": 1, "state": 1},
+            "automation_direct_run",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"user_id": 1, "parent_thread_id": 1},
+            "automation_direct_parent",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"user_id": 1, "child_thread_id": 1, "state": 1},
+            "automation_direct_child",
+            false,
+        ),
+        (
+            crate::models::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"expires_at": 1},
+            "automation_direct_ttl",
+            true,
+        ),
+    ] {
+        let mut options = IndexOptions::builder().name(name.to_owned()).build();
+        if ttl {
+            options.expire_after = Some(std::time::Duration::ZERO);
+        }
+        db.collection::<Document>(collection)
+            .create_index(IndexModel::builder().keys(keys).options(options).build())
+            .await?;
+    }
+    continuation::indexes(db).await?;
     Ok(())
 }
 
@@ -105,12 +158,14 @@ pub async fn claim(db: &Database, id: &str, now: DateTime<Utc>) -> AppResult<Opt
         .collection::<Document>(WORK)
         .find_one_and_update(
             doc! { "_id": id, "at": {"$lte":date(now)} },
-            doc! {
-                "$set": {
-                    "at": date(now+Duration::seconds(LEASE_SECONDS)),
-                    "fence": Uuid::new_v4().to_string(),
-                },
-            },
+            vec![doc! {"$set": {
+                "at": {"$cond": [{"$eq": ["$automation_v2", true]},
+                    date(now+Duration::seconds(continuation::ADMISSION_LEASE_SECONDS)),
+                    date(now+Duration::seconds(LEASE_SECONDS))]},
+                "fence": Uuid::new_v4().to_string(),
+                "claimed_wake_generation": {"$cond": [{"$eq": ["$automation_v2", true]}, {"$ifNull": ["$wake_generation", 0]}, "$$REMOVE"]},
+                "admission_lease_until": {"$cond": [{"$eq": ["$automation_v2", true]}, date(now+Duration::seconds(continuation::ADMISSION_LEASE_SECONDS)), "$$REMOVE"]},
+            }}],
         )
         .return_document(ReturnDocument::After)
         .await?)
@@ -121,7 +176,15 @@ pub async fn reschedule(db: &Database, job: &Document, at: Option<DateTime<Utc>>
         "_id": job.get_str("_id").unwrap_or_default(),
         "fence": job.get_str("fence").unwrap_or_default(),
     };
-    if let Some(at) = at {
+    if job.get_bool("automation_v2").unwrap_or(false)
+        && let Some(at) = at
+    {
+        db.collection::<Document>(WORK).update_one(filter, vec![doc! {"$set": {
+            "at": {"$cond": [{"$ne": ["$wake_generation", "$claimed_wake_generation"]}, date(Utc::now()), date(at)]},
+            "fence": "", "admission_lease_until": "$$REMOVE",
+            "deferrals": {"$cond": [{"$ne": ["$wake_generation", "$claimed_wake_generation"]}, 0, {"$add": [{"$ifNull": ["$deferrals", 0]}, 1]}]},
+        }}]).await?;
+    } else if let Some(at) = at {
         db.collection::<Document>(WORK)
             .update_one(filter, doc! { "$set": {"at":date(at)} })
             .await?;
@@ -141,6 +204,7 @@ pub async fn set_schedule_job(
         && trigger.status == TriggerStatus::Active
         && let Some(at) = trigger.schedule_state.next_due_at
     {
+        super::erasure_admission::fence_in_session(db, &trigger.user_id, session).await?;
         db.collection::<Document>(WORK)
             .replace_one(
                 doc! { "_id": &id },
@@ -148,6 +212,7 @@ pub async fn set_schedule_job(
                     "_id": &id,
                     "kind": "schedule",
                     "trigger_id": &trigger.id,
+                    "user_id": &trigger.user_id,
                     "at": date(at),
                     "fence": "",
                 },
@@ -166,6 +231,8 @@ pub async fn set_schedule_job(
 
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
+        coordinator: None,
+        work: None,
         trigger_generation: None,
         dispatch_at: None,
         terminal_result_recorded: false,
@@ -179,6 +246,7 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         outcome: RunOutcome::Pending,
         confirmation_policy: None,
         reason: None,
+        failure_reason: None,
         started_at: None,
         finished_at: None,
         thread_id: None,
@@ -187,7 +255,10 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         missed: None,
         waiting_for: Vec::new(),
         result_claimed: false,
+        execution_outcome: None,
+        notification_delivery: None,
         image_refs: Vec::new(),
+        delegated_image_refs: Vec::new(),
         image_refs_truncated: 0,
         agent_id: None,
         deliver_to: Default::default(),
@@ -203,6 +274,7 @@ pub(crate) async fn insert_run(
     run: &TriggerRun,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let stored = db
         .collection::<Document>(TRIGGERS)
         .find_one_and_update(
@@ -258,6 +330,7 @@ pub(crate) async fn insert_run(
             "_id": &run.id,
             "kind": "run",
             "trigger_id": &run.trigger_id,
+            "user_id": &run.user_id,
             "at": date(run.dispatch_at.unwrap_or_else(Utc::now)),
             "fence": "",
         })
@@ -496,7 +569,22 @@ pub async fn finish(
 }
 
 /// Fenced terminal decisions belong only to the current worker.
-pub async fn finish_claimed(
+pub fn finish_claimed<'a>(
+    db: &'a Database,
+    job: &'a Document,
+    run_id: &'a str,
+    outcome: RunOutcome,
+    reason: Option<&'a str>,
+    frontend: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    // The scheduler settles many exit paths. Keep each transaction's state
+    // out of its polling frame while it starts a complete assistant turn.
+    Box::pin(finish_claimed_inner(
+        db, job, run_id, outcome, reason, frontend,
+    ))
+}
+
+async fn finish_claimed_inner(
     db: &Database,
     job: &Document,
     run_id: &str,
@@ -572,7 +660,7 @@ async fn finish_update(
             vec![doc! {
                 "$set": {
                     "outcome": outcome.as_str(),
-                    "reason": reason,
+                    "reason": {"$cond": [{"$and": [{"$eq": ["$coordinator.protocol", 2]}, outcome == RunOutcome::Completed && reason.is_none()]}, "coordinator_completed", {"$literal": reason}]},
                     "finished_at": date(now),
                     "duration_ms": {
                         "$cond": [
@@ -587,11 +675,21 @@ async fn finish_update(
         .return_document(ReturnDocument::After);
     let mut run = action.session(&mut *session).await?;
     if let Some(run) = &mut run {
+        notification_delivery::notice_in_session(db, run, frontend, session).await?;
         Box::pin(record_terminal_in_session(
             db, session, run, reason, frontend,
         ))
         .await?;
         run.terminal_result_recorded = true;
+        if run.coordinator.as_ref().is_some_and(|c| c.protocol == 2) {
+            continuation::retire_work_in_session(
+                db,
+                run,
+                reason.unwrap_or("coordinator_completed"),
+                session,
+            )
+            .await?;
+        }
     }
     Ok(run)
 }
@@ -600,24 +698,7 @@ async fn finish_record(db: &Database, run: &TriggerRun) -> AppResult<()> {
     db.collection::<Document>(WORK)
         .delete_one(doc! { "_id": &run.id })
         .await?;
-    let last_run = bson::to_bson(run)
-        .map_err(|error| AppError::Internal(format!("Serialize trigger run: {error}")))?;
-    db.collection::<Trigger>(TRIGGERS)
-        .update_one(
-            doc! {
-                "_id": &run.trigger_id,
-                "$or": [
-                    { "schedule_state.last_run": null },
-                    { "schedule_state.last_run.scheduled_at": { "$lte": date(run.scheduled_at) } },
-                ],
-            },
-            doc! {
-                "$set": {
-                    "schedule_state.last_run": last_run,
-                },
-            },
-        )
-        .await?;
+    project_last_run(db, run, None).await?;
     audit(
         db,
         &run.user_id,
@@ -631,6 +712,38 @@ async fn finish_record(db: &Database, run: &TriggerRun) -> AppResult<()> {
     )
     .await;
     trim_history(db, &run.trigger_id).await
+}
+
+/// The list/tool projection also shows pending delivery, without changing the
+/// authored trigger generation or deleting its recovery work.
+pub(super) async fn project_last_run(
+    db: &Database,
+    run: &TriggerRun,
+    session: Option<&mut ClientSession>,
+) -> AppResult<()> {
+    let last_run = bson::to_bson(run)
+        .map_err(|error| AppError::Internal(format!("Serialize trigger run: {error}")))?;
+    let collection = db.collection::<Trigger>(TRIGGERS);
+    let action = collection.update_one(
+        doc! {
+            "_id": &run.trigger_id,
+            "$or": [
+                { "schedule_state.last_run": null },
+                { "schedule_state.last_run.scheduled_at": { "$lte": date(run.scheduled_at) } },
+            ],
+        },
+        doc! {
+            "$set": {
+                "schedule_state.last_run": last_run,
+            },
+        },
+    );
+    if let Some(session) = session {
+        action.session(session).await?;
+    } else {
+        action.await?;
+    }
+    Ok(())
 }
 
 async fn trim_history(db: &Database, trigger_id: &str) -> AppResult<()> {
@@ -738,6 +851,8 @@ pub async fn audit(db: &Database, owner: &str, event: &str, metadata: Document) 
 
 #[derive(Clone, Debug)]
 pub struct TurnClaim {
+    /// Server readiness decision; only first admission may enroll.
+    pub enroll_v2: bool,
     pub run_id: String,
     pub fence: String,
     pub trigger_updated_at: DateTime<Utc>,
@@ -746,14 +861,27 @@ pub struct TurnClaim {
 
 /// Called ONLY for trigger turns, inside begin_turn's transaction. A committed
 /// turn and its run barrier cannot be separated by a crash or a lease expiry.
-pub async fn admit_turn(
+pub fn admit_turn<'a>(
+    db: &'a Database,
+    owner: &'a str,
+    claim: &'a TurnClaim,
+    thread: &'a str,
+    turn: &'a str,
+    session: &'a mut ClientSession,
+) -> futures::future::BoxFuture<'a, AppResult<Option<crate::models::trigger_run::AutomationWork>>> {
+    // Keep the schedule's transaction state out of the enclosing owner-turn
+    // admission future, which also carries the assistant's authority fences.
+    Box::pin(admit_turn_inner(db, owner, claim, thread, turn, session))
+}
+
+async fn admit_turn_inner(
     db: &Database,
     owner: &str,
     claim: &TurnClaim,
     thread: &str,
     turn: &str,
     session: &mut ClientSession,
-) -> AppResult<()> {
+) -> AppResult<Option<crate::models::trigger_run::AutomationWork>> {
     let now = Utc::now();
     let mut run_filter = doc! {
         "_id": &claim.run_id,
@@ -895,6 +1023,30 @@ pub async fn admit_turn(
             .session(&mut *session)
             .await?;
     }
+    let mut coordinator = run.coordinator.clone();
+    if !claim.continuation && claim.enroll_v2 {
+        coordinator = Some(continuation::state(now, run.expires_at));
+    }
+    if let Some(state) = coordinator.as_mut() {
+        if state.protocol != 2 || state.deadline <= now {
+            return Err(AppError::Conflict("coordinator_timeout".into()));
+        }
+        if claim.continuation {
+            if state.continuations >= continuation::CONTINUATION_LIMIT {
+                return Err(AppError::Conflict("continuation_limit_exceeded".into()));
+            }
+            state.continuations += 1;
+        }
+        state.closed = false;
+        state.wait_kind = None;
+        db.collection::<Document>(WORK)
+            .update_one(
+                doc! {"_id": &run.id},
+                doc! {"$set": {"automation_v2": true, "at": date(state.deadline.min(now + continuation::backstop(0)))}, "$unset": {"admission_lease_until": ""}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     let mut set = doc! {
         "outcome": RunOutcome::Started.as_str(),
         "reason": null,
@@ -929,11 +1081,30 @@ pub async fn admit_turn(
             );
         }
     }
+    if let Some(coordinator) = coordinator.as_ref() {
+        set.insert(
+            "coordinator",
+            bson::to_bson(coordinator)
+                .map_err(|_| AppError::Internal("Encode coordinator state".into()))?,
+        );
+    }
     db.collection::<TriggerRun>(RUNS)
         .update_one(doc! { "_id": &run.id }, doc! { "$set": set })
         .session(session)
         .await?;
-    Ok(())
+    Ok(coordinator.map(|_| {
+        let mut work = continuation::context(&run, thread);
+        if !claim.continuation
+            && trigger.source == TriggerSource::Webhook
+            && let TriggerDelivery::Assistant {
+                confirmation_policy,
+                ..
+            } = trigger.delivery
+        {
+            work.confirmation_policy = Some(confirmation_policy);
+        }
+        work
+    }))
 }
 
 /// Webhook data stays out of the owner-facing home context unless explicitly chosen.
@@ -950,7 +1121,21 @@ pub fn default_thread_policy(
 
 /// Choose and reserve the run thread transactionally, so competing/recovering
 /// workers never create a second dedicated or per-run thread.
-pub async fn run_thread(
+pub fn run_thread<'a>(
+    db: &'a Database,
+    keys: &'a std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    run: &'a TriggerRun,
+    trigger: &'a Trigger,
+) -> futures::future::BoxFuture<
+    'a,
+    AppResult<crate::models::assistant_conversation::AssistantConversation>,
+> {
+    // Thread creation and its authority transaction precede a full assistant
+    // turn; do not embed their state in the scheduler's polling frame.
+    Box::pin(run_thread_inner(db, keys, run, trigger))
+}
+
+async fn run_thread_inner(
     db: &Database,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     run: &TriggerRun,
@@ -1246,8 +1431,14 @@ pub async fn terminal_result(
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation =
-                record_terminal_in_session(&db, session, &run, result.as_deref(), &frontend).await;
+            let operation: AppResult<()> = async {
+                db.collection::<Document>(RUNS).update_one(
+                    doc! {"_id":&run.id,"user_id":&run.user_id,"turn_id":&run.turn_id,
+                        "outcome":{"$in":["started","waiting"]},"execution_outcome":{"$exists":false}},
+                    doc! {"$set":{"execution_outcome":if result.is_some() {"failed"} else {"completed"}}},
+                ).session(&mut *session).await?;
+                record_terminal_in_session(&db, session, &run, result.as_deref(), &frontend).await
+            }.await;
             transactions::transaction_result(operation)
         })
         .await
@@ -1261,6 +1452,7 @@ async fn record_terminal_in_session(
     result: Option<&str>,
     frontend: &str,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let Some(run) = db
         .collection::<TriggerRun>(RUNS)
         .find_one_and_update(
@@ -1328,6 +1520,13 @@ async fn record_terminal_in_session(
             .await?
         {
             let message = AssistantMessage {
+                automation_work: None,
+                execution_task: None,
+                delegated_images: Default::default(),
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,

@@ -71,6 +71,7 @@ impl Uploads {
         let mut metadata = request.parameters;
         metadata["_authority"] = serde_json::to_value(&request.authority)?;
         metadata["_authority_version"] = request.version.into();
+        metadata["_authority_timestamp"] = request.timestamp.into();
         let git = metadata["git"].as_bool().unwrap_or(false);
         let limit = metadata["max_bytes"]
             .as_u64()

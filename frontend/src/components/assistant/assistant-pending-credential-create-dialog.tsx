@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -58,7 +58,7 @@ export function AssistantPendingCredentialCreateDialog({
   readonly mode: "inject" | "push";
   readonly onComplete: (pendingCredentialId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [serviceSlug, setServiceSlug] = useState(params.serviceSlug);
   const [injectionMethod, setInjectionMethod] = useState(
@@ -157,23 +157,23 @@ export function AssistantPendingCredentialCreateDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="size-4" />
-            {resultId ? t("Pending credential confirmed") : title}
+            {resultId ? translateUi("Pending credential confirmed") : title}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? t("The canonical pending-credential projection confirms the active request.")
-              : t("Review the injection shape. Credential material is encrypted through the node flow and is never accepted from chat.")}
+              ? translateUi("The canonical pending-credential projection confirms the active request.")
+              : translateUi("Review the injection shape. Credential material is encrypted through the node flow and is never accepted from chat.")}
           </DialogDescription>
         </DialogHeader>
 
         {resultId ? (
-          <p className="break-all border-y border-border py-4 font-mono text-12 text-muted-foreground">
+          <p className="break-all border-y border-border py-4 font-mono text-14 text-muted-foreground">
             {resultId}
           </p>
         ) : (
           <div className="space-y-4 border-y border-border py-4">
-            <div className="flex items-center justify-between gap-4 text-12">
-              <span className="text-muted-foreground">{t("Node")}</span>
+            <div className="flex items-center justify-between gap-4 text-14">
+              <span className="text-muted-foreground">{translateUi("Node")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -183,7 +183,7 @@ export function AssistantPendingCredentialCreateDialog({
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label htmlFor={`${mode}-service-slug`}>{t("Service slug")}</Label>
+                <Label htmlFor={`${mode}-service-slug`}>{translateUi("Service slug")}</Label>
                 <Input
                   id={`${mode}-service-slug`}
                   value={serviceSlug}
@@ -191,7 +191,7 @@ export function AssistantPendingCredentialCreateDialog({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${mode}-injection-method`}>{t("Injection method")}</Label>
+                <Label htmlFor={`${mode}-injection-method`}>{translateUi("Injection method")}</Label>
                 <Select
                   value={injectionMethod}
                   onValueChange={(value) => {
@@ -203,16 +203,16 @@ export function AssistantPendingCredentialCreateDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="header">{t("Header")}</SelectItem>
-                    <SelectItem value="query-param">{t("Query parameter")}</SelectItem>
-                    <SelectItem value="path-prefix">{t("Path prefix")}</SelectItem>
-                    <SelectItem value="ifttt-webhook">{t("IFTTT Webhooks")}</SelectItem>
+                    <SelectItem value="header">{translateUi("Header")}</SelectItem>
+                    <SelectItem value="query-param">{translateUi("Query parameter")}</SelectItem>
+                    <SelectItem value="path-prefix">{translateUi("Path prefix")}</SelectItem>
+                    <SelectItem value="ifttt-webhook">{translateUi("IFTTT Webhooks")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor={`${mode}-field-name`}>{t("Field name")}</Label>
+              <Label htmlFor={`${mode}-field-name`}>{translateUi("Field name")}</Label>
               <Input
                 id={`${mode}-field-name`}
                 value={fieldName}
@@ -221,7 +221,7 @@ export function AssistantPendingCredentialCreateDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor={`${mode}-target-url`}>{t("Target URL (optional)")}</Label>
+              <Label htmlFor={`${mode}-target-url`}>{translateUi("Target URL (optional)")}</Label>
               <Input
                 id={`${mode}-target-url`}
                 type="url"
@@ -230,7 +230,7 @@ export function AssistantPendingCredentialCreateDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor={`${mode}-label`}>{t("Label (optional)")}</Label>
+              <Label htmlFor={`${mode}-label`}>{translateUi("Label (optional)")}</Label>
               <Input
                 id={`${mode}-label`}
                 value={label}
@@ -241,7 +241,7 @@ export function AssistantPendingCredentialCreateDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -254,10 +254,10 @@ export function AssistantPendingCredentialCreateDialog({
                 onComplete(resultId);
                 close();
               }}
-            >{t("Done")}</Button>
+            >{translateUi("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
@@ -267,7 +267,7 @@ export function AssistantPendingCredentialCreateDialog({
                 }
                 onClick={() => void submit()}
               >
-                {mode === "inject" ? t("Inject credential") : t("Push credential")}
+                {mode === "inject" ? translateUi("Inject credential") : translateUi("Push credential")}
               </Button>
             </>
           )}

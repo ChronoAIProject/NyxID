@@ -7,6 +7,68 @@ pub const VERSION: u32 = 2;
 pub const EXTERNAL_VERSION: u32 = 3;
 /// Offline grace; push revocations still cancel work immediately.
 pub const LEASE_MS: i64 = 45_000;
+/// Maximum server/node clock difference. This is consumed from the lease,
+/// never added to its lifetime. Request.timestamp is signed, in whole seconds.
+pub const CLOCK_SKEW_MS: i64 = 5_000;
+
+#[derive(Clone, Copy, Debug)]
+pub struct LeaseClock {
+    pub now_ms: i64,
+    pub deadline: std::time::Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimingRejection {
+    ClockSkew,
+    Lifetime,
+    Expired,
+}
+impl TimingRejection {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::ClockSkew => "authority_clock_skew",
+            Self::Lifetime => "authority_lifetime_invalid",
+            Self::Expired => "authority_expired",
+        }
+    }
+}
+impl std::fmt::Display for TimingRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+impl std::error::Error for TimingRejection {}
+
+impl LeaseClock {
+    /// Call only after verifying the request signature. Allow bounded skew but
+    /// expire conservatively: node_now + skew is the latest possible server
+    /// time. This keeps cancellation no later than the signed server deadline,
+    /// and at most 45s locally, including delivery delay and whole-second
+    /// timestamp rounding. Old signed envelopes require no new wire fields.
+    pub fn signed(timestamp: i64, expires: i64, node_now: i64) -> Result<Self, TimingRejection> {
+        let issued = timestamp
+            .checked_mul(1000)
+            .ok_or(TimingRejection::Lifetime)?;
+        let upper = issued.checked_add(999).ok_or(TimingRejection::Lifetime)?;
+        let latest = node_now
+            .checked_add(CLOCK_SKEW_MS)
+            .ok_or(TimingRejection::Lifetime)?;
+        if issued > latest || node_now.saturating_sub(upper) > CLOCK_SKEW_MS {
+            return Err(TimingRejection::ClockSkew);
+        }
+        if expires > upper.saturating_add(LEASE_MS) {
+            return Err(TimingRejection::Lifetime);
+        }
+        if expires <= latest {
+            return Err(TimingRejection::Expired);
+        }
+        Ok(Self {
+            now_ms: latest,
+            deadline: std::time::Instant::now()
+                + std::time::Duration::from_millis((expires - latest).min(LEASE_MS) as u64),
+        })
+    }
+}
 
 /// Narrow first-party owner management, signed as request parameters. This
 /// permits only reads and cancellation of an existing job, never execution
@@ -399,6 +461,44 @@ pub(crate) fn external_fixture() -> ExternalAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_lease_clock_handles_skew_without_extending_cancellation() {
+        let server = 1_000_500;
+        let expiry = server + LEASE_MS;
+        for skew in [-5_000, -3_000, 0, 3_000, 5_000] {
+            let node = server + skew;
+            let clock = LeaseClock::signed(server / 1000, expiry, node).unwrap();
+            assert_eq!(clock.now_ms, node + CLOCK_SKEW_MS);
+            assert!(
+                clock
+                    .deadline
+                    .duration_since(std::time::Instant::now())
+                    .as_millis()
+                    <= LEASE_MS as u128
+            );
+            // Even a node 5s behind must finish by the server's signed expiry.
+            assert!(clock.now_ms >= server);
+            assert!(expiry - clock.now_ms <= LEASE_MS);
+        }
+        assert_eq!(
+            LeaseClock::signed(server / 1000, expiry, server - 5_501).unwrap_err(),
+            TimingRejection::ClockSkew
+        );
+        assert_eq!(
+            LeaseClock::signed(server / 1000, expiry, server + 6_000).unwrap_err(),
+            TimingRejection::ClockSkew
+        );
+        assert_eq!(
+            LeaseClock::signed(server / 1000, 1_046_000, server).unwrap_err(),
+            TimingRejection::Lifetime
+        );
+        assert_eq!(
+            LeaseClock::signed(server / 1000, server + CLOCK_SKEW_MS, server).unwrap_err(),
+            TimingRejection::Expired
+        );
+        assert!(LeaseClock::signed(i64::MAX, i64::MAX, 0).is_err());
+    }
 
     #[test]
     fn external_principal_debug_redacts_identifiers_without_changing_wire_identity() {

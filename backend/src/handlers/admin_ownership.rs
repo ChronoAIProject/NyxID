@@ -209,8 +209,9 @@ pub async fn transfer(
 ) -> AppResult<Json<TransferResponse>> {
     auth.ensure_write_scope()?;
     let actor = auth.user_id.to_string();
-    let receipt = transfers::transfer(
+    let receipt = transfers::transfer_with_keys(
         &state.db,
+        Some(&state.encryption_keys),
         TransferCommand {
             actor: &actor,
             api_key_id: auth.api_key_id.as_deref(),

@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
@@ -68,9 +69,9 @@ function DeleteConnectionDialog({
     deletion.mutate(input, {
       onSuccess: (response) => {
         toast.success(
-          response.upstream_revocation_scheduled
+          translateUi(response.upstream_revocation_scheduled
             ? "Removed from NyxID. Upstream revocation scheduled."
-            : "Removed from NyxID. Upstream access remains active.",
+            : "Removed from NyxID. Upstream revocation is not confirmed."),
         );
         onClose();
       },

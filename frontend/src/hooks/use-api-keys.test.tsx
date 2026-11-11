@@ -212,6 +212,24 @@ describe("useCreateApiKey body transforms", () => {
   });
 });
 
+describe("new issuance contract", () => {
+  it("omits false nonexpiry, restricts omitted grants, and preserves absolute expiry", async () => {
+    mockPost.mockResolvedValue({ id: "key", expires_at: "2099-01-01T12:00:00.123Z" });
+    const { result } = renderHook(() => useCreateApiKey(), { wrapper: wrapperFactory() });
+    const response = await result.current.mutateAsync({ name: "finite", scopes: ["proxy"], expires_at: "2099-01-01T12:00:00.123Z" });
+    expect(mockPost).toHaveBeenCalledWith("/api-keys", expect.objectContaining({
+      expires_at: "2099-01-01T12:00:00.123Z", allow_all_services: false,
+      allow_all_nodes: false, allowed_service_ids: [], allowed_node_ids: [],
+    }));
+    expect(mockPost.mock.calls[0]![1]).not.toHaveProperty("never_expires");
+    expect(response.expires_at).toBe("2099-01-01T12:00:00.123Z");
+    await result.current.mutateAsync({ name: "explicit", scopes: ["read"], expires_at: null, never_expires: true });
+    expect(mockPost.mock.calls[1]![1]).toMatchObject({ expires_at: null, never_expires: true });
+    await expect(result.current.mutateAsync({ name: "invalid", scopes: ["read"], expires_at: "2099-01-01", never_expires: true })).rejects.toThrow(/either/);
+    expect(mockPost).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("useUpdateApiKey / useDeleteApiKey / useRotateApiKey", () => {
   it("PUTs the body to /api-keys/{id} with keyId stripped from the body", async () => {
     mockPut.mockResolvedValue({ id: "k1" });

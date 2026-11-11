@@ -217,10 +217,11 @@ export function releaseIntegrityPlugin(): Plugin {
         appVersion: process.env.npm_package_version ?? "0.0.0",
         gitCommit:
           process.env.GITHUB_SHA ??
+          process.env.SOURCE_COMMIT ??
           process.env.NYXID_GIT_COMMIT ??
           process.env.VITE_GIT_COMMIT ??
           "unknown",
-        generatedAt: new Date().toISOString(),
+        generatedAt: releaseBuildTime(),
       });
 
       this.emitFile({
@@ -240,4 +241,11 @@ export function releaseIntegrityPlugin(): Plugin {
       fs.rmSync(placeholder, { force: true });
     },
   };
+}
+
+function releaseBuildTime(): string {
+  const epoch = process.env.SOURCE_DATE_EPOCH;
+  if (!epoch) return new Date().toISOString();
+  if (!/^\d{1,10}$/.test(epoch)) throw new Error("Invalid SOURCE_DATE_EPOCH");
+  return new Date(Number(epoch) * 1000).toISOString();
 }

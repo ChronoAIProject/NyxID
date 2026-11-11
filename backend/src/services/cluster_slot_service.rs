@@ -111,6 +111,13 @@ impl RenewableSlotGuard {
         self.lost.cancelled().await;
     }
 
+    /// Whether this is the longest-held live slot of its namespace and scope.
+    /// Owns its inputs, so it can run on another task.
+    pub fn is_oldest(&self) -> impl Future<Output = AppResult<bool>> + Send + 'static {
+        let (db, token) = (self.db.clone(), self.token.clone());
+        async move { SlotStore::is_oldest_live(&db, &token).await }
+    }
+
     pub fn cancellation_token(&self) -> CancellationToken {
         self.lost.clone()
     }

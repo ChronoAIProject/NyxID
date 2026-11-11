@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { MachineGrantConsent } from "@/components/shared/machine-grant-consent";
 import { readMachineConsentScope } from "@/schemas/machine-grants";
 import { readProtectedConsentRequest } from "@/hooks/use-machine-grants";
@@ -14,7 +15,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   AlertTriangle,
@@ -67,7 +68,7 @@ function ConsentShell({
   /** Two-column layout on large screens. */
   readonly wide?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <main
       className="connect-link-shell flex min-h-dvh items-center justify-center px-4 py-6 text-foreground"
@@ -80,14 +81,14 @@ function ConsentShell({
         {heading}
         <div className="connect-link-card overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm">
           <div className="p-5 sm:p-8">{children}</div>
-          <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground sm:px-8">
-            {preview ? t("Preview · ") : ""}{t("Signed in as")}{" "}
+          <div className="border-t border-border px-5 py-3 text-center text-13 text-muted-foreground sm:px-8">
+            {preview ? translateUi("Preview · ") : ""}{translateUi("Signed in as")}{" "}
             <span className="break-all text-foreground">
-              {email || t("your NyxID account")}
+              {email || translateUi("your NyxID account")}
             </span>
           </div>
         </div>
-        <p className="mt-5 text-center text-xs text-muted-foreground">{t("Application access via NyxID")}</p>
+        <p className="mt-5 text-center text-13 text-muted-foreground">{translateUi("Application access via NyxID")}</p>
       </div>
     </main>
   );
@@ -151,6 +152,7 @@ export function OAuthConsentPage({
 }: {
   readonly preview?: ConsentPreview;
 } = {}) {
+  useUiTranslation();
   const [requestHandle] = useState(() =>
     new URLSearchParams(window.location.search).get("consent_request_id"),
   );
@@ -163,7 +165,7 @@ export function OAuthConsentPage({
 }
 
 function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const owner = useAuthStore((state) => state.user?.id);
   const [request, setRequest] = useState<{ token?: string; owner?: string; failed?: boolean }>({});
   useEffect(() => {
@@ -182,9 +184,9 @@ function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
     return (
       <main className="mx-auto flex min-h-dvh max-w-xl items-center px-4">
         {isPending ? (
-          <p role="status">{t("Loading authorization request...")}</p>
+          <p role="status">{translateUi("Loading authorization request...")}</p>
         ) : (
-          <ErrorBanner message={t("This authorization request is unavailable. Return to the application and try again.")} />
+          <ErrorBanner message={translateUi("This authorization request is unavailable. Return to the application and try again.")} />
         )}
       </main>
     );
@@ -195,7 +197,7 @@ function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
   return parsed ? (
     <OAuthIncrementalConsentPage {...parsed} />
   ) : (
-    <OAuthIncrementalConsentPage error={t("Invalid consent request. Please restart authorization.")} />
+    <OAuthIncrementalConsentPage error={translateUi("Invalid consent request. Please restart authorization.")} />
   );
 }
 
@@ -228,6 +230,7 @@ function identityScopeSummary(identityScopes: readonly string[]): string {
 }
 
 function ScopeIcon({ scope }: { readonly scope: string }) {
+  useUiTranslation();
   const Icon = SCOPE_ICONS[scope] ?? ShieldQuestion;
   return <Icon className="h-4 w-4" aria-hidden="true" />;
 }
@@ -239,7 +242,7 @@ function ServiceScrollList({
   readonly children: ReactNode;
   readonly bordered?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [hiddenEdges, setHiddenEdges] = useState({ top: false, bottom: false });
   const updateEdges = useCallback(() => {
@@ -271,7 +274,7 @@ function ServiceScrollList({
         ref={scrollRef}
         tabIndex={0}
         role="region"
-        aria-label={t("Service access list")}
+        aria-label={translateUi("Service access list")}
         onScroll={updateEdges}
         className="max-h-[min(18rem,45dvh)] overflow-y-auto overscroll-contain focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
       >
@@ -296,7 +299,7 @@ function StandardConsentPage({
 }: {
   readonly preview?: ConsentPreview;
 } = {}) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   useApplyTheme();
   const user = useAuthStore((state) => state.user);
   const { data: userServices, isLoading: userServicesLoading } =
@@ -341,6 +344,7 @@ function StandardConsentPage({
     search.get("external_subject_external_user_id") ?? "";
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
+  const [machineSelectionRequired, setMachineSelectionRequired] = useState(false);
   const [preparedMachineRequest, setPreparedMachineRequest] = useState<string | null>(null);
   const machineScope = scope.split(/\s+/).includes("machine") || Boolean(readMachineConsentScope(consentRequest)?.scope.split(/\s+/).includes("machine"));
   // Server-resolved hints: the app's declared default services matched to
@@ -391,9 +395,9 @@ function StandardConsentPage({
   const identityScopes = agentAccess
     ? scopes.filter((item) => IDENTITY_SCOPE_WORDS[item])
     : [];
-  const listedScopes = agentAccess
-    ? scopes.filter((item) => !IDENTITY_SCOPE_WORDS[item] && item !== "proxy")
-    : scopes;
+  // Machine authority is reviewed separately in the optional selection below.
+  const listedScopes = scopes.filter((item) => item !== "machine" &&
+    (!agentAccess || (!IDENTITY_SCOPE_WORDS[item] && item !== "proxy")));
   const redirectHost = parseHost(redirectUri);
   const email = preview?.email ?? user?.email;
   const selectableServices = useMemo(
@@ -544,9 +548,9 @@ function StandardConsentPage({
     return (
       <ConsentShell email={email} preview={Boolean(preview)}>
         <header className="py-12 text-center">
-          <h1 className="text-22 font-bold leading-tight text-foreground sm:text-28">{t("Invalid consent request")}</h1>
+          <h1 className="type-compact-page-title text-foreground sm:type-page-title">{translateUi("Invalid consent request")}</h1>
         </header>
-        <ErrorBanner message={t("Missing required OAuth parameters. Please restart the sign-in flow.")} />
+        <ErrorBanner message={translateUi("Missing required OAuth parameters. Please restart the sign-in flow.")} />
       </ConsentShell>
     );
   }
@@ -562,20 +566,20 @@ function StandardConsentPage({
             <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
               <NyxidIcon className="size-8" />
             </div>
-            <span className="text-xs font-medium text-foreground">{t("NyxID")}</span>
+            <span className="type-secondary-emphasis text-foreground">NyxID</span>
           </div>
-          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
+          <h1 className="break-words type-compact-page-title text-foreground sm:type-page-title">
             {bindingReview
               ? isLarkBinding
-                ? t("Review Lark bot access")
-                : t("Review application access")
+                ? translateUi("Review Lark bot access")
+                : translateUi("Review application access")
               : isLarkBinding
-                ? t("Authorize Lark bot")
-                : t("Authorize application")}
+                ? translateUi("Authorize Lark bot")
+                : translateUi("Authorize application")}
           </h1>
-          <p className="max-w-md break-words text-12 leading-relaxed text-muted-foreground">
+          <p className="max-w-md break-words text-14 text-muted-foreground">
             {bindingReview ? (
-              <>{t("Review the NyxID services available to")}{" "}
+              <>{translateUi("Review the NyxID services available to")}{" "}
                 <span className="font-medium text-foreground">
                   {clientName}
                 </span>
@@ -585,11 +589,11 @@ function StandardConsentPage({
               <>
                 <span className="font-medium text-foreground">
                   {clientName}
-                </span>{" "}{t("wants to access your account via OAuth.")}</>
+                </span>{" "}{translateUi("wants to access your account via OAuth.")}</>
             )}
           </p>
           {preview && (
-            <p className="text-11 font-medium uppercase text-muted-foreground">{t("Preview · Decisions disabled")}</p>
+            <p className="type-secondary-emphasis uppercase text-muted-foreground">{translateUi("Preview · Decisions disabled")}</p>
           )}
         </header>
       }
@@ -606,8 +610,8 @@ function StandardConsentPage({
         >
           <h2
             id="oauth-permissions"
-            className="text-15 font-semibold text-foreground"
-          >{t("This will allow ")}{clientName}{t(" to:")}</h2>
+            className="type-card-title text-foreground"
+          >{translateUi("This will allow ")}{clientName}{translateUi(" to:")}</h2>
           <div className="mt-4 divide-y divide-border/60">
             {identityScopes.length > 0 && (
               <div className="flex items-start gap-3 py-3">
@@ -615,11 +619,11 @@ function StandardConsentPage({
                   <ScopeIcon scope="openid" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="text-13 font-medium text-foreground">{t("Your NyxID profile")}</p>
-                  <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                  <p className="type-card-title text-foreground">{translateUi("Your NyxID profile")}</p>
+                  <p className="mt-1 text-14 text-muted-foreground">
                     {identityScopeSummary(identityScopes)}
                   </p>
-                  <code className="mt-1 block break-all text-11 text-muted-foreground">
+                  <code className="mt-1 block break-all text-14 text-muted-foreground">
                     {identityScopes.join(" ")}
                   </code>
                 </div>
@@ -637,16 +641,16 @@ function StandardConsentPage({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p
-                      className={`text-13 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
+                      className={`type-card-title text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
                     >
                       {meta?.title ?? item}
                     </p>
                     {meta && (
                       <>
-                        <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                        <p className="mt-1 text-14 text-muted-foreground">
                           {meta.description}
                         </p>
-                        <code className="mt-1 block break-all text-11 text-muted-foreground">
+                        <code className="mt-1 block break-all text-14 text-muted-foreground">
                           {item}
                         </code>
                       </>
@@ -677,8 +681,8 @@ function StandardConsentPage({
             <div className="flex items-center justify-between gap-4">
               <h2
                 id="oauth-services"
-                className="text-15 font-semibold text-foreground"
-              >{t("Service access")}</h2>
+                className="type-card-title text-foreground"
+              >{translateUi("Service access")}</h2>
               <Button
                 type="button"
                 variant="ghost"
@@ -688,19 +692,19 @@ function StandardConsentPage({
                 aria-controls="oauth-service-list"
                 onClick={() => setCustomize((current) => !current)}
               >
-                {customize ? t("Done") : t("Customize")}
+                {customize ? translateUi("Done") : translateUi("Customize")}
               </Button>
             </div>
-            <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
+            <p className="mt-1.5 text-14 text-muted-foreground">
               {serviceAccess.allow_all_services
                 ? bindingReview && currentBindingAllowsAllServices
-                  ? t("This binding currently authorizes all available services.")
-                  : t("This app will be able to use all of your available services through the proxy.")
+                  ? translateUi("This binding currently authorizes all available services.")
+                  : translateUi("This app will be able to use all of your available services through the proxy.")
                 : summaryServices.length > 0
                   ? bindingReview
-                    ? t("Review the current grant and select any additional services.")
-                    : t("This app will be able to use these services through the proxy:")
-                  : t("No service access requested. This app only signs you in.")}
+                    ? translateUi("Review the current grant and select any additional services.")
+                    : translateUi("This app will be able to use these services through the proxy:")
+                  : translateUi("No service access requested. This app only signs you in.")}
             </p>
             <div id="oauth-service-list" className="mt-4">
               {!customize &&
@@ -714,26 +718,26 @@ function StandardConsentPage({
                         className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
                       >
                         <div className="min-w-0">
-                          <p className="break-words text-13 font-medium text-foreground">
+                          <p className="break-words type-card-title text-foreground">
                             {item.primary}
                           </p>
                           {item.description && (
                             <p
-                              className="mt-1 line-clamp-2 break-words text-12 leading-relaxed text-muted-foreground"
+                              className="mt-1 line-clamp-2 break-words text-14 text-muted-foreground"
                               title={item.description}
                             >
                               {item.description}
                             </p>
                           )}
                           {item.secondary && (
-                            <p className="mt-1 break-words text-11 text-text-tertiary">
+                            <p className="mt-1 break-words text-13 text-text-tertiary">
                               {item.secondary}
                             </p>
                           )}
                           {item.orgName && (
                             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                              <Badge variant="secondary" className="text-10">{t("Org")}</Badge>
-                              <span className="break-words text-11 text-muted-foreground">
+                              <Badge variant="secondary" className="text-12">{translateUi("Org")}</Badge>
+                              <span className="break-words text-13 text-muted-foreground">
                                 {item.orgName}
                               </span>
                             </div>
@@ -741,23 +745,23 @@ function StandardConsentPage({
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-1 sm:justify-end">
                           {item.currentlyAuthorized && bindingReview && (
-                            <Badge variant="secondary" className="text-10">{t("Authorized now")}</Badge>
+                            <Badge variant="secondary" className="text-12">{translateUi("Authorized now")}</Badge>
                           )}
                           {item.requiredByApp && (
-                            <Badge variant="secondary" className="text-10">{t("Required by app")}</Badge>
+                            <Badge variant="secondary" className="text-12">{translateUi("Required by app")}</Badge>
                           )}
                           {item.newlySelected && (
-                            <Badge variant="accent" className="text-10">{t("New")}</Badge>
+                            <Badge variant="accent" className="text-12">{translateUi("New")}</Badge>
                           )}
                         </div>
                       </div>
                     ))}
                     {unmatchedDefaults.map((name) => (
                       <div key={`unmatched-${name}`} className="py-3.5">
-                        <p className="break-words text-12 leading-relaxed text-muted-foreground">
+                        <p className="break-words text-14 text-muted-foreground">
                           <span className="font-medium text-foreground">
                             {name}
-                          </span>{" "}{t("— requested by this app, but you have no matching service in your account.")}</p>
+                          </span>{" "}{translateUi("— requested by this app, but you have no matching service in your account.")}</p>
                       </div>
                     ))}
                   </ServiceScrollList>
@@ -766,10 +770,10 @@ function StandardConsentPage({
               {customize && (
                 <div className="divide-y divide-border/60 border-y border-border/60">
                   <div className="flex items-center justify-between gap-3 py-3.5">
-                    <Label htmlFor="oauth-allow-all-services">{t("All services")}</Label>
+                    <Label htmlFor="oauth-allow-all-services">{translateUi("All services")}</Label>
                     <Switch
                       id="oauth-allow-all-services"
-                      aria-label={t("All services")}
+                      aria-label={translateUi("All services")}
                       checked={allowAllServices}
                       onCheckedChange={setAllowAllServices}
                     />
@@ -778,7 +782,7 @@ function StandardConsentPage({
                   {!allowAllServices && (
                     <ServiceScrollList bordered={false}>
                       {!preview && userServicesLoading ? (
-                        <p className="py-3.5 text-12 text-muted-foreground">{t("Loading services...")}</p>
+                        <p className="py-3.5 text-14 text-muted-foreground">{translateUi("Loading services...")}</p>
                       ) : selectableServices.length > 0 ? (
                         selectableServices.map((service) => {
                           const orgName = serviceOrgName(service);
@@ -804,34 +808,34 @@ function StandardConsentPage({
                               <div className="min-w-0">
                                 <Label
                                   htmlFor={`oauth-service-${service.id}`}
-                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-13 leading-5 text-foreground`}
+                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-foreground`}
                                 >
-                                  <span className="block break-words font-medium">
+                                  <span className="block break-words">
                                     {serviceDisplayName(service)}
                                   </span>
                                   {service.catalog_service_description?.trim() && (
-                                    <span
-                                      className="mt-1 line-clamp-2 break-words text-12 font-normal leading-relaxed text-muted-foreground"
+                                    <FieldHelp variant="body"
+                                      className="mt-1 line-clamp-2 break-words text-muted-foreground"
                                       title={
                                         service.catalog_service_description
                                       }
                                     >
                                       {service.catalog_service_description}
-                                    </span>
+                                    </FieldHelp>
                                   )}
                                   {serviceSecondaryText(service) && (
-                                    <span className="mt-1 block break-words text-11 font-normal text-text-tertiary">
+                                    <FieldHelp className="mt-1 block break-words text-text-tertiary">
                                       {serviceSecondaryText(service)}
-                                    </span>
+                                    </FieldHelp>
                                   )}
                                 </Label>
                                 {orgName && (
                                   <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                                     <Badge
                                       variant="secondary"
-                                      className="text-10"
-                                    >{t("Org")}</Badge>
-                                    <span className="break-words text-11 font-normal text-muted-foreground">
+                                      className="text-12"
+                                    >{translateUi("Org")}</Badge>
+                                    <span className="break-words type-secondary text-muted-foreground">
                                       {orgName}
                                     </span>
                                   </div>
@@ -844,14 +848,14 @@ function StandardConsentPage({
                                       )) && (
                                       <Badge
                                         variant="secondary"
-                                        className="text-10"
-                                      >{t("Authorized now")}</Badge>
+                                        className="text-12"
+                                      >{translateUi("Authorized now")}</Badge>
                                     )}
                                   {requiredByApp && (
                                     <Badge
                                       variant="secondary"
-                                      className="text-10"
-                                    >{t("Required by app")}</Badge>
+                                      className="text-12"
+                                    >{translateUi("Required by app")}</Badge>
                                   )}
                                   {bindingReview &&
                                     effectiveSelectedServiceIds.includes(
@@ -866,8 +870,8 @@ function StandardConsentPage({
                                     ) && (
                                       <Badge
                                         variant="accent"
-                                        className="text-10"
-                                      >{t("New")}</Badge>
+                                        className="text-12"
+                                      >{translateUi("New")}</Badge>
                                     )}
                                 </div>
                               </div>
@@ -875,7 +879,7 @@ function StandardConsentPage({
                           );
                         })
                       ) : (
-                        <p className="py-3.5 text-12 text-muted-foreground">{t("No active services are available.")}</p>
+                        <p className="py-3.5 text-14 text-muted-foreground">{translateUi("No active services are available.")}</p>
                       )}
                     </ServiceScrollList>
                   )}
@@ -886,7 +890,7 @@ function StandardConsentPage({
                       className="w-full"
                       onClick={() => setCustomize(false)}
                     >
-                      <Save aria-hidden="true" />{t("Save selection")}</Button>
+                      <Save aria-hidden="true" />{translateUi("Save selection")}</Button>
                   </div>
                 </div>
               )}
@@ -909,10 +913,10 @@ function StandardConsentPage({
             <div>
               <h2
                 id="oauth-trust"
-                className="text-14 font-semibold text-foreground"
-              >{t("Make sure you trust ")}{clientName}
+                className="type-body-strong text-foreground"
+              >{translateUi("Make sure you trust ")}{clientName}
               </h2>
-              <p className="mt-2 text-12 leading-relaxed text-muted-foreground">{t("This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.")}</p>
+              <p className="mt-2 text-14 text-muted-foreground">{translateUi("This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.")}</p>
             </div>
           </div>
         </section>
@@ -923,22 +927,22 @@ function StandardConsentPage({
             agentAccess && "lg:col-start-1 lg:row-start-3 lg:self-start",
           )}
         >
-          <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">{t("App details")}<ChevronDown
+          <summary className="flex cursor-pointer list-none items-center justify-between text-muted-foreground [&::-webkit-details-marker]:hidden">{translateUi("App details")}<ChevronDown
               className="h-4 w-4 transition-transform group-open:rotate-180"
               aria-hidden="true"
             />
           </summary>
           <div className="mt-3 divide-y divide-border/60 border-y border-border/60">
-            <DetailRow label={t("Application")} value={clientName} />
-            <DetailRow label={t("Redirect host")} value={redirectHost} />
-            <DetailRow label={t("Client ID")} value={clientId} mono copyable />
-            <DetailRow label={t("Redirect URI")} value={redirectUri} mono copyable />
-            <DetailRow label={t("Requested scopes")} value={scope} mono />
+            <DetailRow label={translateUi("Application")} value={clientName} />
+            <DetailRow label={translateUi("Redirect host")} value={redirectHost} />
+            <DetailRow label={translateUi("Client ID")} value={clientId} mono copyable />
+            <DetailRow label={translateUi("Redirect URI")} value={redirectUri} mono copyable />
+            <DetailRow label={translateUi("Requested scopes")} value={scope} mono />
           </div>
         </details>
       </div>
 
-      {machineScope && <MachineGrantConsent consentRequest={consentRequest} onPrepared={setPreparedMachineRequest} disabled={Boolean(preview)} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
+      {machineScope && <MachineGrantConsent consentRequest={consentRequest} onPrepared={setPreparedMachineRequest} onSelectionRequired={setMachineSelectionRequired} disabled={Boolean(preview)} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
       <form
         method="POST"
         action="/oauth/authorize/decision"
@@ -961,6 +965,7 @@ function StandardConsentPage({
         />
         <input type="hidden" name="nonce" value={nonce} />
         <input type="hidden" name="consent_request" value={preparedMachineRequest ?? consentRequest} />
+        <input type="hidden" name="browser_form" value="true" />
         {prompt && <input type="hidden" name="prompt" value={prompt} />}
         {externalSubjectPlatform && (
           <input
@@ -1014,10 +1019,10 @@ function StandardConsentPage({
           variant="primary"
           name="decision"
           value="allow"
-          disabled={Boolean(preview) || (machineScope && !preparedMachineRequest)}
+          disabled={Boolean(preview) || (machineScope && machineSelectionRequired && !preparedMachineRequest)}
           className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
         >
-          {bindingReview ? t("Update access") : t("Allow access")}
+          {bindingReview ? translateUi("Update access") : translateUi("Allow access")}
           <ArrowRight className="ml-2 size-4" aria-hidden="true" />
         </Button>
         <Button
@@ -1028,7 +1033,7 @@ function StandardConsentPage({
           disabled={Boolean(preview)}
           className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-28")}
         >
-          {bindingReview ? t("Cancel") : t("Decline")}
+          {bindingReview ? translateUi("Cancel") : translateUi("Decline")}
         </Button>
       </form>
     </ConsentShell>

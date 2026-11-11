@@ -1,3 +1,5 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
+import { GroupedFormScope, GroupedFormBar } from "@/components/ui/grouped-form";
 import type { ComponentProps } from "react";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -71,15 +73,142 @@ afterEach(() => {
   useAuthStore.setState({ user: null });
 });
 
-function show() {
+async function show() {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } })}>
     <AgentSkills agentId="agent" />
   </QueryClientProvider>);
+  const name = await screen.findByText("research");
+  await userEvent.setup().click(name.closest("button")!);
 }
 
 function calls(method: string, url: string) {
   return fetchMock.mock.calls.filter(([u, init]) => u === url && ((init as RequestInit | undefined)?.method ?? "GET") === method);
 }
+
+it("saves preload files with the observed revision and displays the persisted size", async () => {
+  const user = userEvent.setup();
+  const metadata = {
+    description: "Research guide",
+    size_bytes: 1000,
+    preload_paths: ["SKILL.md", "references/menu.md"],
+    preload_bytes: 12901,
+  };
+  replies[`PUT ${api}/skills/skill-id/preload`] = [
+    { status: 200, body: { revision: 5 } },
+  ];
+  replies[`GET ${api}/skills`] = [
+    { status: 200, body: { revision: 4, skills: [pin], metadata: {} } },
+    {
+      status: 200,
+      body: { revision: 5, skills: [pin], metadata: { "skill-id": metadata } },
+    },
+  ];
+  await show();
+  await user.click(await screen.findByText("Preload settings"));
+  expect(
+    screen.queryByRole("button", { name: "Save preload settings" }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("switch", { name: "Preload research" }));
+  const files = screen.getByRole("textbox", {
+    name: "Preload files for research",
+  });
+  await user.clear(files);
+  await user.type(files, "SKILL.md\nreferences/menu.md");
+  const save = screen.getByRole("button", { name: "Save preload settings" });
+  expect(save).toBeEnabled();
+  await user.click(save);
+  await confirmChanges();
+  await waitFor(() =>
+    expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(1),
+  );
+  expect(
+    JSON.parse(
+      calls("PUT", `${api}/skills/skill-id/preload`)[0]![1]!.body as string,
+    ),
+  ).toEqual({
+    expected_revision: 4,
+    paths: ["SKILL.md", "references/menu.md"],
+  });
+  expect(await screen.findByText("Preloaded · 12,901 bytes")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Save preload settings" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps unsaved preload files after a conflict and rejects unsafe paths locally", async () => {
+  const user = userEvent.setup();
+  replies[`PUT ${api}/skills/skill-id/preload`] = [
+    failure(409, "conflict", "Skills changed; reload the current revision"),
+  ];
+  await show();
+  await user.click(await screen.findByText("Preload settings"));
+  await user.click(screen.getByRole("switch", { name: "Preload research" }));
+  const files = screen.getByRole("textbox", {
+    name: "Preload files for research",
+  });
+  await user.clear(files);
+  await user.type(files, "SKILL.md\n../private.md");
+  await user.click(
+    screen.getByRole("button", { name: "Save preload settings" }),
+  );
+  await confirmChanges();
+  expect(
+    await screen.findByText(
+      "Use unique relative .md or .txt paths, one per line.",
+    ),
+  ).toBeVisible();
+  expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(0);
+  await user.clear(files);
+  await user.type(files, "SKILL.md\nreferences/menu.md");
+  await user.click(
+    screen.getByRole("button", { name: "Save preload settings" }),
+  );
+  await confirmChanges();
+  expect(
+    await screen.findByText("Skills changed; reload the current revision"),
+  ).toBeVisible();
+  expect(files).toHaveValue("SKILL.md\nreferences/menu.md");
+});
+
+it("turns preloading off without removing or re-pinning the skill", async () => {
+  const user = userEvent.setup();
+  replies[`GET ${api}/skills`] = [
+    {
+      status: 200,
+      body: {
+        revision: 4,
+        skills: [pin],
+        metadata: {
+          "skill-id": {
+            description: "Research guide",
+            size_bytes: 1000,
+            preload_paths: ["SKILL.md"],
+            preload_bytes: 100,
+          },
+        },
+      },
+    },
+  ];
+  replies[`PUT ${api}/skills/skill-id/preload`] = [
+    { status: 200, body: { revision: 5 } },
+  ];
+  await show();
+  await user.click(await screen.findByText("Preloaded · 100 bytes"));
+  await user.click(screen.getByRole("switch", { name: "Preload research" }));
+  await user.click(
+    screen.getByRole("button", { name: "Save preload settings" }),
+  );
+  await confirmChanges();
+  await waitFor(() =>
+    expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(1),
+  );
+  expect(
+    JSON.parse(
+      calls("PUT", `${api}/skills/skill-id/preload`)[0]![1]!.body as string,
+    ),
+  ).toEqual({ expected_revision: 4, paths: [] });
+  expect(calls("PUT", `${api}/skills`)).toHaveLength(0);
+});
 
 it("tests a pin only on request and shows what the agent reads", async () => {
   const user = userEvent.setup();
@@ -87,8 +216,8 @@ it("tests a pin only on request and shows what the agent reads", async () => {
     status: 200,
     body: { skill_id: "skill-id", name: "research", version: "1.0.0", sha256: "a".repeat(64), disabled: false, description: "Research guide", size_bytes: 1000, readable: true, excerpt: "# Research\nStep one" },
   }];
-  show();
-  await screen.findByText("Research guide");
+  await show();
+  await screen.findByText("Research guide", { selector: "[data-grouped-footer] > p" });
   expect(calls("GET", `${api}/skills/skill-id/preview`)).toHaveLength(0);
   await user.click(screen.getByRole("button", { name: "Test research" }));
   expect(await screen.findByText("Test passed: the agent reads research 1.0.0 (1,000 bytes).")).toBeVisible();
@@ -102,7 +231,7 @@ it("reports a disabled pin and a failed test", async () => {
     { status: 200, body: { skill_id: "skill-id", name: "research", version: "1.0.0", sha256: "a".repeat(64), disabled: true, description: "Research guide", size_bytes: 1000, readable: false, excerpt: "" } },
     failure(409, "conflict", "Ornn now serves different content for this pinned version; reattach the skill"),
   ];
-  show();
+  await show();
   await user.click(await screen.findByRole("button", { name: "Test research" }));
   expect(await screen.findByText("research 1.0.0 is disabled, so the agent does not read it. Enable it to use it again.")).toBeVisible();
   // A second click on the same pin runs the test again.
@@ -119,7 +248,13 @@ it("labels each history event and shows per-pin disabled state", async () => {
       { id: "h1", event_type: "assistant_learning_proposal_edited", created_at: "2026-10-01T00:00:00Z", revision: null, proposal_id: "draft-1", skills: [] },
     ] },
   }];
-  show();
+  await show();
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Back to Skills" }));
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "History" }));
   const history = await screen.findByRole("list", { name: "Skill history" });
   const rows = within(history).getAllByRole("listitem");
   expect(rows).toHaveLength(2);
@@ -132,7 +267,7 @@ it("labels each history event and shows per-pin disabled state", async () => {
 
 it("edits an attached skill through an authored improve draft", async () => {
   const user = userEvent.setup();
-  show();
+  await show();
   await user.click(await screen.findByRole("button", { name: "Edit research" }));
   await waitFor(() => expect(calls("POST", `${api}/skills/skill-id/improve`)).toHaveLength(1));
   expect(calls("POST", `${api}/skills/skill-id/improve`)[0]![1]).toMatchObject({ body: "{}" });
@@ -152,7 +287,7 @@ it("edits an attached skill through an authored improve draft", async () => {
 it("shows why an attached skill cannot be edited", async () => {
   const user = userEvent.setup();
   replies[`POST ${api}/skills/skill-id/improve`] = [failure(409, "conflict", "skill_files_unsupported: this skill has files that cannot be edited here")];
-  show();
+  await show();
   await user.click(await screen.findByRole("button", { name: "Edit research" }));
   expect(await screen.findByText("skill_files_unsupported: this skill has files that cannot be edited here")).toBeVisible();
   expect(screen.queryByRole("form", { name: "Edit skill draft" })).not.toBeInTheDocument();
@@ -160,8 +295,8 @@ it("shows why an attached skill cannot be edited", async () => {
 
 it("hides Edit while agent learning is off", async () => {
   signIn([]);
-  show();
-  await screen.findByText("Research guide");
+  await show();
+  await screen.findByText("Research guide", { selector: "[data-grouped-footer] > p" });
   expect(screen.queryByRole("button", { name: "Edit research" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Test research" })).toBeVisible();
 });
@@ -170,11 +305,39 @@ it("surfaces a refused pin change", async () => {
   const user = userEvent.setup();
   signIn([FEATURE_FLAG.SKILL_PIN_DISABLE]);
   replies[`PUT ${api}/skills`] = [failure(403, "forbidden", "Disabling attached skills is not enabled")];
-  show();
+  await show();
   await user.click(await screen.findByRole("switch", { name: "Use research" }));
   expect(await screen.findByText("Disabling attached skills is not enabled")).toBeVisible();
   expect(JSON.parse(String((calls("PUT", `${api}/skills`)[0]![1] as RequestInit).body))).toEqual({
     expected_revision: 4,
     skills: [{ ...pin, disabled: true }],
   });
+});
+
+it("discards an existing preload draft through the shared bar and keeps it pristine after Back", async () => {
+  const user = userEvent.setup();
+  replies[`GET ${api}/skills`] = [{ status: 200, body: {
+    revision: 4, skills: [pin], metadata: { "skill-id": {
+      description: "Research guide", size_bytes: 1000,
+      preload_paths: ["SKILL.md", "references/menu.md"], preload_bytes: 12901,
+    } },
+  } }];
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } })}>
+    <GroupedFormScope><AgentSkills agentId="agent" /><GroupedFormBar /></GroupedFormScope>
+  </QueryClientProvider>);
+  await user.click((await screen.findByText("research")).closest("button")!);
+  const preload = screen.getByRole("switch", { name: "Preload research" });
+  expect(preload).toBeChecked();
+  expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+  await user.click(preload);
+  expect(preload).not.toBeChecked();
+  expect(screen.getByRole("region", { name: "Unsaved changes" })).toHaveTextContent("Unsaved: research preload");
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(preload).toBeChecked());
+  expect(screen.getByRole("textbox", { name: "Preload files for research" })).toHaveValue("SKILL.md\nreferences/menu.md");
+  expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Back to Skills" }));
+  await user.click(screen.getByRole("button", { name: "History" }));
+  expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+  expect(calls("PUT", `${api}/skills/skill-id/preload`)).toEqual([]);
 });

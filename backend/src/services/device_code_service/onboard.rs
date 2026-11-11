@@ -275,6 +275,7 @@ pub async fn redeem_onboard(
         node_id: node.id,
         refresh_token: refresh_token.to_string(),
         expires_in: super::DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS,
+        api_key_expires_at: created_key.expires_at.map(|value| value.to_rfc3339()),
     })
 }
 
@@ -552,6 +553,11 @@ mod tests {
             Some(DEVICE_ONBOARD_API_KEY_PLATFORM)
         );
         assert_eq!(stored_key.scopes, DEVICE_CODE_API_KEY_SCOPES);
+        assert_eq!(
+            response.api_key_expires_at,
+            stored_key.expires_at.map(|value| value.to_rfc3339())
+        );
+        assert!(response.api_key_expires_at.is_some());
         assert!(!stored_key.allow_all_services);
         assert!(stored_key.allow_auto_connected_services);
         assert_eq!(stored_key.allowed_service_ids, vec![service.id]);

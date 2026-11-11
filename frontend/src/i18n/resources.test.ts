@@ -74,7 +74,6 @@ describe("translation catalogs", () => {
         { "/keys/credential-1": "Profile" },
         {},
         undefined,
-        translate,
       ).map((crumb) => crumb.label),
     ).toEqual(["服务与凭据", "外部服务", "Profile", "概览"]);
   });

@@ -46,6 +46,8 @@ fn child(selection: Selection) -> (NyxbotThread, ThreadTurnBinding) {
 }
 fn origin(child: &NyxbotThread, b: ThreadTurnBinding) -> ChannelOrigin {
     ChannelOrigin {
+        org_execution: None,
+        native_event_id: None,
         nyxbot_channel_id: "link".into(),
         partition: child.partition.clone(),
         platform: "telegram".into(),
@@ -79,7 +81,10 @@ async fn concurrent_activation_reuses_child_and_stop_fences_unclaimed_turn() {
     let stopped = stop(&db, "owner", "link", "parent", &c.id).await.unwrap();
     assert_eq!(stopped.conversation_id, c.conversation_id);
     assert!(activate_claim(&db, &c, b.clone()).await.is_err());
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     let (again, next) = child(choose(&db, &t, &a, true).await);
     assert_eq!(again.id, c.id);
     assert_eq!(again.conversation_id, c.conversation_id);
@@ -95,7 +100,10 @@ async fn concurrent_activation_reuses_child_and_stop_fences_unclaimed_turn() {
 #[tokio::test]
 async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
     let (db, t, a) = setup().await;
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     let (c, b) = child(choose(&db, &t, &a, true).await);
     activate_claim(&db, &c, b).await.unwrap();
     let (_, owner) = child(choose(&db, &t, &a, false).await);
@@ -113,7 +121,7 @@ async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
         )
         .await
         .unwrap(),
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
     update_settings(
         &db,
@@ -132,7 +140,7 @@ async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
         )
         .await
         .unwrap(),
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
     db.drop().await.unwrap();
 }
@@ -151,7 +159,7 @@ async fn followed_thread_quiets_mentions_for_other_users_but_keeps_bot_requests(
             false
         )
         .await,
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
     assert_eq!(
         db.collection::<NyxbotThread>(THREADS)
@@ -169,7 +177,7 @@ async fn followed_thread_quiets_mentions_for_other_users_but_keeps_bot_requests(
     let other = ThreadReplyTarget::fixture("telegram", other);
     assert!(matches!(
         choose(&db, &other, &a, false).await,
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
 
     let mut bot_mention = other.facts().clone();
@@ -219,7 +227,10 @@ async fn idle_expiry_reacquires_capacity_and_all_keeps_same_child_stopped() {
     let (c, b) = child(choose(&db, &t, &a, true).await);
     activate_claim(&db, &c, b).await.unwrap();
     db.collection::<NyxbotThread>(THREADS).update_one(doc! {"_id":&c.id},doc! {"$set":{"follow_expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     sweep(&db).await.unwrap();
     let (same, b) = child(choose(&db, &t, &a, true).await);
     assert_eq!(same.id, c.id);
@@ -276,7 +287,9 @@ async fn admitted_binding_survives_stop_but_not_relink_or_sender_revocation() {
         )
         .await
         .unwrap();
-    relink(&db, "owner", "link", "replacement").await.unwrap();
+    relink(&db, "owner", "owner", "link", "replacement")
+        .await
+        .unwrap();
     assert!(
         validate_delivery(&db, "owner", &o, conversation)
             .await
@@ -348,7 +361,10 @@ async fn rollback_rejects_new_follows_and_preserves_known_addressed_routing() {
         .update_one(doc! {"_id":"flag"}, doc! {"$set":{"enabled":false}})
         .await
         .unwrap();
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     let (same, b) = child(choose(&db, &t, &a, true).await);
     assert_eq!(same.id, c.id);
     activate_claim(&db, &same, b).await.unwrap();
@@ -382,6 +398,8 @@ async fn owner_queue_is_bounded_keeps_event_anchors_and_rechecks_authority_after
         .await
         .unwrap()
         .unwrap();
+    let sources =
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME);
     for i in 0..21 {
         let mut message = source.clone();
         message.id = format!("source-{i}");
@@ -400,9 +418,28 @@ async fn owner_queue_is_bounded_keeps_event_anchors_and_rechecks_authority_after
         );
         event.question_key = Some(format!("question-{i}"));
         event.reply_to = vec![origin(&c, binding)];
+        let source_id = format!("queue-event-{i}");
+        event.source_event_ids = vec![source_id.clone()];
+        sources.insert_one(doc! {"_id": &source_id, "user_id":"owner", "channel_id":"link",
+            "partition": &c.partition, "event_id": format!("native-event-{i}"), "status":"running",
+            "created_at":bson::DateTime::now(), "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(24)),
+            "delivery":{"version":1,"state":"pending","origin":bson::to_bson(&event.reply_to[0]).unwrap(),
+                "sender_id":"human","guest":false,"addressed":true,"transport":"direct",
+                "stream_deadline":bson::DateTime::now(),"checked_at":bson::DateTime::now()}}).await.unwrap();
         assert_eq!(
-            enqueue(&db, "owner", conversation, event).await.unwrap(),
+            super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
+                .await
+                .unwrap(),
             i < 20
+        );
+        let saved = sources
+            .find_one(doc! {"_id": &source_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.get_str("status").unwrap(),
+            if i < 20 { "queued" } else { "running" }
         );
     }
     db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -460,6 +497,7 @@ async fn owner_queue_is_bounded_keeps_event_anchors_and_rechecks_authority_after
         .unwrap();
     assert_eq!(queued.pending_events.len(), 20);
     for (i, event) in queued.pending_events.iter().enumerate() {
+        assert_eq!(event.source_event_ids, [format!("queue-event-{i}")]);
         assert_eq!(
             event.reply_to.len(),
             1,
@@ -569,7 +607,10 @@ async fn unknown_child_contract_never_reactivates_or_delivers() {
             .update_one(doc! {"_id":&c.id}, doc! {"$set":fields})
             .await
             .unwrap();
-        assert!(matches!(choose(&db, &t, &a, true).await, Selection::Quiet));
+        assert!(matches!(
+            choose(&db, &t, &a, true).await,
+            Selection::Quiet(_)
+        ));
         assert!(
             validate_delivery(
                 &db,
@@ -582,4 +623,188 @@ async fn unknown_child_contract_never_reactivates_or_delivers() {
         );
     }
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_after_stop() {
+    let (db, t, a) = setup().await;
+    let (c, b) = child(choose(&db, &t, &a, true).await);
+    let conversation = c.conversation_id.as_deref().unwrap();
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).insert_one(doc! {
+        "_id":conversation,"user_id":"owner","title":"Thread","model":"test","credential_api_key_id":"credential",
+        "message_count":0_i64,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+    }).await.unwrap();
+    let initial_origin = origin(&c, b);
+    let mut event = super::super::assistant_team_service::event(
+        "message",
+        "native source question".into(),
+        None,
+    );
+    event.reply_to = vec![initial_origin.clone()];
+    event.source_event_ids = vec!["source-event".into()];
+    let events =
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME);
+    events.insert_one(doc! {"_id":"source-event","user_id":"owner","channel_id":"link",
+        "partition":&c.partition,"event_id":"native-event","status":"running",
+        "created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(24)),
+        "delivery":{"version":1,"state":"pending","origin":bson::to_bson(&initial_origin).unwrap(),
+            "sender_id":"human","guest":false,"addressed":true,"transport":"direct",
+            "stream_deadline":bson::DateTime::now(),"checked_at":bson::DateTime::now()}}).await.unwrap();
+    // A full queue refuses without activating or extending the native follow.
+    let conversations =
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    let full = (0..super::super::assistant_nyxagent::MAX_PENDING_EVENTS)
+        .map(|_| super::super::assistant_team_service::event("system", "update".into(), None))
+        .collect::<Vec<_>>();
+    conversations
+        .update_one(
+            doc! {"_id":conversation},
+            doc! {"$set":{"pending_events":bson::to_bson(&full).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !super::super::channel_turn_delivery::enqueue(
+            &db,
+            "owner",
+            conversation,
+            event.clone(),
+            None
+        )
+        .await
+        .unwrap()
+    );
+    let refused_child = db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id":&c.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused_child.follow.follow_state, c.follow.follow_state);
+    assert_eq!(
+        refused_child.follow.follow_expires_at,
+        c.follow.follow_expires_at
+    );
+    assert_eq!(
+        refused_child.follow.follow_last_admitted_at,
+        c.follow.follow_last_admitted_at
+    );
+    assert_eq!(
+        events
+            .find_one(doc! {"_id":"source-event"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status")
+            .unwrap(),
+        "running"
+    );
+    conversations
+        .update_one(
+            doc! {"_id":conversation},
+            doc! {"$set":{"pending_events":[]}},
+        )
+        .await
+        .unwrap();
+    // Execute the driver's first attempt, then abort as a transient write
+    // conflict would. No queued bit or follow activation was committed.
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        super::super::channel_turn_delivery::queued_origin_in_session(
+            &db,
+            "owner",
+            conversation,
+            "source-event",
+            &mut session,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        super::super::channel_turn_delivery::enqueue_in_session(
+            &db,
+            "owner",
+            conversation,
+            &event,
+            None,
+            &mut session
+        )
+        .await
+        .unwrap()
+        .accepted
+    );
+    let projected = super::super::channel_turn_delivery::queued_origin_in_session(
+        &db,
+        "owner",
+        conversation,
+        "source-event",
+        &mut session,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(projected.thread.unwrap().queued);
+    assert!(!event.reply_to[0].thread.as_ref().unwrap().queued);
+    let captured = db
+        .collection::<crate::models::nyxbot_channel::NyxbotEvent>(
+            crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": "source-event"})
+        .session(&mut session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!captured.delivery.unwrap().origin.thread.unwrap().queued);
+    session.abort_transaction().await.unwrap();
+    assert!(!event.reply_to[0].thread.as_ref().unwrap().queued);
+    assert_eq!(
+        events
+            .find_one(doc! {"_id":"source-event"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status")
+            .unwrap(),
+        "running"
+    );
+    stop(&db, "owner", "link", "parent", &c.id).await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        super::super::channel_turn_delivery::enqueue_in_session(
+            &db,
+            "owner",
+            conversation,
+            &event,
+            None,
+            &mut session
+        )
+        .await
+        .is_err()
+    );
+    session.abort_transaction().await.unwrap();
+    let row = db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":conversation})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.pending_events.is_empty());
+    // Fresh mention opens a new revision and can be accepted exactly once.
+    let (fresh, binding) = child(choose(&db, &t, &a, true).await);
+    event.reply_to = vec![origin(&fresh, binding)];
+    events
+        .update_one(
+            doc! {"_id":"source-event"},
+            doc! {"$set":{"delivery.origin":bson::to_bson(&event.reply_to[0]).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(prune_queue(&db, "owner", conversation).await.unwrap(), 1);
 }

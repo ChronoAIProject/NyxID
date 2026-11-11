@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope"
 /**
  * Access Scope card — Services + Nodes multi-select, porting
@@ -18,7 +19,7 @@ import { PlatformServiceScope } from "@/components/shared/platform-service-scope
  */
 
 import { Checkbox } from "@/components/ui/checkbox"
-import { Label } from "@/components/ui/label"
+import { Label, FieldHelp } from "@/components/ui/label"
 import { ServiceIcon } from "@/components/service-icon"
 import { useKeys } from "@/hooks/use-keys"
 import { useNodes } from "@/hooks/use-nodes"
@@ -42,7 +43,7 @@ export function AccessScopeCard({
   onChange,
   ownerId,
 }: AccessScopeCardProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const services = useKeys({ includeTools: true });
   const nodes = useNodes()
 
@@ -66,85 +67,85 @@ export function AccessScopeCard({
       className="flex flex-col gap-4 rounded-lg border border-border/60 bg-background/25 p-4"
     >
       <div className="flex flex-col gap-1">
-        <h3 id="access-scope-title" className="text-12 font-semibold">{t("Access Scope")}</h3>
-        <p className="text-xs leading-relaxed text-muted-foreground">{t("Restrict which services and nodes this key can access via proxy.")}</p>
+        <h3 id="access-scope-title" className="type-card-title">{translateUi("Access Scope")}</h3>
+        <p className="text-13 text-muted-foreground">{translateUi("Restrict which services and nodes this key can access via proxy.")}</p>
       </div>
 
       <div className="grid items-start gap-4 sm:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-4">
-          <AccessGroup
-            label={t("Services")}
-            icon={<ShieldIcon />}
-            allowAll={value.allowAllServices}
-            onAllowAllChange={(allowAll) => {
-              onChange({ ...value, allowAllServices: allowAll })
-            }}
-            listLabel={t("Select allowed services:")}
-            loading={services.isLoading}
-            items={
-              services.data
-                ?.filter(
-                  (s) =>
-                    s.is_active &&
-                    !s.auto_connected &&
-                    (!ownerId ||
-                      (s.credential_source?.type === "org" &&
-                        s.credential_source.org_id === ownerId)) &&
-                    (s.credential_source?.type !== "org" ||
-                      s.credential_source.allowed),
-                )
-                .map((s) => ({
-                  id: s.id,
-                  primary: s.label,
-                  secondary: s.slug,
-                  iconSlug: s.catalog_service_slug,
-                })) ?? []
-            }
-            selectedIds={value.selectedServiceIds}
-            onToggle={toggleService}
-          />
+      <AccessGroup
+        label={translateUi("Services")}
+        icon={<ShieldIcon />}
+        allowAll={value.allowAllServices}
+        onAllowAllChange={(allowAll) => {
+          onChange({ ...value, allowAllServices: allowAll })
+        }}
+        listLabel={translateUi("Select allowed services:")}
+        loading={services.isLoading}
+        items={
+          services.data
+            ?.filter(
+              (s) =>
+                s.is_active &&
+                !s.auto_connected &&
+                (!ownerId ||
+                  (s.credential_source?.type === "org" &&
+                    s.credential_source.org_id === ownerId)) &&
+                (s.credential_source?.type !== "org" ||
+                  s.credential_source.allowed),
+            )
+            .map((s) => ({
+              id: s.id,
+              primary: s.label,
+              secondary: s.slug,
+              iconSlug: s.catalog_service_slug,
+            })) ?? []
+        }
+        selectedIds={value.selectedServiceIds}
+        onToggle={toggleService}
+      />
 
-          {!value.allowAllServices && (
-            <PlatformServiceScope
-              services={(services.data ?? []).filter(
-                (service) =>
-                  service.is_active &&
-                  (!ownerId
-                    ? service.credential_source?.type !== "org"
-                    : service.credential_source?.type === "org" &&
-                      service.credential_source.org_id === ownerId),
-              )}
-              selectedIds={[...value.selectedServiceIds]}
-              allowAll={value.allowAutoConnectedServices}
-              onAllowAllChange={(allowAutoConnectedServices) =>
-                onChange({ ...value, allowAutoConnectedServices })
-              }
-              onToggle={toggleService}
-              orgOwned={!!ownerId}
-            />
+      {!value.allowAllServices && (
+        <PlatformServiceScope
+          services={(services.data ?? []).filter(
+            (service) =>
+              service.is_active &&
+              (!ownerId
+                ? service.credential_source?.type !== "org"
+                : service.credential_source?.type === "org" &&
+                  service.credential_source.org_id === ownerId),
           )}
-        </div>
-        <AccessGroup
-          label={t("Nodes")}
-          icon={<ServersIcon />}
-          allowAll={value.allowAllNodes}
-          onAllowAllChange={(allowAll) => {
-            onChange({ ...value, allowAllNodes: allowAll })
-          }}
-          listLabel={t("Select allowed nodes:")}
-          loading={nodes.isLoading}
-          items={
-            nodes.data
-              ?.filter((n) => !ownerId || n.owner.id === ownerId)
-              .map((n) => ({
-                id: n.id,
-                primary: n.name,
-                secondary: n.status,
-              })) ?? []
+          selectedIds={[...value.selectedServiceIds]}
+          allowAll={value.allowAutoConnectedServices}
+          onAllowAllChange={(allowAutoConnectedServices) =>
+            onChange({ ...value, allowAutoConnectedServices })
           }
-          selectedIds={value.selectedNodeIds}
-          onToggle={toggleNode}
+          onToggle={toggleService}
+          orgOwned={!!ownerId}
         />
+      )}
+        </div>
+      <AccessGroup
+        label={translateUi("Nodes")}
+        icon={<ServersIcon />}
+        allowAll={value.allowAllNodes}
+        onAllowAllChange={(allowAll) => {
+          onChange({ ...value, allowAllNodes: allowAll })
+        }}
+        listLabel={translateUi("Select allowed nodes:")}
+        loading={nodes.isLoading}
+        items={
+          nodes.data
+            ?.filter((n) => !ownerId || n.owner.id === ownerId)
+            .map((n) => ({
+              id: n.id,
+              primary: n.name,
+              secondary: n.status,
+            })) ?? []
+        }
+        selectedIds={value.selectedNodeIds}
+        onToggle={toggleNode}
+      />
       </div>
     </section>
   )
@@ -180,36 +181,36 @@ function AccessGroup({
   selectedIds,
   onToggle,
 }: AccessGroupProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-12 font-medium">
+      <div className="flex items-center gap-1.5 type-row-title">
         <span className="text-muted-foreground">{icon}</span>
         <span>{label}</span>
       </div>
-      <Label className="flex cursor-pointer items-center gap-2 text-12">
+      <Label className="flex cursor-pointer items-center gap-2">
         <Checkbox
           checked={allowAll}
           onCheckedChange={(checked) => {
             onAllowAllChange(checked === true)
           }}
         />
-        <span>{t("Allow all {{kind}}", { kind: label.toLowerCase() })}</span>
+        <span>{translateUi("Allow all ")}{label.toLowerCase()}</span>
       </Label>
 
       {allowAll ? null : (
         <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-background/40 p-3">
-          <p className="text-xs text-muted-foreground">{listLabel}</p>
+          <p className="text-13 text-muted-foreground">{listLabel}</p>
           {loading ? (
-            <p className="text-xs text-muted-foreground">{t("Loading…")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Loading…")}</p>
           ) : items.length === 0 ? (
-            <p className="text-xs text-muted-foreground">{t("None available. Add one first, then come back.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("None available. Add one first, then come back.")}</p>
           ) : (
             <div className="flex flex-col gap-1" role="list">
               {items.map((item) => (
                 <Label
                   key={item.id}
-                  className="flex cursor-pointer items-center gap-2 text-12"
+                  className="flex cursor-pointer items-center gap-2"
                 >
                   <Checkbox
                     checked={selectedIds.has(item.id)}
@@ -221,9 +222,9 @@ function AccessGroup({
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (
-                      <span className="ml-1.5 text-xs text-muted-foreground">
+                      <FieldHelp className="ml-1.5 text-muted-foreground">
                         ({item.secondary})
-                      </span>
+                      </FieldHelp>
                     ) : null}
                   </span>
                 </Label>
@@ -237,6 +238,7 @@ function AccessGroup({
 }
 
 function ShieldIcon() {
+  useUiTranslation();
   return (
     <svg
       viewBox="0 0 24 24"
@@ -255,6 +257,7 @@ function ShieldIcon() {
 }
 
 function ServersIcon() {
+  useUiTranslation();
   return (
     <svg
       viewBox="0 0 24 24"

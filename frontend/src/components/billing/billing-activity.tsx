@@ -1,5 +1,6 @@
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Line, LineChart, XAxis, YAxis } from "recharts";
 import { useApiKeysUsage } from "@/hooks/use-api-keys";
@@ -56,7 +57,7 @@ function agentActivityPoints(agents: readonly ApiKeyUsage[]) {
 }
 
 export function BillingActivity() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [days, setDays] = useState(7);
   const [agentId, setAgentId] = useState("all");
   const activity = useApiKeysUsage(days);
@@ -69,25 +70,25 @@ export function BillingActivity() {
     <Card className="billing-activity">
       <CardHeader className="usage-explorer-heading">
         <div>
-          <CardTitle>{t("Daily agent activity")}</CardTitle>
-          <CardDescription>{t("Personal agent requests across all services. Billing filters apply to the breakdown below.")}</CardDescription>
+          <CardTitle>{translateUi("Daily agent activity")}</CardTitle>
+          <CardDescription>{translateUi("Personal agent requests across all services. Billing filters apply to the breakdown below.")}</CardDescription>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <AnalyticsSelect
-            label={t("Activity time range")}
+            label={translateUi("Activity time range")}
             value={String(days)}
             onChange={(value) => setDays(Number(value))}
             options={[
-              { value: "7", label: t("Last 7 days") },
-              { value: "30", label: t("Last 30 days") },
+              { value: "7", get label() { return translateUi("Last 7 days"); } },
+              { value: "30", get label() { return translateUi("Last 30 days"); } },
             ]}
           />
           <AnalyticsSelect
-            label={t("Activity agent")}
+            label={translateUi("Activity agent")}
             value={selected?.api_key_id ?? "all"}
             onChange={setAgentId}
             options={[
-              { value: "all", label: t("All personal agents") },
+              { value: "all", get label() { return translateUi("All personal agents"); } },
               ...agents.map((agent) => ({
                 value: agent.api_key_id,
                 label: agent.api_key_name,
@@ -101,29 +102,29 @@ export function BillingActivity() {
           <Skeleton className="h-[160px] w-full" />
         ) : activity.error ? (
           <ErrorBanner
-            message={t("Could not load daily agent activity.")}
+            message={translateUi("Could not load daily agent activity.")}
             onRetry={() => void activity.refetch()}
           />
         ) : points.length === 0 ? (
-          <p className="text-12 text-muted-foreground">{t("No agent activity in this window.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("No agent activity in this window.")}</p>
         ) : (
           <>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-11">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-13">
               <p className="font-mono tabular-nums">
-                {number(requests)}{t(" requests · ")}{number(errors)}{t(" errors")}</p>
+                {number(requests)}{translateUi(" requests · ")}{number(errors)}{translateUi(" errors")}</p>
               <div className="flex gap-4 text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5">
                   <span
                     className="h-0.5 w-3"
                     style={{ background: chartConfig.requests.color }}
-                  />{t("Requests")}</span>
+                  />{translateUi("Requests")}</span>
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="h-0.5 w-3 bg-destructive" />{t("Errors")}</span>
+                  <span className="h-0.5 w-3 bg-destructive" />{translateUi("Errors")}</span>
               </div>
             </div>
             <div
               role="img"
-              aria-label={t("Daily activity: {{value}} requests and {{value1}} errors across {{length}} UTC days", { value: number(requests), value1: number(errors), length: points.length })}
+              aria-label={translateUi("Daily activity: {{value1}} requests and {{value2}} errors across {{value3}} UTC days", { value1: number(requests), value2: number(errors), value3: points.length })}
             >
               <ChartContainer
                 config={chartConfig}
@@ -139,7 +140,7 @@ export function BillingActivity() {
                     axisLine={false}
                     tickFormatter={dateLabel}
                     tick={{
-                      fontSize: 10,
+                      fontSize: "var(--text-13)",
                       fill: "var(--color-muted-foreground)",
                     }}
                     interval="preserveStartEnd"
@@ -174,16 +175,16 @@ export function BillingActivity() {
                 </LineChart>
               </ChartContainer>
             </div>
-            <details className="mt-3 text-11">
-              <summary className="text-muted-foreground">{t("View daily values")}</summary>
+            <details className="mt-3 text-13">
+              <summary className="text-muted-foreground">{translateUi("View daily values")}</summary>
               <div className="mt-3 max-h-64 overflow-auto">
                 <table className="w-full text-left tabular-nums">
-                  <caption className="sr-only">{t("Agent activity per UTC day")}</caption>
+                  <caption className="sr-only">{translateUi("Agent activity per UTC day")}</caption>
                   <thead>
                     <tr>
-                      <th className="py-2 font-medium">{t("Date (UTC)")}</th>
-                      <th className="py-2 text-right font-medium">{t("Requests")}</th>
-                      <th className="py-2 text-right font-medium">{t("Errors")}</th>
+                      <th className="py-2 font-medium">{translateUi("Date (UTC)")}</th>
+                      <th className="py-2 text-right font-medium">{translateUi("Requests")}</th>
+                      <th className="py-2 text-right font-medium">{translateUi("Errors")}</th>
                     </tr>
                   </thead>
                   <tbody>

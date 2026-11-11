@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -44,7 +44,7 @@ export function AssistantNodeRotateTokenDialog({
   readonly params: AssistantNodeRotateTokenParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,14 +119,14 @@ export function AssistantNodeRotateTokenDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <RefreshCw className="size-4" />
-            {result ? t("Node credentials rotated") : t("Rotate node credentials")}
+            {result ? translateUi("Node credentials rotated") : translateUi("Rotate node credentials")}
           </DialogTitle>
           <DialogDescription>
             {result?.unavailable
-              ? t("The credentials were rotated, but the one-time replacements were not captured. Rotate them again before reconnecting the node.")
+              ? translateUi("The credentials were rotated, but the one-time replacements were not captured. Rotate them again before reconnecting the node.")
               : result
-                ? t("These values are shown only once. Copy and store both securely now.")
-                : t("Rotation immediately invalidates the node's current token and signing secret.")}
+                ? translateUi("These values are shown only once. Copy and store both securely now.")
+                : translateUi("Rotation immediately invalidates the node's current token and signing secret.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -134,30 +134,30 @@ export function AssistantNodeRotateTokenDialog({
           <div className="space-y-3 border-y border-border py-4">
             {result.authToken ? (
               <div className="space-y-1.5">
-                <Label htmlFor="assistant-node-auth-token">{t("One-time auth token")}</Label>
+                <Label htmlFor="assistant-node-auth-token">{translateUi("One-time auth token")}</Label>
                 <Input
                   id="assistant-node-auth-token"
                   readOnly
                   value={result.authToken}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
             {result.signingSecret ? (
               <div className="space-y-1.5">
-                <Label htmlFor="assistant-node-signing-secret">{t("One-time signing secret")}</Label>
+                <Label htmlFor="assistant-node-signing-secret">{translateUi("One-time signing secret")}</Label>
                 <Input
                   id="assistant-node-signing-secret"
                   readOnly
                   value={result.signingSecret}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-12">
-            <span className="text-muted-foreground">{t("Node")}</span>
+          <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-14">
+            <span className="text-muted-foreground">{translateUi("Node")}</span>
             <Badge
               variant="secondary"
               className="max-w-[70%] truncate font-mono"
@@ -168,7 +168,7 @@ export function AssistantNodeRotateTokenDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -182,18 +182,18 @@ export function AssistantNodeRotateTokenDialog({
                 close();
               }}
             >
-              {result.unavailable ? t("Acknowledge") : t("I have saved it")}
+              {result.unavailable ? translateUi("Acknowledge") : translateUi("I have saved it")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void submit()}
-              >{t("Rotate credentials")}</Button>
+              >{translateUi("Rotate credentials")}</Button>
             </>
           )}
         </DialogFooter>

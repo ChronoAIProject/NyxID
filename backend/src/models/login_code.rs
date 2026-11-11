@@ -16,9 +16,14 @@ pub enum LoginCodeStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LoginCode {
+    /// Present only when an explicit approved-sign-in MFA exception was used.
+    #[serde(default)]
+    pub mfa_policy_revision: Option<String>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default)]
+    pub mfa_assured: bool,
     pub code_hmac: String,
     pub status: LoginCodeStatus,
     pub selection: Option<Selection>,
@@ -55,8 +60,10 @@ mod tests {
     fn debug_redacts_codes_and_credential_identifiers() {
         let now = Utc::now();
         let row = LoginCode {
+            mfa_policy_revision: None,
             id: "fixture-request-id".into(),
             user_id: "fixture-owner-id".into(),
+            mfa_assured: false,
             code_hmac: "fixture-secret-code-hmac".into(),
             status: LoginCodeStatus::Pending,
             selection: None,

@@ -26,10 +26,47 @@ pub async fn get_session_for_consumer(
         .ok_or_else(|| AppError::OracleSessionNotFound(conversation_id.to_string()))?;
 
     if session.owner_user_id != actor_user_id {
-        let pool = oracle_pool_service::get_pool(db, &session.pool_id).await?;
+        let pool = oracle_pool_service::get_pool_for_history(db, &session.pool_id).await?;
         oracle_pool_service::ensure_can_manage(db, actor_user_id, &pool)
             .await
             .map_err(|_| AppError::OracleSessionNotFound(conversation_id.to_string()))?;
+    }
+    Ok(session)
+}
+
+pub(crate) async fn get_session_for_consumer_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    conversation_id: &str,
+) -> AppResult<OracleSession> {
+    let session = db
+        .collection::<OracleSession>(ORACLE_SESSIONS)
+        .find_one(doc! { "_id": conversation_id })
+        .session(&mut *mongo_session)
+        .await?
+        .ok_or_else(|| AppError::OracleSessionNotFound(conversation_id.to_string()))?;
+
+    if session.owner_user_id != actor_user_id {
+        let pool = crate::services::oracle_mutation_service::lookup_pool(
+            db,
+            mongo_session,
+            &session.pool_id,
+            true,
+        )
+        .await?;
+        // Keep history reads lightweight; this helper authorizes a mutation.
+        crate::services::oracle_mutation_service::lock_manager(
+            db,
+            mongo_session,
+            actor_user_id,
+            &pool.user_id,
+        )
+        .await
+        .map_err(|error| match error {
+            AppError::Forbidden(_) => AppError::OracleSessionNotFound(conversation_id.to_string()),
+            other => other,
+        })?;
     }
     Ok(session)
 }
@@ -82,18 +119,58 @@ pub async fn close_session(
     actor_user_id: &str,
     conversation_id: &str,
 ) -> AppResult<OracleSession> {
-    let session = get_session_for_consumer(db, actor_user_id, conversation_id).await?;
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_conversation_id = conversation_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_conversation_id,
+            ),
+            |mongo_session,
+             (transaction_db, transaction_actor_user_id, transaction_conversation_id)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let conversation_id = transaction_conversation_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        close_session_in_session(db, mongo_session, actor_user_id, conversation_id)
+                            .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn close_session_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    conversation_id: &str,
+) -> AppResult<OracleSession> {
+    let session =
+        get_session_for_consumer_in_session(db, mongo_session, actor_user_id, conversation_id)
+            .await?;
     if session.closed_at.is_some() {
         return Ok(session);
     }
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, &session.pool_id)
+        .await?;
     let now = bson::DateTime::from_chrono(Utc::now());
     db.collection::<OracleSession>(ORACLE_SESSIONS)
         .update_one(
             doc! { "_id": conversation_id },
             doc! { "$set": { "closed_at": now, "updated_at": now } },
         )
+        .session(&mut *mongo_session)
         .await?;
-    get_session_for_consumer(db, actor_user_id, conversation_id).await
+    get_session_for_consumer_in_session(db, mongo_session, actor_user_id, conversation_id).await
 }
 
 #[cfg(test)]
@@ -107,6 +184,10 @@ mod tests {
     fn test_pool(owner: &str) -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            deleted_at: None,
+            lifecycle_version: 0,
+            installation_epoch: 0,
+            deletion_cleanup_pending: false,
             require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: owner.to_string(),
@@ -135,6 +216,13 @@ mod tests {
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let stranger = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let pool = test_pool(&owner);
         db.collection::<OraclePool>(crate::models::oracle_pool::COLLECTION_NAME)
             .insert_one(&pool)

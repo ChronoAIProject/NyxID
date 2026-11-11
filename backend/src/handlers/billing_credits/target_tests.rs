@@ -59,6 +59,9 @@ fn grant_and_allowance_target_dtos_preserve_new_fields_and_legacy_defaults() {
         assert_eq!(response["target_org_ids"], json!(orgs));
         assert_eq!(response["target_group_ids"], json!(groups));
         let grant = CreditGrant {
+            service_limits: vec![],
+            revoke_requested_at: None,
+            revoke_requested_by: None,
             id: "grant".into(),
             batch_id: "batch".into(),
             schedule_origin: None,
@@ -94,7 +97,8 @@ fn grant_and_allowance_target_dtos_preserve_new_fields_and_legacy_defaults() {
         let legacy: CreditGrant = bson::from_document(legacy).unwrap();
         assert!(legacy.target_org_ids.is_empty());
         assert!(legacy.target_group_ids.is_empty());
-        let response = serde_json::to_value(grant_response(grant.clone(), None, None)).unwrap();
+        let response =
+            serde_json::to_value(grant_response(grant.clone(), None, None).unwrap()).unwrap();
         assert_eq!(response["target_kind"], kind);
         assert_eq!(response["target_org_ids"], json!(orgs));
         assert_eq!(response["target_group_ids"], json!(groups));

@@ -12,7 +12,337 @@ struct AdapterGuard(String);
 impl Drop for AdapterGuard {
     fn drop(&mut self) {
         thread_follow::TEST_ADAPTERS.lock().unwrap().remove(&self.0);
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&self.0);
     }
+}
+
+#[tokio::test]
+async fn discord_2187_followed_identity_preserves_upstream_discord_admission() {
+    let (state, calls, model) = setup("discord_2187_followed_identity").await;
+    let (mut row, _) = channel(&state, "direct").await;
+    row.platform = "discord".into();
+    row.owner_sender_ids = vec!["400".into()];
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>("channel_bots")
+        .update_one(
+            doc! {"_id":&row.channel_bot_id},
+            doc! {"$set":{"platform":"discord","platform_bot_id":"100",
+            "bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,
+            bytes:state.encryption_keys.encrypt(b"token").await.unwrap()}}},
+        )
+        .await
+        .unwrap();
+    // Follow resolution revalidates the complete live route, including its
+    // callback. Keep the common direct fixture consistent with this Discord
+    // group rather than silently falling back before selecting a child.
+    state
+        .db
+        .collection::<bson::Document>("api_keys")
+        .update_one(
+            doc! {"_id":&row.route_api_key_id},
+            doc! {"$set":{"callback_url":"https://example.test/callback"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>("channel_conversations")
+        .update_one(
+            doc! {"_id":&row.route_id},
+            doc! {"$set":{"platform":"discord","platform_conversation_type":"group"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        crate::services::channel_routing_service::resolve_agent(
+            &state.db,
+            &row.channel_bot_id,
+            "200",
+            Some("400"),
+            OWNER,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
+        "_id":"follow-flag", "flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+        "target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"admin",
+        "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let provider = MockServer::start().await;
+    let adapter = Arc::new(
+        crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
+            &provider.uri(),
+        ),
+    );
+    thread_follow::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), adapter.clone());
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), adapter);
+    let _adapter = AdapterGuard(row.channel_bot_id.clone());
+    let chat = json!({"id":"200","type":0,"guild_id":"300"});
+    Mock::given(method("GET"))
+        .and(path("/channels/200"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat.clone()))
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/channels/200/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&provider)
+        .await;
+    let reply_id = std::sync::atomic::AtomicU32::new(1000);
+    Mock::given(method("POST"))
+        .and(path("/channels/200/messages"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id":reply_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst).to_string(),
+                "channel_id":"200"
+            }))
+        })
+        .expect(2)
+        .mount(&provider)
+        .await;
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    // Same display name confers no role authority. Only Discord's verified
+    // managed role tagged with this Bot's platform identity addresses it.
+    crate::services::discord_gateway::roles::observe(
+        &bot,
+        &json!({"t":"GUILD_CREATE","d":{"id":"300","roles":[
+            {"id":"900","name":"Helper","managed":true,"tags":{"bot_id":"100"}},
+            {"id":"999","name":"Helper","managed":false}
+        ]}}),
+    );
+    let mut sources = Vec::new();
+    for (id, bot_mention, own_role) in [
+        ("500", true, false),
+        ("501", false, false),
+        ("502", false, true),
+    ] {
+        let addressed = bot_mention || own_role;
+        let before = calls.lock().await.len();
+        let raw = json!({"op":0,"t":"MESSAGE_CREATE","s":2,"d":{
+            "id":id,"type":0,"channel_id":"200","guild_id":"300",
+            "author":{"id":"400","username":"private sender"},"content":"private request",
+            "mentions":if bot_mention {json!([{"id":"100","username":"Helper"}])}else{json!([])},
+            "mention_roles":if bot_mention {json!([])}else if own_role {json!(["900"])}else{json!(["999"])},"mention_everyone":false}});
+        let (inbound, facts) =
+            crate::services::discord_gateway::normalized_test_message(&bot, &raw, &chat);
+        assert_eq!(facts.address == ThreadAddress::Mention, addressed);
+        assert_eq!(
+            facts
+                .discord_gateway
+                .as_ref()
+                .unwrap()
+                .managed_role_mentioned,
+            own_role
+        );
+        let message_id = Uuid::new_v4().to_string();
+        let mut source = crate::services::channel_relay_service::inbound_metadata(
+            &bot.id,
+            row.route_id.as_deref().unwrap(),
+            OWNER,
+            "discord",
+            &inbound,
+            &row.route_api_key_id,
+            &message_id,
+        );
+        source.thread_context = Some(facts.clone());
+        state
+            .db
+            .collection::<ChannelMessage>("channel_messages")
+            .insert_one(&source)
+            .await
+            .unwrap();
+        let body = json!({"message_id":message_id,"correlation_id":id,"platform":"discord",
+            "thread_context":facts,"conversation":{"id":row.route_id,"platform_id":"200","type":"group"},
+            "sender":{"platform_id":"400","display_name":"private sender"},
+            "content":{"type":"text","text":"private request"},"raw_platform_data":inbound.raw_data});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let token = crate::crypto::jwt::generate_relay_callback_token(
+            &state.jwt_keys,
+            &state.config,
+            id,
+            &row.route_api_key_id,
+            &message_id,
+            "discord",
+            &sha256_hex(&bytes),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+        let (_guard, done) = watch_relay_callback(&row.id, &message_id);
+        assert_eq!(
+            Box::pin(relay_callback(
+                State(state.clone()),
+                Path(row.id.clone()),
+                headers.clone(),
+                Bytes::from(bytes.clone())
+            ))
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        tokio::time::timeout(Duration::from_secs(30), done)
+            .await
+            .unwrap()
+            .unwrap();
+        // The same signed callback is accepted idempotently, with no second turn/reply.
+        assert_eq!(
+            Box::pin(relay_callback(
+                State(state.clone()),
+                Path(row.id.clone()),
+                headers,
+                Bytes::from(bytes)
+            ))
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        let saved = state
+            .db
+            .collection::<ChannelMessage>("channel_messages")
+            .find_one(doc! {"_id": &message_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let admission = saved.nyxbot_admission.as_ref().unwrap();
+        let code = if own_role {
+            "addressed_managed_role"
+        } else if bot_mention {
+            "addressed_user_mention"
+        } else {
+            "not_addressed"
+        };
+        assert_eq!(admission.disposition, code);
+        assert_eq!(admission.bot_mentioned, Some(addressed));
+        assert_eq!(admission.managed_role_mentioned, own_role);
+        assert_eq!(admission.broadcast_roles, Some(u16::from(!addressed)));
+        assert_eq!(
+            admission.address,
+            if addressed {
+                ThreadAddress::Mention
+            } else {
+                ThreadAddress::NotAddressed
+            }
+        );
+        assert_eq!(
+            admission.thread_follow_selection.as_deref(),
+            Some(if addressed { "child" } else { "quiet" })
+        );
+        assert_eq!(admission.resolved_thread_id.is_some(), addressed);
+        assert_eq!(admission.turn_id.is_some(), addressed);
+        assert_eq!(calls.lock().await.len(), before + usize::from(addressed));
+        sources.push((message_id, code));
+    }
+    assert_eq!(calls.lock().await.len(), 2);
+    for call in calls.lock().await.iter() {
+        let context = turn_context_tests::contexts(call);
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0]["identity"]["platform"], "discord");
+        assert_eq!(context[0]["identity"]["channel_bot_id"], row.channel_bot_id);
+        assert_eq!(context[0]["conversation"]["kind"], "group");
+        assert_eq!(context[0]["conversation"]["followed"], true);
+        assert_eq!(context[0]["sender"]["classification"], "owner");
+        assert_eq!(context[0]["sender"]["kind"], "human");
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .count_documents(doc! {"record_scope":"platform_thread"})
+            .await
+            .unwrap(),
+        2
+    );
+    let visible = crate::handlers::channel_activities::bot_activities(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Path(bot.id.clone()),
+        axum::extract::Query(crate::handlers::channel_activities::ActivityQuery {
+            kind: None,
+            page: None,
+            per_page: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(visible.activities.len(), 3);
+    for (source, code) in sources {
+        let activity = visible.activities.iter().find(|a| a.id == source).unwrap();
+        assert_eq!(
+            activity.nyxbot_admission.as_ref().unwrap().disposition,
+            code
+        );
+        let serialized = serde_json::to_string(&activity.nyxbot_admission).unwrap();
+        for private in [
+            "private request",
+            "private sender",
+            "\"999\"",
+            "\"900\"",
+            "\"400\"",
+            "\"200\"",
+            "raw_platform_data",
+            "ciphertext",
+            "sender_id",
+        ] {
+            assert!(
+                !serialized.contains(private),
+                "admission projection retained {private}"
+            );
+        }
+    }
+    let other = crate::handlers::channel_activities::bot_activities(
+        State(state.clone()),
+        crate::test_utils::test_auth_user("12345678-1234-4123-8123-1234567890ac"),
+        Path(bot.id.clone()),
+        axum::extract::Query(crate::handlers::channel_activities::ActivityQuery {
+            kind: None,
+            page: None,
+            per_page: None,
+        }),
+    )
+    .await;
+    assert!(matches!(
+        other,
+        Err(AppError::ChannelBotNotFound(ref id)) if id == &bot.id
+    ));
+    let mut replies: Vec<String> = provider
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["message_reference"]["channel_id"], "200");
+            body["message_reference"]["message_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    replies.sort();
+    assert_eq!(replies, ["500", "502"]);
+    model.abort();
+    provider.verify().await;
 }
 
 #[tokio::test]
@@ -125,15 +455,31 @@ async fn callback_as(
     text: &str,
     kind: ThreadSenderKind,
 ) {
+    callback_with_provenance(state, row, n, topic, sender, addressed, text, (kind, true)).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn callback_with_provenance(
+    state: &AppState,
+    row: &NyxbotChannel,
+    n: u32,
+    topic: &str,
+    sender: &str,
+    addressed: bool,
+    text: &str,
+    (kind, original): (ThreadSenderKind, bool),
+) {
     let raw = if kind == ThreadSenderKind::Bot {
         json!({"message":{"message_id":n,"message_thread_id":topic.parse::<i64>().unwrap(),"is_topic_message":true,
             "from":{"id":sender.parse::<i64>().unwrap(),"is_bot":true},
             "chat":{"id":-100,"type":"supergroup"},"text":text,
             "entities":[{"type":"mention","offset":0,"length":11}]}})
     } else {
-        json!({"message":{"from":{"is_bot":false}}})
+        json!({"message":{"message_id":original.then_some(n),"text":text,"from":{"is_bot":false}}})
     };
     let inbound = InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: n.to_string(),
         conversation_id: "-100".into(),
         conversation_type: "group".into(),
@@ -218,7 +564,6 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     let (mut row, _) = channel(&state, "direct").await;
     row.platform = "telegram".into();
     row.owner_sender_ids = vec!["human".into()];
-    row.route_id = Some(Uuid::new_v4().to_string());
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -253,9 +598,12 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         )
         .await
         .unwrap();
-    state.db.collection::<bson::Document>("channel_conversations").insert_one(doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,
+    assert_eq!(state.db.collection::<bson::Document>("channel_conversations").replace_one(
+        doc! {"_id": &row.route_id},
+        doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,
         "platform":"telegram","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,
-        "default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        "default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}
+    ).await.unwrap().matched_count, 1);
     state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":"follow-flag","org_user_id":bson::Bson::Null,
         "flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,
         "enabled":true,"updated_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
@@ -307,6 +655,11 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].follow.follow_state.as_deref(), Some("active"));
     assert_eq!(calls.lock().await.len(), 2);
+    for call in calls.lock().await.iter() {
+        let input = call.to_string();
+        assert!(input.contains("Destination: Telegram."));
+        assert!(input.contains("4,096 characters"));
+    }
     let conversation = first[0].conversation_id.clone();
     assert!(calls.lock().await[0].to_string().contains("body_available"));
     let messages = engine::messages(
@@ -320,6 +673,25 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     .unwrap();
     assert!(messages.iter().all(|m| !m.text.contains("body_available")
         && !m.text.contains("History body must never be retained")));
+    callback_with_provenance(
+        &state,
+        &row,
+        110,
+        "7",
+        "human",
+        false,
+        "stop following",
+        (ThreadSenderKind::Human, false),
+    )
+    .await;
+    assert_eq!(calls.lock().await.len(), 2);
+    let retained = children()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(retained[0].follow.follow_state.as_deref(), Some("active"));
     callback(&state, &row, 103, "7", "guest", true, "stop following").await;
     assert_eq!(calls.lock().await.len(), 2);
     callback(&state, &row, 104, "7", "human", false, "stop following").await;
@@ -433,9 +805,48 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         "Queued owner request".into(),
         None,
     );
-    event.reply_to = vec![owner_origin];
+    event.reply_to = vec![owner_origin.clone()];
+    let source_id = Uuid::new_v4().to_string();
+    event.source_event_ids = vec![source_id.clone()];
+    let mut source_event = admission(&row.id, "queued-native-source");
+    source_event.status = "running".into();
+    source_event.partition = owner_origin.partition.clone();
+    source_event.id = source_id.clone();
+    source_event.relay_message_id = Some(
+        owner_origin
+            .thread
+            .as_ref()
+            .unwrap()
+            .source_message_id
+            .clone(),
+    );
+    source_event.delivery = Some(crate::models::nyxbot_channel::ChannelTurnDelivery {
+        execution_source_bound: false,
+        execution_owner_verified: false,
+        version: 1,
+        state: "pending".into(),
+        origin: owner_origin,
+        sender_id: "human".into(),
+        sender_kind: Some(ThreadSenderKind::Human),
+        guest: false,
+        addressed: true,
+        transport: "direct".into(),
+        source_route_id: None,
+        source_route_api_key_id: None,
+        stream_deadline: Utc::now(),
+        checked_at: Utc::now(),
+        claim_id: None,
+        target_ciphertext: None,
+        target_expires_at: None,
+    });
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&source_event)
+        .await
+        .unwrap();
     assert!(
-        crate::services::channel_thread_follow_service::enqueue(&state.db, OWNER, id, event)
+        crate::services::channel_turn_delivery::enqueue(&state.db, OWNER, id, event, None)
             .await
             .unwrap()
     );
@@ -477,6 +888,45 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     .await
     .unwrap();
     assert!(!claimed.guest_turn);
+    let turn = claimed.active_turn.as_ref().unwrap();
+    assert_eq!(turn.channel_event_id.as_deref(), Some(source_id.as_str()));
+    let saved = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&source_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.turn_id.as_deref(), Some(turn.turn_id.as_str()));
+    engine::finish_turn(
+        &state.db,
+        &claimed,
+        &claimed.credential_api_key_id,
+        "native-queued-response",
+        &engine::TurnResult {
+            text: "Native queued answer".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    late_delivery::process(&state, &source_id).await;
+    late_delivery::process(&state, &source_id).await;
+    let requests = provider.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 7, "one source-bound native answer attempt");
+    let last = requests.last().unwrap().body_json::<Value>().unwrap();
+    assert_eq!(last["text"], "Native queued answer");
+    assert_eq!(last["message_thread_id"], 7);
+    let saved = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&source_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.delivery.unwrap().state, "sent");
     assert_eq!(claimed.active_turn.as_ref().unwrap().events.len(), 1);
     assert!(
         !claimed

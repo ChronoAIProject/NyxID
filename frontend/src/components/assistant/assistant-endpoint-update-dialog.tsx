@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -108,7 +108,7 @@ export function AssistantEndpointUpdateDialog({
   readonly params: AssistantEndpointUpdateParams;
   readonly onComplete: (endpointId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -222,19 +222,19 @@ export function AssistantEndpointUpdateDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? t("Endpoint already updated") : t("Update endpoint")}
+            {result?.replayed ? translateUi("Endpoint already updated") : translateUi("Update endpoint")}
           </DialogTitle>
           <DialogDescription>
             {result
-              ? t("NyxID verified the endpoint through its authorization evidence. The assistant receives only the endpoint reference.")
-              : t("Confirm the exact endpoint change. NyxID will not send the URL or label to the assistant.")}
+              ? translateUi("NyxID verified the endpoint through its authorization evidence. The assistant receives only the endpoint reference.")
+              : translateUi("Confirm the exact endpoint change. NyxID will not send the URL or label to the assistant.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Endpoint")}</span>
+              <span className="text-muted-foreground">{translateUi("Endpoint")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -244,14 +244,14 @@ export function AssistantEndpointUpdateDialog({
             </div>
             {params.label ? (
               <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">{t("Label")}</span>
+                <span className="text-muted-foreground">{translateUi("Label")}</span>
                 <span className="max-w-[70%] truncate">{params.label}</span>
               </div>
             ) : null}
             {params.endpointUrl ? (
               <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">{t("URL")}</span>
-                <span className="max-w-[70%] truncate font-mono text-11">
+                <span className="text-muted-foreground">{translateUi("URL")}</span>
+                <span className="max-w-[70%] truncate font-mono text-13">
                   {params.endpointUrl}
                 </span>
               </div>
@@ -260,26 +260,26 @@ export function AssistantEndpointUpdateDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-11 text-success">{t("Endpoint update verified.")}</p>
+          <p className="text-13 text-success">{translateUi("Endpoint update verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!result ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void updateEndpoint()}
-              >{t("Update endpoint")}</Button>
+              >{translateUi("Update endpoint")}</Button>
             </>
           ) : (
             <>
@@ -292,7 +292,7 @@ export function AssistantEndpointUpdateDialog({
                     void verifyUpdate(result.resource.endpointId, !result.replayed)
                   }
                 >
-                  <RefreshCw />{t("Retry verification")}</Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -302,7 +302,7 @@ export function AssistantEndpointUpdateDialog({
                   onComplete(result.resource.endpointId);
                   close();
                 }}
-              >{t("Report endpoint")}</Button>
+              >{translateUi("Report endpoint")}</Button>
             </>
           )}
         </DialogFooter>

@@ -204,6 +204,7 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// runtime-independent worker. A renewable process lease, process-exit retry,
 /// and the cross-process stale sweep remain crash recovery.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
+    init_test_audit_chain_hmac_key();
     // Production initializes this before opening balances or billing admission.
     crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
         crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
@@ -225,6 +226,37 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     Some(db)
 }
 
+/// Explicit actor preference for fixtures exercising execution independently
+/// of generic approval. Database/user constructors keep the production default;
+/// callers opt in at the request setup and per-service required policies still
+/// take precedence over this global preference.
+pub(crate) async fn set_test_approval_preference(
+    db: &mongodb::Database,
+    user_id: &str,
+    approval_required: bool,
+) {
+    let channel = crate::services::notification_service::get_or_create_channel(db, user_id)
+        .await
+        .expect("create explicit fixture approval preference");
+    db.collection::<mongodb::bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            mongodb::bson::doc! { "_id": &channel.id },
+            mongodb::bson::doc! { "$set": { "approval_required": approval_required } },
+        )
+        .await
+        .expect("store fixture approval preference");
+    assert_eq!(
+        crate::services::approval_service::user_requires_approval(
+            db,
+            user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .expect("read effective fixture approval preference"),
+        approval_required,
+    );
+}
+
 /// Connect to a fresh test database through a client with MongoDB command
 /// monitoring enabled. Tests use this to prove read-only handler boundaries;
 /// setup commands are observable too, so callers should clear their recorder
@@ -233,6 +265,7 @@ pub(crate) async fn connect_test_database_with_command_handler(
     prefix: &str,
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
+    init_test_audit_chain_hmac_key();
     // Same process-wide precondition as `connect_test_database`; nextest runs
     // each test in its own process, so it cannot rely on another test.
     crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
@@ -252,6 +285,34 @@ pub(crate) async fn connect_test_database_with_command_handler(
         .await
         .expect("initialize fresh test assistant cutover");
     Some(db)
+}
+
+/// Concern assertions need replica discovery: the driver's Single topology
+/// legitimately sends primaryPreferred even for an explicitly Primary handle.
+/// Retain the ordinary fixture guard until this discovered client is dropped.
+pub(crate) async fn connect_replica_test_database_with_command_handler(
+    prefix: &str,
+    handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+) -> mongodb::Database {
+    let fixture = connect_test_database(prefix)
+        .await
+        .expect("Mongo8 fixture required");
+    let uri = TEST_DB_PINNED_URI
+        .get()
+        .expect("fixture pins its selected URI");
+    let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
+    options.direct_connection = Some(false);
+    options.server_selection_timeout = Some(Duration::from_secs(30));
+    options.connect_timeout = Some(Duration::from_secs(20));
+    options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
+    options.max_pool_size = Some(4);
+    options.command_event_handler = Some(handler);
+    let keepalive = fixture.clone();
+    options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_| {
+        let _ = keepalive.name();
+    }));
+    let client = mongodb::Client::with_options(options).unwrap();
+    client.database(fixture.name())
 }
 
 /// Connect to a fresh database and prove that it supports multi-document
@@ -282,6 +343,47 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
         .expect("MongoDB required");
     assert_transaction_test_topology(&db).await;
     db
+}
+
+/// Wait, within the shared readiness budget, until majority-acknowledged
+/// writes and linearizable reads on this database answer within 100 ms.
+///
+/// Tests that exercise production admission gates (the 250 ms analytics
+/// dispatch transaction, the 200 ms linearizable consent read) assert those
+/// deadlines as written. A CI runner can start such a test while MongoDB is
+/// still stalled on its own journal flushes and the per-test database drop
+/// backlog, which no nextest slot reservation prevents. This establishes the
+/// healthy-server precondition first; the measured call still runs once
+/// against the unchanged production bounds.
+pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
+    const BUDGET: Duration = Duration::from_secs(90);
+    const RESPONSIVE: Duration = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let probes = db.collection::<Document>("__readiness");
+    loop {
+        let id = Uuid::new_v4().to_string();
+        let probe = std::time::Instant::now();
+        let write = probes
+            .insert_one(doc! {"_id": &id})
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await;
+        let read = probes
+            .find_one(doc! {"_id": &id})
+            .read_concern(mongodb::options::ReadConcern::linearizable())
+            .await;
+        let elapsed = probe.elapsed();
+        if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
+            return;
+        }
+        assert!(
+            started.elapsed() < BUDGET,
+            "MongoDB majority write + linearizable read were not responsive within \
+             {RESPONSIVE:?} for {BUDGET:?} (last probe took {elapsed:?}; write ok={}, read ok={})",
+            write.is_ok(),
+            read.is_ok()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn assert_transaction_test_topology(db: &mongodb::Database) {
@@ -1756,7 +1858,9 @@ pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
         auth_device_eight_char_codes: false,
+        resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
+        chrono_probe_url: None,
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
@@ -1765,6 +1869,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         environment: "test".to_string(),
         jwt_private_key_path: "keys/private.pem".to_string(),
         jwt_public_key_path: "keys/public.pem".to_string(),
+        jwt_retained_public_key_paths: Vec::new(),
+        domain_aliases: Default::default(),
         jwt_issuer: "nyxid".to_string(),
         jwt_access_ttl_secs: 900,
         jwt_relay_reply_ttl_secs: 1800,
@@ -1789,6 +1895,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         smtp_from_address: None,
         encryption_key: Some("11".repeat(32)),
         encryption_key_previous: None,
+        allow_legacy_record_reads: true,
+        contextual_record_writes: true,
         rate_limit_per_second: 10,
         rate_limit_burst: 30,
         platform_service_rate_limit_per_second: 2,
@@ -1798,6 +1906,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         mtls_client_cert_header: None,
         broker_require_sender_constraint: false,
         broker_require_admin_capability: false,
+        hmac_keyset_path: None,
         cli_pairing_hmac_key: None,
         audit_chain_hmac_key: None,
         billing_ledger_hmac_key: None,
@@ -1829,6 +1938,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
+        automation_continuation_v2_enabled: false,
+        security_rollout: Default::default(),
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
         internal_dispatch_hmac_key: None,
@@ -1886,6 +1997,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
         cloud_response_cache_max_entries: 256,
         billing_enabled: false,
+        billing_allocations_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
         lago_plan_code: "starter".to_string(),
@@ -1973,11 +2085,20 @@ pub(crate) async fn spawn_mock_token_server(
 /// keys per test, so we share one 2048-bit pair across the entire test
 /// binary and clone the cheap `JwtKeys` handle for each caller.
 pub(crate) fn cached_test_jwt_keys() -> JwtKeys {
-    static CACHED: OnceLock<JwtKeys> = OnceLock::new();
-    CACHED.get_or_init(generate_test_jwt_keys).clone()
+    cached_test_jwt_material().0.clone()
 }
 
-fn generate_test_jwt_keys() -> JwtKeys {
+/// Public JWKS fixtures use the same generated pair as signed test assertions.
+pub(crate) fn cached_test_jwk() -> serde_json::Value {
+    cached_test_jwt_material().1.clone()
+}
+
+fn cached_test_jwt_material() -> &'static (JwtKeys, serde_json::Value) {
+    static CACHED: OnceLock<(JwtKeys, serde_json::Value)> = OnceLock::new();
+    CACHED.get_or_init(generate_test_jwt_material)
+}
+
+fn generate_test_jwt_material() -> (JwtKeys, serde_json::Value) {
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
     use rsa::traits::PublicKeyParts;
@@ -1998,13 +2119,21 @@ fn generate_test_jwt_keys() -> JwtKeys {
     let n_bytes = public_key.n().to_bytes_be();
     let kid = hex::encode(&Sha256::digest(&n_bytes)[..8]);
 
-    JwtKeys {
-        encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
-            .expect("build test RSA encoding key"),
-        decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
-            .expect("build test RSA decoding key"),
-        kid,
-    }
+    let jwk = crate::crypto::jwt::public_key_jwk(&public_pem)
+        .expect("produce test public JWK from the generated signing pair");
+    assert_eq!(jwk["kid"], kid);
+    (
+        JwtKeys {
+            encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
+                .expect("build test RSA encoding key"),
+            decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
+                .expect("build test RSA decoding key"),
+            kid,
+            retained: Default::default(),
+            public_jwk: Some(jwk.clone()),
+        },
+        jwk,
+    )
 }
 
 /// Build a minimal `AppState` for handler tests.
@@ -2015,7 +2144,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 
 /// Build an `AppState` with a caller-provided config for pure handler tests.
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .redirect(crate::services::telegram_new_api::app_redirect_policy())
+        .build()
+        .unwrap();
     let jwt_keys = cached_test_jwt_keys();
     let billing = Arc::new(crate::services::billing::BillingService::new(
         db.clone(),
@@ -2065,6 +2197,8 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         std::time::Duration::from_secs(config.cluster_slot_renew_secs),
     );
 
+    let execution_enrollment =
+        crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
         local_machine_platform: None,
         db: db.clone(),
@@ -2123,6 +2257,18 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             db.clone(),
             "auth_device_request",
+            5,
+            60,
+        ),
+        password_change_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "password_change_ip",
+            20,
+            60,
+        ),
+        password_change_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "password_change_user",
             5,
             60,
         ),
@@ -2266,6 +2412,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
+        execution_enrollment,
         telemetry: None,
     }
 }
@@ -2305,9 +2452,13 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
     test_app_state(client.database("nyxid_unit_unused"))
 }
 
-/// Build a permissive session-auth `AuthUser` for handler tests.
+/// Build a session-shaped `AuthUser` without a validated derivation policy.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        execution_enrolled: false,
+        execution_permission: None,
+        mfa_assured: false,
+        mfa_enabled: None,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,
@@ -2320,6 +2471,7 @@ pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
         acting_client_id: None,
         oauth_client_id: None,
         token_jti: None,
+        oauth_lineage: None,
         approval_owner_user_id: None,
         auth_method: AuthMethod::Session,
         allow_all_services: true,
@@ -2487,6 +2639,7 @@ pub(crate) fn assert_rci_audit_row(
 pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
     let now = chrono::Utc::now();
     User {
+        execution_permission_enrollment: None,
         id: user_id.to_string(),
         email: format!("{user_id}@example.com"),
         password_hash: None,
@@ -2719,6 +2872,7 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
+        secret_context_versions: Default::default(),
         offering_kind: Default::default(),
         topics: Vec::new(),
         supplier: None,
@@ -2780,6 +2934,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         default_request_headers: None,
         ws_frame_injections: Vec::new(),
         developer_app_ids: None,
+        introspection_client_ids: None,
         token_exchange_config: None,
         anonymous_endpoints: Vec::new(),
         proxy_operation_policy: None,
@@ -2794,6 +2949,9 @@ pub async fn set_agent_operation_scopes_enabled(
     owner: &str,
     enabled: bool,
 ) {
+    if enabled {
+        crate::services::security_readiness_service::ready_test_replica(db).await;
+    }
     crate::services::feature_flag_service::set_platform_override(
         db,
         crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,
@@ -2830,6 +2988,7 @@ pub async fn scoped_specialist_auth(
             description: "Exercise member operation permissions".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: team::GrantTargets {
                 service_ids: selections.iter().map(|(id, _)| id.clone()).collect(),
                 ..Default::default()
@@ -2896,6 +3055,193 @@ pub async fn scoped_specialist_auth(
 pub(crate) struct LocalMachinePlatform {
     pub profile: crate::models::remote_machine::MachineProfileSpec,
     pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
+}
+
+/// Construct and poll the large native lifecycle journey futures on a scoped
+/// thread. The ordinary libtest/nextest thread only joins and propagates panic.
+pub(crate) fn run_native_journey_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let thread = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = Box::pin(test());
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("native journey runtime")
+                .block_on(future);
+        })
+        .expect("native journey thread");
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Run deletion through the production preparation -> acceptance -> worker path.
+/// A pending external obligation returns Conflict; it is never cleared by this
+/// fixture. Tests can settle it and resume the SAME durable accepted intent.
+pub(crate) async fn accept_and_process_owner_erasure(
+    db: &mongodb::Database,
+    owner: &str,
+    policy: &str,
+) -> crate::errors::AppResult<()> {
+    crate::services::admin_user_service::validate_account_deletion_policy(policy)?;
+    accept_and_process_erasure(db, owner, owner, Some(policy)).await
+}
+
+pub(crate) async fn accept_and_process_admin_erasure(
+    db: &mongodb::Database,
+    actor: &str,
+    owner: &str,
+) -> crate::errors::AppResult<()> {
+    if actor == owner {
+        return Err(crate::errors::AppError::ValidationError(
+            "Cannot delete yourself".into(),
+        ));
+    }
+    accept_and_process_erasure(db, actor, owner, None).await
+}
+
+async fn accept_and_process_erasure(
+    db: &mongodb::Database,
+    actor: &str,
+    owner: &str,
+    policy: Option<&str>,
+) -> crate::errors::AppResult<()> {
+    let state = test_app_state(db.clone());
+    accept_and_process_erasure_with_state(&state, actor, owner, policy).await
+}
+
+pub(crate) async fn accept_and_process_erasure_with_state(
+    state: &crate::AppState,
+    actor: &str,
+    owner: &str,
+    policy: Option<&str>,
+) -> crate::errors::AppResult<()> {
+    let db = &state.db;
+    if let Some(policy) = policy {
+        crate::services::admin_user_service::validate_account_deletion_policy(policy)?;
+    } else if actor == owner {
+        return Err(crate::errors::AppError::ValidationError(
+            "Cannot delete yourself".into(),
+        ));
+    }
+    use crate::errors::AppError;
+    use crate::models::personal_erasure::{COLLECTION_NAME as JOBS, ErasureStatus};
+    use crate::services::personal_erasure_service as erasure;
+    use bson::doc;
+    init_test_audit_chain_hmac_key();
+    erasure::ensure_indexes(db).await?;
+    let mut accepted = false;
+    for _ in 0..256 {
+        match erasure::accept(db, owner, actor, policy).await {
+            Ok(_) => {
+                accepted = true;
+                break;
+            }
+            Err(AppError::ErasurePreparing)
+                if erasure::prepare_one_for_test(db, &state.encryption_keys).await? => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if !accepted {
+        return Err(AppError::Conflict(
+            "Credential preparation remains pending".into(),
+        ));
+    }
+    for _ in 0..256 {
+        if db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":owner})
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let job = erasure::status(db, owner)
+            .await?
+            .ok_or_else(|| AppError::Internal("Accepted erasure intent missing".into()))?;
+        if job.status == ErasureStatus::OperatorAction {
+            return Err(AppError::Conflict(
+                "Accepted erasure requires operator reconciliation".into(),
+            ));
+        }
+        // Advance the server-selected scheduler eligibility without sleeps;
+        // effect budgets and external acknowledgements remain untouched.
+        db.collection::<bson::Document>(JOBS)
+            .update_one(
+                doc! {"_id":&job.id},
+                vec![doc! {"$set":{"retry_at":"$$NOW"}}],
+            )
+            .await?;
+        erasure::process_one(state).await?;
+    }
+    Err(AppError::Conflict(
+        "Accepted erasure cleanup remains pending".into(),
+    ))
+}
+
+/// Create an API key with a caller-reserved UUID.
+pub(crate) async fn create_api_key_with_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    id: &str,
+    params: crate::services::user_api_key_service::CreateApiKeyParams<'_>,
+) -> crate::errors::AppResult<crate::models::user_api_key::UserApiKey> {
+    let api_key = crate::services::user_api_key_service::build_api_key_with_id(
+        encryption_keys,
+        user_id,
+        id,
+        params,
+    )
+    .await?;
+    crate::services::service_history::collection::<crate::models::user_api_key::UserApiKey>(
+        db,
+        crate::models::user_api_key::COLLECTION_NAME,
+    )
+    .insert_one(&api_key)
+    .await?;
+    Ok(api_key)
+}
+
+/// One-shot, per-database admission gate for cancellation-safety regression tests.
+#[derive(Clone)]
+pub struct AdmissionPause {
+    pub entered: std::sync::Arc<tokio::sync::Notify>,
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+fn admission_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>
+{
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+pub fn install_admission_pause(db: &mongodb::Database) -> AdmissionPause {
+    let pause = AdmissionPause {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    admission_pauses()
+        .lock()
+        .unwrap()
+        .insert(db.name().into(), pause.clone());
+    pause
+}
+
+pub async fn pause_committed_admission(db: &mongodb::Database) {
+    let pause = { admission_pauses().lock().unwrap().remove(db.name()) };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.resume.notified().await;
+    }
 }
 
 #[cfg(test)]

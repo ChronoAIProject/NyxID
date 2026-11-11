@@ -237,7 +237,8 @@ pub struct CreateGcpServiceAccountRequest {
     #[serde(default)]
     pub label: Option<String>,
     /// Raw contents of the Google service-account JSON key file.
-    pub key_json: String,
+    #[schema(value_type = String)]
+    pub key_json: zeroize::Zeroizing<String>,
     /// OAuth scope(s) to request when minting (space-separated). Defaults
     /// to `https://www.googleapis.com/auth/cloud-platform`.
     #[serde(default)]
@@ -294,13 +295,17 @@ pub(crate) async fn create_gcp_service_account_key_with_id(
     let actor = auth_user.user_id.to_string();
 
     // Validate JSON shape and derive a default label up front.
-    let parsed: serde_json::Value = serde_json::from_str(&body.key_json)
-        .map_err(|_| AppError::ValidationError("key_json is not valid JSON".to_string()))?;
+    let parsed = crate::crypto::secret_json::SecretJson(
+        serde_json::from_str(&body.key_json)
+            .map_err(|_| AppError::ValidationError("key_json is not valid JSON".to_string()))?,
+    );
     let client_email = parsed
+        .0
         .get("client_email")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let has_private_key = parsed
+        .0
         .get("private_key")
         .and_then(|v| v.as_str())
         .is_some_and(|s| !s.is_empty());
@@ -335,13 +340,19 @@ pub(crate) async fn create_gcp_service_account_key_with_id(
     // Mint once to validate the key actually works before storing it —
     // catches a disabled / deleted service account or a malformed key
     // immediately instead of on the user's first proxy request.
-    let minted = gcp_sa_service::mint_access_token(&body.key_json, scope)
-        .await
-        .map_err(|e| {
-            AppError::ValidationError(format!(
-                "Could not mint a token from this service account: {e}"
-            ))
-        })?;
+    let key_id = reserved_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (attempt, minted) = gcp_sa_service::mint_for_install(
+        &state.db,
+        &state.encryption_keys,
+        &actor,
+        &owner_id,
+        &key_id,
+        &body.key_json,
+        scope,
+    )
+    .await?;
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(minted.expires_in_secs);
 
     let label = body
@@ -365,27 +376,29 @@ pub(crate) async fn create_gcp_service_account_key_with_id(
         source: Some("user_created"),
         source_id: None,
     };
-    let key = match reserved_id {
-        Some(id) => {
-            user_api_key_service::create_api_key_with_id(
-                &state.db,
-                &state.encryption_keys,
-                &owner_id,
-                id,
-                params,
-            )
-            .await?
-        }
-        None => {
-            user_api_key_service::create_api_key(
-                &state.db,
-                &state.encryption_keys,
-                &owner_id,
-                params,
-            )
-            .await?
-        }
-    };
+    let key = user_api_key_service::build_api_key_with_id(
+        &state.encryption_keys,
+        &owner_id,
+        &key_id,
+        params,
+    )
+    .await?;
+    let raw = mongodb::bson::to_document(&key)
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    use std::future::IntoFuture;
+    crate::services::personal_erasure_service::issuance::installing(
+        &attempt,
+        crate::services::personal_erasure_service::issuance::key_mutation(
+            doc! {"_id":&key.id,"user_id":&owner_id},
+            &raw,
+            &minted.access_token,
+            None,
+            crate::services::service_history::collection::<UserApiKey>(&state.db, USER_API_KEYS)
+                .insert_one(&key)
+                .into_future(),
+        ),
+    )
+    .await??;
 
     // Optional: re-point existing services (e.g. google-bigquery,
     // google-cloud-billing) at this credential.
@@ -630,7 +643,8 @@ pub async fn delete_external_api_key(
             TelemetryEvent::KeyDeleted {
                 source: event.source.clone(),
             },
-        );
+        )
+        .await;
     }
     Ok(Json(DeleteExternalApiKeyResponse {
         deleted: true,
@@ -708,6 +722,7 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: key_id.to_string(),
@@ -817,9 +832,10 @@ mod tests {
         service_slugs: &[&str],
         target_org_id: Option<&str>,
     ) -> CreateGcpServiceAccountRequest {
+        crate::test_utils::init_test_audit_chain_hmac_key();
         CreateGcpServiceAccountRequest {
             label: label.map(str::to_string),
-            key_json,
+            key_json: key_json.into(),
             scopes: None,
             service_slugs: service_slugs.iter().map(|slug| slug.to_string()).collect(),
             target_org_id: target_org_id.map(str::to_string),
@@ -1352,6 +1368,10 @@ mod tests {
             return;
         };
         let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
         let state = test_app_state(db.clone());
 
         let (token_uri, _handle) = spawn_gcp_token_server("ya29.minted").await;
@@ -1442,21 +1462,37 @@ mod tests {
             .unwrap();
         assert_eq!(stored.user_id, org_id);
         assert_eq!(stored.credential_type, "gcp_service_account");
-        let decrypted_key = state
-            .encryption_keys
-            .decrypt(stored.credential_encrypted.as_ref().unwrap())
+        let record = crate::services::credential_record_service::CredentialRecord::key(&stored);
+        let decrypted_key = record
+            .text(
+                &state.encryption_keys,
+                "credential_encrypted",
+                stored.credential_encrypted.as_deref().unwrap(),
+            )
             .await
             .unwrap();
-        let decrypted_token = state
-            .encryption_keys
-            .decrypt(stored.access_token_encrypted.as_ref().unwrap())
+        let decrypted_token = record
+            .text(
+                &state.encryption_keys,
+                "access_token_encrypted",
+                stored.access_token_encrypted.as_deref().unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(String::from_utf8(decrypted_key).unwrap(), key_json);
+        assert_eq!(decrypted_key.as_str(), key_json);
+        assert_eq!(decrypted_token.as_str(), "ya29.org-admin");
+        let receipt = db
+            .collection::<mongodb::bson::Document>("personal_erasure_effects")
+            .find_one(doc! {"source_id":&stored.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.get_str("user_id"), Ok(org_id.as_str()));
         assert_eq!(
-            String::from_utf8(decrypted_token).unwrap(),
-            "ya29.org-admin"
+            receipt.get_str("initiating_actor_id"),
+            Ok(admin_id.as_str())
         );
+        assert_eq!(receipt.get_str("reason"), Ok("credential_installed"));
 
         let rebound = db
             .collection::<UserService>(USER_SERVICES)

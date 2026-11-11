@@ -1,4 +1,9 @@
 import {
+  allocationFormSchema,
+  allocationSummarySchema,
+  type AllocationForm,
+} from "@/schemas/billing-credits";
+import {
   allowanceBundleFormSchema,
   allowanceBundleResponseSchema,
   type AllowanceBundleForm,
@@ -36,6 +41,8 @@ function benefitPath(path: "grants" | "allowances", ownerId?: string): string {
 export function useAdminCreditGrants(page = 1, perPage = 50) {
   return useQuery({
     queryKey: [...ADMIN_CREDITS_KEY, "grants", page, perPage],
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
     queryFn: async () =>
       adminCreditGrantListSchema.parse(
         await api.get<unknown>(
@@ -70,10 +77,10 @@ export function useIssueCreditGrant() {
 export function useRevokeCreditGrant() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (grantId: string) =>
+    mutationFn: async (grantId: string | { id: string; allocation: boolean }) =>
       creditGrantSchema.parse(
         await api.delete<unknown>(
-          `/admin/credits/grants/${encodeURIComponent(grantId)}`,
+          `/admin/credits/${typeof grantId === "string" ? "grants" : "allocations"}/${encodeURIComponent(typeof grantId === "string" ? grantId : grantId.id)}`,
         ),
       ),
     onSuccess: () =>
@@ -126,7 +133,7 @@ export function useUpdateCreditSchedule() {
     }) =>
       creditScheduleSchema.parse(
         await api.patch<unknown>(
-          `/admin/credits/schedules/${encodeURIComponent(id)}`,
+          `/admin/credits/${body.service_limits !== undefined ? "allocations/schedules" : "schedules"}/${encodeURIComponent(id)}`,
           body,
         ),
       ),
@@ -263,5 +270,69 @@ export function useSetAllowanceBundleActive() {
       ),
     onSuccess: () =>
       void client.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+  });
+}
+
+export function useAllocationOverview() {
+  return useQuery({
+    queryKey: [...ADMIN_CREDITS_KEY, "allocation-summary"],
+    queryFn: async () =>
+      allocationSummarySchema.parse(
+        await api.get<unknown>("/admin/credits/allocations/summary"),
+      ),
+    retry: false,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/** New routes fail on older servers instead of silently dropping policies. */
+export function useAllocateCredits() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      form,
+      requestId,
+    }: {
+      form: AllocationForm;
+      requestId: string;
+    }) => {
+      const value = allocationFormSchema.parse(form);
+      const { recurrence, expires_at, expiry, ...policy } = value;
+      const body = {
+        ...policy,
+        ...normalizedBillingTargets(value),
+        amount_credits: 0,
+        service_refs: value.all_services ? [] : value.service_refs,
+        reason: value.reason || null,
+        request_id: requestId,
+      };
+      return recurrence === "one_time"
+        ? {
+            kind: "one_time" as const,
+            result: issueGrantResponseSchema.parse(
+              await api.post<unknown>("/admin/credits/allocations", {
+                ...body,
+                expires_at: expires_at
+                  ? new Date(expires_at).toISOString()
+                  : null,
+              }),
+            ),
+          }
+        : {
+            kind: "recurring" as const,
+            result: creditScheduleSchema.parse(
+              await api.post<unknown>("/admin/credits/allocations/schedules", {
+                ...body,
+                recurrence,
+                expiry,
+              }),
+            ),
+          };
+    },
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY });
+      void client.invalidateQueries({ queryKey: USER_CREDITS_KEY });
+    },
   });
 }

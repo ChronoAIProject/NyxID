@@ -28,46 +28,64 @@ use crate::error::{CloudAuthError, CloudAuthResult};
 /// Stored on `UserApiKey.credential_encrypted` as a JSON object. The
 /// `region` and `service` fields are required and must match the
 /// target endpoint — for AWS Cost Explorer that's `us-east-1` + `ce`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct AwsCredentials {
-    pub access_key_id: String,
-    pub secret_access_key: String,
+    pub access_key_id: zeroize::Zeroizing<String>,
+    pub secret_access_key: zeroize::Zeroizing<String>,
     pub region: String,
     pub service: String,
     /// Optional STS session token. When present, the signer attaches
     /// it as `X-Amz-Security-Token` and includes it in the signed-
     /// headers list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_token: Option<String>,
+    pub session_token: Option<zeroize::Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for AwsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsCredentials")
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .field("region", &"[REDACTED]")
+            .field("service", &"[REDACTED]")
+            .field("session_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl AwsCredentials {
     pub fn from_json(raw: &str) -> CloudAuthResult<Self> {
         let trimmed = raw.trim();
-        let creds: Self = serde_json::from_str(trimmed).map_err(|e| {
-            CloudAuthError::InvalidCredential(format!(
-                "aws_sigv4 credential must be a JSON object with access_key_id, secret_access_key, region, service: {}",
-                e
-            ))
+        let creds: Self = serde_json::from_str(trimmed).map_err(|_| {
+            CloudAuthError::InvalidCredential(
+                "aws_sigv4 credential must be a JSON object with string access_key_id, secret_access_key, region, service and optional session_token",
+            )
         })?;
         if creds.access_key_id.is_empty()
             || creds.secret_access_key.is_empty()
             || creds.region.is_empty()
             || creds.service.is_empty()
         {
-            return Err(CloudAuthError::InvalidCredential(
-                "aws_sigv4 credential is missing one of access_key_id, secret_access_key, region, service".to_string(),
-            ));
+            return Err(CloudAuthError::InvalidCredential("missing_required_fields"));
         }
         Ok(creds)
     }
 }
 
 /// A header name/value pair to attach to the outgoing request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignedHeader {
     pub name: String,
-    pub value: String,
+    pub value: zeroize::Zeroizing<String>,
+}
+
+impl std::fmt::Debug for SignedHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedHeader")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Sign `method` + `url` + `headers` + `body` under SigV4 with `creds`.
@@ -91,9 +109,9 @@ pub fn sign_request(
     creds: &AwsCredentials,
 ) -> CloudAuthResult<Vec<SignedHeader>> {
     let aws_creds = Credentials::new(
-        &creds.access_key_id,
-        &creds.secret_access_key,
-        creds.session_token.clone(),
+        creds.access_key_id.as_str(),
+        creds.secret_access_key.as_str(),
+        creds.session_token.as_ref().map(|token| token.to_string()),
         None,
         "nyxid-cloud-auth",
     );
@@ -116,7 +134,7 @@ pub fn sign_request(
             settings
         })
         .build()
-        .map_err(|e| CloudAuthError::Signing(format!("SigningParams build: {e}")))?;
+        .map_err(|_| CloudAuthError::Signing("invalid_signing_parameters"))?;
     let signing_params = aws_sigv4::http_request::SigningParams::from(signing_params);
 
     // Borrow the caller's headers as `(&str, &str)` for the upstream
@@ -131,10 +149,10 @@ pub fn sign_request(
         header_refs.iter().copied(),
         SignableBody::Bytes(body),
     )
-    .map_err(|e| CloudAuthError::Signing(format!("SignableRequest: {e}")))?;
+    .map_err(|_| CloudAuthError::Signing("invalid_signable_request"))?;
 
-    let signing_output = sign(signable, &signing_params)
-        .map_err(|e| CloudAuthError::Signing(format!("sign: {e}")))?;
+    let signing_output =
+        sign(signable, &signing_params).map_err(|_| CloudAuthError::Signing("signing_failed"))?;
     let (instructions, _signature) = signing_output.into_parts();
 
     // `SigningInstructions` exposes its applied headers and query
@@ -146,7 +164,7 @@ pub fn sign_request(
         .method(method)
         .uri(url)
         .body(())
-        .map_err(|e| CloudAuthError::Signing(format!("stub http::Request: {e}")))?;
+        .map_err(|_| CloudAuthError::Signing("invalid_http_request"))?;
     instructions.apply_to_request_http1x(&mut stub);
 
     let mut out = Vec::with_capacity(4);
@@ -161,14 +179,12 @@ pub fn sign_request(
         let value_str = match value.to_str() {
             Ok(s) => s,
             Err(_) => {
-                return Err(CloudAuthError::Signing(format!(
-                    "signed header {name} contains non-ASCII bytes"
-                )));
+                return Err(CloudAuthError::Signing("invalid_signed_header"));
             }
         };
         out.push(SignedHeader {
             name: name.as_str().to_string(),
-            value: value_str.to_string(),
+            value: value_str.to_owned().into(),
         });
     }
     Ok(out)
@@ -177,6 +193,101 @@ pub fn sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_credentials_and_signing_errors_have_fixed_diagnostics() {
+        for raw in [
+            r#"{"access_key_id":"distinctive-id","secret_access_key":"distinctive-secret","region":42}"#,
+            r#"{"access_key_id":"distinctive-id","secret_access_key":"distinctive-secret","session_token":"distinctive-session","service":[]}"#,
+        ] {
+            let error = AwsCredentials::from_json(raw).unwrap_err();
+            for output in [error.to_string(), format!("{error:?}")] {
+                assert!(!output.contains("distinctive"));
+            }
+        }
+        let credentials = AwsCredentials {
+            access_key_id: "distinctive-id".to_owned().into(),
+            secret_access_key: "distinctive-secret".to_owned().into(),
+            session_token: Some("distinctive-session".to_owned().into()),
+            region: "us-east-1".into(),
+            service: "ce".into(),
+        };
+        let error = sign_request(
+            "invalid method",
+            "https://example.invalid/distinctive-token",
+            &[],
+            b"",
+            &credentials,
+        )
+        .unwrap_err();
+        for output in [error.to_string(), format!("{error:?}")] {
+            assert!(!output.contains("distinctive"));
+            assert!(!output.contains("example.invalid"));
+        }
+    }
+
+    #[test]
+    fn signed_header_debug_redacts_all_values() {
+        let headers = vec![
+            SignedHeader {
+                name: "Authorization".into(),
+                value: "AWS4-HMAC-SHA256 Credential=distinctive-signing-key-id"
+                    .to_owned()
+                    .into(),
+            },
+            SignedHeader {
+                name: "X-Amz-Security-Token".into(),
+                value: "distinctive-sts-session-token".to_owned().into(),
+            },
+            SignedHeader {
+                name: "custom".into(),
+                value: "distinctive-custom-header".to_owned().into(),
+            },
+        ];
+        for output in [format!("{headers:?}"), format!("{headers:#?}")] {
+            assert!(!output.contains("distinctive-"));
+            assert!(output.contains("Authorization"));
+            assert!(output.contains("[REDACTED]"));
+        }
+    }
+
+    #[test]
+    fn invalid_credential_errors_do_not_echo_supplied_values() {
+        for raw in [
+            r#"{"access_key_id":"id","secret_access_key":["distinctive-secret"],"region":"r","service":"s"}"#,
+            r#"{"access_key_id":"id","secret_access_key":"secret","region":"r","service":"s","session_token":{"distinctive-secret":1}}"#,
+            r#""distinctive-secret""#,
+        ] {
+            let error = AwsCredentials::from_json(raw).unwrap_err();
+            assert!(!format!("{error}").contains("distinctive-secret"));
+            assert!(!format!("{error:?}").contains("distinctive-secret"));
+        }
+    }
+
+    #[test]
+    fn credentials_debug_redacts_secrets_and_key_identifier() {
+        let credentials = AwsCredentials {
+            access_key_id: "distinctive-access-key-id".to_owned().into(),
+            secret_access_key: "distinctive-secret-access-key".to_owned().into(),
+            session_token: Some("distinctive-session-token".to_owned().into()),
+            region: "us-east-1".into(),
+            service: "ce".into(),
+        };
+        for output in [format!("{credentials:?}"), format!("{credentials:#?}")] {
+            for secret in [
+                &credentials.access_key_id,
+                &credentials.secret_access_key,
+                credentials.session_token.as_ref().unwrap(),
+            ] {
+                assert!(!output.contains(secret.as_str()));
+            }
+            assert!(output.contains("[REDACTED]"));
+        }
+        let json = serde_json::to_string(&credentials).unwrap();
+        let decoded = AwsCredentials::from_json(&json).unwrap();
+        assert_eq!(decoded.secret_access_key, credentials.secret_access_key);
+        assert_eq!(decoded.session_token, credentials.session_token);
+    }
 
     #[test]
     fn rejects_malformed_credential_json() {
@@ -200,8 +311,10 @@ mod tests {
     #[test]
     fn returns_expected_signed_headers() {
         let creds = AwsCredentials {
-            access_key_id: "AKIDEXAMPLE".to_string(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
+            access_key_id: "AKIDEXAMPLE".to_string().into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+                .to_string()
+                .into(),
             region: "us-east-1".to_string(),
             service: "ce".to_string(),
             session_token: None,
@@ -249,11 +362,11 @@ mod tests {
     #[test]
     fn session_token_propagates_to_signed_header_set() {
         let creds = AwsCredentials {
-            access_key_id: "AKIDEXAMPLE".to_string(),
-            secret_access_key: "secret".to_string(),
+            access_key_id: "AKIDEXAMPLE".to_string().into(),
+            secret_access_key: "secret".to_string().into(),
             region: "us-east-1".to_string(),
             service: "ce".to_string(),
-            session_token: Some("FQoGZ...short".to_string()),
+            session_token: Some("FQoGZ...short".to_string().into()),
         };
         let signed = sign_request(
             "POST",
@@ -267,6 +380,6 @@ mod tests {
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("x-amz-security-token"))
             .expect("expected session token to appear as a signed header");
-        assert_eq!(token_header.value, "FQoGZ...short");
+        assert_eq!(token_header.value.as_str(), "FQoGZ...short");
     }
 }

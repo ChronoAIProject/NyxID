@@ -552,6 +552,7 @@ pub async fn launch_creation(
         .creation_request_id
         .ok_or_else(|| AppError::Conflict("Creation is not ready yet".into()))?;
     let service = crate::services::telegram_new_service::TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,

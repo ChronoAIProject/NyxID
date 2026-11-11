@@ -221,53 +221,75 @@ pub async fn begin(
     let previous_attempt = row.attempt_id.clone();
     let row = session
         .start_transaction()
-        .and_run2(async move |session| {
-            let result: AppResult<MachineUpdate> = async {
-                if let Some(id) = &previous_attempt {
-                    // Archive in the same transaction as replacement, so a delayed
-                    // change-stream watcher always finds the terminal outcome.
-                    if let Some(previous) = database
-                        .collection::<MachineUpdate>(COLLECTION_NAME)
-                        .find_one(doc! {"attempt_id": id})
-                        .session(&mut *session)
-                        .await?
-                    {
-                        let snapshot = MachineUpdateAttempt {
-                            id: id.clone(),
-                            user_id: previous.user_id.clone(),
-                            state: previous,
-                        };
-                        database
-                            .collection::<MachineUpdateAttempt>(ATTEMPTS_COLLECTION_NAME)
-                            .replace_one(doc! {"_id": id}, snapshot)
-                            .upsert(true)
+        .and_run(
+            (
+                database,
+                previous_attempt,
+                filter,
+                update,
+                watch,
+                actor.to_owned(),
+            ),
+            |session, (database, previous_attempt, filter, update, watch, actor)| {
+                Box::pin(async move {
+                    let result: AppResult<MachineUpdate> = async {
+                        if let Some(id) = &previous_attempt {
+                            // Archive in the same transaction as replacement, so a delayed
+                            // change-stream watcher always finds the terminal outcome.
+                            if let Some(previous) = database
+                                .collection::<MachineUpdate>(COLLECTION_NAME)
+                                .find_one(doc! {"attempt_id": id})
+                                .session(&mut *session)
+                                .await?
+                            {
+                                let snapshot = MachineUpdateAttempt {
+                                    id: id.clone(),
+                                    user_id: previous.user_id.clone(),
+                                    state: previous,
+                                };
+                                database
+                                    .collection::<MachineUpdateAttempt>(ATTEMPTS_COLLECTION_NAME)
+                                    .replace_one(doc! {"_id": id}, snapshot)
+                                    .upsert(true)
+                                    .session(&mut *session)
+                                    .await?;
+                            }
+                        }
+                        let row = database
+                            .collection::<MachineUpdate>(COLLECTION_NAME)
+                            .find_one_and_update(filter.clone(), update.clone())
+                            .return_document(ReturnDocument::After)
                             .session(&mut *session)
-                            .await?;
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::Conflict("A machine update was already admitted".into())
+                            })?;
+                        if let Some(watch) = &watch {
+                            if !super::assistant_invocation_service::fence_in_session(
+                                database,
+                                session,
+                                actor,
+                                watch.get_str("invocation_id").ok(),
+                            )
+                            .await?
+                            {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
+                            database
+                                .collection::<bson::Document>(
+                                    crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
+                                )
+                                .insert_one(watch)
+                                .session(&mut *session)
+                                .await?;
+                        }
+                        Ok(row)
                     }
-                }
-                let row = database
-                    .collection::<MachineUpdate>(COLLECTION_NAME)
-                    .find_one_and_update(filter.clone(), update.clone())
-                    .return_document(ReturnDocument::After)
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| {
-                        AppError::Conflict("A machine update was already admitted".into())
-                    })?;
-                if let Some(watch) = &watch {
-                    database
-                        .collection::<bson::Document>(
-                            crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
-                        )
-                        .insert_one(watch)
-                        .session(&mut *session)
-                        .await?;
-                }
-                Ok(row)
-            }
-            .await;
-            transactions::transaction_result(result)
-        })
+                    .await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(transactions::map_transaction_error)?;
     super::audit_service::log_async(

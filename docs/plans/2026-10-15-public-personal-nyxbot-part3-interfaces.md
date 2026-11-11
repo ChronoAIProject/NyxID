@@ -1,5 +1,11 @@
 # Part 3 execution interfaces and security proposal
 
+Deployment follow-up, 2026-10-16: the [versioned public runtime contract](2026-10-16-platform-public-runtime-contract.md)
+replaces the unconditional NyxID discovery/readiness stubs described in this
+historical checkpoint. Persisted scoped evidence now gates public enablement;
+upstreams without the new contract remain unavailable. The upstream implementation
+and deployment are still pending, and these local changes claim no runtime proof.
+
 Status: implementation checkpoint, 2026-10-15, through `ee439179c` on
 `nyxbot-manager/public`. The final checkpoint below supersedes historical
 first-stage and next-wave status statements. The initial investigation used

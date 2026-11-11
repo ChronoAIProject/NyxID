@@ -509,7 +509,7 @@ impl Drop for Completion {
             observability: self.observability.clone(),
         };
         self.completed = true;
-        tokio::spawn(async move {
+        crate::turn_trace::spawn(async move {
             if let Err(error) =
                 Box::pin(completion.finish(completion.context.cancellation_cause())).await
             {
@@ -695,7 +695,7 @@ pub(super) async fn response_body(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     // Provider ownership stays in this task. Cancellation wins even when the
     // client stops polling and the bounded response queue is full.
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         loop {
             let next =
                 until_client_disconnect(&token, tokio::time::timeout(idle, upstream.next())).await;
@@ -873,6 +873,13 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database(label).await;
         let state = crate::test_utils::test_app_state(db.clone());
         let auth = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &auth.user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let request_id = uuid::Uuid::new_v4().to_string();
         let metadata = PoolAttemptAccounting {
             pool_id: "pool".into(),
@@ -971,7 +978,7 @@ mod tests {
     async fn pool_reported_sse_usage_survives_cancellation_before_settlement_acknowledgment() {
         let (db, mut completion, finalization) = completion_fixture("pool_cancel_settlement").await;
         let request_id = completion.context.request_id.clone();
-        completion.observe(b"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
+        completion.observe(b"data: {\"model\":\"gpt-5.5\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
         {
             let finish = completion.finish_inner(PoolCompletionCause::Complete);
             tokio::pin!(finish);
@@ -980,7 +987,9 @@ mod tests {
             assert!(futures::poll!(&mut finish).is_pending());
         }
         assert!(completion.usage_extracted && completion.extracted_usage.is_some());
-        drop(completion);
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let trace = crate::turn_trace::TurnContext::for_turn(&turn_id);
+        crate::turn_trace::scope(trace, async { drop(completion) }).await;
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             await_finalization(&finalization),
@@ -995,12 +1004,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.quantity, Some(3));
+        // Recorded for reporting only; the pricing model stays unset.
+        assert_eq!(
+            (row.model.as_deref(), row.reported_model.as_deref()),
+            (None, Some("gpt-5.5"))
+        );
         assert_eq!(row.status, UsageStatus::Finalized);
         assert_eq!(
             row.pool_attempt.unwrap().outcome,
             Some(PoolAttemptOutcome::Reported)
         );
         assert!(row.released);
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = db
+                    .collection::<crate::models::audit_log::AuditLog>(
+                        crate::models::audit_log::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"event_type": "service_pool_attempt"})
+                    .await
+                    .unwrap()
+                {
+                    break row;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(audit.event_data.unwrap()["turn_id"], turn_id);
         db.drop().await.unwrap();
     }
     #[tokio::test]

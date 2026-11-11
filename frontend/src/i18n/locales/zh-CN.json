@@ -9023,5 +9023,14 @@
   " · Child {{id}}": " · 子密钥 {{id}}",
   "Different owner": "所有者不同",
   "No callback URL": "没有回调 URL",
-  "Assistant chat key": "助手聊天密钥"
+  "Assistant chat key": "助手聊天密钥",
+  "Attach": "附加",
+  "Back to Channels": "返回频道",
+  "Back to Skills": "返回技能",
+  "Back to skill": "返回技能",
+  "Choose provider": "选择提供方",
+  "View": "查看",
+  "e.g. media.write": "例如 media.write",
+  "e.g. repo,read:org": "例如 repo,read:org",
+  "{{value1}} bot": "{{value1}} 机器人"
 }

@@ -12,6 +12,7 @@ use mongodb::{
 #[derive(Clone)]
 pub struct Authority {
     pub catalog_base_url: String,
+    pub catalog_base_aliases: Vec<String>,
     pub actor: AuditActor,
     /// Captured from the authenticated request, never inferred from a user row.
     pub first_party_human: bool,
@@ -84,6 +85,13 @@ async fn check_parent(
             write_fence,
         )
         .await?;
+        if super::platform_key_service::model_only(&live)
+            && (!authority.first_party_human || !admin)
+        {
+            return Err(AppError::Forbidden(
+                "Model-only records require live Admin authority".into(),
+            ));
+        }
         if authority.admin_required && !admin {
             return Err(AppError::Forbidden("Admin authority revoked".into()));
         }
@@ -154,6 +162,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "auth_key_name",
         "oauth_client_id",
         "credential_encrypted",
+        "secret_context_versions",
         "platform_key",
         "tools_credential_frozen",
         "destination_targets",
@@ -187,15 +196,16 @@ pub async fn commit_update(
     let fields = fields.clone();
     let filter = filter.clone();
     let key = zeroize::Zeroizing::new(audit_key.to_vec());
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let result = async {
-            let (live, admin) = fence(&db, session, &observed, Some(&authority)).await?;
+    let context = (&db, &observed, &authority, &fields, &filter, &key);
+    super::transaction_service::run_db_only(&db, &context, |session, context| {
+        let &(db, observed, authority, fields, filter, key) = context;
+        Box::pin(async move {
+            let (live, admin) = fence(db, session, observed, Some(authority)).await?;
             let tool = live.offering_kind == OfferingKind::Tool;
-            require_desired_kind(&live, &fields, &authority, admin)?;
-            validate_update_fields(&db, session, &live, &fields, &authority, admin).await?;
+            require_desired_kind(&live, fields, authority, admin)?;
+            validate_update_fields(db, session, &live, fields, authority, admin).await?;
             if fields.get_str("offering_kind") == Ok("tool") {
-                require_providerless_tool(&db, session, &live).await?;
+                require_providerless_tool(db, session, &live).await?;
             }
             if tool && (fields.contains_key("credential_encrypted") || fields.contains_key("base_url")) && live.updated_at != observed.updated_at {
                 return Err(AppError::Conflict("Tool credential or destination revision changed".into()));
@@ -205,29 +215,28 @@ pub async fn commit_update(
                 return Err(AppError::Forbidden("Tool credential and destination are frozen; ask an Admin".into()));
             }
             if let Ok(url) = fields.get_str("icon_url") {
-                let id = super::catalog_icon_service::asset_id(&authority.catalog_base_url, url)?;
-                super::catalog_icon_service::require_asset(&db, id, Some(&mut *session)).await?;
+                let id = super::catalog_icon_service::asset_id_with_aliases(&authority.catalog_base_url, &authority.catalog_base_aliases, url)?;
+                super::catalog_icon_service::require_asset(db, id, Some(&mut *session)).await?;
             }
             if let Some(rules) = fields.get("anonymous_endpoints") {
                 let rules: Vec<crate::models::downstream_service::AnonymousEndpointRule> = bson::from_bson(rules.clone()).map_err(|e| AppError::Internal(format!("Invalid anonymous rules: {e}")))?;
                 super::anonymous_endpoint_service::validate_rules_for_service(&live, &rules)?;
             }
-            if tool && (tools_manager_service::tool_contract_changed(&live, &fields)?
+            if tool && (tools_manager_service::tool_contract_changed(&live, fields)?
                 || fields.get_str("offering_kind").is_ok_and(|kind| kind != "tool")) {
-                super::service_endpoint_service::demote_tool_in_session(&db, session, &live.id, None, Some((&authority.actor, &key))).await?;
+                super::service_endpoint_service::demote_tool_in_session(db, session, &live.id, None, Some((&authority.actor, key))).await?;
             }
             let updated = db.collection::<DownstreamService>(COLLECTION_NAME).find_one_and_update(
                 filter.clone(), doc! {"$set": &fields, "$unset": {"api_spec_url": ""}}
             ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Service changed or identity reconciliation is pending".into()))?;
             if tool {
-                super::audit_service::log_actor_event_in_session(&db, session, &key, &authority.actor, "tools_manager_updated",
+                super::audit_service::log_actor_event_in_session(db, session, key, &authority.actor, "tools_manager_updated",
                     serde_json::json!({"service_id":live.id,"authority":if admin {"admin"} else {"tools_manager"},"fields":fields.keys().filter(|k| k.as_str() != "updated_at").collect::<Vec<_>>()})).await?;
             }
             Ok(updated)
-        }.await;
-        super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+        })
+    }).await
 }
 
 /// Recheck the field-dependent boundaries against live rows within the same
@@ -240,6 +249,41 @@ pub(crate) async fn validate_update_fields(
     authority: &Authority,
     admin: bool,
 ) -> AppResult<()> {
+    if let Some(value) = fields.get("billing") {
+        let requested: Option<crate::models::service_billing::ServiceBilling> =
+            bson::from_bson(value.clone())
+                .map_err(|_| AppError::ValidationError("Invalid billing configuration".into()))?;
+        super::billing::model_tariffs::validate_catalog_update(
+            live.billing.as_ref(),
+            requested.as_ref(),
+        )?;
+    }
+    if let Some(value) = fields.get("platform_key") {
+        let next: Option<crate::models::downstream_service::PlatformKeyConfig> =
+            bson::from_bson(value.clone())
+                .map_err(|_| AppError::ValidationError("Invalid platform key policy".into()))?;
+        if super::platform_key_service::model_only(live)
+            && next.as_ref().map(|c| c.purpose) != live.platform_key.as_ref().map(|c| c.purpose)
+        {
+            return Err(AppError::ValidationError(
+                "Model-only credential purpose cannot be changed".into(),
+            ));
+        }
+    }
+    let next_model_only = fields
+        .get_document("platform_key")
+        .ok()
+        .and_then(|p| p.get_str("purpose").ok())
+        .is_some_and(|purpose| purpose != "ordinary");
+    if super::platform_key_service::model_only(live) || next_model_only {
+        let mut candidate = bson::to_document(live)
+            .map_err(|_| AppError::Internal("Invalid catalog record".into()))?;
+        candidate.extend(fields.clone());
+        super::platform_key_service::validate_model_purpose(
+            &bson::from_document(candidate)
+                .map_err(|_| AppError::ValidationError("Invalid catalog update".into()))?,
+        )?;
+    }
     if let Some(scheme) = fields.get("auth_scheme") {
         let scheme: Option<String> = bson::from_bson(scheme.clone())
             .map_err(|_| AppError::ValidationError("Invalid auth_scheme".into()))?;

@@ -74,7 +74,7 @@ test("pasted text becomes a pill, and removing its upload clears undo references
   await expect(input).not.toContainText("text-1");
   await expect(
     page.getByRole("button", { name: "Send message", exact: true }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
 });
 
 test("plain paste preserves line breaks and ignores HTML formatting", async ({

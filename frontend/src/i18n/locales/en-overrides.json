@@ -26,5 +26,9 @@
   "{{count}} groups_one": "{{count}} group",
   "{{count}} groups_other": "{{count}} groups",
   "{{count}} charged records were metered under a price that is no longer available, so their gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact._one": "{{count}} charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact.",
-  "{{count}} charged records were metered under a price that is no longer available, so their gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact._other": "{{count}} charged records were metered under a price that is no longer available, so their gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact."
+  "{{count}} charged records were metered under a price that is no longer available, so their gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact._other": "{{count}} charged records were metered under a price that is no longer available, so their gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact.",
+  "credit grant": "grant",
+  "credit grants": "grants",
+  "Agent memory": "Memory",
+  "Billing grants": "Grants"
 }

@@ -8,6 +8,11 @@ import {
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { capture } from "@/lib/telemetry";
+vi.mock("@/lib/telemetry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/telemetry")>()),
+  capture: vi.fn(),
+}));
 type TurnEvent = DirectTurnEvent;
 import type { User } from "@/types/api";
 
@@ -75,6 +80,7 @@ async function startedConversation(
 }
 
 beforeEach(() => {
+  vi.mocked(capture).mockClear();
   localStorage.clear();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAuthStore.setState({
@@ -405,6 +411,14 @@ describe("DirectAssistantTransport streaming", () => {
       events.length - 1,
     );
     expect(streamCancelled).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({
+        error_code: "NYXBOT_RUN_ERROR",
+        engine: "direct",
+        upstream_error_code: "upstream_failed",
+      }),
+    });
   });
 
   it("aborts and emits cancellation exactly once", async () => {
@@ -442,6 +456,7 @@ describe("DirectAssistantTransport streaming", () => {
     expect(events.filter((event) => event.event === "turn.completed")).toEqual([
       expect.objectContaining({ status: "cancelled" }),
     ]);
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("fails a request that misses the first-byte deadline", async () => {
@@ -459,6 +474,13 @@ describe("DirectAssistantTransport streaming", () => {
       event: "turn.completed",
       status: "failed",
       error: { code: "first_byte_timeout" },
+    });
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({
+        error_code: "NYXBOT_START_TIMEOUT",
+        engine: "direct",
+      }),
     });
   });
 
@@ -495,10 +517,57 @@ describe("DirectAssistantTransport streaming", () => {
       status: "failed",
       error: { code: "idle_timeout" },
     });
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({
+        error_code: "NYXBOT_STREAM_TIMEOUT",
+        engine: "direct",
+      }),
+    });
   });
 });
 
 describe("DirectAssistantTransport authentication boundaries", () => {
+  it.each([403, 500])(
+    "records HTTP %s once before the UI handles it",
+    async (status) => {
+      const transport = new DirectAssistantTransport({
+        fetch: vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                error: "internal",
+                error_code: 9100,
+                message: "private server details",
+              }),
+              { status, headers: { "x-trace-id": "trace-direct" } },
+            ),
+        ),
+      });
+      const conversationId = await startedConversation(transport);
+      const events: TurnEvent[] = [];
+      transport.sendMessage(conversationId, "private prompt", (event) =>
+        events.push(event),
+      );
+      await waitForTerminal(events);
+      expect(capture).toHaveBeenCalledExactlyOnceWith({
+        name: "nyxbot.error",
+        props: expect.objectContaining({
+          error_code:
+            status === 403
+              ? "NYXBOT_HTTP_FORBIDDEN"
+              : "NYXBOT_HTTP_SERVER_ERROR",
+          engine: "direct",
+          http_status: status,
+          trace_id: "trace-direct",
+          upstream_error_code: 9100,
+        }),
+      });
+      expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain(
+        "private",
+      );
+    },
+  );
   it("clears auth only for a structured NyxID 401", async () => {
     const transport = new DirectAssistantTransport({
       fetch: vi.fn(

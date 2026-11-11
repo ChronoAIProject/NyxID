@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { isValidHttpUrl } from "@/schemas/http-url";
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
@@ -25,7 +25,7 @@ export function CallbackUrlCard({
   readonly keyId: string;
   readonly callbackUrl: string | null;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(callbackUrl ?? "");
   const updateApiKey = useUpdateApiKey();
@@ -33,7 +33,7 @@ export function CallbackUrlCard({
   function handleSave() {
     const trimmed = value.trim();
     if (trimmed !== "" && !isValidHttpUrl(trimmed)) {
-      toast.error(translateUi("Must be a full URL with a domain, e.g. https://agent.example.com/callback"));
+      toast.error(translateErrorMessage("Must be a full URL with a domain, e.g. https://agent.example.com/callback"));
       return;
     }
     updateApiKey.mutate(
@@ -79,9 +79,9 @@ export function CallbackUrlCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Link2 className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">{t("Callback URL")}</CardTitle>
+          <CardTitle className="text-15">{translateUi("Callback URL")}</CardTitle>
         </div>
-        <CardDescription>{t("Where NyxID sends channel relay messages for this agent")}</CardDescription>
+        <CardDescription>{translateUi("Where NyxID sends channel relay messages for this agent")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {editing ? (
@@ -92,7 +92,7 @@ export function CallbackUrlCard({
               value={value}
               onChange={(e) => setValue(e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">{t("Must be HTTPS in production. Used by Channel Bot Relay to forward platform messages to this agent.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Must be HTTPS in production. Used by Channel Bot Relay to forward platform messages to this agent.")}</p>
             <div className="flex justify-end gap-2">
               <Button
                 variant="outline"
@@ -100,22 +100,22 @@ export function CallbackUrlCard({
                   setValue(callbackUrl ?? "");
                   setEditing(false);
                 }}
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending}
-              >{t("Save")}</Button>
+              >{translateUi("Save")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
             {callbackUrl ? (
-              <code className="truncate rounded bg-muted px-2 py-1 text-xs">
+              <code className="truncate rounded bg-muted px-2 py-1 text-14">
                 {callbackUrl}
               </code>
             ) : (
-              <Badge variant="secondary">{t("Not set")}</Badge>
+              <Badge variant="secondary">{translateUi("Not set")}</Badge>
             )}
             <div className="flex shrink-0 gap-1">
               <Button

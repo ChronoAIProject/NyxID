@@ -12,9 +12,13 @@ pub struct Consent {
     pub user_id: String,
     pub client_id: String,
     pub scopes: String,
-    /// Opaque version fences browser decisions and pending incremental codes.
+    /// Authority version rotates when previously valid authority is removed.
+    /// Browser decisions additionally bind the complete authority fingerprint.
     #[serde(default)]
     pub revision: Option<String>,
+    /// Independent CAS version; authority revisions remain stable on broadening.
+    #[serde(default)]
+    pub write_version: Option<String>,
     /// Serializes incremental token issuance with transactional revocation.
     #[serde(default)]
     pub issuance_fence: Option<String>,
@@ -83,6 +87,7 @@ mod tests {
             client_id: "client-1".to_string(),
             scopes: "openid profile email".to_string(),
             revision: None,
+            write_version: None,
             issuance_fence: None,
             allow_all_services: false,
             allowed_service_ids: None,

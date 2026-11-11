@@ -134,6 +134,9 @@ pub async fn append_chained_entry(
         .unwrap_or_else(|| mongodb::error::Error::custom("audit chain append exhausted retries")))
 }
 
+#[derive(Debug)]
+pub(crate) struct AuditHeadCollision;
+
 /// Append alongside a policy mutation. The caller retries the enclosing
 /// transaction on conflicts; an audit failure must abort the mutation too.
 pub async fn append_chained_entry_in_session(
@@ -156,7 +159,16 @@ pub async fn append_chained_entry_in_session(
         None => (1, GENESIS_PREV_HASH.to_owned()),
     };
     prepare_chained_entry(&mut entry, seq, hash, key)?;
-    collection.insert_one(entry).session(&mut *session).await?;
+    if let Err(error) = collection.insert_one(entry).session(&mut *session).await {
+        if is_duplicate_key_error(&error)
+            && error.to_string().contains("index: audit_log_seq_unique ")
+        {
+            return Err(AppError::DatabaseError(mongodb::error::Error::custom(
+                AuditHeadCollision,
+            )));
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 

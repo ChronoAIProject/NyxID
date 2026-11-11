@@ -107,7 +107,7 @@ export function SshTerminalPage() {
           )}
         </div>
 
-        <Badge variant="accent" className="text-9">
+        <Badge variant="accent" className="text-9 unthemed:text-9">
           {principal}
         </Badge>
 
@@ -116,7 +116,7 @@ export function SshTerminalPage() {
         <Button
           variant="ghost"
           onClick={handleBack}
-          className="h-7 gap-1 text-xs text-slate-400 hover:text-slate-200"
+          className="h-7 gap-1 text-xs unthemed:text-xs text-slate-400 hover:text-slate-200"
         >
           <X className="h-3 w-3" />{t("Close")}</Button>
       </div>

@@ -27,10 +27,12 @@ pub struct SetupInfo {
     conversation_id: Option<String>,
     expires_at: String,
     machine: Option<nyxid_machine::MachineProfile>,
+    selection_reason: Option<String>,
 }
 impl SetupInfo {
     fn new(row: MachineSetup, machine: Option<nyxid_machine::MachineProfile>) -> Self {
         Self {
+            selection_reason: None,
             id: row.id,
             choices: row.choices,
             status: row.status,
@@ -71,6 +73,7 @@ pub async fn get(
     super::login_client_context::require_first_party_human(&auth)?;
     let mut row = setup::get(&state.db, &auth.user_id.to_string(), &id).await?;
     let node = crate::services::node_service::get_node_by_id(&state.db, &id).await?;
+    let mut selection_reason = None;
     if let Some(node) = &node {
         if node.user_id != row.choices.owner_id.as_deref().unwrap_or(&row.user_id)
             || !crate::services::org_service::resolve_owner_access(
@@ -83,11 +86,14 @@ pub async fn get(
         {
             return Err(AppError::MachineNotAllowed);
         }
+        selection_reason = Box::pin(setup::setup_selection_reason(&state.db, &row, node)).await?;
         if let Some(profile) = &node.machine {
             row.status = if node.status != crate::models::node::NodeStatus::Online {
                 "offline"
             } else if profile.computer && !profile.computer_ready {
                 "permissions_missing"
+            } else if selection_reason.is_some() {
+                "selection_required"
             } else {
                 "connected"
             }
@@ -98,7 +104,10 @@ pub async fn get(
     {
         row.status = "expired".into();
     }
-    Ok(Json(SetupInfo::new(row, node.and_then(|n| n.machine))))
+    let mut info = SetupInfo::new(row, node.and_then(|n| n.machine));
+    info.selection_reason =
+        selection_reason.map(crate::services::machine_access_service::selection_message);
+    Ok(Json(info))
 }
 
 #[derive(Serialize)]
@@ -292,6 +301,8 @@ pub async fn link_tool(
     crate::services::machine_service::caller(chat)?;
     rate_owner(state, &chat.user_id).await?;
     let choices = Choices {
+        separation: None,
+        legacy_warning_acknowledged: false,
         automatic_updates: None,
         owner_id: None,
         name: args["name"].as_str().unwrap_or("my-machine").into(),

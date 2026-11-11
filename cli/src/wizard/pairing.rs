@@ -758,6 +758,9 @@ pub fn prefill_api_key_create(p: &ApiKeyCreatePrefill) -> Value {
         obj.insert("scopes".into(), Value::String(v.clone()));
     }
     if let Some(v) = p.expires_in_days {
+        if v == 0 {
+            obj.insert("never_expires".into(), Value::Bool(true));
+        }
         obj.insert(
             "expires_in_days".into(),
             Value::Number(serde_json::Number::from(v)),
@@ -1402,6 +1405,21 @@ mod tests {
                 (_, other) => panic!("unexpected variant for {other}"),
             }
         }
+    }
+
+    #[test]
+    fn explicit_no_expiry_survives_pairing_prefill() {
+        let value = prefill_api_key_create(&ApiKeyCreatePrefill {
+            expires_in_days: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(value["never_expires"], true);
+        assert_eq!(value["expires_in_days"], 0);
+        assert!(
+            prefill_api_key_create(&ApiKeyCreatePrefill::default())
+                .get("never_expires")
+                .is_none()
+        );
     }
 
     #[test]

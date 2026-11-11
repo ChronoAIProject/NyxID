@@ -6,13 +6,17 @@
 //! operation policy, and the configured node-binding set) so an approved
 //! effect cannot be silently retargeted while the approval is pending.
 
+use crate::crypto::secret_json::SecretJson;
+#[cfg(test)]
+use crate::crypto::secret_json::clear_json_strings;
 use serde::Serialize;
 
-use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::default_request_header::ResolvedDefaultRequestHeader as DefaultRequestHeader;
 use crate::models::downstream_service::ProxyOperationPolicy;
 use crate::services::mcp_service;
 use crate::services::provider_token_exchange_service;
 use crate::services::proxy_service::UserServiceResolution;
+use zeroize::Zeroizing;
 
 pub const LEGACY_CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v1";
 pub const CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v2";
@@ -39,12 +43,23 @@ pub struct IdentityInjectionProjection {
     pub custom_user_agent: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct HeaderProjection {
     pub name: String,
-    pub value: String,
+    pub value: Zeroizing<String>,
     pub overridable: bool,
     pub sensitive: bool,
+}
+
+impl std::fmt::Debug for HeaderProjection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderProjection")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("overridable", &self.overridable)
+            .field("sensitive", &self.sensitive)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,7 +165,7 @@ pub fn build_projection(
 }
 
 pub fn digest(projection: &ExecutionAuthorityProjection) -> String {
-    mcp_service::canonical_sha256(
+    secret_canonical_sha256(
         serde_json::to_value(projection).expect("execution authority projection is JSON"),
     )
 }
@@ -159,7 +174,7 @@ pub fn digest(projection: &ExecutionAuthorityProjection) -> String {
 /// approvals store this in the legacy slot while authorizing current replicas
 /// through the explicit v2 binding.
 pub fn legacy_digest(projection: &ExecutionAuthorityProjection) -> String {
-    mcp_service::canonical_sha256(serde_json::json!({
+    secret_canonical_sha256(serde_json::json!({
         "contract_version": LEGACY_CONTRACT_VERSION,
         "user_service_id": &projection.user_service_id,
         "destination_base_url": &projection.destination_base_url,
@@ -171,6 +186,28 @@ pub fn legacy_digest(projection: &ExecutionAuthorityProjection) -> String {
         "proxy_operation_policy": policy_projection(projection.proxy_operation_policy.as_ref()),
         "node_route": &projection.node_route,
     }))
+}
+
+/// Header-bearing canonical hashing preserves the frozen public JSON contract
+/// while clearing the owned JSON tree on every exit. Serialization streams
+/// directly into SHA-256, without an owned plaintext serialization buffer.
+/// Keep unrelated public canonical hashing unchanged.
+fn secret_canonical_sha256(value: serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let tree = SecretJson(mcp_service::canonical_json(value));
+    struct DigestWriter(Sha256);
+    impl std::io::Write for DigestWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = DigestWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, &tree.0).expect("serializing JSON values cannot fail");
+    format!("sha256:{}", hex::encode(writer.0.finalize()))
 }
 
 // Freeze the real v1/v2 nested policy shape explicitly. New routing selectors
@@ -244,7 +281,7 @@ mod tests {
             default_headers: DefaultHeadersProjection {
                 catalog: vec![HeaderProjection {
                     name: "X-Example".to_string(),
-                    value: "one".to_string(),
+                    value: "one".to_string().into(),
                     overridable: false,
                     sensitive: false,
                 }],
@@ -271,6 +308,54 @@ mod tests {
         assert_eq!(legacy_digest(&projection), v1);
         projection.auth_scheme = None;
         assert_eq!(digest(&projection), original);
+    }
+
+    #[test]
+    fn header_debug_redacts_nested_values_without_changing_approval_serialization() {
+        let mut projection = sample_projection();
+        let secret = "distinctive-sensitive-header-secret-7c9e";
+        projection.default_headers.catalog[0].value = secret.to_owned().into();
+        // Redact every value, including a mislabelled sensitive header.
+        projection.default_headers.catalog[0].sensitive = false;
+        assert!(!format!("{projection:?}").contains(secret));
+        assert!(serde_json::to_string(&projection).unwrap().contains(secret));
+        let original_v1 = legacy_digest(&projection);
+        let original_v2 = digest(&projection);
+        projection.default_headers.catalog[0].value = "changed".to_owned().into();
+        assert_ne!(original_v1, legacy_digest(&projection));
+        assert_ne!(original_v2, digest(&projection));
+    }
+
+    #[test]
+    fn streamed_secret_hash_matches_frozen_canonical_bytes_and_clears_tree() {
+        let mut projection = sample_projection();
+        projection.default_headers.catalog[0].value = "distinctive-header-α-\"\n".to_owned().into();
+        assert_eq!(
+            digest(&projection),
+            mcp_service::canonical_sha256(serde_json::to_value(&projection).unwrap())
+        );
+        let legacy = serde_json::json!({
+            "contract_version": LEGACY_CONTRACT_VERSION,
+            "user_service_id": &projection.user_service_id,
+            "destination_base_url": &projection.destination_base_url,
+            "auth_method": &projection.auth_method,
+            "auth_key_name": &projection.auth_key_name,
+            "credential": &projection.credential,
+            "identity_injection": &projection.identity_injection,
+            "default_headers": &projection.default_headers,
+            "proxy_operation_policy": policy_projection(projection.proxy_operation_policy.as_ref()),
+            "node_route": &projection.node_route,
+        });
+        assert_eq!(
+            legacy_digest(&projection),
+            mcp_service::canonical_sha256(legacy)
+        );
+        let mut tree = serde_json::json!({"distinctive-key":["distinctive-value", {"nested-key":"nested-value"}], "number":7});
+        clear_json_strings(&mut tree);
+        assert_eq!(tree, serde_json::json!({}));
+        let mut array = serde_json::json!(["value", ["nested"], 7]);
+        clear_json_strings(&mut array);
+        assert_eq!(array, serde_json::json!(["", [""], 7]));
     }
 
     #[test]
@@ -359,7 +444,7 @@ mod tests {
     #[test]
     fn header_value_participates_in_the_digest() {
         let mut changed = sample_projection();
-        changed.default_headers.catalog[0].value = "two".to_string();
+        changed.default_headers.catalog[0].value = "two".to_string().into();
         assert_ne!(digest(&sample_projection()), digest(&changed));
     }
 

@@ -63,12 +63,17 @@ pub enum AuthDeviceCodeStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuthDeviceCode {
+    /// Present only when an explicit approved-sign-in MFA exception was used.
+    #[serde(default)]
+    pub mfa_policy_revision: Option<String>,
     #[serde(rename = "_id")]
     pub id: String,
     #[serde(default)]
     pub supports_grant_choice: bool,
     #[serde(default)]
     pub login_approval_id: Option<String>,
+    #[serde(default)]
+    pub mfa_assured: bool,
     pub device_code_hmac: String,
     pub user_code_hmac: String,
     #[serde(default)]
@@ -253,7 +258,9 @@ mod tests {
     fn make_auth_device_code() -> AuthDeviceCode {
         let now = Utc::now();
         AuthDeviceCode {
+            mfa_policy_revision: None,
             login_approval_id: None,
+            mfa_assured: false,
             supports_grant_choice: false,
             id: uuid::Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),

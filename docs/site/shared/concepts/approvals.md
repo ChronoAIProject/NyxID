@@ -15,13 +15,15 @@ The key property is that approvals are **blocking and synchronous from the agent
 
 Approval is triggered for all **programmatic authentication methods**: API keys, delegated tokens, and service accounts. Direct browser sessions (session-cookie auth) bypass the approval system — approvals are for non-interactive callers.
 
-Approval is not triggered for every request globally. It is enabled per-user, per-service via `ServiceApprovalConfig`. By default, no services require approval. Users can enable it on specific services using the CLI or web console.
+New users require approval for programmatic requests by default, even before opening notification settings. Newly created settings retain that default. Existing explicit false preferences and legacy rows missing the field retain their previous false value; they are not rewritten. The global default exempts auto-connected, credential-free services. Explicit per-service `ServiceApprovalConfig` and org policies retain their precedence, including explicit auto-allow/deny and existing grant behavior. Users can manage these policies through the CLI or web console.
+
+Required approval remains enforced when notifications are unavailable. Deploy this behavior to **all serving backend replicas and drain old binaries** before relying on it. Readiness observations cannot discover a hidden old replica; see the repository [security rollout contract](https://github.com/ChronoAIProject/NyxID/blob/main/docs/SECURITY_ROLLOUT_READINESS.md).
 
 ## Two approval modes
 
 ### Per-request mode (default)
 
-Every proxy call triggers a fresh approval notification. No grants are created. The approver sees a human-readable action description that describes what the specific request will do:
+Every gated proxy call creates a fresh pending approval request and attempts configured notifications. No grants are created. The approver sees a human-readable action description that describes what the specific request will do:
 
 ```
 POST /v1/chat/completions
@@ -55,7 +57,9 @@ When an approval request is created, NyxID notifies the resource owner through c
 
 - **Telegram** — the bot sends a message with Approve and Reject inline keyboard buttons. The decision is processed via the webhook or long-polling connection.
 - **Mobile push** — the iOS/Android authenticator app receives a push notification.
-- **Web console** — the pending request appears in the approvals list at `/approvals` and can be decided there.
+- **Web console** — the durable pending request appears in [Approval History](/approvals/history) and can be decided there. Use **Refresh** to discover a request created after opening the page, including when the list is initially empty.
+
+Telegram and push are optional delivery routes on a server that explicitly advertises required web approval. A registered device or chat alone does not establish initialized server credentials or successful delivery. An unavailable provider, disconnected channel, invalid token, or failed send leaves the request pending for a web decision; expiry does not run the operation. Older servers without this capability may suspend protection, so older/unknown-server status must be taken literally.
 
 All channels share the same approval record. The first response wins; if the user approves via Telegram, subsequent mobile notifications are updated to reflect the decision.
 
@@ -82,7 +86,7 @@ Agent ──POST /proxy/s/openai/…──> NyxID
 Agent ◄──downstream response────────┘
 ```
 
-Pending requests auto-expire after the configured timeout (default: 30 seconds for the hold). A background sweep runs every 5 seconds to mark timed-out requests as expired and update any Telegram messages.
+Pending requests auto-expire after the configured timeout (300 seconds for newly created settings). Existing timeouts remain unchanged; legacy rows with no timeout still read as 30 seconds. Keep Approval History open and refresh before the deadline when using web-only decisions. A background sweep runs every 5 seconds to mark timed-out requests as expired and update any Telegram messages.
 
 ## Org approval policies
 

@@ -1,4 +1,6 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { Check, Copy, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -29,17 +31,17 @@ export function CopyableUrlCallout({
   docsHref,
   className,
 }: CopyableUrlCalloutProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(url);
       setCopied(true);
-      toast.success(t("{{label}} copied", { label }));
+      toast.success(translateUi(`${label} copied`));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error(t("Failed to copy"));
+      toast.error(translateErrorMessage("Failed to copy"));
     }
   }
 
@@ -50,9 +52,9 @@ export function CopyableUrlCallout({
         className,
       )}
     >
-      <p className="text-xs font-medium text-foreground">{label}</p>
+      <p className="type-secondary-emphasis text-foreground">{label}</p>
       <div className="relative">
-        <code className="flex min-h-[40px] items-center break-all rounded-lg border border-border bg-background px-3 py-2 pr-11 font-mono text-12 leading-relaxed text-foreground">
+        <code className="flex min-h-[40px] items-center break-all rounded-lg border border-border bg-background px-3 py-2 pr-11 font-mono text-14 text-foreground">
           {url}
         </code>
         <Button
@@ -61,26 +63,26 @@ export function CopyableUrlCallout({
           size="icon"
           className="absolute right-1.5 top-1.5 h-8 w-8 shrink-0"
           onClick={() => void handleCopy()}
-          aria-label={t("Copy {{label}}", { label })}
+          aria-label={translateUi("Copy {{value1}}", { value1: label })}
         >
           {copied ? (
             <Check className="h-3.5 w-3.5 text-success" />
           ) : (
             <Copy className="h-3.5 w-3.5" />
           )}
-          <span className="sr-only">{t("Copy {{label}}", { label })}</span>
+          <span className="sr-only">{translateUi("Copy ")}{label}</span>
         </Button>
       </div>
       {description ? (
-        <p className="text-xs text-muted-foreground">{description}</p>
+        <p className="text-13 text-muted-foreground">{description}</p>
       ) : null}
       {docsHref ? (
         <a
           href={docsHref}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
-        >{t("Learn more →")}<ExternalLink className="h-3 w-3" aria-hidden="true" />
+          className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
+        >{translateUi("Learn more →")}<ExternalLink className="h-3 w-3" aria-hidden="true" />
         </a>
       ) : null}
     </div>

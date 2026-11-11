@@ -43,7 +43,7 @@ impl LarkFamilyAdapter {
                     .filter(|token| !token.is_empty() && token.len() <= 4096)
                     .ok_or_else(threads::unavailable)?;
                 Ok(provider_token_exchange_service::CachedToken {
-                    token: token.into(),
+                    token: zeroize::Zeroizing::new(token.to_owned()),
                     expires_at: Utc::now()
                         + chrono::Duration::seconds(
                             response["expire"].as_i64().unwrap_or(7200).clamp(60, 86400),
@@ -51,7 +51,6 @@ impl LarkFamilyAdapter {
                 })
             })
             .await
-            .map(zeroize::Zeroizing::new)
     }
 
     async fn thread_message(

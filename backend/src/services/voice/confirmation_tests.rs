@@ -22,6 +22,7 @@ fn fixed(decision: Decision) -> Fixed {
 }
 fn segment(speaker: Speaker, text: &str, start: i64, end: i64) -> Segment {
     Segment {
+        fragments: Vec::new(),
         id: uuid::Uuid::new_v4().to_string(),
         speaker,
         text: text.into(),

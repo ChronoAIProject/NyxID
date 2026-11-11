@@ -36,6 +36,7 @@ export interface ComposerEditorHandle extends ComposerSelection {
   readonly disabled: boolean;
   focus(): void;
   setSelectionRange(start: number, end: number): void;
+  insertDictation(text: string, selection: ComposerSelection): boolean;
 }
 export interface ComposerEditorProps extends Omit<
   HTMLAttributes<HTMLDivElement>,
@@ -185,6 +186,29 @@ export function ComposerEditor({
       focus() {
         editorRef.current?.view.focus();
       },
+      insertDictation(text, selection) {
+        const editor = editorRef.current;
+        if (!editor || editorText(editor.state.doc) !== selection.value)
+          return false;
+        const range = selectEditorOffsets(
+          editor.state.doc,
+          selection.selectionStart,
+          selection.selectionEnd,
+        );
+        if (
+          selection.value.length -
+            (selection.selectionEnd - selection.selectionStart) +
+            text.length >
+          MAX_COMPOSER_LENGTH
+        )
+          return false;
+        const tr = closeHistory(editor.state.tr)
+          .setSelection(range)
+          .insertText(text);
+        editor.view.dispatch(tr);
+        editor.view.dispatch(closeHistory(editor.state.tr));
+        return true;
+      },
       setSelectionRange(start, end) {
         const editor = editorRef.current;
         if (editor)
@@ -207,7 +231,7 @@ export function ComposerEditor({
     previousTokenKey.current = tokenKey;
     const removed = previousTokens.current.filter(
       (token) =>
-        token.kind !== "agent" &&
+        token.kind !== "agent" && token.kind !== "person" &&
         !latest.current.tokens.some((next) => next.id === token.id),
     );
     previousTokens.current = latest.current.tokens;

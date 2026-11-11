@@ -193,8 +193,8 @@ afterEach(async () => {
 describe("service card billing and caller details", () => {
   it("keeps billing classification and supplied names intact in Chinese", async () => {
     for (const [language, partial] of [
-      ["zh-CN", "部分计费信息未提供"],
-      ["zh-TW", "部分計費資訊未提供"],
+      ["zh-CN", "部分报告了计费信息"],
+      ["zh-TW", "部分回報了計費資訊"],
     ]) {
       await appI18n.changeLanguage(language);
       expect(summarizeBillingModel("ready", [insight, undefined])).toBe(partial);

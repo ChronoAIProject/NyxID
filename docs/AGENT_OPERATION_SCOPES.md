@@ -45,7 +45,7 @@ permission engine uses:
   `required` stops a filter from being dropped, and authentication, method
   override and NyxID routing parameters cannot be declared;
 - `body`: when present, a closed JSON schema (`object`, `array`, `string`,
-  `integer`, `boolean`, `exact`, `one_of`; every object closed, bounded depth).
+  `integer`, `number`, `boolean`, `exact`, `one_of`; every object closed, bounded depth).
 
 Absent parts stay unconstrained. Limits are validated at save time against the
 operation's method and template, and checked by `check_inputs` against the final
@@ -55,9 +55,39 @@ body, so a body limit refuses them. Authoring is through the API or CLI
 (`--inputs`); the UI shows a "Value limits" mark and preserves saved limits for
 operations that stay selected.
 
+Native `nyxid__set_agent_operations` and `nyxid__request_agent_operations`
+validate the `selection.inputs` dictionary before reading or changing scope
+state. Malformed entries return a bounded field path such as
+`selection.inputs.<endpoint-id>.body: expected path/query/body rules`; the
+error names only the rule location and never echoes rule values. A failed
+validation leaves the existing permission unchanged. The body vocabulary above
+is NyxID's tagged `JsonShape` form, rather than standard JSON Schema.
+
 The **contract digest** (`contract_digest`) is a SHA-256 over the compiled
 catalog identity and operations, excluding the revision. A selection that
 carries `contract_digest` fails with a conflict if it now compiles differently.
+
+### Decimal number limits
+
+`number` accepts finite JSON numbers, including integers, within inclusive
+`minimum` and `maximum` bounds (both signed 64-bit integers). Its
+`max_fraction_digits` must be between 0 and 12; the minimum cannot exceed the
+maximum. Strings such as `"12.34"` are refused. Use `integer` for dates expressed
+as milliseconds.
+
+For example, an Amount property in a closed receipt `fields` object can use:
+
+```json
+{"type":"number","minimum":0,"maximum":1000000,"max_fraction_digits":2}
+```
+
+Fraction precision is checked on serde_json's canonical decimal representation
+of the parsed value, with exponents expanded and insignificant trailing decimal
+zeros removed. `12.34` and `12.340` have two fractional digits; `12.345` has three
+and is refused by this example. `12.0` and `1e2` have none. `1.5e-3` expands to
+`0.0015` and has four. The original byte spelling does not preserve extra
+precision after JSON parsing. Bounds are compared as scaled integers so the
+inclusive i64 edges do not widen through floating-point conversion.
 
 ## Execution and discovery
 
@@ -160,15 +190,157 @@ Audits contain holder/service/endpoint IDs, revisions and counts only
 (`assistant_agent_operations_changed`, `api_key_operations_changed`). No request
 bodies, tool arguments, input-limit values, secrets or credential material.
 
+## Receipt-Bot recipe
+
+This example restricts the managed Lark Base receipt-write workflow using the
+published field-list and managed-create operations. The connection and rollout
+guide is [Lark Base](site/cli/guides/connect-a-service.md#lark-base).
+
+Grant one Lark/Feishu UserService to a specialist, then select only
+`bitable_fields_list` and `bitable_record_create_with_attachments`. A grant
+still supplies service access; this scope only narrows it. Do not grant plain
+`bitable_record_create` or standalone `bitable_media_upload` to this specialist.
+The composite's internal field reads/uploads/create run under its managed
+guard, so it does not need those child operations as separate grants.
+
+First read the table's field definitions and current options with
+`bitable_fields_list`. The example uses Base `bascnReceiptApp`, table
+`tblReceipts`, select options `Expense`/`Refund` for `Type` and `1234`/`5678`
+for `Card Number`, a UTC date in 2026 as integer milliseconds, Amount between
+0 and 1,000,000 with at most two decimal places, and the attachment field
+`Receipt Photos`. Replace these values with the owner's exact schema and
+policy. A newly added dropdown option requires an explicit scope change; the
+agent cannot invent options.
+
+Identify the two operations through catalog/MCP discovery, then read
+`GET /api/v1/assistant/nyxagent/agents/{agent_id}/operations` as the human
+owner. Find the granted UserService and match each operation's method/path
+to the returned scope options to obtain its endpoint ID. The options include
+method, path, and summary; they do not expose operation names. Endpoint IDs
+are the returned server IDs, not operation-name strings. In the following
+selection, replace
+`<fields-endpoint-id>` and `<composite-endpoint-id>` everywhere, including the
+`inputs` object keys. Replace `expected_revision: 0` with that service's current
+revision. Save the resulting JSON with:
+
+```http
+PUT /api/v1/assistant/nyxagent/agents/{agent_id}/operations/{service_id}
+Content-Type: application/json
+```
+
+```json
+{
+  "expected_revision": 0,
+  "all_operations": false,
+  "endpoint_ids": ["<fields-endpoint-id>", "<composite-endpoint-id>"],
+  "inputs": {
+    "<fields-endpoint-id>": {
+      "path": {
+        "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+        "table_id": {"type": "exact", "value": "tblReceipts"}
+      }
+    },
+    "<composite-endpoint-id>": {
+      "path": {
+        "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+        "table_id": {"type": "exact", "value": "tblReceipts"}
+      },
+      "body": {
+        "type": "object",
+        "required": ["fields", "attachments"],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": ["Type", "Card Number", "Date", "Amount"],
+            "properties": {
+              "Type": {"type": "one_of", "values": ["Expense", "Refund"]},
+              "Card Number": {"type": "one_of", "values": ["1234", "5678"]},
+              "Date": {"type": "integer", "minimum": 1767225600000, "maximum": 1798761599999},
+              "Amount": {"type": "number", "minimum": 0, "maximum": 1000000, "max_fraction_digits": 2}
+            }
+          },
+          "attachments": {
+            "type": "object",
+            "required": ["Receipt Photos"],
+            "properties": {
+              "Receipt Photos": {
+                "type": "array",
+                "max_items": 10,
+                "items": {"type": "string", "max_length": 128}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Every `object` in this vocabulary is closed without an
+`additionalProperties` keyword. This selection refuses missing fields,
+unknown fields or top-level properties, unknown dropdown options, a different
+Base/table, Amount `12.345`, and more than ten photo IDs. Amount `12.34` is a
+number, not a quoted string. The scope vocabulary's `array` has a maximum but
+no minimum length; the managed composite separately refuses empty photo
+arrays, repeated IDs/content, incomplete inbound photo sets, and inaccessible uploads
+before any provider call. The required `Receipt Photos` property makes an
+empty `attachments` object fail the scope itself.
+
+An ordinary Agent Key's equivalent management routes are
+`GET /api/v1/api-keys/{key_id}/operations` and
+`PUT /api/v1/api-keys/{key_id}/operations/{service_id}`, using that key's own
+endpoint IDs and revision. The CLI can apply the same input map to an ordinary
+key after saving the JSON object's `inputs` value as `receipt-inputs.json`:
+
+```bash
+nyxid api-key operations <key-id> --service <user-service-id> \
+  --allow-endpoint <fields-endpoint-id> \
+  --allow-endpoint <composite-endpoint-id> \
+  --inputs receipt-inputs.json
+```
+
+This demonstrates scope management only: an ordinary Agent Key cannot execute
+chat attachment writes. For the working Receipt-Bot, use the specialist's
+scope endpoint above; its live owner conversation key inherits the saved
+scope. The specialist's grants UI and the Agent Key **Service operations**
+card can select operations and retain existing input limits, but cannot author
+this nested JSON. Configuration requires `assistant:operation-scopes` for the
+acting person; execution also needs `assistant:attachment-writes` and a live,
+non-guest owner turn. Upgrade all replicas before saving the Number rule.
+
+Success returns `{record_id, already_created:false}`; an authorized identical
+replay returns `{record_id, already_created:true}`, even after credential
+rotation. Active writes report `in progress; try again shortly`. For
+`uncertain`, follow `outcome unknown; check the Base; NyxID will not create it
+again`. Never call plain create or standalone upload to evade that decision.
+A succeeded-photo conflict names the existing record and directs field changes
+to `bitable_record_update`. An incomplete source set reports `N of M photos
+from that message could not be read; ask the owner to resend`. Definite
+non-application releases reservations; `failed_definite` / `not_sent` proves
+the create request did not leave NyxID, permitting one create on a corrected
+new call. See the guide for all outcomes, the 400-day protection horizon, and
+[compatibility](#compatibility) for scope removal before rollback.
+
 ## Relationship to permission-bound keys
 
 Permission-bound keys (`purpose: permission_bound`) remain an immutable,
-single-connection pilot with their own ingress and Drive folder adapter. Both
-systems now share one input-rule evaluator (`permissions/src/values.rs`); the
-Google adapter's query and body checks call the same functions. The intended
-next steps are to express Google policies as scoped operations with input
-limits, move the Drive ancestry check into the shared pipeline as a resource
-adapter, and fold `/permission-execution` into `/proxy`.
+single-connection pilot with their own ingress and existing personal Google/Drive
+adapters. Both systems share the input-rule evaluator
+(`permissions/src/values.rs`). Operation scopes and input limits are access
+ceilings; they do not themselves supply affirmative execution consent.
+
+The [execution permission contract](EXECUTION_PERMISSIONS.md) (#2193) adds an
+optional versioned `ApprovalGrant.execution`, server-only task references, a
+pure coverage/validity/binding evaluator, and reader fields for native policy
+indirection and separately authored mandatory org review. The default-off
+`permissions:execution-v1` flag is readiness-gated. This step enables no new
+writer or dispatch behavior, does not fold `/permission-execution` into `/proxy`,
+and does not extend resource adapters. Existing keys, scopes, service approvals,
+Full/Auto/Ask behavior and exact/durable claims retain their contracts. The
+contract names exactly three prompt floors that future integration may satisfy;
+webhook, Machine, sign-in, delegation, org-instruction/mandatory and guest gates
+remain separate.
 
 ## Compatibility
 
@@ -181,5 +353,68 @@ current binaries, so remove scopes (or the keys/specialists holding them) before
 returning traffic to old binaries. Older writers of `grants` cannot erase
 sibling scopes.
 
+**Upgrade all replicas before saving a scope that uses `number`**
+(`JsonShape::Number`). A previous enum reader cannot deserialize this variant;
+the typed API-key load fails closed instead of discarding the input limits or
+falling back to unrestricted access. This may surface as an authentication or
+database error on an old replica. Remove every Number scope, including its
+compiled copies on keys, before rolling back to a binary without this variant.
+
 Scopes contain no person-specific ownership assumptions; execution and billing
 remain the acting person's.
+
+Execution-permission dispatch (default-off #2194 Phase A) can satisfy only the
+three eligible discretionary floors for a fully covered, exact actor/account
+operation. Operation and input scopes remain ceilings and always run first.
+Eligible assistant MCP/proxy gaps use one requester-private permission card
+and exact retained-effect resume (#2195 Part A); other gaps keep existing cards.
+Activation is per-person only and requires reader, dispatch and authoring readiness; see
+[the execution contract](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-a).
+
+## Native discovery pagination (#2271)
+
+`nyxid__get_agent_operations` keeps `subagent` required and `guests` optional,
+and adds optional `service_id`, `limit` (1–50, default 20), and `cursor`.
+`service_id` is the exact granted connection or platform-service ID, not a
+catalog alias or a slug. An unavailable or ungranted filter returns an empty
+complete view; it never resolves arbitrary service IDs. The existing live
+owner/organization maintenance checks, specialist self-only rule and shared/
+guest exclusions apply on every page. This is management discovery within the
+agent's grants, not permission to execute every listed operation.
+
+The response retains `services` and its fields and adds `snapshot`, `offset`,
+`count`, `total`, `complete`, `truncated`, `next_cursor`, and `continuation_hint`.
+Each service carries `page: {offset, count, total, complete}`. Page units are
+parallel slices of `operations`, selected `endpoint_ids`, explicit `rules`,
+and the ordered `inputs` map. A service with no entries occupies one unit.
+The service's `page.complete` means this page contains that entire service;
+top-level `complete` means there are no further pages in the discovery view.
+`total` counts these units, not only operations. Services sort by ID and
+operations by endpoint ID; selected IDs, rules and input keys have stable order.
+Append the three arrays and merge input keys for each service across pages.
+Do not interpret an empty partial array as an empty selection, or call
+`set_agent_operations` until all pages of the same snapshot are collected.
+
+Continue with `cursor=next_cursor`, retaining the same `subagent`, `service_id`
+and `guests`; `limit` may change. A page automatically shrinks to fit 9,200
+UTF-8 bytes including the second JSON escaping layer in MCP text content,
+below NyxAgent's 10,000-character projection and byte-oriented context budget.
+Nothing is clipped. A single operation, summary, path or saved rule that
+cannot fit yields a bounded error directing the user to Operations settings;
+no complete selection is claimed. REST keeps its full authorized response.
+
+The v1 cursor is a versioned view locator, not a bearer capability: it binds
+actor, conversation key, conversation, calling agent, target agent, guest mode,
+filter and the complete sorted view. No result cache or new collection is
+introduced. Every read rebuilds the live authorized view. Changes between
+pages return `discovery_snapshot_changed` with instructions to discard earlier
+pages and restart without `cursor`; no acknowledgement is required. Concurrent
+changes during a read may make the next page conflict; clients never silently
+combine versions. Cursor offsets are untrusted and bounded, and cannot bypass
+live authorization. Metadata diagnostics contain row counts and byte lengths
+only, never descriptions, paths, input values or cursors.
+
+The additional parameters and response fields are additive. Old replicas
+reject the new parameters under their existing closed schema and retain the
+old unpaged result; upgrade all serving replicas before relying on pagination.
+No stored model, execution policy or permission is changed by discovery.

@@ -1,6 +1,7 @@
+import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 
@@ -56,6 +57,70 @@ it("still shows unknown notices by their first sentence", () => {
   ).toBeInTheDocument();
 });
 
+it("keeps a multi-line reply excerpt in one card, not a card per line", async () => {
+  const user = userEvent.setup();
+  render(
+    <NyxBotEventNotice
+      message={message(
+        "event",
+        `${HEADER}\n- Specialist reservation-test replied. Reply excerpt: "Configured FAQ answers:\n• Address: Junction 8\n- Hours: 11:00-21:30" Read more with nyxid__read_subagent.\n- The user finished connecting github (connect_link_id cl-1).`,
+      )}
+    />,
+  );
+  const cards = within(screen.getByRole("group", { name: "NyxID updates" })).getAllByRole("note");
+  expect(cards.map((card) => card.getAttribute("aria-label"))).toEqual([
+    "NyxID event: reservation-test replied",
+    "NyxID event: Finished connecting github",
+  ]);
+  await user.click(within(cards[0]!).getByRole("button"));
+  expect(cards[0]).toHaveTextContent("• Address: Junction 8");
+  expect(cards[0]).toHaveTextContent("- Hours: 11:00-21:30");
+});
+
+it("shows an automation run by its automation's name, the instruction on demand", async () => {
+  const user = userEvent.setup();
+  const root = createRootRoute();
+  const route = createRoute({
+    getParentRoute: () => root,
+    path: "/",
+    component: () => (
+      <NyxBotEventNotice
+        message={{
+          ...message("event", "Maintain only Notion FAQ KEK specs.\nEvery day recheck each outlet."),
+          origin: "trigger",
+          automation: { triggerId: "t1", runId: "r1", label: "Keep KEK restaurant FAQ current" },
+        }}
+      />
+    ),
+  });
+  const automations = createRoute({ getParentRoute: () => root, path: "/assistant/automations" });
+  const router = createRouter({
+    routeTree: root.addChildren([route, automations]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  render(<RouterProvider router={router} />);
+  const card = await screen.findByRole("note", { name: "NyxID event: Automation · Keep KEK restaurant FAQ current" });
+  expect(card).not.toHaveTextContent("Maintain only");
+  await user.click(within(card).getByRole("button"));
+  expect(card).toHaveTextContent("Every day recheck each outlet.");
+  expect(within(card).getByRole("link", { name: "Open Automations" })).toBeInTheDocument();
+});
+
+it("names an automation run whose record has expired generically", () => {
+  render(<NyxBotEventNotice message={{ ...message("event", "Do the thing."), origin: "trigger" }} />);
+  expect(screen.getByRole("note", { name: "NyxID event: Automation run" })).toBeInTheDocument();
+});
+
+it("labels a finished background task", () => {
+  render(
+    <NyxBotEventNotice
+      message={message("event", `${HEADER}\n- Asynchronous service operation finished: done. Its result is quoted in this turn's context.`)}
+    />,
+  );
+  expect(screen.getByRole("note", { name: "NyxID event: Background task finished" })).toBeInTheDocument();
+});
+
 it("labels an orchestrator instruction as coming from NyxBot", () => {
   render(<NyxBotOrchestratorMessage message={message("orchestrator", "Find urgent issues")} />);
   const article = screen.getByRole("article", { name: "Message from NyxBot" });
@@ -73,4 +138,33 @@ it("stamps an orchestrator instruction with its send time", () => {
   );
   const article = screen.getByRole("article", { name: "Message from NyxBot" });
   expect(article.querySelector(`time[datetime="${sent}"]`)).toBeInTheDocument();
+});
+
+
+it("shows a queued channel event's retained image and download without opening its notice", async () => {
+  const endpoint = "/assistant/nyxagent/conversations/thread/attachments/photo";
+  const fetch = vi.fn((request: { endpoint: string }) => {
+    expect(request.endpoint).toBe(endpoint);
+    return new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } });
+  });
+  globalThis.__nyxidAssistantHttpMock = fetch;
+  const original = { createObjectURL: URL.createObjectURL, revokeObjectURL: URL.revokeObjectURL };
+  Object.assign(URL, { createObjectURL: vi.fn(() => "blob:retained-photo"), revokeObjectURL: vi.fn() });
+  try {
+    const { unmount } = render(<NyxBotEventNotice message={{
+      ...message("event", `${HEADER}\n- Message from the owner on Discord: "see the photo".`),
+      images: [
+        { id: "photo", origin: "user_upload", contentType: "image/png", label: "photo", endpoint },
+        { id: "file", origin: "user_upload", contentType: "application/octet-stream", label: "original.bin", endpoint: endpoint.replace("photo", "file") },
+      ],
+    }} />);
+    expect(await screen.findByRole("img", { name: "Image from photo" })).toHaveAttribute("src", "blob:retained-photo");
+    expect(screen.getByText("original.bin")).toBeVisible();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toMatchObject({ endpoint });
+    unmount();
+  } finally {
+    Object.assign(URL, original);
+    globalThis.__nyxidAssistantHttpMock = undefined;
+  }
 });

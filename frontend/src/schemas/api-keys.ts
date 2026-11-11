@@ -45,6 +45,7 @@ export const createApiKeySchema = z.object({
       },
       { message: "Expiry date must be in the future" },
     ),
+  never_expires: z.boolean().optional(),
   description: z.string().nullable().optional(),
   allow_all_services: z.boolean().optional(),
   allow_auto_connected_services: z.boolean().optional(),
@@ -65,6 +66,21 @@ export const createApiKeySchema = z.object({
    * the caller is an admin of the target org.
    */
   target_org_id: z.string().optional(),
+}).refine((value) => !(value.never_expires && value.expires_at), {
+  path: ["expires_at"],
+  message: "Choose either an expiry date or no expiry",
 });
 
 export type CreateApiKeyFormData = z.infer<typeof createApiKeySchema>;
+
+/** A new form intent; persisted keys and rotation never use these defaults. */
+export function newApiKeyDefaults(now = Date.now()): CreateApiKeyFormData {
+  return {
+    name: "", scopes: [],
+    expires_at: new Date(now + 90 * 86400000).toISOString().slice(0, 10),
+    never_expires: false, description: null,
+    allow_all_services: false, allow_auto_connected_services: false, allow_all_nodes: false,
+    allowed_service_ids: [], allowed_node_ids: [], callback_url: null,
+    target_org_id: undefined,
+  };
+}

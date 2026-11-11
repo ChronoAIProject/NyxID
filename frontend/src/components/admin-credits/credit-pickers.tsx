@@ -1,5 +1,8 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { useDeferredValue, useMemo, useState } from "react";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label, FieldHelp } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useGroups } from "@/hooks/use-rbac";
 import { useAdminUsers } from "@/hooks/use-admin";
@@ -13,11 +16,13 @@ import { Input } from "@/components/ui/input";
 export function UserPicker({
   selected,
   onChange,
+  onBlockedChange,
 }: {
+  readonly onBlockedChange?: (blocked: boolean) => void;
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const peopleQuery = useAdminUsers(
@@ -53,6 +58,10 @@ export function UserPicker({
       : users;
   }, [search, users]);
   const loading = peopleQuery.isFetching || organizationsQuery.isFetching;
+  const failed = peopleQuery.isError || organizationsQuery.isError;
+  useEffect(() => {
+    onBlockedChange?.(failed || loading);
+  }, [onBlockedChange, failed, loading]);
 
   return (
     <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
@@ -61,7 +70,7 @@ export function UserPicker({
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder={t("Search owners")}
+          placeholder={translateUi("Search owners")}
           className="border-0 pl-9 focus-visible:ring-0"
         />
       </div>
@@ -69,9 +78,9 @@ export function UserPicker({
         {selected
           .filter((id) => !filtered.some((user) => user.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -79,16 +88,16 @@ export function UserPicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>{t("Selected owner:")}{" "}
+              <span>{translateUi("Selected owner:")}{" "}
                 {users.find((user) => user.id === id)?.display_name ||
                   users.find((user) => user.id === id)?.email ||
-                  id}{" "}{t("(outside current results)")}</span>
-            </label>
+                  id}{" "}{translateUi("(outside current results)")}</span>
+            </Label>
           ))}
         {filtered.map((user) => {
           const checked = selected.includes(user.id);
           return (
-            <label
+            <Label
               key={user.id}
               className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
             >
@@ -103,25 +112,38 @@ export function UserPicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium">
+                <span className="block truncate">
                   {user.display_name || user.slug || user.email}
                 </span>
-                <span className="block truncate text-11 text-muted-foreground">
-                  {user.slug ? t("Organization / {{slug}}", { slug: user.slug }) : user.email}
-                </span>
+                <FieldHelp className="block truncate text-muted-foreground">
+                  {user.slug ? translateUi("Organization / {{value1}}", { value1: user.slug }) : user.email}
+                </FieldHelp>
               </span>
-            </label>
+            </Label>
           );
         })}
-        {filtered.length === 0 && !loading ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">{t("No owners found.")}</p>
+        {failed ? (
+          <p role="alert" className="p-3 text-14 text-destructive">{translateUi("Owners could not be loaded.")}{" "}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void peopleQuery.refetch();
+                void organizationsQuery.refetch();
+              }}
+            >{translateUi("Retry owners")}</Button>
+          </p>
+        ) : null}
+        {filtered.length === 0 && !loading && !failed ? (
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">{translateUi("No owners found.")}</p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">{t("Searching...")}</p>
+          <p className="px-3 py-3 text-center text-13 text-muted-foreground">{translateUi("Searching...")}</p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
-        {selected.length}{t(" selected")}</div>
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-13 text-muted-foreground">
+        {selected.length}{translateUi(" selected")}</div>
     </div>
   );
 }
@@ -137,7 +159,7 @@ export function ServicePicker({
   readonly onChange: (ids: string[]) => void;
   readonly multiple?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -156,7 +178,7 @@ export function ServicePicker({
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder={t("Search services")}
+          placeholder={translateUi("Search services")}
           className="border-0 pl-9 focus-visible:ring-0"
         />
       </div>
@@ -164,9 +186,9 @@ export function ServicePicker({
         {selected
           .filter((id) => !filtered.some((service) => service.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -174,15 +196,15 @@ export function ServicePicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>{t("Selected service:")}{" "}
-                {services.find((service) => service.id === id)?.name ?? id}{" "}{t("(outside current results)")}</span>
-            </label>
+              <span>{translateUi("Selected service:")}{" "}
+                {services.find((service) => service.id === id)?.name ?? id}{" "}{translateUi("(outside current results)")}</span>
+            </Label>
           ))}
         {filtered.map((service) => {
           const checked = selected.includes(service.id);
           const metric = resolveServiceBillingMetric(service);
           return (
-            <label
+            <Label
               key={service.id}
               className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
             >
@@ -199,21 +221,21 @@ export function ServicePicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium">
+                <span className="block truncate">
                   {service.name}
                 </span>
-                <span className="block truncate text-11 text-muted-foreground">
+                <FieldHelp className="block truncate text-muted-foreground">
                   {service.slug}
-                </span>
+                </FieldHelp>
               </span>
               <Badge variant="secondary" className="shrink-0">
                 {metric}
               </Badge>
-            </label>
+            </Label>
           );
         })}
         {filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">{t("No services found.")}</p>
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">{translateUi("No services found.")}</p>
         ) : null}
       </div>
     </div>
@@ -221,11 +243,13 @@ export function ServicePicker({
 }
 
 type MemberPickerProps = {
+  readonly onBlockedChange?: (blocked: boolean) => void;
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
 };
 
 export function OrgPicker(props: MemberPickerProps) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const query = useAdminUsers(1, 100, deferredSearch || undefined, "org");
@@ -245,22 +269,38 @@ export function OrgPicker(props: MemberPickerProps) {
       onSearch={setSearch}
       loading={query.isFetching}
       error={query.isError}
+      retry={() => void query.refetch()}
     />
   );
 }
 
 export function PersonPicker(props: MemberPickerProps) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const query = useAdminUsers(1, 100, deferredSearch || undefined, "person");
-  return <MemberPicker {...props} kind="person"
-    items={(query.data?.users ?? []).filter((user) => user.is_active).map((user) => ({
-      id: user.id, name: user.display_name || user.email, detail: user.email,
-    }))}
-    search={search} onSearch={setSearch} loading={query.isFetching} error={query.isError} />;
+  return (
+    <MemberPicker
+      {...props}
+      kind="person"
+      items={(query.data?.users ?? [])
+        .filter((user) => user.is_active)
+        .map((user) => ({
+          id: user.id,
+          name: user.display_name || user.email,
+          detail: user.email,
+        }))}
+      search={search}
+      onSearch={setSearch}
+      loading={query.isFetching}
+      error={query.isError}
+      retry={() => void query.refetch()}
+    />
+  );
 }
 
 export function GroupPicker(props: MemberPickerProps) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const query = useGroups();
   const items = (query.data?.groups ?? []).map((group) => ({
@@ -277,6 +317,7 @@ export function GroupPicker(props: MemberPickerProps) {
       onSearch={setSearch}
       loading={query.isFetching}
       error={query.isError}
+      retry={() => void query.refetch()}
     />
   );
 }
@@ -290,6 +331,8 @@ function MemberPicker({
   onSearch,
   loading,
   error,
+  retry,
+  onBlockedChange,
 }: MemberPickerProps & {
   readonly kind: "organization" | "group" | "person";
   readonly items: readonly { id: string; name: string; detail: string }[];
@@ -297,8 +340,12 @@ function MemberPicker({
   readonly onSearch: (value: string) => void;
   readonly loading: boolean;
   readonly error: boolean;
+  readonly retry: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
+  useEffect(() => {
+    onBlockedChange?.(error || loading);
+  }, [onBlockedChange, error, loading]);
   const needle = search.trim().toLowerCase();
   const filtered = items.filter((item) =>
     `${item.name} ${item.detail}`.toLowerCase().includes(needle),
@@ -310,7 +357,7 @@ function MemberPicker({
         <Input
           value={search}
           onChange={(event) => onSearch(event.target.value)}
-          placeholder={t(kind === "organization" ? "Search organizations" : kind === "group" ? "Search groups" : "Search people")}
+          placeholder={translateUi("Search {{value1}}s", { value1: kind })}
           className="border-0 pl-9 focus-visible:ring-0"
         />
       </div>
@@ -318,9 +365,9 @@ function MemberPicker({
         {selected
           .filter((id) => !filtered.some((item) => item.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -328,12 +375,12 @@ function MemberPicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>{t("Selected ")}{kind}:{" "}
-                {items.find((item) => item.id === id)?.name ?? id}{t(" (outside current results)")}</span>
-            </label>
+              <span>{translateUi("Selected ")}{kind}:{" "}
+                {items.find((item) => item.id === id)?.name ?? id}{translateUi(" (outside current results)")}</span>
+            </Label>
           ))}
         {filtered.map((item) => (
-          <label
+          <Label
             key={item.id}
             className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
           >
@@ -348,28 +395,30 @@ function MemberPicker({
               }
             />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-12 font-medium">
+              <span className="block truncate">
                 {item.name}
               </span>
-              <span className="block truncate text-11 text-muted-foreground">
+              <FieldHelp className="block truncate text-muted-foreground">
                 {item.detail}
-              </span>
+              </FieldHelp>
             </span>
-          </label>
+          </Label>
         ))}
         {error ? (
-          <p role="alert" className="px-3 py-3 text-12 text-destructive">{t("Failed to load ")}{kind}s.
+          <p role="alert" className="px-3 py-3 text-14 text-destructive">{translateUi("Failed to load ")}{kind}s.{" "}
+            <Button type="button" variant="outline" size="sm" onClick={retry}>{translateUi("Retry ")}{kind}s
+            </Button>
           </p>
         ) : null}
         {!error && !loading && filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">{t("No ")}{kind}{t("s found.")}</p>
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">{translateUi("No ")}{kind}{translateUi("s found.")}</p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">{t("Searching...")}</p>
+          <p className="px-3 py-3 text-center text-13 text-muted-foreground">{translateUi("Searching...")}</p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
-        {selected.length}{t(" selected")}</div>
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-13 text-muted-foreground">
+        {selected.length}{translateUi(" selected")}</div>
     </div>
   );
 }

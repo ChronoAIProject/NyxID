@@ -1,4 +1,11 @@
 import { voiceStartError, type VoiceStartStep } from "./voice-start-error";
+import {
+  MicrophoneCapture,
+  AudioActivityMeter,
+  microphoneError,
+  type AudioActivity,
+  type PreparedMicrophone,
+} from "./microphone-capture";
 import { GrokAudio } from "./grok-audio";
 import { api, apiClient, apiUrl, ApiError } from "./api-client";
 import {
@@ -12,12 +19,22 @@ import {
   type VoiceSnapshot,
 } from "@/schemas/assistant-voice";
 
+export type VoiceConnectionStatus =
+  | "microphone"
+  | "audio"
+  | "server"
+  | "connecting"
+  | "ready"
+  | "reconnecting";
+
 /** Media is ephemeral; only the server's sideband can admit work or usage. */
 export class AssistantVoiceClient {
   private grok?: GrokAudio;
   private audioEnd?: number;
   private peer?: RTCPeerConnection;
   private media?: MediaStream;
+  private capture?: MicrophoneCapture;
+  private meter?: AudioActivityMeter;
   private controlSocket?: WebSocket;
   private audio?: HTMLAudioElement;
   private session?: VoiceSession;
@@ -30,6 +47,9 @@ export class AssistantVoiceClient {
   private closed = false;
   private held = false;
   private speakerMuted = false;
+  private connectionStatus?: VoiceConnectionStatus;
+  private phaseStartedAt = 0;
+  private startupAt?: number;
   get isClosed() {
     return this.closed;
   }
@@ -39,51 +59,134 @@ export class AssistantVoiceClient {
   private onSnapshot: (value: VoiceSnapshot) => void;
   private onError: (message: string) => void;
   private onClosed: () => void;
+  private lastPlaybackMs = 0;
+  private onActivity: (activity: AudioActivity) => void;
   private onConflict: (session: VoiceSession | null) => void;
+  private onStatus: (status: VoiceConnectionStatus) => void;
   constructor(
     thread: string,
     onSnapshot: (value: VoiceSnapshot) => void,
     onError: (message: string) => void,
     onClosed: () => void = () => {},
     onConflict: (session: VoiceSession | null) => void = () => {},
+    privateActivity: (activity: AudioActivity) => void = () => {},
+    onStatus: (status: VoiceConnectionStatus) => void = () => {},
   ) {
     this.thread = thread;
     this.onSnapshot = onSnapshot;
     this.onError = onError;
     this.onClosed = onClosed;
     this.onConflict = onConflict;
+    this.onActivity = privateActivity;
+    this.onStatus = onStatus;
+  }
+  private setStatus(status: VoiceConnectionStatus) {
+    if (this.closed || this.connectionStatus === status) return;
+    const now = performance.now();
+    if (this.startupAt !== undefined) {
+      if (this.connectionStatus) {
+        const name = `nyxid.voice.startup.${this.connectionStatus}`;
+        performance.clearMeasures(name);
+        performance.measure(name, { start: this.phaseStartedAt, end: now });
+      }
+      if (status === "ready") {
+        performance.clearMeasures("nyxid.voice.startup.total");
+        performance.measure("nyxid.voice.startup.total", {
+          start: this.startupAt,
+          end: now,
+        });
+        this.startupAt = undefined;
+      }
+    }
+    this.phaseStartedAt = now;
+    this.connectionStatus = status;
+    this.onStatus(status);
   }
   private path() {
     return `/assistant/nyxagent/conversations/${this.thread}/voice-sessions`;
   }
+  private preparation?: PreparedMicrophone;
   async start(
     preferences: VoicePreferences,
     protocol: "openai_live" | "xai_realtime" = "openai_live",
+    beforeProvider?: () => Promise<void>,
+    preparation?: PreparedMicrophone,
+    deviceId?: string,
   ) {
+    if (this.closed || this.connectionStatus) return;
+    this.startupAt = preparation?.startedAt ?? performance.now();
+    for (const phase of [
+      "preparation",
+      "microphone",
+      "audio",
+      "server",
+      "connecting",
+      "reconnecting",
+      "total",
+    ])
+      performance.clearMeasures(`nyxid.voice.startup.${phase}`);
+    performance.measure("nyxid.voice.startup.preparation", {
+      start: this.startupAt,
+      end: performance.now(),
+    });
+    this.setStatus("microphone");
     this.preferences = preferences;
+    this.preparation = preparation;
     let step: VoiceStartStep = "microphone";
     try {
       this.audio = document.createElement("audio");
       this.audio.autoplay = true;
       this.audio.setAttribute("playsinline", "");
-      const media = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      });
+      const revoked = () => {
+        this.onError(
+          "Microphone access ended. Start a new call when it is available.",
+        );
+        void this.end();
+      };
+      if (preparation?.isClosed)
+        throw new DOMException("Cancelled", "AbortError");
+      this.capture =
+        preparation?.capture ?? new MicrophoneCapture(revoked, deviceId);
+      const activity = (value: AudioActivity) => {
+        const playing = !!this.audio && !this.audio.paused;
+        const audible = playing && !this.audio!.muted && this.audio!.volume > 0;
+        // Caption progression follows the media timeline, including speaker mute.
+        // It is not proof of audible delivery; paused/closed media retain progress.
+        if (playing)
+          this.lastPlaybackMs = Math.max(this.lastPlaybackMs, value.playbackMs);
+        this.onActivity({
+          ...value,
+          output: audible ? value.output : 0,
+          playbackMs: this.lastPlaybackMs,
+        });
+      };
+      const playback = () =>
+        this.grok?.watermark() ??
+        Math.max(0, Math.floor((this.audio?.currentTime ?? 0) * 1000));
+      if (preparation) {
+        this.meter = preparation.meter;
+        this.meter.playbackFrom(playback);
+        preparation.listen(activity, revoked);
+      } else this.meter = new AudioActivityMeter(activity, playback);
+      const media = await (preparation?.ready ?? this.capture.ready);
       if (this.closed) {
-        media.getTracks().forEach((t) => t.stop());
+        this.capture?.close();
         return;
       }
       this.media = media;
+      if (preparation?.isClosed)
+        throw new DOMException("Cancelled", "AbortError");
+      if (!preparation) this.meter.watch(media, "input");
+      if (beforeProvider) {
+        step = "settings";
+        await beforeProvider();
+      }
+      if (this.closed) return;
       media.getAudioTracks().forEach((t) => {
         t.enabled = false;
       });
       step = "webrtc";
+      this.setStatus("audio");
       if (protocol === "xai_realtime") {
         if (preferences.input_mode !== "push_to_talk")
           throw new Error("Grok requires Hold to talk");
@@ -112,10 +215,13 @@ export class AssistantVoiceClient {
               void this.end();
             }
           },
+          (stream) => this.meter?.watch(stream, "output"),
+          this.meter.audioContext,
         );
         await this.grok.start(media);
         if (this.closed) return;
         step = "server";
+        this.setStatus("server");
         const raw = await apiClient(this.path(), {
           method: "POST",
           signal: this.abort.signal,
@@ -143,6 +249,7 @@ export class AssistantVoiceClient {
       peer.ontrack = ({ streams, track }) => {
         if (!this.audio || this.closed) return;
         this.audio.srcObject = streams[0] ?? new MediaStream([track]);
+        this.meter?.watch(this.audio.srcObject as MediaStream, "output");
         void this.resumeAudio();
       };
       peer.onconnectionstatechange = () => {
@@ -178,6 +285,7 @@ export class AssistantVoiceClient {
       await this.waitForIce(peer);
       if (this.closed) return;
       step = "server";
+      this.setStatus("server");
       const raw = await apiClient(this.path(), {
         method: "POST",
         signal: this.abort.signal,
@@ -213,7 +321,11 @@ export class AssistantVoiceClient {
             this.onConflict(null);
           }
         }
-        this.onError(voiceStartError(error, step));
+        this.onError(
+          step === "microphone"
+            ? microphoneError(error)
+            : voiceStartError(error, step),
+        );
       }
       await this.end();
     }
@@ -254,6 +366,7 @@ export class AssistantVoiceClient {
   }
   private openControls() {
     if (!this.session || this.closed) return;
+    if (this.connectionStatus !== "reconnecting") this.setStatus("connecting");
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.reconnectTimer = undefined;
     this.controlsReady = false;
@@ -266,7 +379,8 @@ export class AssistantVoiceClient {
     this.controlSocket = socket;
     socket.binaryType = "arraybuffer";
     socket.onmessage = ({ data }) => {
-      if (this.closed) return;
+      if (this.closed || socket !== this.controlSocket) return;
+      let event: unknown;
       try {
         if (this.grok && data instanceof ArrayBuffer) {
           if (
@@ -279,64 +393,88 @@ export class AssistantVoiceClient {
           this.audioEnd = undefined;
           return;
         }
-        const event = JSON.parse(String(data)) as {
+        event = JSON.parse(String(data));
+      } catch {
+        this.recoverControlProtocol(socket);
+        return;
+      }
+      try {
+        const control = event as {
           type?: string;
           generation?: number;
           end_ms?: number;
         };
         if (
           this.grok &&
-          (event.type === "audio" || event.type === "audio_flush")
+          (control.type === "audio" || control.type === "audio_flush")
         ) {
-          if (event.generation !== this.session?.generation || this.closed)
+          if (control.generation !== this.session?.generation || this.closed)
             return;
-          if (event.type === "audio_flush") {
+          if (control.type === "audio_flush") {
             this.grok.flush();
             this.audioEnd = undefined;
             return;
           }
           if (
             this.audioEnd !== undefined ||
-            !Number.isSafeInteger(event.end_ms) ||
-            event.end_ms! < 0 ||
-            event.end_ms! > 1830000
+            !Number.isSafeInteger(control.end_ms) ||
+            control.end_ms! < 0 ||
+            control.end_ms! > 1830000
           )
             throw new Error("Invalid playback watermark");
-          this.audioEnd = event.end_ms;
+          this.audioEnd = control.end_ms;
           return;
         }
-        if (event.type === "start_failed") {
+        if (control.type === "start_failed") {
           const failure = voiceStartFailureSchema.parse(event);
           this.onError(
             voiceStartError(new ApiError(503, failure.error), "server"),
           );
-          void this.end();
+          this.dispose();
           return;
         }
-        const snapshot = voiceSnapshotSchema.parse(event);
-        if (this.closed || snapshot.session.id !== this.session?.id)
+        // New control event types do not invalidate an established call.
+        if (control.type !== "snapshot") return;
+        const result = voiceSnapshotSchema.safeParse(event);
+        if (!result.success) {
+          this.recoverControlProtocol(socket);
           return;
+        }
+        const snapshot = result.data;
+        if (this.closed || snapshot.session.id !== this.session?.id) return;
         this.controlsReady = true;
         this.reconnectAttempt = 0;
         this.session = snapshot.session;
         this.onSnapshot(snapshot);
         this.updateInput();
-        if (snapshot.session.state === "closed" || snapshot.session.state === "failed") {
+        if (
+          snapshot.session.state === "closed" ||
+          snapshot.session.state === "failed"
+        ) {
           if (snapshot.session.end_reason === "server_update")
-            this.onError("The call ended during a server update; start a new call");
+            this.onError(
+              "The call ended during a server update; start a new call",
+            );
           this.dispose();
         }
       } catch {
-        this.onError("Voice state could not be verified.");
-        void this.end();
+        this.recoverControlProtocol(socket);
       }
     };
     socket.onclose = () => {
       if (this.closed || socket !== this.controlSocket) return;
       if (this.heartbeat) clearInterval(this.heartbeat);
+      this.audioEnd = undefined;
+      this.grok?.flush();
       this.controlsReady = false;
+      this.held = false;
+      this.updateInput();
+      this.setStatus("reconnecting");
       if (this.reconnectAttempt >= 6) {
         this.onError("Voice control connection could not reconnect.");
+        // Losing transport is not a user End command. Heartbeat expiry owns
+        // server cleanup, and accepted work keeps its independent lifetime.
+        this.dispose();
         return;
       }
       const delays = [1000, 2000, 4000, 8000, 15000, 30000];
@@ -346,7 +484,11 @@ export class AssistantVoiceClient {
       }, delay);
     };
     this.heartbeat = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN && this.session && this.controlsReady)
+      if (
+        socket.readyState === WebSocket.OPEN &&
+        this.session &&
+        this.controlsReady
+      )
         socket.send(
           JSON.stringify({
             type: "heartbeat",
@@ -364,14 +506,34 @@ export class AssistantVoiceClient {
         );
     }, 1000);
   }
+  /**
+   * A forward-compatible server event must not turn into an implicit hang-up.
+   * Drop this control socket and let the existing bounded reconnect path obtain
+   * a fresh snapshot while the durable call keeps running on the server.
+   */
+  private recoverControlProtocol(socket: WebSocket) {
+    if (this.closed || socket !== this.controlSocket) return;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+    this.audioEnd = undefined;
+    this.grok?.flush();
+    this.controlsReady = false;
+    this.held = false;
+    this.updateInput();
+    this.setStatus("reconnecting");
+    socket.close();
+  }
   private updateInput() {
-    const enabled =
+    const ready =
       !this.closed &&
       this.started &&
       this.controlsReady &&
-      this.session?.state === "active" &&
-      !this.session.muted &&
-      !this.session.input_muted &&
+      this.session?.state === "active";
+    if (ready) this.setStatus("ready");
+    const enabled =
+      ready &&
+      !this.session?.muted &&
+      !this.session?.input_muted &&
       (this.preferences?.input_mode === "automatic" || this.held);
     this.media?.getAudioTracks().forEach((t) => {
       t.enabled = enabled;
@@ -380,15 +542,16 @@ export class AssistantVoiceClient {
   }
   hold(pressed: boolean) {
     if (this.closed || this.held === pressed) return;
+    if (
+      pressed &&
+      (!this.started ||
+        !this.controlsReady ||
+        this.session?.state !== "active" ||
+        this.session.muted ||
+        this.session.input_muted)
+    )
+      return;
     if (this.grok) {
-      if (
-        pressed &&
-        (this.session?.state !== "active" ||
-          this.session.muted ||
-          this.session.input_muted ||
-          !this.controlsReady)
-      )
-        return;
       if (this.controlSocket?.readyState === WebSocket.OPEN)
         this.controlSocket.send(
           JSON.stringify({ type: pressed ? "ptt_begin" : "ptt_commit" }),
@@ -405,6 +568,7 @@ export class AssistantVoiceClient {
   async resumeAudio() {
     if (this.audio) this.audio.muted = this.speakerMuted;
     try {
+      await this.meter?.resume();
       await this.grok?.resume();
       await this.audio?.play();
     } catch {
@@ -444,10 +608,14 @@ export class AssistantVoiceClient {
   async end() {
     this.closed = true;
     this.abort.abort();
+    this.preparation?.close();
+    if (!this.preparation) {
+      this.capture?.close();
+      this.meter?.close();
+    }
     this.onClosed();
     this.media?.getTracks().forEach((t) => {
       t.enabled = false;
-      t.stop();
     });
     this.audio?.pause();
     this.grok?.close();
@@ -473,10 +641,14 @@ export class AssistantVoiceClient {
     this.onClosed();
     this.closed = true;
     this.abort.abort();
+    this.preparation?.close();
+    if (!this.preparation) {
+      this.capture?.close();
+      this.meter?.close();
+    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);
-    this.media?.getTracks().forEach((t) => t.stop());
     this.peer?.close();
     this.grok?.close();
     this.controlSocket?.close();

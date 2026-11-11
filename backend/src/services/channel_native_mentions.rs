@@ -228,3 +228,58 @@ pub fn lark(message: &Value, own_id: Option<&str>) -> Mentions {
     }
     result
 }
+
+#[cfg(test)]
+mod directed_command_tests {
+    use super::*;
+    use serde_json::json;
+    fn bot() -> ChannelBot {
+        bson::from_document(bson::doc! {
+            "_id":"bot", "user_id":"owner", "platform":"telegram", "label":"Support",
+            "platform_bot_id":"123", "platform_bot_username":"Helper_bot",
+            "webhook_registered":true,"webhook_secret_hash":"hash","status":"active","is_active":true,
+            "bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        }).unwrap()
+    }
+    #[test]
+    fn standard_start_command_arguments_wrong_target_and_unicode_entities() {
+        // Entity parsing only: Telegram privacy/delivery is not simulated.
+        for (text, offset, target) in [
+            ("/start@Helper_bot", 0, true),
+            ("/start@Helper_bot invite-code", 0, true),
+            ("😀 /start@Helper_bot 参数", 3, true),
+            ("/start@Wrong_bot invite-code", 0, false),
+        ] {
+            let token = text
+                .split_whitespace()
+                .find(|s| s.starts_with('/'))
+                .unwrap();
+            let facts = telegram(
+                &json!({"text":text,"entities":[{"type":"bot_command","offset":offset,"length":token.encode_utf16().count()}]}),
+                &bot(),
+            );
+            assert!(!facts.invalid, "{text}");
+            assert_eq!(facts.bot, target, "{text}");
+            assert_eq!(facts.other, !target);
+        }
+        let spaced = telegram(
+            &json!({"text":"/start @Helper_bot","entities":[
+                {"type":"bot_command","offset":0,"length":6},
+                {"type":"mention","offset":7,"length":11}
+            ]}),
+            &bot(),
+        );
+        assert!(spaced.bot && !spaced.other && !spaced.invalid);
+        let invalid = telegram(
+            &json!({"text":"😀 /start@Helper_bot", "entities":[{"type":"bot_command","offset":1,"length":17}]}),
+            &bot(),
+        );
+        assert!(invalid.invalid);
+        let plain = telegram(
+            &json!({"text":"/start","entities":[{"type":"bot_command","offset":0,"length":6}]}),
+            &bot(),
+        );
+        assert!(!plain.bot && !plain.other && !plain.invalid);
+    }
+}

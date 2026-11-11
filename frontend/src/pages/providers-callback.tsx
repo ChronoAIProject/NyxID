@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { CheckCircle, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
  * redirects here with ?status=success or ?status=error&message=...
  */
 export function ProvidersCallbackPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as {
     readonly status?: string;
@@ -29,26 +30,26 @@ export function ProvidersCallbackPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <CardTitle>
-            {isSuccess ? t("Provider Connected") : t("Connection Failed")}
+            {isSuccess ? translateUi("Provider Connected") : translateUi("Connection Failed")}
           </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col items-center gap-4">
           {isSuccess ? (
             <>
               <CheckCircle className="h-12 w-12 text-success" />
-              <p className="text-12 text-muted-foreground text-center">{t("Your provider has been connected successfully.")}</p>
-              <Button onClick={() => void navigate({ to: "/providers" })}>{t("Back to Providers")}</Button>
+              <p className="text-14 text-muted-foreground text-center">{translateUi("Your provider has been connected successfully.")}</p>
+              <Button onClick={() => void navigate({ to: "/providers" })}>{translateUi("Back to Providers")}</Button>
             </>
           ) : (
             <>
               <XCircle className="h-12 w-12 text-destructive" />
-              <p className="text-12 text-destructive text-center">
+              <p className="text-14 text-destructive text-center">
                 {errorMessage}
               </p>
               <Button
                 variant="outline"
                 onClick={() => void navigate({ to: "/providers" })}
-              >{t("Back to Providers")}</Button>
+              >{translateUi("Back to Providers")}</Button>
             </>
           )}
         </CardContent>

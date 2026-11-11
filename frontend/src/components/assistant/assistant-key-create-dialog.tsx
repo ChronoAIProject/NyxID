@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
@@ -126,7 +127,7 @@ function KeyEffectResult({
   readonly onRetryVerification: () => void;
   readonly onFinish: (keyId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -148,8 +149,8 @@ function KeyEffectResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-13 font-medium">{t("Existing key")}</p>
-            <p className="break-all font-mono text-12 text-muted-foreground">
+            <p className="type-card-title">{translateUi("Existing key")}</p>
+            <p className="break-all font-mono text-14 text-muted-foreground">
               {result.resource.keyId}
             </p>
           </div>
@@ -157,31 +158,31 @@ function KeyEffectResult({
       ) : (
         <div className="space-y-4 border-y border-border py-4">
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-12">
+            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-14">
               {result.fullKey}
             </code>
             <Button
               type="button"
               variant="outline"
               size="icon"
-              title={t("Copy API key")}
-              aria-label={t("Copy API key")}
+              title={translateUi("Copy API key")}
+              aria-label={translateUi("Copy API key")}
               onClick={() => void copySecret()}
             >
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-12">
+          <Label className="flex cursor-pointer items-start gap-2">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
             />
-            <span>{t("I saved this key in a secure location.")}</span>
-          </label>
+            <span>{translateUi("I saved this key in a secure location.")}</span>
+          </Label>
         </div>
       )}
       {verified ? (
-        <p className="text-11 text-success">{t("Exact least-scope access verified.")}</p>
+        <p className="text-13 text-success">{translateUi("Exact least-scope access verified.")}</p>
       ) : null}
       <DialogFooter>
         {!verified ? (
@@ -191,7 +192,7 @@ function KeyEffectResult({
             isLoading={verifying}
             onClick={onRetryVerification}
           >
-            <RefreshCw />{t("Retry verification")}</Button>
+            <RefreshCw />{translateUi("Retry verification")}</Button>
         ) : null}
         <Button
           type="button"
@@ -199,7 +200,7 @@ function KeyEffectResult({
           disabled={!verified || (!result.replayed && !saved)}
           onClick={() => onFinish(result.resource.keyId)}
         >
-          {result.replayed ? t("Report existing key") : t("I have saved it")}
+          {result.replayed ? translateUi("Report existing key") : translateUi("I have saved it")}
         </Button>
       </DialogFooter>
     </>
@@ -226,7 +227,7 @@ export function AssistantKeyCreateDialog({
   readonly params: AssistantKeyCreateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [platformGrant, setPlatformGrant] = useState(
     params.allowAutoConnectedServices,
   );
@@ -370,33 +371,33 @@ export function AssistantKeyCreateDialog({
       >
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? t("API key already created") : t("Create API key")}
+            {result?.replayed ? translateUi("API key already created") : translateUi("Create API key")}
           </DialogTitle>
           <DialogDescription>
             {result
               ? result.replayed
-                ? t("The original one-time secret is no longer available.")
-                : t("This key is shown only once. Copy and store it securely now.")
-              : t("Confirm the exact key identity and service boundary.")}
+                ? translateUi("The original one-time secret is no longer available.")
+                : translateUi("This key is shown only once. Copy and store it securely now.")
+              : translateUi("Confirm the exact key identity and service boundary.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Name")}</span>
+              <span className="text-muted-foreground">{translateUi("Name")}</span>
               <span className="min-w-0 truncate font-medium">
                 {params.name}
               </span>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Platform")}</span>
+              <span className="text-muted-foreground">{translateUi("Platform")}</span>
               <Badge variant="secondary" className="max-w-[70%] truncate">
                 {params.platform}
               </Badge>
             </div>
             <div className="space-y-2">
-              <span className="text-muted-foreground">{t("Allowed services")}</span>
+              <span className="text-muted-foreground">{translateUi("Allowed services")}</span>
               <div className="flex flex-wrap gap-1.5">
                 {(platformIds ?? params.allowedServiceIds).map((serviceId) => (
                   <Badge
@@ -409,7 +410,7 @@ export function AssistantKeyCreateDialog({
                 ))}
               </div>
             </div>
-            <p className="text-11 leading-relaxed text-muted-foreground">{t("Proxy access follows these service selections. Node access is denied.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Proxy access follows these service selections. Node access is denied.")}</p>
           </div>
         ) : null}
 
@@ -424,21 +425,21 @@ export function AssistantKeyCreateDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {!result ? (
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+            <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               disabled={submitting}
               onClick={() => void createKey()}
-            >{t("Create key")}</Button>
+            >{translateUi("Create key")}</Button>
           </DialogFooter>
         ) : null}
         {result ? (

@@ -761,6 +761,19 @@ mod tests {
             .expect("collect created keys");
         assert_eq!(keys.len(), 1);
         let key = &keys[0];
+        assert_eq!(
+            key.expires_at.unwrap(),
+            mongodb::bson::DateTime::from_chrono(key.created_at + chrono::Duration::days(90))
+                .to_chrono()
+        );
+        let created = [&first, &second]
+            .into_iter()
+            .find_map(|result| match result {
+                KeyCreateActionResult::Created(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(created.expires_at, key.expires_at);
         assert_eq!(key.scopes, "proxy");
         assert_eq!(key.allowed_service_ids, vec![service_id]);
         assert!(key.allowed_node_ids.is_empty());
@@ -778,6 +791,77 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].resource_id, key.id);
         assert_eq!(receipts[0].status, AssistantActionReceiptStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn assistant_rotation_and_readback_preserve_finite_and_legacy_nonexpiring_policy() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w9_assistant_rotation").await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let service_id = Uuid::new_v4().to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &user_id,
+                "api-github",
+                &Uuid::new_v4().to_string(),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
+        for legacy_nonexpiring in [false, true] {
+            let mut request = exact_request(&service_id);
+            request.action_request_id = format!("create-{legacy_nonexpiring}");
+            let KeyCreateActionResult::Created(created) =
+                create_key(&db, &user_id, request).await.unwrap()
+            else {
+                panic!("first execution must create");
+            };
+            if legacy_nonexpiring {
+                // Simulate the existing policy of a pre-upgrade key, not a new default.
+                db.collection::<ApiKey>(API_KEYS)
+                    .update_one(
+                        doc! {"_id": &created.id},
+                        doc! {"$set": {"expires_at": mongodb::bson::Bson::Null}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let original = key_service::get_api_key(&db, &user_id, &created.id)
+                .await
+                .unwrap();
+            let request = KeyRotateActionRequest {
+                action_request_id: format!("rotate-{legacy_nonexpiring}"),
+                key_id: original.id.clone(),
+            };
+            let KeyRotateActionResult::Created {
+                created: successor, ..
+            } = rotate_key(&db, &keys, &user_id, request.clone())
+                .await
+                .unwrap()
+            else {
+                panic!("first rotation must create");
+            };
+            let stored = key_service::get_api_key(&db, &user_id, &successor.id)
+                .await
+                .unwrap();
+            assert_eq!(successor.expires_at, original.expires_at);
+            assert_eq!(stored.expires_at, original.expires_at);
+            assert_eq!(stored.allowed_service_ids, original.allowed_service_ids);
+            assert_eq!(stored.allowed_node_ids, original.allowed_node_ids);
+            assert_eq!(stored.allow_all_services, original.allow_all_services);
+            assert_eq!(stored.allow_all_nodes, original.allow_all_nodes);
+            assert!(
+                matches!(rotate_key(&db, &keys, &user_id, request).await.unwrap(),
+                KeyRotateActionResult::Replayed { key_id, .. } if key_id == stored.id)
+            );
+        }
     }
 
     #[tokio::test]

@@ -26,7 +26,6 @@
 use chrono::{Duration, Utc};
 use mongodb::bson::{self, doc};
 use serde::Deserialize;
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -39,27 +38,27 @@ use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 pub const DEFAULT_GCP_SA_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 /// Google's default OAuth 2.0 token endpoint. A service-account key file
-/// carries its own `token_uri` (always this value in practice); we honor
-/// the key's value so tests can point it at a local server.
+/// carries `token_uri`; production accepts only this canonical endpoint.
+/// The private test transport seam permits a loopback mock server.
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 
 /// Parsed Google service-account JSON key. Only the fields we need to
 /// mint an access token; any other fields in the key file are ignored.
 #[derive(Deserialize)]
 struct GcpServiceAccountKey {
-    client_email: String,
-    private_key: String,
+    client_email: zeroize::Zeroizing<String>,
+    private_key: zeroize::Zeroizing<String>,
     #[serde(default)]
-    token_uri: Option<String>,
+    token_uri: Option<zeroize::Zeroizing<String>>,
 }
 
 impl std::fmt::Debug for GcpServiceAccountKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never log the private key.
+        // Key identifiers and unvalidated input URLs may also carry secrets.
         f.debug_struct("GcpServiceAccountKey")
-            .field("client_email", &self.client_email)
+            .field("client_email", &"[REDACTED]")
             .field("private_key", &"[REDACTED]")
-            .field("token_uri", &self.token_uri)
+            .field("token_uri", &"[REDACTED]")
             .finish()
     }
 }
@@ -79,6 +78,13 @@ pub struct MintedToken {
     pub access_token: String,
     /// Lifetime in seconds reported by Google (defaults to 3600 if absent).
     pub expires_in_secs: i64,
+}
+
+impl Drop for MintedToken {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.access_token.zeroize();
+    }
 }
 
 impl std::fmt::Debug for MintedToken {
@@ -133,9 +139,9 @@ fn resolve_token_uri(from_key: Option<&str>) -> Result<String, MintError> {
     )))
 }
 
-pub async fn mint_access_token(sa_json: &str, scope: &str) -> Result<MintedToken, MintError> {
+fn token_request(sa_json: &str, scope: &str) -> Result<reqwest::RequestBuilder, MintError> {
     let sa: GcpServiceAccountKey = serde_json::from_str(sa_json)
-        .map_err(|e| MintError::Terminal(format!("invalid service account JSON: {e}")))?;
+        .map_err(|_| MintError::Terminal("invalid service account JSON".into()))?;
 
     if sa.client_email.is_empty() || sa.private_key.is_empty() {
         return Err(MintError::Terminal(
@@ -149,7 +155,7 @@ pub async fn mint_access_token(sa_json: &str, scope: &str) -> Result<MintedToken
     // metadata, internal services, localhost). Real Google service-account
     // keys always carry `https://oauth2.googleapis.com/token`, so we pin to
     // it and reject anything else — losing nothing legitimate.
-    let token_uri = resolve_token_uri(sa.token_uri.as_deref())?;
+    let token_uri = resolve_token_uri(sa.token_uri.as_ref().map(|uri| uri.as_str()))?;
 
     let now = Utc::now();
     let assertion_claims = Assertion {
@@ -164,55 +170,130 @@ pub async fn mint_access_token(sa_json: &str, scope: &str) -> Result<MintedToken
     // KEY"); `from_rsa_pem` accepts them (same call push_service uses for
     // FCM). A bad key is a permanent configuration error, not transient.
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(sa.private_key.as_bytes())
-        .map_err(|e| MintError::Terminal(format!("invalid service account private key: {e}")))?;
+        .map_err(|_| MintError::Terminal("invalid service account private key".into()))?;
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    let assertion = jsonwebtoken::encode(&header, &assertion_claims, &key)
-        .map_err(|e| MintError::Terminal(format!("failed to sign assertion: {e}")))?;
+    let assertion = zeroize::Zeroizing::new(
+        jsonwebtoken::encode(&header, &assertion_claims, &key)
+            .map_err(|_| MintError::Terminal("failed to sign assertion".into()))?,
+    );
 
-    let response = crate::services::oauth_flow::token_exchange_client()
+    Ok(crate::services::oauth_flow::token_exchange_client()
         .post(&token_uri)
         .form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", assertion.as_str()),
-        ])
+        ]))
+}
+#[cfg(test)]
+pub async fn mint_access_token(sa_json: &str, scope: &str) -> Result<MintedToken, MintError> {
+    send_token_request(token_request(sa_json, scope)?, None).await
+}
+/// Every production mint has durable predispatch intent, including validation
+/// mints before initial creation. Local parsing/signing failures issue nothing.
+pub(crate) async fn mint_for_install(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    owner: &str,
+    destination: &str,
+    sa_json: &str,
+    scope: &str,
+) -> AppResult<(String, MintedToken)> {
+    let request = token_request(sa_json, scope)
+        .map_err(|error| AppError::ValidationError(error.to_string()))?;
+    let (attempt, canonical) =
+        super::personal_erasure_service::issuance::begin_gcp(db, actor, owner, destination).await?;
+    let minted = send_token_request(request, Some((db, keys, &attempt, &canonical)))
+        .await
+        .map_err(|error| match error {
+            MintError::Terminal(message) => AppError::ValidationError(message),
+            MintError::Transient(message) => AppError::Internal(message),
+        })?;
+    Ok((attempt, minted))
+}
+async fn send_token_request(
+    request: reqwest::RequestBuilder,
+    journal: Option<(&mongodb::Database, &EncryptionKeys, &str, &str)>,
+) -> Result<MintedToken, MintError> {
+    let response = request
         .send()
         .await
-        // Network errors are transient — the key is still valid.
-        .map_err(|e| MintError::Transient(format!("token request failed: {e}")))?;
-
+        .map_err(|_| MintError::Transient("token request failed".into()))?;
     let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let truncated: String = body.chars().take(300).collect();
-        // 5xx / 429 mean the token endpoint is momentarily unavailable;
-        // the service-account key is unaffected. Everything else (4xx:
-        // invalid_grant for a disabled/deleted SA, invalid_client, etc.)
-        // is a terminal configuration error.
-        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(MintError::Transient(format!(
-                "token endpoint transiently unavailable: {status} {truncated}"
-            )));
+    let body = zeroize::Zeroizing::new(
+        response
+            .text()
+            .await
+            .map_err(|_| MintError::Transient("failed to read token response".into()))?,
+    );
+    let value: crate::crypto::secret_json::SecretJson = serde_json::from_str(&body)
+        .map_err(|_| MintError::Transient("failed to parse token response".into()))?;
+    let access = value
+        .0
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
+    // Only an absent lifetime has the protocol default. A present malformed
+    // value must not become a live one-hour token. Retain returned material
+    // first, with unknown expiry, even when the success envelope is invalid.
+    let lifetime = match value.0.get("expires_in") {
+        None => Some(3600),
+        Some(value) => value
+            .as_i64()
+            .filter(|seconds| (1..=3600).contains(seconds)),
+    };
+    let expiry = lifetime.map(|seconds| Utc::now() + Duration::seconds(seconds));
+    if let Some((db, keys, attempt, owner)) = journal {
+        if let Some(access) = access {
+            super::personal_erasure_service::issuance::received_gcp(
+                db, keys, attempt, owner, access, expiry,
+            )
+            .await
+            .map_err(|_| {
+                MintError::Transient("could not confirm durable issued-token receipt".into())
+            })?;
+        } else if value
+            .0
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+            && value
+                .0
+                .get("access_token")
+                .is_none_or(serde_json::Value::is_null)
+            && value
+                .0
+                .get("refresh_token")
+                .is_none_or(serde_json::Value::is_null)
+        {
+            super::personal_erasure_service::issuance::settled(db, attempt, false)
+                .await
+                .map_err(|_| {
+                    MintError::Transient("could not confirm no-issuance receipt".into())
+                })?;
         }
-        return Err(MintError::Terminal(format!(
-            "token endpoint rejected service account: {status} {truncated}"
-        )));
     }
-
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        #[serde(default)]
-        expires_in: Option<i64>,
+    if !status.is_success() {
+        let code = super::provider_diagnostics::response_code(&body);
+        let message = format!("token endpoint rejected service account: {status} ({code})");
+        return Err(
+            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                MintError::Transient(message)
+            } else {
+                MintError::Terminal(message)
+            },
+        );
     }
-
-    let token: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| MintError::Transient(format!("failed to parse token response: {e}")))?;
-
+    if expiry.is_none() {
+        return Err(MintError::Transient(
+            "invalid service account token lifetime".into(),
+        ));
+    }
     Ok(MintedToken {
-        access_token: token.access_token,
-        expires_in_secs: token.expires_in.unwrap_or(3600),
+        access_token: access
+            .ok_or_else(|| MintError::Transient("token response contains no access token".into()))?
+            .to_owned(),
+        expires_in_secs: lifetime.expect("validated lifetime"),
     })
 }
 
@@ -231,7 +312,18 @@ pub async fn mint_access_token(sa_json: &str, scope: &str) -> Result<MintedToken
 /// resurrects a row a concurrent revoke / failure moved to a terminal
 /// state. Concurrent successful mints keep last-write-wins — both tokens
 /// are valid, so a later one overwriting an earlier one is harmless.
-pub async fn mint_and_store(
+/// Heap-own the credential lifecycle future at the production boundary. Proxy
+/// callers and joined lifecycle races must not embed its transaction/HTTP
+/// state in every enclosing future's stack frame.
+pub fn mint_and_store<'a>(
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    api_key: &'a UserApiKey,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<UserApiKey>> + Send + 'a>> {
+    Box::pin(mint_and_store_inner(db, encryption_keys, api_key))
+}
+
+async fn mint_and_store_inner(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     api_key: &UserApiKey,
@@ -239,10 +331,33 @@ pub async fn mint_and_store(
     let enc = api_key.credential_encrypted.as_ref().ok_or_else(|| {
         AppError::Internal("GCP service account key has no stored credential".to_string())
     })?;
-    let dec = Zeroizing::new(encryption_keys.decrypt(enc).await?);
-    let sa_json = String::from_utf8((*dec).clone()).map_err(|e| {
-        AppError::Internal(format!("Failed to decode GCP service account JSON: {e}"))
-    })?;
+    use super::credential_record_service as records;
+    let raw = db
+        .collection::<bson::Document>(USER_API_KEYS)
+        .find_one(doc! {"_id":&api_key.id})
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("Service account credential disappeared before mint".into())
+        })?;
+    let current: UserApiKey = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    if current.credential_type != "gcp_service_account"
+        || current.status != api_key.status
+        || !matches!(current.status.as_str(), "active" | "expired")
+        || current.updated_at.timestamp_millis() != api_key.updated_at.timestamp_millis()
+        || current.user_id != api_key.user_id
+        || current.credential_epoch != api_key.credential_epoch
+        || current.credential_encrypted != api_key.credential_encrypted
+        || current.secret_context_versions != api_key.secret_context_versions
+    {
+        return Err(AppError::Conflict(
+            "Service account credential changed before mint".into(),
+        ));
+    }
+    let predicate = records::exact_source_filter(USER_API_KEYS, &raw)?;
+    let sa_json = records::CredentialRecord::key(api_key)
+        .text(encryption_keys, "credential_encrypted", enc)
+        .await?;
 
     let scope = api_key
         .token_scopes
@@ -250,9 +365,20 @@ pub async fn mint_and_store(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_GCP_SA_SCOPE);
 
-    let minted = match mint_access_token(&sa_json, scope).await {
+    let lifecycle_owner = super::erasure_admission::credential_owner(db, &api_key.user_id).await?;
+    let (attempt, minted) = match mint_for_install(
+        db,
+        encryption_keys,
+        &lifecycle_owner,
+        &api_key.user_id,
+        &api_key.id,
+        &sa_json,
+        scope,
+    )
+    .await
+    {
         Ok(minted) => minted,
-        Err(MintError::Transient(msg)) => {
+        Err(AppError::Internal(msg)) => {
             tracing::warn!(
                 api_key_id = %api_key.id,
                 "GCP service account token mint hit a transient error; leaving key active for retry: {msg}"
@@ -261,19 +387,14 @@ pub async fn mint_and_store(
                 "GCP token mint transiently failed: {msg}"
             )));
         }
-        Err(MintError::Terminal(msg)) => {
+        Err(AppError::ValidationError(msg)) => {
             let now = Utc::now();
             let truncated: String = msg.chars().take(300).collect();
             // CAS on `updated_at` + `status`: don't clobber a row a
             // concurrent operation already moved off our snapshot.
-            let snapshot_updated_at = bson::DateTime::from_chrono(api_key.updated_at);
             crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .update_one(
-                    doc! {
-                        "_id": &api_key.id,
-                        "updated_at": &snapshot_updated_at,
-                        "status": { "$nin": ["revoked", "failed"] },
-                    },
+                    predicate.clone(),
                     doc! { "$set": {
                         "status": "failed",
                         "error_message": format!("GCP token mint failed: {truncated}"),
@@ -285,33 +406,49 @@ pub async fn mint_and_store(
                 "GCP token mint failed: {truncated}"
             )));
         }
+        Err(error) => return Err(error),
     };
 
     let now = Utc::now();
     let expires_at = now + Duration::seconds(minted.expires_in_secs);
-    let access_enc = encryption_keys
-        .encrypt(minted.access_token.as_bytes())
-        .await?;
+    let access_enc = records::encrypt(
+        encryption_keys,
+        USER_API_KEYS,
+        &api_key.id,
+        &api_key.user_id,
+        "access_token_encrypted",
+        minted.access_token.as_bytes(),
+    )
+    .await?;
+    let mut versions = api_key.secret_context_versions.clone();
+    records::mark_version(&mut versions, encryption_keys, "access_token_encrypted");
 
-    let write = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-        .update_one(
-            doc! {
-                "_id": &api_key.id,
-                "status": { "$nin": ["revoked", "failed"] },
-            },
-            doc! { "$set": {
-                "access_token_encrypted": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: access_enc,
-                },
-                "expires_at": bson::DateTime::from_chrono(expires_at),
-                "status": "active",
-                "error_message": bson::Bson::Null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .routine_refresh()
-        .await?;
+    let set = doc! {
+        "access_token_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: access_enc,
+        },
+        "secret_context_versions":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?,
+        "expires_at": bson::DateTime::from_chrono(expires_at),
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    use std::future::IntoFuture;
+    let write = super::personal_erasure_service::issuance::installing(
+        &attempt,
+        super::personal_erasure_service::issuance::key_mutation(
+            doc! {"_id":&api_key.id},
+            &set.clone(),
+            &minted.access_token,
+            None,
+            super::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .update_one(predicate, doc! {"$set":set})
+                .routine_refresh()
+                .into_future(),
+        ),
+    )
+    .await??;
 
     // A concurrent revoke / terminal-failure moved the row off our
     // snapshot between the read and this write, so the freshly minted
@@ -333,6 +470,28 @@ pub async fn mint_and_store(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_account_debug_redacts_key_identifiers_and_unvalidated_url() {
+        let key=super::GcpServiceAccountKey {
+            client_email:"distinctive-key-email@example.test".to_owned().into(),
+            private_key:"distinctive-private-material".to_owned().into(),
+            token_uri:Some("https://distinctive-user:distinctive-password@example.test/token?secret=distinctive-query".to_owned().into()),
+        };
+        for rendered in [format!("{key:?}"), format!("{key:#?}")] {
+            for distinctive in [
+                "distinctive-key-email",
+                "distinctive-private-material",
+                "distinctive-user",
+                "distinctive-password",
+                "distinctive-query",
+                "example.test",
+            ] {
+                assert!(!rendered.contains(distinctive));
+            }
+            assert!(rendered.contains("[REDACTED]"));
+        }
+    }
+
     use super::*;
     use crate::models::user_api_key::UserApiKey;
     use crate::test_utils::{connect_test_database, test_encryption_keys};
@@ -388,6 +547,106 @@ mod tests {
             .expect("mint should succeed");
         assert_eq!(minted.access_token, "ya29.minted");
         assert_eq!(minted.expires_in_secs, 3599);
+    }
+
+    #[tokio::test]
+    async fn malformed_success_never_echoes_credential_response_in_mint_error() {
+        let secret = "distinctive-gcp-malformed-expiry-6107";
+        let (token_uri, server) = spawn_token_server(
+            serde_json::json!({"access_token":secret,"expires_in":secret}),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let error = mint_access_token(&sa_json(&token_uri), DEFAULT_GCP_SA_SCOPE)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, MintError::Transient(_)));
+        assert!(!error.to_string().contains(secret));
+        assert!(!format!("{error:?}").contains(secret));
+        assert_eq!(error.to_string(), "invalid service account token lifetime");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn present_invalid_lifetime_is_rejected_and_returned_token_is_journaled() {
+        use serde_json::json;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db = crate::test_utils::connect_transaction_test_database("gcp_invalid_expiry").await;
+        let keys = test_encryption_keys();
+        let owner = Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        for malformed in [
+            json!(null),
+            json!("3600"),
+            json!(0),
+            json!(-1),
+            json!(3601),
+            json!(3.5),
+            json!(true),
+        ] {
+            let (uri, server) = spawn_token_server(
+                json!({"access_token":"retained-invalid-expiry-token","expires_in":malformed}),
+                axum::http::StatusCode::OK,
+            )
+            .await;
+            let destination = Uuid::new_v4().to_string();
+            assert!(
+                mint_for_install(
+                    &db,
+                    &keys,
+                    &owner,
+                    &owner,
+                    &destination,
+                    &sa_json(&uri),
+                    DEFAULT_GCP_SA_SCOPE
+                )
+                .await
+                .is_err()
+            );
+            let receipt = db
+                .collection::<bson::Document>("personal_erasure_effects")
+                .find_one(doc! {"source_id":destination})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.get_str("status"), Ok("received"));
+            assert!(receipt.get_binary_generic("capability_encrypted").is_ok());
+            let raw = keys
+                .decrypt_record(
+                    receipt.get_binary_generic("capability_encrypted").unwrap(),
+                    &crate::crypto::aes::RecordContext::new(
+                        "personal_erasure_effects",
+                        receipt.get_str("_id").unwrap(),
+                        &owner,
+                        &["capability_encrypted"],
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let capability: crate::crypto::secret_json::SecretJson =
+                serde_json::from_slice(&raw).unwrap();
+            assert_eq!(
+                capability
+                    .get("access_token")
+                    .and_then(serde_json::Value::as_str),
+                Some("retained-invalid-expiry-token")
+            );
+            assert!(
+                capability
+                    .get("expires_at")
+                    .is_none_or(serde_json::Value::is_null)
+            );
+            server.abort();
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -465,6 +724,7 @@ mod tests {
     fn make_gcp_key(sa_json_enc: Vec<u8>) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
@@ -494,6 +754,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn journaled_mint_installs_for_person_org_and_canonically_owned_service_account() {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db = crate::test_utils::connect_transaction_test_database("gcp_mint_owners").await;
+        let keys = test_encryption_keys();
+        let (uri, server) = spawn_token_server(
+            serde_json::json!({"access_token":"owner-token","expires_in":3600}),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        for kind in ["person", "org", "service_account", "org_service_account"] {
+            let canonical = Uuid::new_v4().to_string();
+            let is_org = kind.contains("org");
+            db.collection::<crate::models::user::User>("users")
+                .insert_one(crate::test_utils::test_user(
+                    &canonical,
+                    if is_org {
+                        crate::models::user::UserType::Org
+                    } else {
+                        crate::models::user::UserType::Person
+                    },
+                ))
+                .await
+                .unwrap();
+            let subject = if kind.contains("service_account") {
+                let subject = Uuid::new_v4().to_string();
+                db.collection::<bson::Document>(crate::models::service_account::COLLECTION_NAME).insert_one(doc! {
+                    "_id":&subject,"name":"Mint owner","client_id":Uuid::new_v4().to_string(),
+                    "client_secret_hash":"unused-hash","secret_prefix":"unused","allowed_scopes":"proxy",
+                    "is_active":true,"created_by":&canonical,"owner_user_id":&canonical,
+                    "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+                }).await.unwrap();
+                subject
+            } else {
+                canonical.clone()
+            };
+            let mut key = make_gcp_key(keys.encrypt(sa_json(&uri).as_bytes()).await.unwrap());
+            key.user_id = subject.clone();
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .insert_one(&key)
+                .await
+                .unwrap();
+            let live = mint_and_store(&db, &keys, &key).await.unwrap();
+            assert!(live.provider_config_id.is_none());
+            assert_eq!(
+                super::super::credential_record_service::CredentialRecord::key(&live)
+                    .text(
+                        &keys,
+                        "access_token_encrypted",
+                        live.access_token_encrypted.as_deref().unwrap()
+                    )
+                    .await
+                    .unwrap()
+                    .as_str(),
+                "owner-token"
+            );
+            let receipt = db
+                .collection::<bson::Document>("personal_erasure_effects")
+                .find_one(doc! {"source_id":&key.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.get_str("user_id"), Ok(canonical.as_str()));
+            assert_eq!(receipt.get_str("target_owner_id"), Ok(subject.as_str()));
+            assert_eq!(receipt.get_str("reason"), Ok("credential_installed"));
+            assert!(!receipt.contains_key("capability_encrypted"));
+        }
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_gcp_mint_after_erasure_preserves_response_and_supports_truthful_policy_resolution()
+     {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db = crate::test_utils::connect_transaction_test_database("gcp_held_erasure").await;
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (entered_server, release_server) = (entered.clone(), release.clone());
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let (entered, release) = (entered_server.clone(), release_server.clone());
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    axum::Json(
+                        serde_json::json!({"access_token":"late-gcp-token","expires_in":3600}),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let key = make_gcp_key(keys.encrypt(sa_json(&uri).as_bytes()).await.unwrap());
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                &key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        let mint = mint_and_store(&db, &keys, &key);
+        let erase = async {
+            entered.notified().await;
+            super::super::personal_erasure_service::accept(&db, &key.user_id, &key.user_id, None)
+                .await
+                .unwrap();
+            // Actual production worker may preserve/purge source material; the
+            // upstream intent still prevents any completed account claim.
+            for _ in 0..8 {
+                db.collection::<bson::Document>("personal_erasure_jobs")
+                    .update_one(
+                        doc! {"user_id":&key.user_id},
+                        doc! {"$set":{"retry_at":bson::DateTime::from_millis(0)}},
+                    )
+                    .await
+                    .unwrap();
+                super::super::personal_erasure_service::process_one(&state)
+                    .await
+                    .unwrap();
+            }
+            assert_ne!(
+                super::super::personal_erasure_service::status(&db, &key.user_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                crate::models::personal_erasure::ErasureStatus::Complete
+            );
+            release.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(mint, erase)
+        })
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let receipt = db
+            .collection::<bson::Document>("personal_erasure_effects")
+            .find_one(doc! {"source_id":&key.id,"kind":"oauth_issuance"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.get_str("status"), Ok("received"));
+        assert!(receipt.contains_key("capability_encrypted"));
+        let id = receipt.get_str("_id").unwrap();
+        db.collection::<bson::Document>("personal_erasure_effects")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"updated_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::process_one(&state)
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::provider::reconcile_effect(
+            &db,
+            &keys,
+            &key.user_id,
+            &key.user_id,
+            &crate::services::personal_erasure_service::provider::EffectReconciliationRequest {
+                effect_id: (id).to_string(),
+                action: ("record_remote_revocation_unavailable").to_string(),
+                evidence_reference:
+                    ("fixture://gcp-individual-revocation-unavailable-and-expiry-policy")
+                        .to_string(),
+                expected_retry_generation: 0,
+                idempotency_key: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let resolved = db
+            .collection::<bson::Document>("personal_erasure_effects")
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.get_bool("remote_revocation_confirmed"), Ok(false));
+        assert_eq!(
+            resolved.get_str("completion_basis"),
+            Ok("operator_recorded_revocation_unavailable")
+        );
+        assert!(!resolved.contains_key("capability_encrypted"));
+        assert!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! {"_id":&key.id,"access_token_encrypted":{"$ne":null}})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn mint_and_store_persists_token_and_expiry() {
         let Some(db) = connect_test_database("gcp_mint_and_store_persists").await else {
             eprintln!("skipping mint_and_store test: no local MongoDB available");
@@ -511,6 +978,14 @@ mod tests {
             .await
             .unwrap();
         let key = make_gcp_key(sa_enc);
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                &key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(&key)
             .await
@@ -541,10 +1016,16 @@ mod tests {
                 .unwrap(),
             0
         );
-        let decrypted = encryption_keys
-            .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
-            .await
-            .unwrap();
+        let decrypted =
+            crate::services::credential_record_service::CredentialRecord::key(&refreshed)
+                .decrypt(
+                    &encryption_keys,
+                    "access_token_encrypted",
+                    refreshed.access_token_encrypted.as_ref().unwrap(),
+                )
+                .await
+                .unwrap()
+                .to_vec();
         assert_eq!(String::from_utf8(decrypted).unwrap(), "ya29.persisted");
     }
 
@@ -566,6 +1047,14 @@ mod tests {
             .await
             .unwrap();
         let key = make_gcp_key(sa_enc);
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                &key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(&key)
             .await

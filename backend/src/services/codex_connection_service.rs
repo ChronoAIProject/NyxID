@@ -79,6 +79,7 @@ pub fn version(token: &UserProviderToken) -> ConnectionVersion {
 
 pub async fn connection_status(
     db: &Database,
+    encryption: &EncryptionKeys,
     token: &UserProviderToken,
 ) -> AppResult<&'static str> {
     if token.status != "active" {
@@ -87,7 +88,7 @@ pub async fn connection_status(
     let Some(service_id) = token.metadata.as_ref().and_then(|m| m.get("service_id")) else {
         return Ok("saved");
     };
-    let binding = match verification_binding(db, token, service_id).await {
+    let binding = match verification_binding(db, encryption, token, service_id).await {
         Ok(binding) => binding,
         Err(AppError::BadRequest(_) | AppError::Conflict(_)) => return Ok("reconnect_required"),
         Err(error) => return Err(error),
@@ -131,16 +132,26 @@ pub async fn import_api_key(
     }
     let provider = provider(db).await?;
     let (catalog, _) = llm_gateway_service::resolve_llm_service_by_slug(db, "openai").await?;
-    let encrypted = encryption.encrypt(api_key.as_bytes()).await?;
     let id = Uuid::new_v4().to_string();
     let service_id = Uuid::new_v4().to_string();
     let db = db.clone();
     let user = user.to_string();
     let expected = expected.cloned();
-    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+    let api_key = zeroize::Zeroizing::new(api_key.to_owned());
+    crate::services::service_history::transaction::run_send(&db.clone(), encryption, move |session, encryption| {
+        let db = db.clone();
+        let user = user.clone();
+        let provider = provider.clone();
+        let catalog = catalog.clone();
+        let id = id.clone();
+        let service_id = service_id.clone();
+        let expected = expected.clone();
+        let api_key = api_key.clone();
+        Box::pin(async move {
         let operation: AppResult<UserProviderToken> = async {
+            super::erasure_admission::credential_change_in_session(&db, &user, session).await?;
             // Serialize two first imports before either has a token row to lock.
-            let owner = db.collection::<User>(USERS).update_one(doc! {"_id":&user},
+            let owner = db.collection::<User>(USERS).update_one(doc! {"_id":&user,"is_active":true,"platform_personal_deleting":{"$ne":true}},
                 doc! {"$inc":{"provider_import_fence":1_i64}}).session(&mut *session).await?;
             if owner.matched_count != 1 { return Err(AppError::Unauthorized("Account is unavailable".into())); }
             let tokens = db.collection::<UserProviderToken>(TOKENS);
@@ -173,29 +184,37 @@ pub async fn import_api_key(
                         metadata.insert("service_id".into(), id.clone());
                     }
                 }
-                let token = tokens.find_one_and_update(doc! {"_id":&old.id,"state_version":old.state_version},
+                let encrypted = super::credential_record_service::encrypt(encryption, TOKENS, &old.id, &user, "api_key_encrypted", api_key.as_bytes()).await?;
+                let mut versions = Default::default();
+                super::credential_record_service::mark_version(&mut versions, encryption, "api_key_encrypted");
+                let token = tokens.find_one_and_update(doc! {"_id":&old.id,"user_id":&user,"provider_config_id":&provider.id,"state_version":old.state_version},
                     doc! {"$set": {"api_key_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted.clone()},
+                        "secret_context_versions":bson::to_bson(&versions).map_err(|_| AppError::Internal("Invalid credential version map".into()))?,
                         "status":"active","token_type":"api_key","metadata":bson::to_bson(&metadata).map_err(|_| AppError::Internal("Connection metadata encoding failed".into()))?,
                         "updated_at":bson::DateTime::from_chrono(now), "error_message":bson::Bson::Null,
                         "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
                         "expires_at":bson::Bson::Null,"gateway_url":bson::Bson::Null}, "$inc":{"state_version":1_i64}})
                     .return_document(ReturnDocument::After).session(&mut *session).await?
                     .ok_or_else(|| AppError::Conflict("Provider connection changed; confirm replacement again".into()))?;
-                user_api_key_service::replace_provider_api_key_in_transaction(&db, session, &token).await?;
+                user_api_key_service::replace_provider_api_key_in_transaction(&db, encryption, session, &token).await?;
                 let service = token.metadata.as_ref().and_then(|m| m.get("service_id")).expect("import service ID");
-                unified::provision_imported_api_key_in_transaction(&db, session, &token, &catalog, service).await?;
+                unified::provision_imported_api_key_in_transaction(&db, encryption, session, &token, &catalog, service).await?;
                 return Ok(token);
             }
-            let token = UserProviderToken {id:id.clone(),user_id:user.clone(),provider_config_id:provider.id.clone(),
+            let encrypted = super::credential_record_service::encrypt(encryption, TOKENS, &id, &user, "api_key_encrypted", api_key.as_bytes()).await?;
+            let mut versions = Default::default();
+            super::credential_record_service::mark_version(&mut versions, encryption, "api_key_encrypted");
+            let token = UserProviderToken {secret_context_versions: versions, id:id.clone(),user_id:user.clone(),provider_config_id:provider.id.clone(),
                 connection_id:None,credential_user_id:None,token_type:"api_key".into(),access_token_encrypted:None,
                 refresh_token_encrypted:None,token_scopes:None,expires_at:None,api_key_encrypted:Some(encrypted.clone()),
                 status:"active".into(),state_version:1,last_refreshed_at:None,last_used_at:None,error_message:None,
                 label:Some("Codex API key".into()),metadata:Some(metadata),gateway_url:None,created_at:now,updated_at:now};
             tokens.insert_one(&token).session(&mut *session).await?;
-            unified::provision_imported_api_key_in_transaction(&db, session, &token, &catalog, &service_id).await?;
+            unified::provision_imported_api_key_in_transaction(&db, encryption, session, &token, &catalog, &service_id).await?;
             Ok(token)
         }.await;
         transactions::transaction_result(operation)
+        })
     }).await.map_err(transactions::map_transaction_error)
 }
 
@@ -231,6 +250,7 @@ pub struct VerificationBinding {
 
 pub async fn verification_binding(
     db: &Database,
+    encryption: &EncryptionKeys,
     token: &UserProviderToken,
     service_id: &str,
 ) -> AppResult<VerificationBinding> {
@@ -252,10 +272,29 @@ pub async fn verification_binding(
         .await?
         .ok_or_else(|| AppError::Conflict("Saved service credential changed".into()))?;
     if key.provider_config_id.as_deref() != Some(&token.provider_config_id)
-        || key.credential_encrypted != token.api_key_encrypted
         || key.credential_type != "api_key"
         || key.expires_at.is_some_and(|expiry| expiry <= Utc::now())
     {
+        return Err(AppError::Conflict(
+            "Saved service no longer uses this credential; reconnect before verification".into(),
+        ));
+    }
+    let key_bytes = key
+        .credential_encrypted
+        .as_deref()
+        .ok_or_else(|| AppError::Conflict("Saved service credential is missing".into()))?;
+    let token_bytes = token
+        .api_key_encrypted
+        .as_deref()
+        .ok_or_else(|| AppError::Conflict("Saved provider credential is missing".into()))?;
+    let key_plain = super::credential_record_service::CredentialRecord::key(&key)
+        .decrypt(encryption, "credential_encrypted", key_bytes)
+        .await?;
+    let token_plain = super::credential_record_service::CredentialRecord::token(token)
+        .decrypt(encryption, "api_key_encrypted", token_bytes)
+        .await?;
+    use subtle::ConstantTimeEq;
+    if !bool::from(key_plain.as_slice().ct_eq(token_plain.as_slice())) {
         return Err(AppError::Conflict(
             "Saved service no longer uses this credential; reconnect before verification".into(),
         ));
@@ -275,7 +314,11 @@ pub async fn verification_binding(
     })
 }
 
-pub async fn registered_service(db: &Database, token: &UserProviderToken) -> AppResult<String> {
+pub async fn registered_service(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    token: &UserProviderToken,
+) -> AppResult<String> {
     require_current(db, &token.user_id, &version(token)).await?;
     let id = token
         .metadata
@@ -284,7 +327,7 @@ pub async fn registered_service(db: &Database, token: &UserProviderToken) -> App
         .ok_or_else(|| {
             AppError::BadRequest("This connection was not imported from Codex".into())
         })?;
-    verification_binding(db, token, id).await?;
+    verification_binding(db, encryption, token, id).await?;
     Ok(id.clone())
 }
 

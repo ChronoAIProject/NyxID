@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { z } from "zod";
@@ -83,7 +83,7 @@ export function AssistantServiceDeleteDialog({
   readonly params: AssistantServiceDeleteParams;
   readonly onComplete: (userServiceId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
@@ -161,42 +161,42 @@ export function AssistantServiceDeleteDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Delete connected service")}</DialogTitle>
-          <DialogDescription>{t("This cannot be undone from chat. Confirm every time — NyxID never skips the confirmation, including retries.")}</DialogDescription>
+          <DialogTitle>{translateUi("Delete connected service")}</DialogTitle>
+          <DialogDescription>{translateUi("This cannot be undone from chat. Confirm every time — NyxID never skips the confirmation, including retries.")}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3 border-y border-border py-4 text-12">
+        <div className="space-y-3 border-y border-border py-4 text-14">
           <p className="break-all font-mono text-muted-foreground">
             {params.userServiceId}
           </p>
           {cascade ? (
             <div className="space-y-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
               <p className="flex items-start gap-2 text-warning">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{t("Deleting this ")}{cascade.provider_name}{t(" connection will also revoke the shared grant")}{cascade.siblings.length
-                  ? t(" used by {{count}} other services", { count: cascade.siblings.length })
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{translateUi("Deleting this ")}{cascade.provider_name}{translateUi(" connection will also revoke the shared grant")}{cascade.siblings.length
+                  ? translateUi(" used by {{value1}} other service{{value2}}", { value1: String(cascade.siblings.length), value2: cascade.siblings.length === 1 ? "" : "s" })
                   : ""}
                 .
               </p>
             </div>
           ) : (
-            <p className="text-muted-foreground">{t("The connected service, its stored credential, and its endpoint will be removed. Confirm explicitly to continue.")}</p>
+            <p className="text-muted-foreground">{translateUi("The connected service, its stored credential, and its endpoint will be removed. Confirm explicitly to continue.")}</p>
           )}
         </div>
 
         {error ? (
-          <p role="alert" className="text-12 text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+          <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
           {!confirmed ? (
             <Button
               type="button"
               variant="destructive"
               onClick={() => setConfirmed(true)}
-            >{t("I understand, continue")}</Button>
+            >{translateUi("I understand, continue")}</Button>
           ) : (
             <Button
               type="button"
@@ -204,7 +204,7 @@ export function AssistantServiceDeleteDialog({
               isLoading={submitting}
               onClick={() => void submit(cascade !== null)}
             >
-              {cascade ? t("Delete and revoke grant") : t("Delete service")}
+              {cascade ? translateUi("Delete and revoke grant") : translateUi("Delete service")}
             </Button>
           )}
         </DialogFooter>

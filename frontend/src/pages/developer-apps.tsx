@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -27,7 +28,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  
+
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
@@ -86,13 +87,14 @@ function StatCard({
   readonly description: string;
   readonly icon: React.ComponentType<{ className?: string }>;
 }) {
+  useUiTranslation();
   return (
     <Card>
       <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
-          <p className="text-12 text-muted-foreground">{title}</p>
-          <p className="text-2xl font-semibold text-foreground">{value}</p>
-          <p className="text-11 text-text-tertiary">{description}</p>
+          <p className="text-14 text-muted-foreground">{title}</p>
+          <p className="type-metric text-foreground">{value}</p>
+          <p className="text-13 text-text-tertiary">{description}</p>
         </div>
         <Icon className="h-5 w-5 text-primary-text" />
       </CardContent>
@@ -101,7 +103,7 @@ function StatCard({
 }
 
 export function DeveloperAppsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDeveloperApps();
   const createMutation = useCreateDeveloperApp();
@@ -130,7 +132,7 @@ export function DeveloperAppsPage() {
 
   async function handleCreate() {
     if (!name.trim()) {
-      toast.error(translateUi("Application name is required"));
+      toast.error(translateErrorMessage("Application name is required"));
       return;
     }
 
@@ -163,7 +165,7 @@ export function DeveloperAppsPage() {
       if (error instanceof ApiError) {
         toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error(translateUi("Failed to create app"));
+        toast.error(translateErrorMessage("Failed to create app"));
       }
     }
   }
@@ -172,8 +174,8 @@ export function DeveloperAppsPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>{t("Developer Apps")}</h2>
-          <p className="text-12 text-muted-foreground">{t("Register and manage OAuth applications for your products.")}</p>
+          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>{translateUi("Developer Apps")}</h2>
+          <p className="text-14 text-muted-foreground">{translateUi("Register and manage OAuth applications for your products.")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
@@ -182,30 +184,30 @@ export function DeveloperAppsPage() {
               checked={showInactive}
               onCheckedChange={setShowInactive}
             />
-            <label htmlFor="show-inactive" className="text-12 text-muted-foreground cursor-pointer">{t("Show inactive")}</label>
+            <Label htmlFor="show-inactive" className="text-muted-foreground cursor-pointer">{translateUi("Show inactive")}</Label>
           </div>
-          <AddCtaButton label={t("New Application")} onClick={() => setCreateOpen(true)} />
+          <AddCtaButton label={translateUi("New Application")} onClick={() => setCreateOpen(true)} />
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>{t("Create Developer App")}</DialogTitle>
-                <DialogDescription>{t("Register a new OAuth application for your product.")}</DialogDescription>
+                <DialogTitle>{translateUi("Create Developer App")}</DialogTitle>
+                <DialogDescription>{translateUi("Register a new OAuth application for your product.")}</DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-12 font-medium" htmlFor="app-name">{t("Application Name")}</label>
+                  <Label htmlFor="app-name">{translateUi("Application Name")}</Label>
                   <Input
                     id="app-name"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    placeholder={t("My SaaS App")}
+                    placeholder={translateUi("My SaaS App")}
                   />
                 </div>
                 <div className="space-y-2">
-                  <label
-                    className="text-12 font-medium"
+                  <Label
+
                     htmlFor="redirect-uris"
-                  >{t("Redirect URIs (one per line)")}</label>
+                  >{translateUi("Redirect URIs (one per line)")}</Label>
                   <textarea
                     id="redirect-uris"
                     value={redirectUrisText}
@@ -215,11 +217,11 @@ export function DeveloperAppsPage() {
                     placeholder={
                       "https://app.example.com/oauth/callback\nmyapp://oauth/callback"
                     }
-                    className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
+                    className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-12 font-medium">{t("Client Type")}</label>
+                  <Label>{translateUi("Client Type")}</Label>
                   <Select
                     value={clientType}
                     onValueChange={(value: "public" | "confidential") =>
@@ -230,14 +232,14 @@ export function DeveloperAppsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="public">{t("Public (PKCE)")}</SelectItem>
-                      <SelectItem value="confidential">{t("Confidential")}</SelectItem>
+                      <SelectItem value="public">{translateUi("Public (PKCE)")}</SelectItem>
+                      <SelectItem value="confidential">{translateUi("Confidential")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-12 font-medium">{t("Allowed Scopes")}</label>
-                  <p className="text-xs text-muted-foreground">{t("OIDC scopes this app can request. Determines what user data and NyxID capabilities are included in tokens.")}</p>
+                  <Label>{translateUi("Allowed Scopes")}</Label>
+                  <p className="text-13 text-muted-foreground">{translateUi("OIDC scopes this app can request. Determines what user data and NyxID capabilities are included in tokens.")}</p>
                   <div className="space-y-2">
                     {OIDC_SCOPES.map((scope) => (
                       <div key={scope.id} className="flex items-start gap-2">
@@ -253,18 +255,18 @@ export function DeveloperAppsPage() {
                             );
                           }}
                         />
-                        <div className="grid gap-0.5 leading-none">
-                          <label
+                        <div className="grid gap-0.5">
+                          <Label
                             htmlFor={`scope-create-${scope.id}`}
-                            className="text-12 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                            className="peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                           >
                             {scope.label}
                             {scope.required && (
-                              <span className="ml-1 text-xs text-muted-foreground">{t("(required)")}</span>
+                              <FieldHelp className="ml-1 text-muted-foreground">{translateUi("(required)")}</FieldHelp>
                             )}
-                          </label>
+                          </Label>
                           {"hint" in scope && scope.hint && (
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-13 text-muted-foreground">
                               {scope.hint}
                             </p>
                           )}
@@ -279,12 +281,12 @@ export function DeveloperAppsPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setCreateOpen(false)}
-                >{t("Cancel")}</Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   variant="primary"
                   onClick={() => void handleCreate()}
                   isLoading={createMutation.isPending}
-                >{t("Create App")}</Button>
+                >{translateUi("Create App")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -299,21 +301,21 @@ export function DeveloperAppsPage() {
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard
-          title={t("Total Apps")}
+          title={translateUi("Total Apps")}
           value={apps.length}
-          description={t("All registered applications")}
+          description={translateUi("All registered applications")}
           icon={Code}
         />
         <StatCard
-          title={t("Active Apps")}
+          title={translateUi("Active Apps")}
           value={activeCount}
-          description={t("Ready for production traffic")}
+          description={translateUi("Ready for production traffic")}
           icon={ShieldCheck}
         />
         <StatCard
-          title={t("Confidential Apps")}
+          title={translateUi("Confidential Apps")}
           value={confidentialCount}
-          description={t("Require client secret")}
+          description={translateUi("Require client secret")}
           icon={Shield}
         />
       </div>
@@ -321,7 +323,7 @@ export function DeveloperAppsPage() {
       <div className="grid gap-4 xl:grid-cols-2">
         {!isLoading && error && (
           <div className="xl:col-span-2">
-            <ErrorBanner message={t("Failed to load developer apps. Please refresh and try again.")} onRetry={refetch} />
+            <ErrorBanner message={translateUi("Failed to load developer apps. Please refresh and try again.")} onRetry={refetch} />
           </div>
         )}
 
@@ -347,11 +349,11 @@ export function DeveloperAppsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle>{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? t("Active") : t("Inactive")}
+                    {app.is_active ? translateUi("Active") : translateUi("Inactive")}
                   </Badge>
                 </div>
-                <CardDescription className="break-all">{t("Client ID:")}{" "}
-                  <span className="text-xs text-foreground">
+                <CardDescription className="break-all">{translateUi("Client ID:")}{" "}
+                  <span className="text-13 text-foreground">
                     {app.id}
                   </span>
                 </CardDescription>
@@ -360,7 +362,7 @@ export function DeveloperAppsPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">{app.client_type}</Badge>
                   <Badge variant="secondary">
-                    {app.redirect_uris.length}{t(" redirect URIs")}</Badge>
+                    {app.redirect_uris.length}{translateUi(" redirect URIs")}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(app.allowed_scopes || "")
@@ -370,7 +372,7 @@ export function DeveloperAppsPage() {
                       <Badge
                         key={scope}
                         variant="secondary"
-                        className="text-xs"
+                        className="text-12"
                       >
                         {scope}
                       </Badge>
@@ -387,7 +389,7 @@ export function DeveloperAppsPage() {
                       })
                     }
                   >
-                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>{t("View Details")}</Button>
+                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>{translateUi("View Details")}</Button>
                 </div>
               </CardContent>
             </Card>
@@ -397,13 +399,13 @@ export function DeveloperAppsPage() {
           <div className="xl:col-span-2 flex flex-col items-center justify-center gap-1 py-12 text-center">
             <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground" />
             <div className="space-y-1">
-              <p className="text-12 font-medium text-muted-foreground">
-                {apps.length === 0 ? t("No Developer Apps") : t("No Active Apps")}
+              <p className="type-row-title text-muted-foreground">
+                {apps.length === 0 ? translateUi("No Developer Apps") : translateUi("No Active Apps")}
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {apps.length === 0
-                  ? t("Create your first application.")
-                  : t("Enable 'Show inactive' to view deactivated apps.")}
+                  ? translateUi("Create your first application.")
+                  : translateUi("Enable 'Show inactive' to view deactivated apps.")}
               </p>
             </div>
           </div>

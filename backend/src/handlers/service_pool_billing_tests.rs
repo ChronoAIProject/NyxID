@@ -20,6 +20,13 @@ struct EntitledLago;
 
 #[async_trait::async_trait]
 impl LagoApi for EntitledLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, input: &OwnerProvisionInput) -> AppResult<String> {
         Ok(input.external_customer_id.clone())
     }
@@ -99,6 +106,7 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
         .await
         .unwrap();
     let lane = |code: &str| LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::Tokens,
         credits_per_unit: "1".into(),
         lago_metric_code: code.into(),
@@ -194,7 +202,11 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
 }
 
 async fn settled_rows(fixture: &BilledFixture, expected: usize) -> Vec<UsageMeterRow> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    // Release follows the attempt's own deadline (up to 20 s overall in these
+    // fixtures) plus MongoDB settlement. Observe for longer than that budget so
+    // a loaded four-slot CI runner cannot turn a correct release into a timeout;
+    // the assertions on what was released are unchanged.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let rows: Vec<UsageMeterRow> = fixture
                 .proxy
@@ -657,7 +669,10 @@ async fn pool_proxy_paused_consumer_renews_lease_and_lease_loss_closes_provider(
     let initial = rows.find_one(doc! {}).await.unwrap().unwrap();
     assert!(!initial.released);
     let initial_lease = initial.pool_attempt.as_ref().unwrap().lease_until;
-    tokio::time::timeout(std::time::Duration::from_secs(14), async {
+    // The heartbeat renews every 10 s. Observe two full intervals plus margin,
+    // because a loaded CI runner can delay one tick past a single interval
+    // without the renewal ever stopping. The renewal itself is still required.
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
         loop {
             let current = rows
                 .find_one(doc! { "_id": &initial.id })
@@ -773,6 +788,7 @@ async fn pool_attempts_price_the_matched_operation_on_each_member_lane() {
     // The base rate (5) exceeds the one-credit wallet; only the operation
     // price (1) can admit either attempt.
     let lane = |suffix: &str| LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::Requests,
         credits_per_unit: "5".into(),
         lago_metric_code: format!("platform_svc_pool-review-api_{suffix}"),

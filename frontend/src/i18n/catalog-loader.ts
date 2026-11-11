@@ -19,7 +19,19 @@ export const catalogBackend: BackendModule = {
     }
     void loader(language).then(
       (catalog) => callback(null, catalog),
-      (error: unknown) => callback(error instanceof Error ? error : new Error(String(error)), false),
+      (error: unknown) => callback(error instanceof Error ? error : new Error(String(error)), true),
     );
   },
 };
+
+/** Render with English fallback if downloading a catalog stalls. */
+export function waitForCatalogs(ready: PromiseLike<unknown>, timeoutMs = 1500): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    const finish = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    void Promise.resolve(ready).then(finish, finish);
+  });
+}

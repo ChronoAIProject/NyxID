@@ -103,6 +103,7 @@ export const approveDeviceResponseSchema = z.object({
   device_label: z.string(),
   hw_id: z.string(),
   api_key_id: z.string(),
+  api_key_expires_at: z.string().nullable().optional(),
   node_id: z.string(),
   owner_user_id: z.string(),
   org_id: z.string().nullable(),

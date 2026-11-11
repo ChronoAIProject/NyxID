@@ -32,7 +32,7 @@ pub struct CreateMappingRequest {
     pub channel_user_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct MappingResponse {
     pub status: String,
     pub message: String,
@@ -142,7 +142,8 @@ pub async fn handle_channel_message(
                 platform: format!("openclaw:{}", message.channel),
                 conversation_id_hash: conversation_hash,
             },
-        );
+        )
+        .await;
     }
 
     // Get available providers and check OpenClaw connection status
@@ -229,7 +230,8 @@ pub async fn create_mapping(
             platform: format!("openclaw:{}", body.channel),
             conversation_id_hash: hash_conversation_id(&body.channel_user_id),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -248,6 +250,12 @@ pub async fn create_mapping(
                 .to_string(),
         webhook_secret: Some(webhook_secret),
     }))
+}
+
+impl std::fmt::Debug for MappingResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappingResponse").finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

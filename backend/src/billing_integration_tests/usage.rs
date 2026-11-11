@@ -5,10 +5,12 @@ use crate::models::usage_meter::{BillingLayer, UsageFunding};
 use crate::test_utils::test_auth_user;
 use axum::extract::{Query, State};
 
-fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
+pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     UsageMeterRow {
+        model_tariff: None,
+        org_channel_guest: None,
         rollup_pending: true,
         id: id.clone(),
         transaction_id: id.clone(),
@@ -19,6 +21,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         wallet_id: Some("wallet".into()),
         actor_user_id: owner.to_string(),
         api_key_id: None,
+        assistant_source: None,
         user_service_id: None,
         service_id: Some("service".into()),
         service_slug: Some("llm-test".into()),
@@ -27,6 +30,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         operation: None,
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
+        reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
         image_tokens: None,
@@ -57,6 +61,7 @@ async fn read_usage(state: &crate::AppState, actor: &str) -> BillingUsageRespons
         State(state.clone()),
         test_auth_user(actor),
         Query(UsageQuery {
+            owner_id: None,
             machine_id: None,
             job_id: None,
             period: None,
@@ -181,6 +186,9 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         if grant_micros > 0 {
             db.collection::<CreditGrant>(GRANTS)
                 .insert_one(CreditGrant {
+                    service_limits: Vec::new(),
+                    revoke_requested_at: None,
+                    revoke_requested_by: None,
                     id: grant_id.clone(),
                     batch_id: Uuid::new_v4().to_string(),
                     schedule_origin: None,
@@ -341,6 +349,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
             quantity: 20,
         }],
         grant_consumptions: vec![GrantConsumptionAllocation {
+            service_limit_key: None,
             operation_id: "g".into(),
             grant_id: "g".into(),
             amount: crate::models::credits::Credits::from_micros(50),
@@ -446,6 +455,7 @@ fn reservation_priced(quantity: i64, pico: Option<i64>, micros: i64, owner: &str
 
 fn grant_consumption(amount: Credits) -> crate::models::usage_meter::GrantConsumptionAllocation {
     crate::models::usage_meter::GrantConsumptionAllocation {
+        service_limit_key: None,
         operation_id: Uuid::new_v4().to_string(),
         grant_id: Uuid::new_v4().to_string(),
         amount,
@@ -747,6 +757,9 @@ async fn org_credential_request(platform_key: bool) {
     create_usage_index(&db).await;
     insert_fresh_rates(&db).await;
     let actor = insert_owner(&db).await;
+    // Keep payer/rollout assertions independent of the actor approval preference.
+    crate::test_utils::set_test_approval_preference(&db, &actor, false).await;
+
     let org = Uuid::new_v4().to_string();
     db.collection::<User>(USERS)
         .insert_one(test_user(&org, UserType::Org))
@@ -811,6 +824,7 @@ async fn org_credential_request(platform_key: bool) {
         .await
         .unwrap();
     catalog.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![org.clone()],
@@ -936,7 +950,7 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
         .unwrap();
     let resolver = BillingOwnerResolver::new(db.clone());
     let personal = resolver
-        .resolve_for_execution(&actor, &org, CredentialClass::NyxidManagedMaster)
+        .resolve_for_ordinary_execution(&actor, &org, CredentialClass::NyxidManagedMaster)
         .await
         .unwrap();
     assert_eq!(personal.owner_id, actor);
@@ -949,7 +963,7 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
         CredentialClass::NoAuth,
     ] {
         let resolved = resolver
-            .resolve_for_execution(&actor, &org, class)
+            .resolve_for_ordinary_execution(&actor, &org, class)
             .await
             .unwrap();
         assert_eq!(resolved.owner_id, org);
@@ -960,12 +974,14 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
             }
         );
         assert!(matches!(
-            resolver.resolve_for_execution(&outsider, &org, class).await,
+            resolver
+                .resolve_for_ordinary_execution(&outsider, &org, class)
+                .await,
             Err(AppError::Forbidden(_))
         ));
         assert_eq!(
             resolver
-                .resolve_for_execution(&actor, &actor, class)
+                .resolve_for_ordinary_execution(&actor, &actor, class)
                 .await
                 .unwrap(),
             personal
@@ -1003,6 +1019,7 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
         State(state.clone()),
         test_auth_user(&owner),
         Query(UsageQuery {
+            owner_id: None,
             machine_id: None,
             job_id: None,
             period: Some("7d".into()),
@@ -1032,6 +1049,7 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
         State(state),
         test_auth_user(&owner),
         Query(UsageQuery {
+            owner_id: None,
             machine_id: None,
             job_id: None,
             period: None,
@@ -1140,6 +1158,7 @@ async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scop
             State(state.clone()),
             test_auth_user(&owner),
             Query(UsageQuery {
+                owner_id: None,
                 period: None,
                 bucket: None,
                 machine_id: Some(machine.clone()),
@@ -1164,6 +1183,7 @@ async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scop
             State(state),
             test_auth_user(&owner),
             Query(UsageQuery {
+                owner_id: None,
                 period: None,
                 bucket: None,
                 machine_id: Some("not-a-uuid".into()),

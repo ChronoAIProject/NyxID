@@ -1,7 +1,9 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { activityDecisionPresentation, type ActivityDecision } from "@/lib/assistant/activity-decision";
 import { useEffect, useState } from "react";
+import { RECEIPT_MAX_W } from "@/lib/assistant/banner";
 import { useMachinePreviewPolicy } from "@/hooks/use-machine-activity";
 import { File, Globe, Terminal, Monitor } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
@@ -13,18 +15,21 @@ import { ToolImage } from "./blocks/tool-image";
 
 export function MachineToolCard({
   receipt,
+  decision,
   conversationId,
   images = [],
 }: {
+  readonly decision?: ActivityDecision | null;
   readonly receipt: MachineReceipt;
   readonly conversationId?: string;
   readonly images?: readonly ChatImage[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [preferenceOpen, setPreferenceOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [open, setOpen] = useState(false);
+  const gated = activityDecisionPresentation(decision);
   const command = receipt.action.startsWith("command.");
   const Icon = command
     ? Terminal
@@ -56,8 +61,8 @@ export function MachineToolCard({
   }
   return (
     <section
-      aria-label={t("Machine action")}
-      className="my-2 min-w-0 space-y-2 rounded-lg border border-hairline bg-overlay/35 p-3 text-xs"
+      aria-label={translateUi("Machine action")}
+      className={`${RECEIPT_MAX_W} my-2 min-w-0 space-y-2 rounded-lg border border-hairline bg-overlay/35 p-3 text-13`}
     >
       <div className="flex flex-wrap items-center gap-2">
         <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -67,25 +72,26 @@ export function MachineToolCard({
         <span
           role="status"
           className={
-            receipt.status === "error"
+            (gated ? gated.status === "error" : receipt.status === "error")
               ? "text-destructive"
               : "text-muted-foreground"
           }
         >
-          {receipt.status}
+          {gated?.label ?? receipt.status}
         </span>
-        {receipt.exit_code !== null && <span>{t("Exit ")}{receipt.exit_code}</span>}
+        {receipt.exit_code !== null && <span>{translateUi("Exit ")}{receipt.exit_code}</span>}
         {receipt.bytes !== null && (
-          <span>{receipt.bytes.toLocaleString(getFormattingLocale())}{t(" bytes")}</span>
+          <span>{receipt.bytes.toLocaleString(getFormattingLocale())}{translateUi(" bytes")}</span>
         )}
       </div>
-      <p className="break-all text-10 text-muted-foreground">
+      {gated ? <p className="text-muted-foreground">{gated.detail}</p> : null}
+      <p className="break-all text-12 text-muted-foreground">
         {receipt.machine_name?.trim() ||
-          t("Machine {{value}}", { value: receipt.node_id.slice(0, 8) })}{" "}
-        · {receipt.context_mode === "separated" ? t("Separate workspace and browser for this agent") : t("Shared workspace and browser")}
+          translateUi("Machine {{value1}}", { value1: receipt.node_id.slice(0, 8) })}{" "}
+        · {receipt.context_mode === "separated" ? translateUi("Separate workspace and browser for this agent") : translateUi("Shared workspace and browser")}
       </p>
-      <details className="text-10 text-muted-foreground">
-        <summary className="cursor-pointer">{t("Correlation IDs")}</summary>
+      <details className="text-12 text-muted-foreground">
+        <summary className="cursor-pointer">{translateUi("Correlation IDs")}</summary>
         <dl className="space-y-1 break-all pt-2">
           {[
             ["Machine", receipt.node_id],
@@ -102,8 +108,8 @@ export function MachineToolCard({
             ))}
         </dl>
       </details>
-      {receipt.error_code !== null && (
-        <p role="alert">{t("Machine error ")}{receipt.error_code}</p>
+      {(!gated || gated.status === "error") && receipt.error_code !== null && (
+        <p role="alert">{translateUi("Machine error ")}{receipt.error_code}</p>
       )}
       {image && <ToolImage image={image} />}
       {receipt.preview_id && root && (
@@ -114,7 +120,7 @@ export function MachineToolCard({
             aria-expanded={open}
             onClick={() => setOpen(!open)}
           >
-            {open ? t("Hide") : t("Show")}{t(" saved excerpt")}</Button>
+            {open ? translateUi("Hide") : translateUi("Show")}{translateUi(" saved excerpt")}</Button>
           {open && (
             <CommandExcerpt
               key={receipt.preview_id}
@@ -128,8 +134,8 @@ export function MachineToolCard({
           className="text-muted-foreground"
           onToggle={(event) => setPreferenceOpen(event.currentTarget.open)}
         >
-          <summary className="cursor-pointer">{t("Command excerpt preference")}</summary>
-          <p className="pt-2">{t("Off by default. Save bounded, redacted output from future commands in this conversation for up to 30 days. Output can contain private data.")}</p>
+          <summary className="cursor-pointer">{translateUi("Command excerpt preference")}</summary>
+          <p className="pt-2">{translateUi("Off by default. Save bounded, redacted output from future commands in this conversation for up to 30 days. Output can contain private data.")}</p>
           <Button
             size="sm"
             variant="outline"
@@ -137,11 +143,11 @@ export function MachineToolCard({
             onClick={() => void changePolicy()}
             className="mt-2"
           >
-            {enabled ? t("Stop saving excerpts") : t("Save future excerpts")}
+            {enabled ? translateUi("Stop saving excerpts") : translateUi("Save future excerpts")}
           </Button>
           {error && <p role="alert">{translateUi(error)}</p>}
           {policy.isError && (
-            <p role="alert">{t("Could not load excerpt preference.")}</p>
+            <p role="alert">{translateUi("Could not load excerpt preference.")}</p>
           )}
         </details>
       )}
@@ -150,7 +156,7 @@ export function MachineToolCard({
 }
 
 function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [text, setText] = useState<string>();
   const [failed, setFailed] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -170,11 +176,11 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
     return () => controller.abort();
   }, [endpoint]);
   if (expired)
-    return <p role="status">{t("Command excerpt expired per retention policy.")}</p>;
-  if (failed) return <p role="status">{t("Excerpt unavailable.")}</p>;
-  if (text === undefined) return <p role="status">{t("Loading excerpt…")}</p>;
+    return <p role="status">{translateUi("Command excerpt expired per retention policy.")}</p>;
+  if (failed) return <p role="status">{translateUi("Excerpt unavailable.")}</p>;
+  if (text === undefined) return <p role="status">{translateUi("Loading excerpt…")}</p>;
   return (
-    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-11">
+    <pre data-scroll-fade="" className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-14">
       {text}
     </pre>
   );

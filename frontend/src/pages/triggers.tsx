@@ -1,8 +1,9 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { TEXT_STYLES } from "@/lib/typography";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   BellRing,
@@ -133,7 +134,7 @@ function TriggerActions({
   readonly onToggle: () => void;
   readonly onDelete: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -142,25 +143,25 @@ function TriggerActions({
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          aria-label={t("More actions for {{label}}", { label: trigger.label })}
+          aria-label={translateUi("More actions for {{value1}}", { value1: trigger.label })}
         >
           <MoreVertical className="h-3.5 w-3.5" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={onView}>
-          <Eye />{t("View details")}</DropdownMenuItem>
+          <Eye />{translateUi("View details")}</DropdownMenuItem>
         <DropdownMenuItem onClick={onRotate}>
-          <RotateCw />{t("Rotate secret")}</DropdownMenuItem>
+          <RotateCw />{translateUi("Rotate secret")}</DropdownMenuItem>
         <DropdownMenuItem onClick={onToggle}>
           <Power />
-          {trigger.status === "active" ? t("Disable") : t("Enable")}
+          {trigger.status === "active" ? translateUi("Disable") : translateUi("Enable")}
         </DropdownMenuItem>
         <DropdownMenuItem
           className="text-destructive focus:text-destructive"
           onClick={onDelete}
         >
-          <Trash2 />{t("Delete")}</DropdownMenuItem>
+          <Trash2 />{translateUi("Delete")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -175,46 +176,46 @@ function TriggerDetail({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
         <SheetHeader>
           <SheetTitle className="text-15">{trigger?.label}</SheetTitle>
-          <SheetDescription>{t("Ingress verification and delivery configuration.")}</SheetDescription>
+          <SheetDescription>{translateUi("Ingress verification and delivery configuration.")}</SheetDescription>
         </SheetHeader>
         {trigger && (
           <div className="mt-6 space-y-4">
-            <DetailSection title={t("Trigger")}>
+            <DetailSection title={translateUi("Trigger")}>
               <DetailRow
-                label={t("Status")}
+                label={translateUi("Status")}
                 value={titleCase(trigger.status)}
                 badge
               />
               <DetailRow
-                label={t("Delivery")}
+                label={translateUi("Delivery")}
                 value={deliveryLabel(trigger)}
                 badge
               />
               <DetailRow
-                label={t("Verification")}
+                label={translateUi("Verification")}
                 value={verificationLabel(trigger)}
               />
               <DetailRow
-                label={t("Inbound URL")}
+                label={translateUi("Inbound URL")}
                 value={trigger.inbound_url ?? "No inbound URL"}
                 copyable
                 mono
               />
             </DetailSection>
-            <DetailSection title={t("Metadata")}>
-              <DetailRow label={t("Trigger ID")} value={trigger.id} copyable mono />
+            <DetailSection title={translateUi("Metadata")}>
+              <DetailRow label={translateUi("Trigger ID")} value={trigger.id} copyable mono />
               <DetailRow
-                label={t("Created")}
+                label={translateUi("Created")}
                 value={formatDateTime(trigger.created_at)}
               />
               <DetailRow
-                label={t("Updated")}
+                label={translateUi("Updated")}
                 value={formatDateTime(trigger.updated_at)}
               />
             </DetailSection>
@@ -234,7 +235,7 @@ function TriggerCreateDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly onCreated: (values: readonly OneTimeSecretValue[]) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const createMutation = useCreateTrigger();
   const form = useAppForm<TriggerForm>({
     resolver: zodResolver(triggerFormSchema),
@@ -279,8 +280,8 @@ function TriggerCreateDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Create Trigger")}</DialogTitle>
-          <DialogDescription>{t("Verify an inbound event and choose where NyxID should deliver it.")}</DialogDescription>
+          <DialogTitle>{translateUi("Create Trigger")}</DialogTitle>
+          <DialogDescription>{translateUi("Verify an inbound event and choose where NyxID should deliver it.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form className="space-y-4" onSubmit={form.handleSubmit(create)}>
@@ -289,9 +290,9 @@ function TriggerCreateDialog({
               name="label"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Label")}</FormLabel>
+                  <FormLabel>{translateUi("Label")}</FormLabel>
                   <FormControl>
-                    <Input {...field} placeholder={t("Repository activity")} />
+                    <Input {...field} placeholder={translateUi("Repository activity")} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -302,7 +303,7 @@ function TriggerCreateDialog({
               name="verification_mode"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Verification")}</FormLabel>
+                  <FormLabel>{translateUi("Verification")}</FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger>
@@ -310,9 +311,9 @@ function TriggerCreateDialog({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="bearer">{t("Bearer token")}</SelectItem>
-                      <SelectItem value="query">{t("Query token")}</SelectItem>
-                      <SelectItem value="hmac">{t("HMAC-SHA256")}</SelectItem>
+                      <SelectItem value="bearer">{translateUi("Bearer token")}</SelectItem>
+                      <SelectItem value="query">{translateUi("Query token")}</SelectItem>
+                      <SelectItem value="hmac">{translateUi("HMAC-SHA256")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -325,9 +326,9 @@ function TriggerCreateDialog({
                 name="signature_header"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Signature Header")}</FormLabel>
+                    <FormLabel>{translateUi("Signature Header")}</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder={"X-Hub-Signature-256"} />
+                      <Input {...field} placeholder="X-Hub-Signature-256" />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -339,7 +340,7 @@ function TriggerCreateDialog({
               name="delivery_type"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Delivery Target")}</FormLabel>
+                  <FormLabel>{translateUi("Delivery Target")}</FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger>
@@ -347,9 +348,9 @@ function TriggerCreateDialog({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="notification">{t("Notification")}</SelectItem>
-                      <SelectItem value="agent">{t("Agent conversation")}</SelectItem>
-                      <SelectItem value="webhook">{t("Webhook")}</SelectItem>
+                      <SelectItem value="notification">{translateUi("Notification")}</SelectItem>
+                      <SelectItem value="agent">{translateUi("Agent conversation")}</SelectItem>
+                      <SelectItem value="webhook">{translateUi("Webhook")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -362,7 +363,7 @@ function TriggerCreateDialog({
                 name="webhook_url"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Webhook URL")}</FormLabel>
+                    <FormLabel>{translateUi("Webhook URL")}</FormLabel>
                     <FormControl>
                       <Input
                         {...field}
@@ -381,9 +382,9 @@ function TriggerCreateDialog({
                 name="conversation_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Conversation ID")}</FormLabel>
+                    <FormLabel>{translateUi("Conversation ID")}</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder={"conversation-id"} />
+                      <Input {...field} placeholder="conversation-id" />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -395,7 +396,7 @@ function TriggerCreateDialog({
                 type="button"
                 variant="outline"
                 onClick={() => handleOpenChange(false)}
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -405,7 +406,7 @@ function TriggerCreateDialog({
                   createMutation.isPending
                 }
                 isLoading={createMutation.isPending}
-              >{t("Create")}</Button>
+              >{translateUi("Create")}</Button>
             </DialogFooter>
           </form>
         </Form>
@@ -415,7 +416,7 @@ function TriggerCreateDialog({
 }
 
 export function TriggersPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const triggersQuery = useTriggers();
   const updateMutation = useUpdateTrigger();
   const deleteMutation = useDeleteTrigger();
@@ -450,7 +451,7 @@ export function TriggersPage() {
     const status = trigger.status === "active" ? "disabled" : "active";
     try {
       await updateMutation.mutateAsync({ id: trigger.id, data: { status } });
-      toast.success(translateUi("Trigger {{value}}", { value: status === "active" ? "enabled" : "disabled" }));
+      toast.success(translateUi(`Trigger ${status === "active" ? "enabled" : "disabled"}`));
     } catch (error) {
       toast.error(
         translateErrorMessage(error instanceof ApiError ? error.message : "Failed to update trigger"),
@@ -502,13 +503,13 @@ export function TriggersPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Triggers")}
-        description={t("Relay verified inbound events to agents, webhooks, or notifications.")}
+        title={translateUi("Triggers")}
+        description={translateUi("Relay verified inbound events to agents, webhooks, or notifications.")}
         actions={
           <>
-            <Link to="/assistant/automations" className="text-12 text-primary-text underline">{t("Automations")}</Link>
+            <Link to="/assistant/automations" className="text-14 text-primary-text underline">{translateUi("Automations")}</Link>
             <AddCtaButton
-              label={t("Create Trigger")}
+              label={translateUi("Create Trigger")}
               onClick={() => setCreateOpen(true)}
             />
           </>
@@ -522,14 +523,14 @@ export function TriggersPage() {
         </div>
       ) : triggersQuery.error ? (
         <ErrorBanner
-          message={t("Failed to load triggers.")}
+          message={translateUi("Failed to load triggers.")}
           onRetry={() => void triggersQuery.refetch()}
         />
       ) : triggers.length === 0 ? (
         <TeachingEmptyState
           icon={DishAntennaIcon}
-          title={t("No triggers yet")}
-          description={t("Create an authenticated ingress endpoint and choose where events should go.")}
+          title={translateUi("No triggers yet")}
+          description={translateUi("Create an authenticated ingress endpoint and choose where events should go.")}
           primaryCta={{
             label: "Create Your First Trigger",
             onClick: () => setCreateOpen(true),
@@ -550,7 +551,7 @@ export function TriggersPage() {
                     <BellRing className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <div className="min-w-0 space-y-2">
-                    <p className="truncate text-13 font-semibold">
+                    <p data-trigger-title="" className={`truncate ${TEXT_STYLES.rowTitle}`}>
                       {trigger.label}
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -565,7 +566,7 @@ export function TriggersPage() {
                         {deliveryLabel(trigger)}
                       </Badge>
                     </div>
-                    <p className="text-11 text-text-tertiary">{t("Created ")}{formatDateTime(trigger.created_at)}
+                    <p className="text-13 text-text-tertiary">{translateUi("Created ")}{formatDateTime(trigger.created_at)}
                     </p>
                   </div>
                 </div>
@@ -577,18 +578,18 @@ export function TriggersPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Label")}</TableHead>
-                  <TableHead>{t("Delivery")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{t("Created")}</TableHead>
-                  <TableHead className="w-12 text-right">{t("Actions")}</TableHead>
+                  <TableHead>{translateUi("Label")}</TableHead>
+                  <TableHead>{translateUi("Delivery")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Created")}</TableHead>
+                  <TableHead className="w-12 text-right">{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {triggers.map((trigger) => (
                   <TableRow key={trigger.id}>
-                    <TableCell className="font-medium">
-                      {trigger.label}
+                    <TableCell>
+                      <span data-trigger-title="" className={TEXT_STYLES.rowTitle}>{trigger.label}</span>
                     </TableCell>
                     <TableCell>{deliveryLabel(trigger)}</TableCell>
                     <TableCell>
@@ -600,7 +601,7 @@ export function TriggersPage() {
                         {titleCase(trigger.status)}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-mono text-11 text-text-tertiary">
+                    <TableCell className="font-mono text-14 text-text-tertiary">
                       {formatDateTime(trigger.created_at)}
                     </TableCell>
                     <TableCell className="text-right">
@@ -630,7 +631,7 @@ export function TriggersPage() {
         open={secretOpen}
         onOpenChange={setSecretOpen}
         title={secretTitle}
-        description={t("These values are shown only once. Copy and store them securely now.")}
+        description={translateUi("These values are shown only once. Copy and store them securely now.")}
         values={secretValues}
       />
 
@@ -642,16 +643,16 @@ export function TriggersPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Rotate trigger secret?")}</DialogTitle>
-            <DialogDescription>{t("The current inbound secret will stop working immediately.")}</DialogDescription>
+            <DialogTitle>{translateUi("Rotate trigger secret?")}</DialogTitle>
+            <DialogDescription>{translateUi("The current inbound secret will stop working immediately.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRotateTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setRotateTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               isLoading={rotateMutation.isPending}
               onClick={() => void rotateSecret()}
-            >{t("Rotate Secret")}</Button>
+            >{translateUi("Rotate Secret")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -664,16 +665,16 @@ export function TriggersPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete trigger?")}</DialogTitle>
-            <DialogDescription>{t("The inbound URL and secret will stop accepting events. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete trigger?")}</DialogTitle>
+            <DialogDescription>{translateUi("The inbound URL and secret will stop accepting events. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={deleteMutation.isPending}
               onClick={() => void deleteTrigger()}
-            >{t("Delete Trigger")}</Button>
+            >{translateUi("Delete Trigger")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

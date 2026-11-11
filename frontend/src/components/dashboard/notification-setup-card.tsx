@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState, useCallback } from "react";
 import { Link } from "@tanstack/react-router";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -34,7 +35,7 @@ const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 const DISMISSED_KEY = "nyxid:notification-setup-dismissed";
 
 export function NotificationSetupCard() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: settings, isLoading } = useNotificationSettings();
   const { data: pushDevices } = usePushDevices();
   const updateMutation = useUpdateNotificationSettings();
@@ -52,8 +53,10 @@ export function NotificationSetupCard() {
     settings?.push_enabled && (pushDevices?.devices.length ?? 0) > 0;
   const approvalEnabled = settings?.approval_required ?? false;
   const approvalSuspended = settings?.approval_suspended ?? false;
+  const deliveryConfigured = settings?.approval_delivery_configured;
+  const webAvailable = settings?.approval_web_available === true;
   const hasChannel = telegramReady || pushReady;
-  const allDone = hasChannel && approvalEnabled && !approvalSuspended;
+  const allDone = approvalEnabled && !approvalSuspended && webAvailable;
 
   const handleDismiss = useCallback(() => {
     localStorage.setItem(DISMISSED_KEY, "true");
@@ -65,7 +68,7 @@ export function NotificationSetupCard() {
       await telegramLinkMutation.mutateAsync();
       setLinkDialogOpen(true);
     } catch {
-      toast.error(translateUi("Failed to generate link code"));
+      toast.error(translateErrorMessage("Failed to generate link code"));
     }
   }
 
@@ -73,12 +76,12 @@ export function NotificationSetupCard() {
     try {
       await updateMutation.mutateAsync({ approval_required: enable });
       toast.success(
-        enable
+        translateUi(enable
           ? "Approval protection enabled"
-          : "Approval protection disabled",
+          : "Approval protection disabled"),
       );
     } catch {
-      toast.error(translateUi("Failed to update approval settings"));
+      toast.error(translateErrorMessage("Failed to update approval settings"));
     }
   }
 
@@ -92,7 +95,7 @@ export function NotificationSetupCard() {
   const steps = [
     {
       done: Boolean(telegramReady || pushReady),
-      label: "Set up a notification channel",
+      label: webAvailable ? "Add optional notifications" : "Connect a notification channel",
     },
     { done: approvalEnabled, label: "Enable approval protection" },
   ];
@@ -105,7 +108,7 @@ export function NotificationSetupCard() {
             variant="ghost"
             className="absolute right-2 top-2 h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
             onClick={handleDismiss}
-            aria-label={t("Dismiss")}
+            aria-label={translateUi("Dismiss")}
           >
             <X className="h-3.5 w-3.5" />
           </Button>
@@ -116,8 +119,8 @@ export function NotificationSetupCard() {
           <div className="flex items-center gap-3">
             <Bell className="h-5 w-5 text-primary-text" aria-hidden="true" />
             <div className="flex flex-col gap-0.5">
-              <h3 className="text-22 font-normal leading-tight">{t("Notifications & Approvals")}</h3>
-              <p className="text-12 text-muted-foreground">{t("Control how AI agents access your services")}</p>
+              <h3 className="type-compact-page-title">{translateUi("Notifications & Approvals")}</h3>
+              <p className="text-14 text-muted-foreground">{translateUi("Control how AI agents access your services")}</p>
             </div>
           </div>
 
@@ -125,14 +128,14 @@ export function NotificationSetupCard() {
           <div className="flex flex-col gap-2">
             {steps.map((step, i) => (
               <div key={i} className="flex items-center gap-2.5">
-                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-10 font-medium text-muted-foreground">
+                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay type-group-label text-muted-foreground">
                   {i + 1}
                 </div>
                 <span
                   className={
                     step.done
-                      ? "text-13 text-muted-foreground"
-                      : "text-13 font-medium"
+                      ? "text-15 text-muted-foreground"
+                      : "type-card-title "
                   }
                 >
                   {step.label}
@@ -146,25 +149,36 @@ export function NotificationSetupCard() {
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-primary-text" />
-                <span className="text-13 font-medium">{t("Approval protection is active")}</span>
+                <span className="type-card-title">{translateUi("Approval protection is active")}</span>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">{t("AI agents must request your approval before accessing services.")}{" "}
+              <p className="mt-1 text-13 text-muted-foreground">
+                {settings?.global_approval_mode === "writes_only"
+                  ? translateUi("Writes and destructive operations require approval; reads and stateless model inference can proceed. ")
+                  : translateUi("AI agents must request your approval before accessing services. ")}
                 <Link
                   to="/approvals/settings"
                   className="text-primary-text hover:underline"
-                >{t("Manage settings")}</Link>
+                >{translateUi("Manage settings")}</Link>
               </p>
             </div>
           )}
 
-          {approvalSuspended && (
+          {approvalEnabled && deliveryConfigured === false && webAvailable && !approvalSuspended && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-amber-500" />
-                <span className="text-13 font-medium">{t("Approval protection is suspended")}</span>
+                <span className="type-card-title">{translateUi("Review approvals on the web")}</span>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">{t("Your approval preference remains on. Connect or re-enable Telegram or push notifications and protection will resume automatically.")}</p>
+              <p className="mt-1 text-13 text-muted-foreground">{translateUi("Approval remains required while notifications are unavailable. Review pending requests in the Approval History page. Notifications are optional and delivery can fail.")}</p>
             </div>
+          )}
+
+          {approvalEnabled && (approvalSuspended || !webAvailable) && (
+            <p role="status" className="text-13 text-amber-600">
+              {approvalSuspended ? translateUi("Server reports approval is suspended. ") : translateUi("Web-only approval support is unconfirmed. ")}{translateUi("Keep a configured notification channel enabled until the server confirms required web approval.")}</p>
+          )}
+          {deliveryConfigured === undefined && (
+            <p className="text-13 text-muted-foreground">{translateUi("Notification provider configuration is unknown.")}</p>
           )}
 
           {/* Channel rows -- always shown so users can add more channels */}
@@ -177,19 +191,19 @@ export function NotificationSetupCard() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-13 font-medium">{t("Telegram")}</p>
-                  <p className="text-xs text-muted-foreground">{t("Receive approval requests via bot")}</p>
+                  <p className="type-card-title">{translateUi("Telegram")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Receive approval requests via bot")}</p>
                 </div>
               </div>
               {telegramReady ? (
-                <Badge variant="success">{t("Connected")}</Badge>
+                <Badge variant="success">{translateUi("Connected")}</Badge>
               ) : (
                 <Button
                   variant="outline"
                   onClick={() => void handleLinkTelegram()}
                   isLoading={telegramLinkMutation.isPending}
                 >
-                  <ButtonIcon><MessageSquare className="h-3.5 w-3.5" /></ButtonIcon>{t("Connect")}</Button>
+                  <ButtonIcon><MessageSquare className="h-3.5 w-3.5" /></ButtonIcon>{translateUi("Connect")}</Button>
               )}
             </div>
 
@@ -201,13 +215,13 @@ export function NotificationSetupCard() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-13 font-medium">{t("NyxID Mobile App")}</p>
-                  <p className="text-xs text-muted-foreground">{t("Approve from your phone (iOS & Android)")}</p>
+                  <p className="type-card-title">{translateUi("NyxID Mobile App")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Approve from your phone (iOS & Android)")}</p>
                 </div>
               </div>
               {pushReady ? (
                 <Badge variant="success">
-                  {pushDevices?.devices.length ?? 0}{t(" device")}{(pushDevices?.devices.length ?? 0) !== 1 ? "s" : ""}
+                  {pushDevices?.devices.length ?? 0}{translateUi(" device")}{(pushDevices?.devices.length ?? 0) !== 1 ? "s" : ""}
                 </Badge>
               ) : (
                 <Button variant="outline" asChild>
@@ -216,25 +230,29 @@ export function NotificationSetupCard() {
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    <ButtonIcon><Download className="h-3.5 w-3.5" /></ButtonIcon>{t("Download")}<ExternalLink className="h-3 w-3" />
+                    <ButtonIcon><Download className="h-3.5 w-3.5" /></ButtonIcon>{translateUi("Download")}<ExternalLink className="h-3 w-3" />
                   </a>
                 </Button>
               )}
             </div>
 
             {/* Enable approval button */}
-            {hasChannel && !approvalEnabled && (
+            {!approvalEnabled && (
               <Button
                 variant="primary"
                 className="w-full"
+                disabled={!hasChannel && !webAvailable}
                 onClick={() => void handleToggleApproval(true)}
                 isLoading={updateMutation.isPending}
               >
-                <ButtonIcon><Shield className="h-4 w-4" /></ButtonIcon>{t("Enable Approval Protection")}</Button>
+                <ButtonIcon><Shield className="h-4 w-4" /></ButtonIcon>{translateUi("Enable Approval Protection")}</Button>
             )}
 
-            {!hasChannel && (
-              <p className="text-xs text-muted-foreground">{t("Connect Telegram or download the mobile app to receive approval requests. Then explicitly enable approval protection in this card or Approval Settings.")}</p>
+            {!hasChannel && webAvailable && (
+              <p className="text-13 text-muted-foreground">{translateUi("Review pending requests in Approval History on the web. You can also connect Telegram or the mobile app for optional notifications.")}</p>
+            )}
+            {!hasChannel && !webAvailable && (
+              <p className="text-13 text-muted-foreground">{translateUi("Web-only approval support is unconfirmed. Connect and enable a notification channel before turning on approval protection on this server.")}</p>
             )}
           </div>
         </div>
@@ -244,24 +262,24 @@ export function NotificationSetupCard() {
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Connect Telegram")}</DialogTitle>
-            <DialogDescription>{t("Send the following command to the NyxID bot on Telegram to link your account.")}</DialogDescription>
+            <DialogTitle>{translateUi("Connect Telegram")}</DialogTitle>
+            <DialogDescription>{translateUi("Send the following command to the NyxID bot on Telegram to link your account.")}</DialogDescription>
           </DialogHeader>
           {linkData && (
             <div className="space-y-4">
               <div className="rounded-lg bg-muted p-4 text-center">
-                <p className="text-xs text-muted-foreground">{t("Send this to @")}{linkData.bot_username}
+                <p className="text-13 text-muted-foreground">{translateUi("Send this to @")}{linkData.bot_username}
                 </p>
-                <code className="mt-2 block text-lg font-semibold">
+                <code className="mt-2 block type-body">
                   /start {linkData.link_code}
                 </code>
               </div>
-              <p className="text-xs text-muted-foreground">{t("This code expires in")}{" "}
-                {String(Math.floor(linkData.expires_in_secs / 60))}{t(" minutes.")}</p>
+              <p className="text-13 text-muted-foreground">{translateUi("This code expires in")}{" "}
+                {String(Math.floor(linkData.expires_in_secs / 60))}{translateUi(" minutes.")}</p>
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>{t("Close")}</Button>
+            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>{translateUi("Close")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

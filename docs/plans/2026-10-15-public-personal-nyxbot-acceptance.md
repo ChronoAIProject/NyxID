@@ -199,3 +199,23 @@ unrelated.
 
 The test results above do not establish production readiness, external runtime
 proof or live acceptance. Each completed gate must link to its evidence.
+
+
+## 23 October launch checkpoint
+
+Current launch work and ownership are recorded in
+[the launch plan](2026-10-23-assistant-launch-and-legal.md). The newer
+[19 October repair](2026-10-19-platform-botfather-repair.md), including its
+20 October delivery revision, supersedes the earlier assumption that every
+public entry needs a model or sponsor: approved deterministic FAQ can be active
+without a saved public AI policy. Production runtime readback confirms that
+mode is active and `faq_ready`; optional explicit AI retains its existing gates.
+
+One synthetic real personal browser turn completed on production build
+`9cc4a7ec722d`, with task-attributed provider inference and exact benefit-funded
+settlement of 0.0279456 credits. The launch plan records its conversation and
+turn, quantities, prices and evidence limits. This is additional A8 evidence;
+it does not complete sponsor/org/duplicate cases, the two-account Telegram
+journey, pinned-upstream proof or A13. All canonical gate statuses above remain
+open until their complete required evidence is available. A15–A17 protections
+remain in force.

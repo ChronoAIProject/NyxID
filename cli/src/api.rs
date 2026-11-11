@@ -115,66 +115,19 @@ fn build_cli_http_client_with_redirect(
 }
 
 fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuilder> {
-    // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
-    // BOTH conditions are true:
-    //   (a) the operator has configured a telemetry DSN (or opted into
-    //       the community share-back), AND
-    //   (b) the user on this machine has actually consented (CLI
-    //       config / `NYXID_TELEMETRY=on` / `DO_NOT_TRACK` — see
-    //       `crate::telemetry::consent::resolve_consent`).
-    //
-    // Historically this function checked only (a), which meant that a
-    // user who had run `nyxid telemetry disable` — or set
-    // `DO_NOT_TRACK=1` — still produced surface-tagged headers on every
-    // request, and the backend emitted `surface="cli"` telemetry events
-    // for their traffic anyway. Local opt-out was partial theater.
-    // Tracked in `docs/TELEMETRY_CONSENT_FIX.md` §8.3.
-    //
-    // The `profile` argument is kept on the signature for future per-
-    // profile features, but consent is read against the DEFAULT profile
-    // regardless. Rationale: the only built-in consent editor today is
-    // `nyxid telemetry enable|disable`, which writes to
-    // `~/.nyxid/config.toml` (default profile). The main.rs first-run
-    // prompt also writes there. Reading profile-specific consent here
-    // would mean `nyxid --profile dev some-command` silently lost its
-    // headers until the user manually edited `~/.nyxid/profiles/dev/
-    // config.toml` — a footgun that treats consent as per-profile when
-    // no editor UI treats it that way. Consent is user-global in v1;
-    // making it per-profile is a separate feature that also needs a
-    // `nyxid telemetry --profile ...` editor path.
-    let telemetry_configured = std::env::var("NYXID_TELEMETRY_DSN")
-        .ok()
-        .is_some_and(|s| !s.is_empty())
-        || std::env::var("NYXID_SHARE_ANALYTICS")
-            .ok()
-            .is_some_and(|v| {
-                matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
-            });
-
-    // `resolve_consent_preferring_profile` honors the default profile
-    // (where v1 persists user choice) but also falls back to any
-    // explicit per-profile consent from older releases, so upgrading
-    // doesn't silently override a historical opt-out on a named
-    // profile.
-    let user_consented =
-        crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
-
-    let mut builder = crate::tls::client_builder()?
+    // Surface is metadata. Positive analytics narrowing is recomputed from
+    // the live account/profile choice on each authenticated API request.
+    let _ = profile;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-nyxid-client", "cli".parse().unwrap());
+    headers.insert(
+        "x-nyxid-client-version",
+        env!("CARGO_PKG_VERSION").parse().unwrap(),
+    );
+    let builder = crate::tls::client_builder()?
         .user_agent(CLI_USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(10));
-
-    if telemetry_configured && user_consented {
-        let mut default_headers = reqwest::header::HeaderMap::new();
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("x-nyxid-client"),
-            reqwest::header::HeaderValue::from_static("cli"),
-        );
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("x-nyxid-client-version"),
-            reqwest::header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
-        );
-        builder = builder.default_headers(default_headers);
-    }
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .default_headers(headers);
 
     Ok(builder)
 }
@@ -243,6 +196,7 @@ pub struct ApiClient {
     /// a specific API key and must not silently fall back to the user's
     /// saved session access token on the `profile`.
     refresh_disabled: bool,
+    write_refresh_disabled: bool,
     agent_key_auth: bool,
     login_generation: Option<String>,
 }
@@ -269,6 +223,7 @@ impl ApiClient {
             access_token,
             profile,
             refresh_disabled: agent_key_auth,
+            write_refresh_disabled: false,
             agent_key_auth,
             login_generation,
         })
@@ -283,6 +238,7 @@ impl ApiClient {
                 access_token: resolved.token,
                 profile: auth.profile.clone(),
                 refresh_disabled: true,
+                write_refresh_disabled: false,
                 agent_key_auth: false,
                 login_generation: None,
             });
@@ -345,6 +301,12 @@ impl ApiClient {
         self
     }
 
+    /// Preserve read refresh while refusing automatic replay of mutations.
+    pub fn without_write_refresh(mut self) -> Self {
+        self.write_refresh_disabled = true;
+        self
+    }
+
     pub fn for_credential_transfer(mut self) -> Result<Self> {
         self.client =
             credential_http_client_builder(self.profile.as_deref(), self.base_url_root())?
@@ -361,13 +323,26 @@ impl ApiClient {
             .unwrap_or(&self.base_url)
     }
 
+    pub fn clear_deleted_account_credentials(&self, generation: Option<&str>) -> Result<()> {
+        crate::auth::clear_deleted_account_credentials(
+            self.profile.as_deref(),
+            self.base_url_root(),
+            generation,
+            &self.access_token,
+        )
+    }
+
     pub fn is_agent_key_auth(&self) -> bool {
         self.agent_key_auth
     }
 
     fn reject_agent_key_unauthorized(&self, response: &reqwest::Response) -> Result<()> {
         if self.agent_key_auth && response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            bail!("{}", crate::auth::agent_key::REJECTED_MESSAGE);
+            return Err(crate::auth::ReauthRequired {
+                code: "agent_key_rejected",
+                message: crate::auth::agent_key::REJECTED_MESSAGE.into(),
+            }
+            .into());
         }
         Ok(())
     }
@@ -377,38 +352,38 @@ impl ApiClient {
     /// wire protocol to [`crate::auth::exchange_refresh_token`] (the single
     /// source of truth) and owns only the token I/O: read the saved refresh
     /// token, persist the rotated pair, and update this client's in-memory copy.
-    async fn try_refresh_token(&mut self) -> bool {
+    async fn try_refresh_token(&mut self) -> Result<bool> {
         let client = self.client.clone();
         self.try_refresh_token_with_client(&client).await
     }
 
-    async fn try_refresh_token_with_client(&mut self, client: &Client) -> bool {
+    async fn try_refresh_token_with_client(&mut self, client: &Client) -> Result<bool> {
         if self.refresh_disabled {
-            return false;
+            return Ok(false);
         }
         let profile = self.profile.as_deref();
         // Same cross-process discipline as the preflight: lock, then prefer a
         // token another process already rotated over presenting a stale one.
         let Ok(_lock) = crate::auth::acquire_refresh_lock(profile) else {
-            return false;
+            return Ok(false);
         };
         if self.login_generation != crate::auth::login_generation(profile)
             || crate::auth::validate_profile_destination(profile, self.base_url_root()).is_err()
         {
-            return false;
+            return Ok(false);
         }
         if crate::auth::agent_key::is_agent_key_profile(profile) {
-            return false;
+            return Ok(false);
         }
         if let Some(access_token) = crate::auth::fresh_access_token_on_disk(profile)
             && access_token != self.access_token
         {
             self.access_token = access_token;
-            return true;
+            return Ok(true);
         }
         let refresh_token = match crate::auth::read_saved_refresh_token_for(profile) {
             Some(rt) => rt,
-            None => return false,
+            None => return Ok(false),
         };
 
         match crate::auth::exchange_refresh_token(client, self.base_url_root(), &refresh_token)
@@ -421,13 +396,17 @@ impl ApiClient {
                 if crate::auth::save_tokens_for(profile, &access_token, Some(&refresh_token))
                     .is_err()
                 {
-                    return false;
+                    return Ok(false);
                 }
                 self.access_token = access_token;
-                true
+                Ok(true)
             }
-            crate::auth::RefreshExchange::Rejected(_)
-            | crate::auth::RefreshExchange::Network(_) => false,
+            crate::auth::RefreshExchange::Rejected(rejection) => Err(crate::auth::ReauthRequired {
+                code: rejection.code(),
+                message: format!("{} Run `nyxid login` to continue.", rejection.headline()),
+            }
+            .into()),
+            crate::auth::RefreshExchange::Network(_) => Ok(false),
         }
     }
 
@@ -437,16 +416,26 @@ impl ApiClient {
             .client
             .get(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .send()
             .await
             .with_context(|| format!("GET {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await? {
             let resp = self
                 .client
                 .get(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("GET {path} failed (retry)"))?;
@@ -467,16 +456,26 @@ impl ApiClient {
             .client
             .get(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .send()
             .await
             .with_context(|| format!("GET {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await? {
             resp = self
                 .client
                 .get(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("GET {path} failed (retry)"))?;
@@ -498,17 +497,30 @@ impl ApiClient {
             .client
             .post(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
             .with_context(|| format!("POST {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             let resp = self
                 .client
                 .post(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -529,17 +541,30 @@ impl ApiClient {
             .client
             .put(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
             .with_context(|| format!("PUT {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             let resp = self
                 .client
                 .put(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -561,17 +586,30 @@ impl ApiClient {
             .client
             .patch(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
             .with_context(|| format!("PATCH {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             let resp = self
                 .client
                 .patch(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -597,17 +635,30 @@ impl ApiClient {
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             let resp = self
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .headers(headers)
                 .send()
                 .await
@@ -629,29 +680,52 @@ impl ApiClient {
         }
     }
 
-    pub async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+    pub async fn delete_with_headers<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
+            .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             let resp = self
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
+                .headers(headers)
                 .send()
                 .await
                 .with_context(|| format!("DELETE {path} failed (retry)"))?;
             return Self::handle_response(resp, path).await;
         }
-
         Self::handle_response(resp, path).await
+    }
+
+    pub async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+        self.delete_with_headers(path, reqwest::header::HeaderMap::new())
+            .await
     }
 
     pub async fn delete_with_body<T: DeserializeOwned, B: Serialize>(
@@ -664,17 +738,28 @@ impl ApiClient {
         let resp = client
             .delete(url.clone())
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
-            && self.try_refresh_token_with_client(&client).await
+            && !self.write_refresh_disabled
+            && self.try_refresh_token_with_client(&client).await?
         {
             let resp = client
                 .delete(url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -691,16 +776,29 @@ impl ApiClient {
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             resp = self
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("DELETE {path} failed (retry)"))?;
@@ -718,17 +816,30 @@ impl ApiClient {
             .client
             .post(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
             .with_context(|| format!("POST {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
             let resp = self
                 .client
                 .post(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -748,6 +859,47 @@ impl ApiClient {
             let body = resp.text().await.unwrap_or_default();
             Err(ApiError::new(format!("POST {path}"), status, body).into())
         }
+    }
+
+    /// Streamable HTTP MCP uses the root /mcp route. Calls never replay on 401.
+    pub(crate) async fn mcp_request(
+        &mut self,
+        session: Option<&str>,
+        version: &str,
+        body: &serde_json::Value,
+        read: bool,
+    ) -> Result<reqwest::Response> {
+        let response = self.mcp_request_once(session, version, body).await?;
+        self.reject_agent_key_unauthorized(&response)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && read
+            && self.try_refresh_token().await?
+        {
+            return self.mcp_request_once(session, version, body).await;
+        }
+        Ok(response)
+    }
+
+    async fn mcp_request_once(
+        &self,
+        session: Option<&str>,
+        version: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let mut request = self
+            .client
+            .post(format!("{}/mcp", self.base_url_root()))
+            .bearer_auth(&self.access_token)
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", version)
+            .json(body);
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        request
+            .send()
+            .await
+            .context("MCP request failed; inspect execution state before retrying a call")
     }
 
     pub async fn proxy_request(
@@ -819,7 +971,7 @@ impl ApiClient {
             // the connection for the refresh + retry sequence.
             let _ = resp.bytes().await;
 
-            if self.try_refresh_token().await {
+            if self.try_refresh_token().await? {
                 return build_req(&self.access_token)
                     .send()
                     .await
@@ -1279,6 +1431,87 @@ mod tests {
             Some("GitHub")
         );
         assert_eq!(api_error.body_json(), Some(&body));
+    }
+
+    #[test]
+    fn write_refresh_policy_covers_delete_helpers_and_preserves_read_refresh() {
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = HomeGuard::set(temp.path());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for disabled in [false, true] {
+                    for operation in ["delete", "delete_with_body", "get"] {
+                        let server = MockServer::start().await;
+                        let refresh_allowed = !disabled || operation == "get";
+                        let method_name = if operation == "get" { "GET" } else { "DELETE" };
+                        Mock::given(method("POST"))
+                            .and(path("/api/v1/auth/refresh"))
+                            .respond_with(ResponseTemplate::new(200).set_body_json(
+                                serde_json::json!({
+                                    "access_token": "renewed-access",
+                                    "refresh_token": "renewed-refresh"
+                                }),
+                            ))
+                            .expect(u64::from(refresh_allowed))
+                            .mount(&server)
+                            .await;
+                        Mock::given(method(method_name))
+                            .and(path("/api/v1/resource"))
+                            .and(header("authorization", "Bearer original-access"))
+                            .respond_with(ResponseTemplate::new(401))
+                            .expect(1)
+                            .mount(&server)
+                            .await;
+                        Mock::given(method(method_name))
+                            .and(path("/api/v1/resource"))
+                            .and(header("authorization", "Bearer renewed-access"))
+                            .respond_with(
+                                ResponseTemplate::new(200).set_body_json(serde_json::json!({})),
+                            )
+                            .expect(u64::from(refresh_allowed))
+                            .mount(&server)
+                            .await;
+                        let profile = Some("write-refresh-policy");
+                        crate::auth::save_tokens_for(
+                            profile,
+                            "original-access",
+                            Some("original-refresh"),
+                        )
+                        .unwrap();
+                        let mut api = ApiClient::new_with_profile(
+                            &server.uri(),
+                            "original-access".into(),
+                            profile.map(str::to_owned),
+                        )
+                        .unwrap();
+                        if disabled {
+                            api = api.without_write_refresh();
+                        }
+                        let result: anyhow::Result<serde_json::Value> = match operation {
+                            "delete" => api.delete("/resource").await,
+                            "delete_with_body" => {
+                                api.delete_with_body("/resource", &serde_json::json!({"once":true}))
+                                    .await
+                            }
+                            "get" => api.get("/resource").await,
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(result.is_ok(), refresh_allowed, "{operation}, {disabled}");
+                        if !refresh_allowed {
+                            let error = result.unwrap_err();
+                            assert_eq!(
+                                error.downcast_ref::<ApiError>().unwrap().status(),
+                                reqwest::StatusCode::UNAUTHORIZED
+                            );
+                        }
+                        server.verify().await;
+                    }
+                }
+            });
     }
 
     async fn assert_override_is_fail_closed(auth: &AuthArgs, expected_token: &str) {

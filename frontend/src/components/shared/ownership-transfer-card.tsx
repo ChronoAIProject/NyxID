@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { ArrowRightLeft } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
@@ -18,6 +19,7 @@ interface OwnershipTransferCardProps {
 }
 
 export function OwnershipTransferCard(props: OwnershipTransferCardProps) {
+  useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const authorization = useOwnershipTransferAuthorization(
     props.kind,
@@ -39,19 +41,19 @@ function TransferCard({
   resource,
   onTransferred,
 }: OwnershipTransferCardProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState(false);
 
   return (
-    <DetailSection title={t("Ownership transfer")}>
+    <DetailSection title={translateUi("Ownership transfer")}>
       <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between">
-        <div className="max-w-2xl space-y-2 text-xs text-muted-foreground">
-          <p>{t("Transfer ")}{kind === "service" ? t("the catalog definition for ") : ""}
-            {resource.name}{t(" to another person or organization.")}</p>
+        <div className="max-w-2xl space-y-2 text-13 text-muted-foreground">
+          <p>{translateUi("Transfer ")}{kind === "service" ? translateUi("the catalog definition for ") : ""}
+            {resource.name}{translateUi(" to another person or organization.")}</p>
           <p>
             {kind === "channel_bot"
-              ? t("Credentials and webhook settings stay with the bot. Existing routes will be retired, and the new owner must assign their own agents. Conversation history stays with the previous owner.")
-              : t("Existing connections, credentials and pricing stay in place. Shared service configuration remains managed by NyxID admins.")}
+              ? translateUi("Credentials and webhook settings stay with the bot. Existing routes will be retired, and the new owner must assign their own agents. Conversation history stays with the previous owner.")
+              : translateUi("Existing connections, credentials and pricing stay in place. Shared service configuration remains managed by NyxID admins.")}
           </p>
         </div>
         <Button
@@ -59,7 +61,7 @@ function TransferCard({
           className="shrink-0"
           onClick={() => setOpen(true)}
         >
-          <ArrowRightLeft className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{t("Transfer ownership")}</Button>
+          <ArrowRightLeft className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{translateUi("Transfer ownership")}</Button>
       </div>
       {open && (
         <OwnershipTransferDialog

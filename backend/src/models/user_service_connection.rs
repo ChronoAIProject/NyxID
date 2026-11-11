@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "user_service_connections";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserServiceConnection {
     #[serde(rename = "_id")]
     pub id: String,
@@ -14,6 +14,8 @@ pub struct UserServiceConnection {
     /// For "internal" services: None (master credential used).
     #[serde(with = "crate::models::bson_bytes::optional")]
     pub credential_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// What kind of credential is stored (e.g., "api_key", "bearer", "basic").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_type: Option<String>,
@@ -30,6 +32,13 @@ pub struct UserServiceConnection {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for UserServiceConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserServiceConnection")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +51,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let conn = UserServiceConnection {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -64,6 +74,7 @@ mod tests {
     #[test]
     fn bson_backward_compat_missing_state_version() {
         let mut doc = bson::to_document(&UserServiceConnection {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

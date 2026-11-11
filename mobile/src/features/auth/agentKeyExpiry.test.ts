@@ -37,3 +37,13 @@ test("invalid credential expiry displays one clear inline issue", () => {
     assert.equal(agentKeyLoginError(result.error), "Enter an expiry as YYYY-MM-DD or an RFC 3339 timestamp with a timezone.");
   }
 });
+
+test("explicit no-expiry survives normalization and conflicts with a date", () => {
+  const base = { kind: "new", name: "CLI", scopes: "read proxy" };
+  const selection = newAgentKeySchema.parse({ ...base, expires_at: null, never_expires: true });
+  assert.equal(selection.never_expires, true);
+  assert.equal(selection.expires_at, null);
+  assert.equal(newAgentKeySchema.safeParse({ ...base, expires_at: "2099-01-01", never_expires: true }).success, false);
+  assert.equal(JSON.stringify(newAgentKeySchema.parse({ ...base, never_expires: false })).includes("never_expires"), false);
+  assert.equal(newAgentKeySchema.parse(base).expires_at, undefined);
+});

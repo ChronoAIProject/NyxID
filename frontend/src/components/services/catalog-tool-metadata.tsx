@@ -1,5 +1,7 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { Label } from "@/components/ui/label";
 import { useAuthStore } from "@/stores/auth-store";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -24,7 +26,7 @@ export function CatalogToolMetadata({
 }: {
   service: DownstreamService;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
@@ -93,7 +95,7 @@ export function CatalogToolMetadata({
           form.reset(values);
           toast.success(translateUi("Tool metadata saved"));
         } catch {
-          toast.error(translateUi("Metadata update failed"));
+          toast.error(translateErrorMessage("Metadata update failed"));
         }
       })}
     >
@@ -110,40 +112,40 @@ export function CatalogToolMetadata({
                 });
                 toast.success(translateUi("Tool icon removed"));
               } catch {
-                toast.error(translateUi("Icon removal failed"));
+                toast.error(translateErrorMessage("Icon removal failed"));
               }
             }}
-          >{t("Remove icon")}</Button>
+          >{translateUi("Remove icon")}</Button>
         )}
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-12">{t("Name")}<Input {...form.register("name")} />
-          </label>
-          <label className="text-12">{t("Supplier")}<Input {...form.register("supplier")} />
-          </label>
-          <label className="text-12">{t("Description")}<Input {...form.register("description")} />
-          </label>
+          <Label>{translateUi("Name")}<Input {...form.register("name")} />
+          </Label>
+          <Label>{translateUi("Supplier")}<Input {...form.register("supplier")} />
+          </Label>
+          <Label>{translateUi("Description")}<Input {...form.register("description")} />
+          </Label>
           {admin && (
-            <label className="text-12">{t("Offering kind")}<Select
+            <Label>{translateUi("Offering kind")}<Select
                 value={form.watch("offering_kind")}
                 onValueChange={(value) =>
                   form.setValue("offering_kind", value as "ai_service" | "tool")
                 }
               >
-                <SelectTrigger aria-label={t("Offering kind")}>
+                <SelectTrigger aria-label={translateUi("Offering kind")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="ai_service">{t("AI Service")}</SelectItem>
-                  <SelectItem value="tool">{t("Tool")}</SelectItem>
+                  <SelectItem value="ai_service">{translateUi("AI Service")}</SelectItem>
+                  <SelectItem value="tool">{translateUi("Tool")}</SelectItem>
                 </SelectContent>
               </Select>
-            </label>
+            </Label>
           )}
-          <label className="text-12">{t("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
-          </label>
+          <Label>{translateUi("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
+          </Label>
         </div>
         <details className="space-y-3">
-          <summary className="cursor-pointer text-12">{t("Documentation and operational notes")}</summary>
+          <summary className="cursor-pointer text-14">{translateUi("Documentation and operational notes")}</summary>
           <div className="grid gap-3 sm:grid-cols-2">
             {(
               [
@@ -155,24 +157,24 @@ export function CatalogToolMetadata({
                 "known_limitations",
               ] as const
             ).map((field) => (
-              <label key={field} className="text-12">
+              <Label key={field}>
                 {field.replaceAll("_", " ")}
                 <Input {...form.register(field)} />
-              </label>
+              </Label>
             ))}
           </div>
-          <label className="block text-12">{t("Required permissions")}<Input
-              placeholder={t("read:api, write:data")}
+          <Label className="block">{translateUi("Required permissions")}<Input
+              placeholder={translateUi("read:api, write:data")}
               {...form.register("required_permissions")}
             />
-          </label>
+          </Label>
           {form.formState.errors.required_permissions && (
-            <p role="alert" className="text-11 text-destructive">
-              {translateUi(form.formState.errors.required_permissions.message ?? "")}
+            <p role="alert" className="text-13 text-destructive">
+              {form.formState.errors.required_permissions.message}
             </p>
           )}
-          <p className="text-11 text-text-tertiary">{t("Comma-separated vendor permissions required for the operations.")}</p>
-          <p className="text-12 font-medium">{t("Capabilities")}</p>
+          <p className="text-13 text-text-tertiary">{translateUi("Comma-separated vendor permissions required for the operations.")}</p>
+          <p className="type-row-title">{translateUi("Capabilities")}</p>
           <div className="grid gap-2 sm:grid-cols-2">
             {(
               [
@@ -185,10 +187,10 @@ export function CatalogToolMetadata({
                 ["supports_streaming", "Streaming"],
               ] as const
             ).map(([key, label]) => (
-              <label
+              <Label
                 key={key}
                 htmlFor={`tool-cap-${service.id}-${key}`}
-                className="flex items-center justify-between rounded-lg border border-border p-2 text-12"
+                className="flex items-center justify-between rounded-lg border border-border p-2"
               >
                 {label}
                 <Switch
@@ -198,11 +200,11 @@ export function CatalogToolMetadata({
                     form.setValue(`capabilities.${key}`, value)
                   }
                 />
-              </label>
+              </Label>
             ))}
           </div>
         </details>
-        <p className="text-12">{t("Topics")}</p>
+        <p className="text-14">{translateUi("Topics")}</p>
         <div className="flex flex-wrap gap-1">
           {topics.map((topic) => (
             <Button
@@ -229,9 +231,9 @@ export function CatalogToolMetadata({
           ))}
         </div>
         {service.import_source && (
-          <p className="text-11 text-text-tertiary">{t("Imported from ")}{service.import_source.kind}:{" "}
+          <p className="text-13 text-text-tertiary">{translateUi("Imported from ")}{service.import_source.kind}:{" "}
             {service.import_source.reference} ·{" "}
-            {service.import_source.version ?? t("Unversioned")}
+            {service.import_source.version ?? translateUi("Unversioned")}
           </p>
         )}
         <div className="flex justify-end">
@@ -240,7 +242,7 @@ export function CatalogToolMetadata({
             type="submit"
             disabled={!form.formState.isDirty}
             isLoading={mutation.isPending}
-          >{t("Save metadata")}</Button>
+          >{translateUi("Save metadata")}</Button>
         </div>
       </fieldset>
     </form>

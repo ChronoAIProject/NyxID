@@ -93,6 +93,8 @@ pub struct PublishedSetupContent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlatformSetup {
+    #[serde(default)]
+    pub facts_context_version: Option<u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub owner_user_id: Option<String>,

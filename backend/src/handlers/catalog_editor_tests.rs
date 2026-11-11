@@ -116,6 +116,7 @@ async fn add_ornn_connection(f: &Fixture, owner: &str, credential: &[u8]) -> Str
         .db
         .collection::<UserServiceConnection>(CONNECTIONS)
         .insert_one(UserServiceConnection {
+            secret_context_versions: Default::default(),
             id: id.clone(),
             user_id: owner.into(),
             service_id: f.service.id.clone(),
@@ -763,6 +764,8 @@ async fn catalog_scope_save_preserves_ornn_slug_workflow_without_operation_polic
     };
 
     let (f, upstream, role_id) = ornn_account("editor_ornn_scope_save").await;
+    crate::test_utils::set_test_approval_preference(&f.state.db, &f.owner, false).await;
+
     let proxy_token = token(&f, None).await;
     let validate_path = "/api/v1/proxy/s/ornn-api/api/v1/skill-format/validate";
     Mock::given(method("POST"))
@@ -1368,6 +1371,7 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
         .db
         .collection::<UserServiceConnection>(CONNECTIONS)
         .insert_one(UserServiceConnection {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: f.sa.id.clone(),
             service_id: service.id.clone(),

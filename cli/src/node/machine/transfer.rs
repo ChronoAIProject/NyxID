@@ -178,7 +178,14 @@ impl Runtime {
     ) -> Result<()> {
         self.ensure_authority_watch();
         let authority: Option<Box<nyxid_machine::authority::Authority>> =
-            serde_json::from_value(metadata["_authority"].clone())?;
+            serde_json::from_value(metadata["_authority"].clone())
+                .map_err(|_| super::MachineError::AuthorityStale)?;
+        if !matches!(
+            (metadata["_authority_version"].as_u64(), authority.is_some()),
+            (Some(1), false) | (Some(2), true)
+        ) {
+            return Err(super::MachineError::AuthorityStale.into());
+        }
         let mut authority_stop = if let Some(authority) = &authority {
             if !authority.capabilities.allows(upload.operation(), metadata)
                 || metadata["conversation_id"] != authority.conversation_id
@@ -188,7 +195,26 @@ impl Runtime {
             }
             Some(
                 self.authority
-                    .admit(authority, &self.runtime_id, None)
+                    .admit_at(
+                        authority,
+                        &self.runtime_id,
+                        None,
+                        nyxid_machine::authority::LeaseClock::signed(
+                            metadata["_authority_timestamp"]
+                                .as_i64()
+                                .ok_or(super::MachineError::AuthorityStale)?,
+                            authority.expires_at_ms,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                        .map_err(|error| {
+                            tracing::warn!(
+                                reason = error.reason(),
+                                request_id = metadata["request_id"].as_str().unwrap_or_default(),
+                                "Machine upload authority timing rejected"
+                            );
+                            super::MachineError::AuthorityStale
+                        })?,
+                    )
                     .map_err(|_| super::MachineError::AuthorityStale)?,
             )
         } else {
@@ -376,6 +402,116 @@ pub fn worker() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn issue_1844_signed_upload_timing_failures_are_authority_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(
+            &nyxid_machine::config::Config {
+                files: true,
+                allow_root: true,
+                roots: vec![root.path().into()],
+                ..Default::default()
+            },
+            &uuid::Uuid::new_v4().to_string(),
+            root.path(),
+        )
+        .unwrap();
+        let uploads = Arc::new(crate::node::proxy_upload::Uploads::default());
+        let id = || uuid::Uuid::new_v4().to_string();
+        for case in [
+            "expired",
+            "overlong",
+            "skew",
+            "missing_timestamp",
+            "missing_authority",
+            "missing_version",
+        ] {
+            let now = chrono::Utc::now();
+            let authority = nyxid_machine::authority::Authority {
+                require_v2: true,
+                context_id: id(),
+                generation: 1,
+                mode: "shared_legacy".into(),
+                agent_id: id(),
+                owner_id: id(),
+                actor_id: id(),
+                group_id: None,
+                runtime_id: runtime.runtime_id.clone(),
+                conversation_id: id(),
+                turn_id: id(),
+                lease_id: id(),
+                revision: 1,
+                expires_at_ms: now.timestamp_millis()
+                    + match case {
+                        "expired" => -1,
+                        "overlong" => 50_000,
+                        _ => 30_000,
+                    },
+                capabilities: nyxid_machine::authority::Capabilities {
+                    files: true,
+                    ..Default::default()
+                },
+            };
+            let mut request = nyxid_machine::Request {
+                version: 2,
+                request_id: id(),
+                node_id: runtime.node_id.clone(),
+                operation: Operation::SaveAttachment,
+                parameters: json!({"conversation_id":authority.conversation_id,"turn_id":authority.turn_id,"max_bytes":0,"path":"never-written"}),
+                authority: Some(Box::new(authority)),
+                external_authority: None,
+                timestamp: now.timestamp() + if case == "skew" { 10 } else { 0 },
+                nonce: id(),
+                signature: String::new(),
+            };
+            request.signature = nyxid_machine::signing::sign(&request, b"upload-timing");
+            let (mut metadata, upload) = uploads
+                .begin(
+                    serde_json::to_value(request).unwrap(),
+                    &runtime.node_id,
+                    &hex::encode(b"upload-timing"),
+                )
+                .await
+                .unwrap();
+            match case {
+                "missing_timestamp" => {
+                    metadata
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("_authority_timestamp");
+                }
+                "missing_authority" => {
+                    metadata.as_object_mut().unwrap().remove("_authority");
+                }
+                "missing_version" => {
+                    metadata
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("_authority_version");
+                }
+                _ => {}
+            }
+            let (sender, mut receiver) = mpsc::channel(2);
+            let error = runtime
+                .transfer(&metadata, upload, &sender)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<super::super::MachineError>()
+                    .unwrap()
+                    .public()
+                    .0,
+                12421,
+                "{case}: {error}"
+            );
+            assert!(receiver.try_recv().is_err(), "{case}: no transfer starts");
+            assert!(!root.path().join("never-written").exists());
+        }
+        uploads.disconnect().await;
+        runtime.shutdown().await;
+    }
 
     #[test]
     fn user_attachment_limit_does_not_widen_image_or_clipboard_reads() {

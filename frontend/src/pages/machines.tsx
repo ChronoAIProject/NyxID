@@ -1,5 +1,12 @@
-import { translateUi } from "@/i18n/use-ui-translation";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { CompactChrome } from "@/components/ui/compact-title";
+import { TEXT_STYLES } from "@/lib/typography";
+import {
+  GroupedPage,
+  GroupedSheet as Sheet,
+  GroupedSheetContent as SheetContent,
+} from "@/components/ui/grouped-dialog";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import {
   MachineIsolationBadge,
@@ -27,15 +34,13 @@ import { parseMachinesSearch } from "@/lib/machine-search";
 import { SavedLoginsPage } from "@/pages/saved-logins";
 import { MachineActivity } from "@/components/shared/machine-activity";
 import { MachineSettings } from "@/components/shared/machine-settings";
-import { PageHeader } from "@/components/shared/page-header";
+import { WorkspacePageHeader } from "@/components/assistant/workspace-page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Sheet,
-  SheetContent,
   SheetHeader,
   SheetTitle,
   SheetDescription,
@@ -53,27 +58,27 @@ function MachineCard({
   readonly onActivity: () => void;
   readonly update?: MachineUpdateStatus;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const machine = node.machine!;
   return (
     <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
         <Monitor className="h-4 w-4 text-text-tertiary" />
-        <h3 className="min-w-0 flex-1 truncate text-13 font-medium">
+        <h3 data-machine-card-title="" className={`min-w-0 flex-1 truncate ${TEXT_STYLES.cardTitle}`}>
           {node.name}
         </h3>
         {update?.update_available ? (
-          <Badge variant="warning">{t("Update available (")}{update.target_version})
+          <Badge variant="warning">{translateUi("Update available (")}{update.target_version})
           </Badge>
         ) : null}
-        <span className="text-11 text-muted-foreground">
-          v{node.metadata?.agent_version ?? t("unknown")}
+        <span className="text-13 text-muted-foreground">
+          v{node.metadata?.agent_version ?? translateUi("unknown")}
         </span>
         <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
         <MachineIsolationBadge machine={machine} />
         <MachineSharingBadge />
       </div>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {[
           machine.shell && "Commands",
           machine.files && "Files",
@@ -84,11 +89,11 @@ function MachineCard({
           .join(" · ")}{" "}
         · {machine.os} / {machine.arch}
       </p>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {node.owner.display_name} ·{" "}
-        {node.is_connected ? t("Connected") : t("Disconnected")}
+        {node.is_connected ? translateUi("Connected") : translateUi("Disconnected")}
         {machine.computer && !machine.computer_ready
-          ? t(" · Computer permissions or display unavailable")
+          ? translateUi(" · Computer permissions or display unavailable")
           : ""}
       </p>
       <div className="flex flex-wrap gap-2">
@@ -98,20 +103,29 @@ function MachineCard({
               to="/assistant/machines/$nodeId/desktop"
               params={{ nodeId: node.id }}
               disabled={!node.is_connected}
-            >{t("Watch / Take over desktop")}</Link>
+            >{translateUi("Watch / Take over desktop")}</Link>
           </Button>
         ) : null}
         <Button onClick={onActivity}>
-          <History />{t("Activity")}</Button>
-        <Button onClick={onSettings} aria-label={t("Settings for {{name}}", { name: node.name })}>
-          <Settings />{t("Settings")}</Button>
+          <History />{translateUi("Activity")}</Button>
+        <Button onClick={onSettings} aria-label={translateUi("Settings for {{value1}}", { value1: node.name })}>
+          <Settings />{translateUi("Settings")}</Button>
       </div>
     </article>
   );
 }
 
 export function MachinesPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
+  return (
+    <GroupedPage>
+      <MachinesContent />
+    </GroupedPage>
+  );
+}
+
+function MachinesContent() {
+  useUiTranslation();
   const remoteAdmission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
@@ -166,7 +180,32 @@ export function MachinesPage() {
     });
   }
   return (
-    <div className="space-y-6">
+    <div className="shell-page-stack">
+      <WorkspacePageHeader
+        title={translateUi("Machines")}
+        description={translateUi("Remote and self-hosted computers for authorized agents and clients.")}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            {remoteAdmission && (
+              <AddCtaButton
+                label={translateUi("Create remote machine")}
+                onClick={() =>
+                  void navigate({
+                    to: "/assistant/machines/new",
+                    search: { where: "hosted" },
+                  })
+                }
+              />
+            )}
+            <AddCtaButton
+              label={translateUi("Add a machine")}
+              onClick={() =>
+                void navigate({ to: "/assistant/machines/new" })
+              }
+            />
+          </div>
+        }
+      />
       <Tabs
         value={search.tab ?? "machines"}
         onValueChange={(tab) =>
@@ -177,48 +216,23 @@ export function MachinesPage() {
         }
       >
         <TabsList>
-          <TabsTrigger value="machines">{t("Machines")}</TabsTrigger>
-          <TabsTrigger value="logins">{t("Saved logins")}</TabsTrigger>
+          <TabsTrigger value="machines">{translateUi("Machines")}</TabsTrigger>
+          <TabsTrigger value="logins">{translateUi("Saved logins")}</TabsTrigger>
         </TabsList>
         <TabsContent value="machines" className="mt-6 space-y-6">
-          <PageHeader
-            title={t("Machines")}
-            description={t("Remote and self-hosted computers for authorized agents and clients.")}
-            actions={
-              <div className="flex flex-wrap gap-2">
-                {remoteAdmission && (
-                  <AddCtaButton
-                    label={t("Create remote machine")}
-                    onClick={() =>
-                      void navigate({
-                        to: "/assistant/machines/new",
-                        search: { where: "hosted" },
-                      })
-                    }
-                  />
-                )}
-                <AddCtaButton
-                  label={t("Add a machine")}
-                  onClick={() =>
-                    void navigate({ to: "/assistant/machines/new" })
-                  }
-                />
-              </div>
-            }
-          />
-          <section aria-label={t("Remote machines")} className="space-y-3">
-            <h3 className="text-15 font-semibold">{t("Remote machines")}</h3>
-            <p className="text-12 text-muted-foreground">{t("Personal hosted machines with a fixed workspace and selected capabilities. Resource state, runtime billing and execution authorization are independent.")}</p>
+          <section aria-label={translateUi("Remote machines")} className="space-y-3">
+            <h3 className="type-card-title">{translateUi("Remote machines")}</h3>
+            <p className="text-14 text-muted-foreground">{translateUi("Personal hosted machines with a fixed workspace and selected capabilities. Resource state, runtime billing and execution authorization are independent.")}</p>
             {!remote.isPending &&
               !remote.error &&
               !remote.discoveryComplete && (
-                <p role="status" className="text-12 text-muted-foreground">{t("Complete remote Machine discovery is not confirmed by this server.")}</p>
+                <p role="status" className="text-14 text-muted-foreground">{translateUi("Complete remote Machine discovery is not confirmed by this server.")}</p>
               )}
             {remote.isPending ? (
-              <p role="status" className="text-12">{t("Loading remote machines…")}</p>
+              <p role="status" className="text-14">{translateUi("Loading remote machines…")}</p>
             ) : remote.error ? (
               <ErrorBanner
-                message={t("Remote machine management could not be loaded. This deployment may not expose it yet.")}
+                message={translateUi("Remote machine management could not be loaded. This deployment may not expose it yet.")}
                 onRetry={() => void remote.refetch()}
               />
             ) : hostedMachines.length ? (
@@ -227,16 +241,16 @@ export function MachinesPage() {
                 onOpen={openRemote}
               />
             ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">{t("No remote machines. Check your free slot and the configured profile before creating one.")}</p>
+              <p className="rounded-lg border border-dashed border-border p-6 text-14 text-muted-foreground">{translateUi("No remote machines. Check your free slot and the configured profile before creating one.")}</p>
             )}
           </section>
-          <h3 className="text-15 font-semibold">{t("Self-hosted machines")}</h3>
+          <h3 className="type-card-title">{translateUi("Self-hosted machines")}</h3>
           {nodes.isPending || orgs.isPending ? (
-            <p role="status">{t("Loading machines…")}</p>
+            <p role="status">{translateUi("Loading machines…")}</p>
           ) : null}
           {nodes.error || orgs.error ? (
-            <p role="alert" className="text-12 text-destructive">{t("Could not load machines.")}{" "}
-              {translateUi(nodes.error?.message ?? orgs.error?.message ?? "")}
+            <p role="alert" className="text-14 text-destructive">{translateUi("Could not load machines.")}{" "}
+              {nodes.error?.message ?? orgs.error?.message}
             </p>
           ) : null}
           {!nodes.isPending &&
@@ -244,7 +258,7 @@ export function MachinesPage() {
           !nodes.error &&
           !orgs.error &&
           !machines.length ? (
-            <p className="rounded-xl border border-border/50 p-6 text-12 text-muted-foreground">{t("Add a machine to let NyxBot run commands, work with files and use a desktop.")}</p>
+            <p className="rounded-xl border border-border/50 p-6 text-14 text-muted-foreground">{translateUi("Add a machine to let NyxBot run commands, work with files and use a desktop.")}</p>
           ) : null}
           <div className="grid gap-4 xl:grid-cols-2">
             {machines.map((node) => (
@@ -273,8 +287,8 @@ export function MachinesPage() {
       >
         <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
           <SheetHeader className="pr-8">
-            <SheetTitle>{t("Remote machine details")}</SheetTitle>
-            <SheetDescription>{t("Lifecycle, access, work history and billing for this machine.")}</SheetDescription>
+            <SheetTitle>{translateUi("Remote machine details")}</SheetTitle>
+            <SheetDescription>{translateUi("Lifecycle, access, work history and billing for this machine.")}</SheetDescription>
           </SheetHeader>
           {remoteDetailId ? (
             <RemoteMachineDetail
@@ -282,6 +296,10 @@ export function MachinesPage() {
               operationId={search.operation}
               confirmationId={search.confirmation}
               machineId={remoteDetailId}
+              onClose={() => {
+                setSelectedId(undefined);
+                void navigate({ to: "/assistant/machines", search: {} });
+              }}
               initialMachine={selectedRemote}
               node={
                 nodes.error
@@ -303,7 +321,7 @@ export function MachinesPage() {
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>{t("Machine activity")}</SheetTitle>
+            <SheetTitle>{translateUi("Machine activity")}</SheetTitle>
             <SheetDescription>
               {machines.find((node) => node.id === activityId)?.name}
             </SheetDescription>
@@ -320,10 +338,10 @@ export function MachinesPage() {
         }}
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
-          <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>{selected?.name}{t(" settings")}</SheetTitle>
-            <SheetDescription>{t("Control confirmations, saved-login typing and specialist access.")}</SheetDescription>
-          </SheetHeader>
+          <CompactChrome><SheetHeader className="shrink-0 p-5 pr-10 [[data-compact=true]_&]:py-2">
+            <SheetTitle className="[[data-compact=true]_&]:text-15">{selected?.name}{translateUi(" settings")}</SheetTitle>
+            <SheetDescription className="[[data-compact=true]_&]:hidden">{translateUi("Control confirmations, saved-login typing and specialist access.")}</SheetDescription>
+          </SheetHeader></CompactChrome>
           {selected ? (
             <MachineSettings
               key={selected.id}
@@ -345,7 +363,7 @@ function RemoteMachineList({
   readonly machines: RemoteMachine[];
   readonly onOpen: (id: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const label = (value: string) =>
     value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
   const state = (machine: RemoteMachine) => (
@@ -361,7 +379,7 @@ function RemoteMachineList({
       >
         {label(machine.resource_state)}
       </Badge>
-      <span className="text-11 text-muted-foreground">{t("Billing: ")}{label(machine.billing_state)}{t(" · Authorization:")}{" "}
+      <span className="text-13 text-muted-foreground">{translateUi("Billing: ")}{label(machine.billing_state)}{translateUi(" · Authorization:")}{" "}
         {label(machine.authorization_state)}
       </span>
     </div>
@@ -374,13 +392,13 @@ function RemoteMachineList({
             key={machine.node_id}
             className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
           >
-            <h4 className="break-all text-13 font-semibold">
+            <h4 className="break-all type-card-title">
               {machine.name ?? machine.sandbox_name}
             </h4>
             {state(machine)}
-            <p className="text-11 text-muted-foreground">{t("Generation ")}{machine.runtime_generation} ·{" "}
-              {machine.profile.workspace_gib}{t(" GiB workspace")}</p>
-            <Button onClick={() => onOpen(machine.node_id)}>{t("View details")}</Button>
+            <p className="text-13 text-muted-foreground">{translateUi("Generation ")}{machine.runtime_generation} ·{" "}
+              {machine.profile.workspace_gib}{translateUi(" GiB workspace")}</p>
+            <Button onClick={() => onOpen(machine.node_id)}>{translateUi("View details")}</Button>
           </article>
         ))}
       </div>
@@ -388,11 +406,11 @@ function RemoteMachineList({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{t("Machine")}</TableHead>
-              <TableHead>{t("State")}</TableHead>
-              <TableHead>{t("Runtime")}</TableHead>
+              <TableHead>{translateUi("Machine")}</TableHead>
+              <TableHead>{translateUi("State")}</TableHead>
+              <TableHead>{translateUi("Runtime")}</TableHead>
               <TableHead>
-                <span className="sr-only">{t("Details")}</span>
+                <span className="sr-only">{translateUi("Details")}</span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -403,21 +421,21 @@ function RemoteMachineList({
                   <div className="font-medium">
                     {machine.name ?? machine.sandbox_name}
                   </div>
-                  <div className="font-mono text-11 text-muted-foreground">
+                  <div className="font-mono text-13 text-muted-foreground">
                     {machine.node_id}
                   </div>
                 </TableCell>
                 <TableCell>{state(machine)}</TableCell>
-                <TableCell>{t("Generation ")}{machine.runtime_generation}
+                <TableCell>{translateUi("Generation ")}{machine.runtime_generation}
                   <br />
-                  <span className="text-11 text-muted-foreground">
-                    {machine.profile.workspace_gib}{t(" GiB workspace")}</span>
+                  <span className="text-13 text-muted-foreground">
+                    {machine.profile.workspace_gib}{translateUi(" GiB workspace")}</span>
                 </TableCell>
                 <TableCell>
                   <Button
                     onClick={() => onOpen(machine.node_id)}
-                    aria-label={t("View {{value}}", { value: machine.name ?? machine.sandbox_name })}
-                  >{t("Details")}</Button>
+                    aria-label={translateUi("View {{value1}}", { value1: machine.name ?? machine.sandbox_name })}
+                  >{translateUi("Details")}</Button>
                 </TableCell>
               </TableRow>
             ))}

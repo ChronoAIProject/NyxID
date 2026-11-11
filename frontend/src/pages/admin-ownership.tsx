@@ -97,7 +97,7 @@ export function AdminOwnershipPage() {
                 <TableRow key={resource.id}>
                   <TableCell>
                     <p className="font-medium">{resource.name}</p>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       {resource.slug || resource.platform}
                     </p>
                   </TableCell>
@@ -108,12 +108,12 @@ export function AdminOwnershipPage() {
                         resource.owner_user_id}
                     </p>
                     {resource.owner_name && resource.owner_email && (
-                      <p className="break-all text-xs text-muted-foreground">
+                      <p className="break-all text-13 text-muted-foreground">
                         {resource.owner_email}
                       </p>
                     )}
                     {(resource.owner_name || resource.owner_email) && (
-                      <p className="break-all font-mono text-xs text-muted-foreground">
+                      <p className="break-all font-mono text-13 text-muted-foreground">
                         {resource.owner_user_id}
                       </p>
                     )}

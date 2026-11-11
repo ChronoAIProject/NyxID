@@ -10,6 +10,7 @@ use crate::test_utils::{
     connect_transaction_test_database, test_encryption_keys, test_membership, test_user,
     test_user_endpoint, test_user_service,
 };
+use chrono::{Duration, Utc};
 use mongodb::bson;
 use std::sync::Arc;
 
@@ -30,6 +31,7 @@ fn platform_service() -> DownstreamService {
     service.auth_method = "bearer".into();
     service.auth_key_name = "Authorization".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],
@@ -138,6 +140,69 @@ async fn platform_acl_checks_people_org_roles_activity_and_revocation() {
 }
 
 #[tokio::test]
+async fn owner_grants_listing_matches_proxy_organization_order() {
+    let db = connect_transaction_test_database("platform_listing_org_order").await;
+    let actor = owner(&db, UserType::Person).await;
+    let primary = owner(&db, UserType::Org).await;
+    let earliest = owner(&db, UserType::Org).await;
+    let tie_a = owner(&db, UserType::Org).await;
+    let tie_b = owner(&db, UserType::Org).await;
+    let now = Utc::now();
+
+    let mut primary_membership = test_membership(&primary, &actor, OrgRole::Member, None);
+    primary_membership.created_at = now - Duration::days(3);
+    let mut earliest_membership = test_membership(&earliest, &actor, OrgRole::Member, None);
+    earliest_membership.created_at = now - Duration::days(5);
+    let mut tie_membership_a = test_membership(&tie_a, &actor, OrgRole::Member, None);
+    tie_membership_a.created_at = now - Duration::days(1);
+    let mut tie_membership_b = test_membership(&tie_b, &actor, OrgRole::Member, None);
+    tie_membership_b.created_at = tie_membership_a.created_at;
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_many([
+            primary_membership,
+            earliest_membership,
+            tie_membership_a,
+            tie_membership_b,
+        ])
+        .await
+        .unwrap();
+
+    db.collection::<bson::Document>(USERS)
+        .update_one(
+            doc! { "_id": &actor },
+            doc! { "$set": { "primary_org_id": &primary } },
+        )
+        .await
+        .unwrap();
+    let grants = OwnerGrants::load_for_listing(&db, &actor).await.unwrap();
+    let ordered: Vec<_> = grants
+        .memberships()
+        .iter()
+        .map(|membership| membership.org_user_id.as_str())
+        .collect();
+    assert_eq!(ordered[0], primary);
+    assert_eq!(ordered[1], earliest);
+    let expected_tie = if tie_a < tie_b {
+        [tie_a.as_str(), tie_b.as_str()]
+    } else {
+        [tie_b.as_str(), tie_a.as_str()]
+    };
+    assert_eq!(ordered[2], expected_tie[0]);
+    assert_eq!(ordered[3], expected_tie[1]);
+
+    db.collection::<bson::Document>(USERS)
+        .update_one(
+            doc! { "_id": &actor },
+            doc! { "$unset": { "primary_org_id": "" } },
+        )
+        .await
+        .unwrap();
+    let grants = OwnerGrants::load_for_listing(&db, &actor).await.unwrap();
+    assert_eq!(grants.memberships()[0].org_user_id, earliest);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn seeded_provider_platform_binding_resolves_proxy_gateway_and_realtime() {
     let db = connect_transaction_test_database("platform_providers").await;
     let enc = test_encryption_keys();
@@ -176,7 +241,7 @@ async fn seeded_provider_platform_binding_resolves_proxy_gateway_and_realtime() 
         )
         .await
         .unwrap();
-        assert_eq!(direct.credential, "test-platform-secret");
+        assert_eq!(direct.credential.as_str(), "test-platform-secret");
         let connection = unified_key_service::create_platform_key(
             &db,
             &user,
@@ -207,7 +272,10 @@ async fn seeded_provider_platform_binding_resolves_proxy_gateway_and_realtime() 
         .unwrap()
         .unwrap();
         assert!(resolution.master_credential);
-        assert_eq!(resolution.target.credential, "test-platform-secret");
+        assert_eq!(
+            resolution.target.credential.as_str(),
+            "test-platform-secret"
+        );
         let entry = catalog_service::get_catalog_entry(&db, &enc, &user, &service.slug)
             .await
             .unwrap();
@@ -416,6 +484,7 @@ async fn platform_auto_connections_reconcile_and_hosted_links_complete_once() {
     let link = connect_link_service::create(
         &db,
         connect_link_service::CreateInput {
+            assistant_intent_locked: false,
             user_id: user.clone(),
             service_slug: catalog.slug.clone(),
             use_platform_key: Some(true),
@@ -586,6 +655,7 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         assert_eq!(response.status(), 200);
     }
     let endpoint = mcp_service::McpToolEndpoint {
+        attachment_input: None,
         async_operation: None,
         endpoint_id: "completion".into(),
         name: "completion".into(),
@@ -625,6 +695,9 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
     )
     .unwrap();
     let ctx = mcp_service::McpExecContext {
+        strict_response_utf8: false,
+        execution_permission: None,
+        assistant_chat: None,
         response_body_limit: None,
         actor_user_id: None,
         caller_token: None,
@@ -634,6 +707,7 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         agent_owner: None,
         operation_scopes: None,
         api_key_id: None,
+        api_key_credential_id: None,
         allow_all_nodes: true,
         allowed_node_ids: &[],
     };
@@ -1242,7 +1316,7 @@ async fn public_platform_explicit_org_binding_keeps_execution_and_agent_access()
     .unwrap();
     let target = target.expect("public explicit org binding remains executable");
     assert!(target.master_credential);
-    assert_eq!(target.target.credential, "platform-secret");
+    assert_eq!(target.target.credential.as_str(), "platform-secret");
     db.drop().await.unwrap();
 }
 
@@ -1422,14 +1496,24 @@ async fn platform_to_oauth_uses_existing_unified_placeholder_flow() {
     assert!(key.connection_id.is_some());
     assert_eq!(key.credential_type, "oauth2");
     assert_eq!(
-        enc.decrypt(key.user_oauth_client_id_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &enc,
+                "user_oauth_client_id_encrypted",
+                key.user_oauth_client_id_encrypted.as_deref().unwrap()
+            )
             .await
             .unwrap()
             .as_slice(),
         b"custom-app"
     );
     assert_eq!(
-        enc.decrypt(key.user_oauth_client_secret_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &enc,
+                "user_oauth_client_secret_encrypted",
+                key.user_oauth_client_secret_encrypted.as_deref().unwrap()
+            )
             .await
             .unwrap()
             .as_slice(),
@@ -1489,6 +1573,7 @@ async fn server_chosen_accepts_implicit_and_explicit_public_only() {
         None,
         service.platform_key.clone(),
         Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![],
@@ -1632,7 +1717,21 @@ async fn explicit_platform_connections_allow_cosmetics_and_name_locked_fields() 
             .unwrap();
     assert!(stored.admin_only);
     assert_eq!(stored.custom_user_agent.as_deref(), Some("MyAgent/1"));
-    assert_eq!(stored.default_request_headers.unwrap()[0].name, "X-Project");
+    let headers = stored.default_request_headers.as_ref().unwrap();
+    assert_eq!(headers[0].name, "X-Project");
+    assert!(!headers[0].sensitive);
+    assert!(headers[0].value.is_empty());
+    assert!(headers[0].value_encrypted.is_some());
+    let decoded = crate::services::default_header_service::decode(
+        Some(&state.encryption_keys),
+        crate::models::user_service::COLLECTION_NAME,
+        &stored.id,
+        &stored.user_id,
+        stored.default_request_headers.as_deref(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(decoded[0].value.as_str(), "test");
     let ep = db
         .collection::<crate::models::user_endpoint::UserEndpoint>(
             crate::models::user_endpoint::COLLECTION_NAME,
@@ -1773,6 +1872,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
         .unwrap();
     catalog.billing = Some(ServiceBilling {
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric: BillingMetric::Tokens,
@@ -1922,12 +2022,16 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        catalog_slug: None,
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,
         base_url: service.base_url.clone(),
         auth_method: "bearer".into(),
         auth_key_name: "Authorization".into(),
-        credential: "server-secret".into(),
+        credential: "server-secret".to_owned().into(),
         service,
         catalog_default_headers: vec![],
         user_service_default_headers: vec![],

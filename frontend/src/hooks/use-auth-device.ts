@@ -67,6 +67,8 @@ export type WebAuthDevicePhase =
   | "idle"
   | "requesting"
   | "pending"
+  | "restoring"
+  | "restore_error"
   | "success"
   | "restricted"
   | "denied"
@@ -129,6 +131,7 @@ function getTerminalPhase(errorCode: number | null): WebAuthDevicePhase | null {
 export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAuthDeviceLoginState & {
   readonly start: () => void;
   readonly generateNew: () => void;
+  readonly retryProfile: () => void;
   readonly close: () => void;
 } {
   const checkAuth = useAuthStore((state) => state.checkAuth);
@@ -168,6 +171,27 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
   }, []);
 
   const schedulePollRef = useRef<(delaySeconds: number) => void>(() => {});
+  const restoreProfile = useCallback(async (
+    activeRequest: AuthDeviceRequestResponse,
+    generation: number,
+  ) => {
+    setCurrentPhase("restoring");
+    setError(null);
+    const isCurrent = () => requestGenerationRef.current === generation &&
+      requestRef.current === activeRequest && phaseRef.current === "restoring";
+    const restored = await checkAuth({ isCurrent });
+    if (!isCurrent()) return;
+    if (restored) {
+      setCurrentPhase("success");
+    } else {
+      setCurrentPhase("restore_error");
+      setError({
+        code: null,
+        message: "Your sign-in was approved, but we couldn't load your account. Retry to finish signing in.",
+      });
+    }
+  }, [checkAuth, setCurrentPhase]);
+
   const poll = useCallback(async () => {
     if (stoppedRef.current || phaseRef.current !== "pending") return;
     const activeRequest = requestRef.current;
@@ -215,10 +239,11 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
         setError(null);
         return;
       }
-      await checkAuth();
-      if (!isCurrent()) return;
-      setCurrentPhase("success");
-      setError(null);
+      // The cookie has been delivered once. Profile retries must never poll
+      // this grant again, and its former expiry no longer governs restoration.
+      expiresAtRef.current = null;
+      setRemainingSeconds(null);
+      await restoreProfile(activeRequest, generation);
     } catch (pollError) {
       if (!isCurrent()) return;
       const code = getApiErrorCode(pollError);
@@ -253,7 +278,7 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
       setCurrentPhase("error");
       setError({ code, message: friendlyAuthDeviceErrorMessage(pollError) });
     }
-  }, [checkAuth, setCurrentPhase, stopPolling]);
+  }, [restoreProfile, setCurrentPhase, stopPolling]);
 
   useEffect(() => {
     schedulePollRef.current = (delaySeconds: number) => {
@@ -370,6 +395,10 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
     error,
     start: () => void begin(),
     generateNew: () => void begin(),
+    retryProfile: () => {
+      if (phaseRef.current !== "restore_error" || !requestRef.current) return;
+      void restoreProfile(requestRef.current, requestGenerationRef.current);
+    },
     close,
   };
 }

@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { ChannelAdapterResources } from "@/components/admin/channel-adapter-resources";
 import { useState } from "react";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
@@ -99,7 +100,7 @@ function CredentialForm({
   readonly provider: PlatformCredentials;
   readonly onRefresh: () => Promise<PlatformCredentials | undefined>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [refreshRequired, setRefreshRequired] = useState(false);
   const [provider, setProvider] = useState(source);
   const update = useUpdatePlatformCredentials(provider.provider);
@@ -229,21 +230,21 @@ function CredentialForm({
         ) : (
           <KeyRound className="size-4 text-muted-foreground" />
         )}
-        <h2 className="text-15 font-semibold">{provider.label}</h2>
+        <h2 className="type-card-title">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
           {refreshRequired
-            ? t("Refresh required")
+            ? translateUi("Refresh required")
             : provider.available
-              ? t("Configured")
-              : t("Not configured")}
+              ? translateUi("Configured")
+              : translateUi("Not configured")}
         </Badge>
       </div>
       {sharedProvider && (
-        <p className="text-xs text-muted-foreground">{t("Shared with the ")}{sharedProvider}{t(" provider.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Shared with the ")}{sharedProvider}{translateUi(" provider.")}</p>
       )}
       {refreshRequired && (
         <ErrorBanner
-          message={t("Credentials cleared; current details could not be refreshed")}
+          message={translateUi("Credentials cleared; current details could not be refreshed")}
           onRetry={async () => {
             const saved = await onRefresh();
             if (saved) {
@@ -270,7 +271,7 @@ function CredentialForm({
       >
         {form.formState.errors.root && (
           <ErrorBanner
-            message={form.formState.errors.root.message ?? t("Unable to save")}
+            message={form.formState.errors.root.message ?? translateUi("Unable to save")}
           />
         )}
         {provider.fields.map((field) => (
@@ -280,7 +281,7 @@ function CredentialForm({
                 {field.label}
               </Label>
               {!refreshRequired && field.configured && (
-                <Badge variant="success">{t("Configured")}</Badge>
+                <Badge variant="success">{translateUi("Configured")}</Badge>
               )}
             </div>
             <div className="flex items-start gap-2">
@@ -292,7 +293,7 @@ function CredentialForm({
                 disabled={unavailable}
                 placeholder={
                   field.secret && field.configured
-                    ? t("Enter a replacement to rotate")
+                    ? translateUi("Enter a replacement to rotate")
                     : undefined
                 }
                 {...form.register(`fields.${field.name}`)}
@@ -301,8 +302,8 @@ function CredentialForm({
                 type="button"
                 size="icon"
                 variant="ghost"
-                title={t("Clear {{label}}", { label: field.label })}
-                aria-label={t("Clear {{label}}", { label: field.label })}
+                title={translateUi("Clear {{value1}}", { value1: field.label })}
+                aria-label={translateUi("Clear {{value1}}", { value1: field.label })}
                 disabled={unavailable || !field.configured}
                 onClick={() => form.setValue(`fields.${field.name}`, null)}
               >
@@ -310,12 +311,12 @@ function CredentialForm({
               </Button>
             </div>
             {form.watch(`fields.${field.name}`) === null && (
-              <p className="text-xs text-destructive">{t("Will be cleared when you confirm changes.")}</p>
+              <p className="text-13 text-destructive">{translateUi("Will be cleared when you confirm changes.")}</p>
             )}
-            <p className="text-xs text-muted-foreground">{field.help}</p>
+            <p className="text-13 text-muted-foreground">{field.help}</p>
             {form.formState.errors.fields?.[field.name] && (
-              <p className="text-xs text-destructive">
-                {translateUi(form.formState.errors.fields[field.name]?.message ?? "")}
+              <p className="text-13 text-destructive">
+                {form.formState.errors.fields[field.name]?.message}
               </p>
             )}
           </div>
@@ -327,27 +328,27 @@ function CredentialForm({
             isLoading={pending}
             disabled={unavailable || stale || !isDirty || !isValid}
           >
-            <Save className="size-3" />{t("Save credentials")}</Button>
+            <Save className="size-3" />{translateUi("Save credentials")}</Button>
           <Button
             type="button"
             variant="ghost"
             disabled={unavailable || stale || !provider.updated_at}
             onClick={() => setConfirm("clear")}
           >
-            <Trash2 className="size-3" />{t("Clear provider")}</Button>
+            <Trash2 className="size-3" />{translateUi("Clear provider")}</Button>
         </div>
       </form>
       <div className="max-w-2xl space-y-3">
         {provider.callback_url && (
           <CopyableUrlCallout
-            label={t("Platform Callback URL")}
+            label={translateUi("Platform Callback URL")}
             url={provider.callback_url}
           />
         )}
         {provider.webhook_verify_token && (
           <>
             <CopyableUrlCallout
-              label={t("Platform Verify Token")}
+              label={translateUi("Platform Verify Token")}
               url={provider.webhook_verify_token}
             />
             <Button
@@ -355,13 +356,13 @@ function CredentialForm({
               disabled={unavailable || stale}
               onClick={() => setConfirm("regenerate")}
             >
-              <RotateCw className="size-3" />{t("Regenerate verify token")}</Button>
+              <RotateCw className="size-3" />{translateUi("Regenerate verify token")}</Button>
           </>
         )}
       </div>
       <div className="max-w-2xl space-y-3">
-        <h3 className="text-13 font-medium">{t("Setup checklist")}</h3>
-        <ol className="list-decimal space-y-3 pl-4 text-xs text-muted-foreground">
+        <h3 className="type-card-title">{translateUi("Setup checklist")}</h3>
+        <ol className="list-decimal space-y-3 pl-4 text-13 text-muted-foreground">
           {provider.setup_checklist.map((step) => (
             <li key={step}>{step}</li>
           ))}
@@ -372,30 +373,30 @@ function CredentialForm({
           <DialogHeader>
             <DialogTitle>
               {confirm !== "regenerate"
-                ? t("Clear platform credentials")
-                : t("Regenerate verify token")}
+                ? translateUi("Clear platform credentials")
+                : translateUi("Regenerate verify token")}
             </DialogTitle>
             <DialogDescription>
               {confirm === "clear"
                 ? provider.provider === "aurinko"
-                  ? t("Clearing these credentials prevents managed mailbox authorization and managed bot webhook verification until restored. Manual connections keep their own credentials. Unsaved credential edits will be discarded.")
+                  ? translateUi("Clearing these credentials prevents managed mailbox authorization and managed bot webhook verification until restored. Manual connections keep their own credentials. Unsaved credential edits will be discarded.")
                   : sharedProvider
-                    ? t("These credentials are shared with the {{sharedProvider}} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored. Unsaved credential edits will be discarded.", { sharedProvider: sharedProvider })
-                    : t("Managed onboarding and managed bot authentication will be unavailable until credentials are restored. Unsaved credential edits will be discarded.")
-                : t("Update {{label}}'s webhook verification settings with the replacement token.", { label: provider.label })}
+                    ? translateUi("These credentials are shared with the {{value1}} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored. Unsaved credential edits will be discarded.", { value1: sharedProvider })
+                    : translateUi("Managed onboarding and managed bot authentication will be unavailable until credentials are restored. Unsaved credential edits will be discarded.")
+                : translateUi("Update {{value1}}'s webhook verification settings with the replacement token.", { value1: provider.label })}
             </DialogDescription>
           </DialogHeader>
           {stale && (
-            <p role="alert">{t("Saved values changed. Cancel and load the latest values before continuing.")}</p>
+            <p role="alert">{translateUi("Saved values changed. Cancel and load the latest values before continuing.")}</p>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirm(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setConfirm(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               isLoading={pending}
               disabled={unavailable || stale}
               onClick={() => void confirmAction()}
-            >{t("Confirm")}</Button>
+            >{translateUi("Confirm")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -404,14 +405,15 @@ function CredentialForm({
 }
 
 export function AdminPlatformCredentialsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const query = useAdminPlatformCredentials();
   return (
     <div className="space-y-8">
-      <PageHeader title={t("Platform Credentials")} />
+      <PageHeader title={translateUi("Platform Credentials")} />
+      <ChannelAdapterResources />
       {query.error && (
         <ErrorBanner
-          message={t("Unable to refresh platform credentials")}
+          message={translateUi("Unable to refresh platform credentials")}
           onRetry={query.refetch}
         />
       )}

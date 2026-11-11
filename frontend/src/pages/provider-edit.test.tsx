@@ -50,10 +50,12 @@ const provider: ProviderConfig = {
 
 function renderEditor(
   credentialMode: ProviderConfig["credential_mode"] = "both",
+  authorizationNonceRequired?: boolean,
 ) {
   vi.spyOn(api, "get").mockResolvedValue({
     ...provider,
     credential_mode: credentialMode,
+    authorization_nonce_required: authorizationNonceRequired,
   });
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -101,6 +103,39 @@ describe("ProviderEditPage", () => {
       expect(body).not.toHaveProperty(field);
     }
   });
+
+  it("preserves enabled nonce when changing only the provider name", async () => {
+    const put = vi.spyOn(api, "put").mockResolvedValue({ ...provider, authorization_nonce_required: true });
+    const user = userEvent.setup();
+    renderEditor("both", true);
+    const name = await screen.findByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "Updated provider");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm changes" }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith("/providers/twitter-provider", { name: "Updated provider" }));
+    expect(screen.getByRole("switch", { name: "Authorization nonce required" })).toBeChecked();
+  });
+
+  it.each([undefined, false, true])(
+    "edits the hosted authorization nonce from %s and submits only that setting",
+    async (enabled) => {
+      const put = vi.spyOn(api, "put").mockResolvedValue(provider);
+      const user = userEvent.setup();
+      renderEditor("both", enabled);
+      const toggle = await screen.findByRole("switch", { name: "Authorization nonce required" });
+      expect(toggle).toHaveAttribute("aria-checked", String(enabled ?? false));
+      const save = screen.getByRole("button", { name: "Save Changes" });
+      expect(save).toBeDisabled();
+      await user.click(toggle);
+      expect(save).toBeEnabled();
+      await user.click(save);
+      await user.click(await screen.findByRole("button", { name: "Confirm changes" }));
+      await waitFor(() => expect(put).toHaveBeenCalledWith("/providers/twitter-provider", {
+        authorization_nonce_required: !(enabled ?? false),
+      }));
+    },
+  );
 
   it.each([
     ["user", "User Provided"],

@@ -1,4 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { RotateCcw, SlidersHorizontal, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -44,7 +45,7 @@ function scopeSummary(member: MemberResponse): string {
   const list = member.effective_allowed_service_ids;
   if (list == null) return translateUi("All services");
   if (list.length === 0) return translateUi("No services");
-  return translateUi(list.length === 1 ? "{{count}} service" : "{{count}} services", { count: list.length });
+  return `${String(list.length)} service${list.length === 1 ? "" : "s"}`;
 }
 
 /**
@@ -63,7 +64,7 @@ export function MemberRow({
   onEditScope,
   onResetScope,
 }: MemberRowProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const displayName =
     member.display_name ?? member.email ?? member.user_id;
   const scopeLabel = scopeSummary(member);
@@ -74,17 +75,17 @@ export function MemberRow({
     <TableRow>
       <TableCell>
         <div className="flex flex-col gap-0.5">
-          <span className="text-12 font-medium text-foreground">
+          <span className="type-row-title text-foreground">
             {displayName}
             {isSelf && (
-              <span className="ml-2 text-xs text-muted-foreground">{t("(you)")}</span>
+              <span className="ml-2 text-13 text-muted-foreground">{translateUi("(you)")}</span>
             )}
             {hasCustomScope && (
-              <Badge variant="info" className="ml-2 align-middle text-11">{t("Custom scope")}</Badge>
+              <Badge variant="info" className="ml-2 align-middle text-12">{translateUi("Custom scope")}</Badge>
             )}
           </span>
           {member.email && member.display_name && (
-            <span className="text-xs text-muted-foreground">
+            <span className="text-13 text-muted-foreground">
               {member.email}
             </span>
           )}
@@ -105,7 +106,7 @@ export function MemberRow({
                   </SelectTrigger>
                 </span>
               </TooltipTrigger>
-              <TooltipContent className="max-w-[260px] text-xs">
+              <TooltipContent className="max-w-[260px] text-13">
                 {LAST_ACTIVE_ADMIN_TOOLTIP}
               </TooltipContent>
             </Tooltip>
@@ -141,7 +142,7 @@ export function MemberRow({
       <TableCell>
         <Badge
           variant={isScopeRestricted ? "info" : "secondary"}
-          className="text-xs"
+          className="text-12"
         >
           {scopeLabel}
         </Badge>
@@ -158,8 +159,8 @@ export function MemberRow({
               className="h-8 w-8 text-muted-foreground"
               onClick={() => onEditScope(member)}
               disabled={isUpdating}
-              aria-label={t("Edit service access for {{displayName}}", { displayName: displayName })}
-              title={t("Edit service access")}
+              aria-label={translateUi("Edit service access for {{value1}}", { value1: displayName })}
+              title={translateUi("Edit service access")}
             >
               <SlidersHorizontal className="h-4 w-4" />
             </Button>
@@ -170,8 +171,8 @@ export function MemberRow({
                 className="h-8 w-8 text-muted-foreground"
                 onClick={() => onResetScope(member)}
                 disabled={isUpdating}
-                aria-label={t("Reset {{displayName}} to role defaults", { displayName: displayName })}
-                title={t("Reset to role defaults")}
+                aria-label={translateUi("Reset {{value1}} to role defaults", { value1: displayName })}
+                title={translateUi("Reset to role defaults")}
               >
                 <RotateCcw className="h-4 w-4" />
               </Button>
@@ -186,13 +187,13 @@ export function MemberRow({
                       className="h-8 w-8 text-muted-foreground hover:text-destructive"
                       onClick={() => onRevoke(member)}
                       disabled
-                      aria-label={t("Remove {{displayName}}", { displayName: displayName })}
+                      aria-label={translateUi("Remove {{value1}}", { value1: displayName })}
                     >
                       <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </span>
                 </TooltipTrigger>
-                <TooltipContent className="max-w-[260px] text-xs">
+                <TooltipContent className="max-w-[260px] text-13">
                   {LAST_ACTIVE_ADMIN_TOOLTIP}
                 </TooltipContent>
               </Tooltip>
@@ -203,7 +204,7 @@ export function MemberRow({
                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                 onClick={() => onRevoke(member)}
                 disabled={isUpdating}
-                aria-label={t("Remove {{displayName}}", { displayName: displayName })}
+                aria-label={translateUi("Remove {{value1}}", { value1: displayName })}
               >
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>

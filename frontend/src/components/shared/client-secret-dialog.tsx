@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -26,11 +27,11 @@ export function ClientSecretDialog({
   clientId,
   clientSecret,
 }: ClientSecretDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   function handleCopy(value: string, label: string) {
     void copyToClipboard(value)
-      .then(() => toast.success(translateUi("{{label}} copied", { label: label })))
-      .catch(() => toast.error(translateUi("Failed to copy {{label}}", { label: label })));
+      .then(() => toast.success(translateUi(`${label} copied`)))
+      .catch(() => toast.error(translateErrorMessage(`Failed to copy ${label}`)));
   }
 
   return (
@@ -38,16 +39,16 @@ export function ClientSecretDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {clientId ? t("Save Client Secret") : t("New Client Secret")}
+            {clientId ? translateUi("Save Client Secret") : translateUi("New Client Secret")}
           </DialogTitle>
-          <DialogDescription>{t("This secret is shown only once. Copy and store it securely now.")}</DialogDescription>
+          <DialogDescription>{translateUi("This secret is shown only once. Copy and store it securely now.")}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           {clientId && (
             <div className="space-y-2">
-              <p className="text-xs uppercase tracking-wide text-text-tertiary">{t("Client ID")}</p>
+              <p className="text-13 uppercase tracking-wide text-text-tertiary">{translateUi("Client ID")}</p>
               <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-                <p className="min-w-0 flex-1 truncate font-mono text-xs">
+                <p className="min-w-0 flex-1 truncate font-mono text-13">
                   {clientId}
                 </p>
                 <Button
@@ -63,9 +64,9 @@ export function ClientSecretDialog({
             </div>
           )}
           <div className="space-y-2">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">{t("Client Secret")}</p>
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">{translateUi("Client Secret")}</p>
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-              <p className="min-w-0 flex-1 truncate font-mono text-xs">
+              <p className="min-w-0 flex-1 truncate font-mono text-13">
                 {clientSecret}
               </p>
               <Button
@@ -79,11 +80,11 @@ export function ClientSecretDialog({
               </Button>
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            <strong>{t("Lost it?")}</strong>{t(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
+          <p className="text-13 text-muted-foreground">
+            <strong>{translateUi("Lost it?")}</strong>{translateUi(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
         </div>
         <DialogFooter>
-          <Button variant="primary" type="button" onClick={() => onOpenChange(false)}>{t("I have saved it")}</Button>
+          <Button variant="primary" type="button" onClick={() => onOpenChange(false)}>{translateUi("I have saved it")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

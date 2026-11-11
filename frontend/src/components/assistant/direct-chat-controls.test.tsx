@@ -7,7 +7,7 @@ import {
   DirectModeBanner,
   DIRECT_MODE_COPY,
 } from "@/components/assistant/direct-chat-controls";
-import { api } from "@/lib/api-client";
+import * as assistantHttp from "@/lib/assistant/assistant-http";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
@@ -44,7 +44,7 @@ beforeEach(() => {
 
 describe("DirectChatControls", () => {
   it("loads first-party catalogs with plain GETs and retains draft selections", async () => {
-    const get = vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
+    const get = vi.spyOn(assistantHttp, "assistantJson").mockImplementation(async (endpoint) => {
       if (endpoint === "/assistant/direct/models") {
         return [
           { id: "gpt-5.5", label: "GPT-5.5", default: false },
@@ -108,7 +108,7 @@ describe("DirectChatControls", () => {
   });
 
   it("falls back to the first published model when none is marked default", async () => {
-    vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
+    vi.spyOn(assistantHttp, "assistantJson").mockImplementation(async (endpoint) => {
       if (endpoint === "/assistant/direct/models") {
         return [
           { id: "server-first", label: "Server First", default: false },
@@ -127,7 +127,7 @@ describe("DirectChatControls", () => {
 
   it("does not replace an explicit model when the catalog arrives", async () => {
     directAssistantTransport.setModel(undefined, "user-choice");
-    const get = vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
+    const get = vi.spyOn(assistantHttp, "assistantJson").mockImplementation(async (endpoint) => {
       if (endpoint === "/assistant/direct/models") {
         return [
           { id: "server-default", label: "Server Default", default: true },
@@ -163,7 +163,7 @@ describe("DirectChatControls", () => {
       ["assistant", "direct", "skills"],
       [{ slug: "nyxid", label: "NyxID" }],
     );
-    vi.spyOn(api, "get").mockResolvedValue([] as never);
+    vi.spyOn(assistantHttp, "assistantJson").mockResolvedValue([] as never);
     expect(() =>
       renderWithQuery(
         <DirectChatControls conversationId="direct-missing" />,
@@ -192,7 +192,7 @@ describe("DirectChatControls", () => {
       ["assistant", "direct", "models"],
       [{ id: "gpt-5.5", label: "Server Default", default: true }],
     );
-    vi.spyOn(api, "get").mockResolvedValue([] as never);
+    vi.spyOn(assistantHttp, "assistantJson").mockResolvedValue([] as never);
 
     expect(() =>
       renderWithQuery(

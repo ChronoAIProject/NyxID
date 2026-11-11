@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useNavigate } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,7 @@ const ERROR_LABELS: Record<string, string> = {
 };
 
 export function OAuthErrorPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   useApplyTheme();
   const navigate = useNavigate();
   const search = new URLSearchParams(window.location.search);
@@ -62,27 +62,27 @@ export function OAuthErrorPage() {
             <CardTitle>{title}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-12 leading-relaxed text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               {isMissingRequiredService
-                ? t("{{serviceName}} is required by this app but is not connected to your NyxID account. Connect it, then retry authorization.", { serviceName: serviceName })
+                ? translateUi("{{value1}} is required by this app but is not connected to your NyxID account. Connect it, then retry authorization.", { value1: serviceName })
                 : message}
             </p>
             {isMissingRequiredService && (
               <div className="flex items-center gap-3 rounded-lg border border-border bg-muted px-3 py-3">
                 <ServiceIcon slug={serviceSlug} size="md" />
                 <div className="min-w-0">
-                  <p className="truncate text-xs font-medium text-foreground">
+                  <p className="truncate type-secondary-emphasis text-foreground">
                     {serviceName}
                   </p>
-                  <p className="truncate text-11 text-text-tertiary">
+                  <p className="truncate text-13 text-text-tertiary">
                     {serviceSlug}
                   </p>
                 </div>
               </div>
             )}
             <div className="rounded-lg border border-border bg-muted px-3 py-2">
-              <p className="text-11 text-text-tertiary">{t("Error code")}</p>
-              <p className="text-xs text-foreground">{code}</p>
+              <p className="text-13 text-text-tertiary">{translateUi("Error code")}</p>
+              <p className="text-13 text-foreground">{code}</p>
             </div>
             {isMissingRequiredService ? (
               <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
@@ -91,26 +91,26 @@ export function OAuthErrorPage() {
                   onClick={() => window.history.back()}
                   className="w-full sm:w-auto"
                 >
-                  <RotateCcw />{t("Retry authorization")}</Button>
+                  <RotateCcw />{translateUi("Retry authorization")}</Button>
                 <Button asChild variant="primary" className="w-full sm:w-auto">
                   <a
                     href={connectServiceUrl}
                     target="_blank"
                     rel="noreferrer"
-                  >{t("Connect service")}<ExternalLink />
+                  >{translateUi("Connect service")}<ExternalLink />
                   </a>
                 </Button>
               </div>
             ) : (
               <div className="flex justify-end gap-3 pt-2">
-                <Button variant="outline" onClick={() => window.history.back()}>{t("Go Back")}</Button>
-                <Button onClick={() => void navigate({ to: "/dashboard" })}>{t("Home")}</Button>
+                <Button variant="outline" onClick={() => window.history.back()}>{translateUi("Go Back")}</Button>
+                <Button onClick={() => void navigate({ to: "/dashboard" })}>{translateUi("Home")}</Button>
               </div>
             )}
           </CardContent>
         </Card>
 
-        <p className="text-center text-11 text-text-tertiary">{t("If this issue persists, contact the application developer.")}</p>
+        <p className="text-center text-13 text-text-tertiary">{translateUi("If this issue persists, contact the application developer.")}</p>
       </div>
     </div>
   );

@@ -19,6 +19,7 @@ fn schedule_and_frozen_period_dtos_round_trip_target_provenance() {
         );
         let now = Utc::now();
         let schedule = CreditSchedule {
+            service_limits: vec![],
             id: "schedule".into(),
             amount_credits: 10,
             amount: crate::models::credits::Credits::from_micros(10_000_000),
@@ -42,6 +43,7 @@ fn schedule_and_frozen_period_dtos_round_trip_target_provenance() {
             skipped_periods: 0,
         };
         let period = CreditSchedulePeriod {
+            service_limits: Vec::new(),
             id: "period".into(),
             schedule_id: schedule.id.clone(),
             period_start: now,

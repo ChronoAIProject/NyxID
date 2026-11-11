@@ -24,12 +24,10 @@ test("a first send stays continuous through the canonical id transition", async 
   const message = "Plan my week with my connected calendar.";
   await openAssistant(page, { faults: { aliasOnFirstSend: true } });
   const sidebarRows = page
-    .getByRole("navigation")
+    .getByRole("navigation", { name: "Agents and conversations" })
     .getByRole("button", { name: "Options for" });
 
-  await expect(
-    page.locator("header").getByText("New chat", { exact: true }),
-  ).toBeVisible();
+  await expect(page).toHaveTitle("nyxid - New chat");
   await expect(
     thread(page).getByText(
       "Ask NyxID to help with services, access, and account operations.",
@@ -47,7 +45,7 @@ test("a first send stays continuous through the canonical id transition", async 
   await observeTurnContinuity(page, message);
   await sendMessage(page, message);
 
-  const echoedMessage = thread(page).getByText(message, { exact: true });
+  const echoedMessage = page.locator("[data-chat-transcript]").getByText(message, { exact: true });
   await expect(echoedMessage).toHaveCount(1, { timeout: 1_000 });
   await expect(composerInput(page)).toHaveText("");
   await expect(page).toHaveURL(/c=nyxid-chat-mock-/, { timeout: 2_000 });
@@ -126,9 +124,7 @@ test("reloading a fixture-only canonical id repairs naturally to New chat", asyn
   }, reloadUrl.toString());
   await page.reload();
 
-  await expect(
-    page.locator("header").getByText("New chat", { exact: true }),
-  ).toBeVisible({ timeout: 5_000 });
+  await expect(page).toHaveTitle("nyxid - New chat", { timeout: 5_000 });
   await expect(
     thread(page).getByText(
       "Ask NyxID to help with services, access, and account operations.",
@@ -194,10 +190,10 @@ test("switching away from a canonicalized new chat and back keeps both transcrip
       exact: false,
     }),
   ).toBeVisible();
-  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-chat-transcript]").getByText(message, { exact: true })).toHaveCount(0);
 
   await conversationRow(page, message).click();
-  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(1);
+  await expect(page.locator("[data-chat-transcript]").getByText(message, { exact: true })).toHaveCount(1);
   await expect(
     thread(page).getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible();

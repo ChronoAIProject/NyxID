@@ -1,5 +1,6 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useState } from "react";
 import type { AdminUsageStats } from "@/types/admin";
 import { MEASURE_LABELS, formatAnalyticsValue } from "@/lib/usage-analytics";
@@ -17,7 +18,7 @@ export function TokenUsageValue({
   usage: AdminUsageStats;
   selected: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const totalSelected = selected.includes("total_tokens");
   const value = sumTokenMetrics(usage, selected);
@@ -37,26 +38,26 @@ export function TokenUsageValue({
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label={t("Token count breakdown: {{value}} tokens", { value: number(value) })}
+          aria-label={translateUi("Token count breakdown: {{value1}} tokens", { value1: number(value) })}
           onClick={(event) => {
             // Radix closes tooltips on click; keep the breakdown visible after a tap.
             event.preventDefault();
             setOpen(true);
           }}
-          className="cursor-help rounded-sm text-left font-display text-28 font-medium leading-none tracking-tight tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          className="cursor-pointer rounded-sm text-left font-display type-metric tracking-tight tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
         >
           {formatAnalyticsValue(value, "tokens", true)}
         </button>
       </TooltipTrigger>
       <TooltipContent
         collisionPadding={12}
-        className="w-80 max-w-[calc(100vw-1.5rem)] space-y-3 border border-border bg-card p-3 text-12 text-foreground"
+        className="w-80 max-w-[calc(100vw-1.5rem)] space-y-3 border border-border bg-card p-3 text-13 text-foreground"
       >
         <div>
           <p className="font-medium">
-            {totalSelected ? t("Total tokens") : t("Selected token counts")}
+            {totalSelected ? translateUi("Total tokens") : translateUi("Selected token counts")}
           </p>
-          <p className="mt-1 font-mono text-11 tabular-nums">
+          <p className="mt-1 font-mono text-13 tabular-nums">
             {parts.map((metric) => number(usage[metric])).join(" + ")} ={" "}
             {number(value)}
           </p>
@@ -75,7 +76,7 @@ export function TokenUsageValue({
           <div className="space-y-1.5 border-t border-border pt-2">
             {details.length > 0 && (
               <>
-                <p className="font-medium">{t("Included in input / output")}</p>
+                <p className="font-medium">{translateUi("Included in input / output")}</p>
                 <dl className="space-y-1.5">
                   {details.map((detail) => (
                     <div
@@ -89,17 +90,19 @@ export function TokenUsageValue({
                 </dl>
               </>
             )}
-            <p className="text-11 leading-relaxed text-muted-foreground">{t("Image and voice tokens are included in the total when reported.")}{details.length === 0 &&
+            <p className="text-13 text-muted-foreground">{translateUi("Image and voice tokens are included in the total when reported.")}{details.length === 0 &&
                 " No separate image or voice breakdown was recorded for this selection."}
             </p>
             {(usage.cached_tokens > 0 || usage.cache_creation_tokens > 0) && (
-              <p className="text-11 leading-relaxed text-muted-foreground">{t("Cache read ")}{number(usage.cached_tokens)}{t(" · cache write")}{" "}
-                {number(usage.cache_creation_tokens)}{t(". These can overlap input counts and are not added to the total.")}</p>
+              <p className="text-13 text-muted-foreground">{translateUi("Cache read ")}{number(usage.cached_tokens)}{translateUi(" · cache write")}{" "}
+                {number(usage.cache_creation_tokens)}. These can overlap input
+                counts and are not added to the total.
+              </p>
             )}
           </div>
         )}
         {!totalSelected && selected.length > 1 && (
-          <p className="text-11 leading-relaxed text-muted-foreground">{t("Selected counts are added together. Cache counts can overlap input; use Total tokens for the input + output total.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Selected counts are added together. Cache counts can overlap input; use Total tokens for the input + output total.")}</p>
         )}
       </TooltipContent>
     </Tooltip>

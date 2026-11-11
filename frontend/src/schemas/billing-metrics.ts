@@ -11,11 +11,20 @@ export const SERVICE_BILLING_METRICS = [
   "cache_write_tokens",
   "images",
   "voice_seconds",
+  "sandbox_cpu_millis_seconds",
+  "sandbox_memory_mib_seconds",
+  "sandbox_disk_gib_seconds",
 ] as const;
-// Runtime billing has its own logical SKU; ordinary service lanes cannot price it.
+// Machine fixed-profile billing has its own logical SKU. Sandbox allocation
+// units use versioned CMA rate cards; only retained lifecycle evidence meters them.
 export const BILLING_METRICS = [
   ...SERVICE_BILLING_METRICS,
   "machine_running_seconds",
+  "reasoning_tokens",
+  "image_input_tokens",
+  "image_output_tokens",
+  "audio_input_tokens",
+  "audio_output_tokens",
 ] as const;
 export const BILLING_UNITS: Record<
   (typeof BILLING_METRICS)[number],
@@ -54,6 +63,26 @@ export const BILLING_UNITS: Record<
     get singular() { return translateUi("machine running second"); },
     tokenFamily: false,
   },
+  sandbox_cpu_millis_seconds: {
+    get label() { return translateUi("Sandbox CPU millicore-seconds"); },
+    get singular() { return translateUi("Sandbox CPU millicore-second"); },
+    tokenFamily: false,
+  },
+  sandbox_memory_mib_seconds: {
+    get label() { return translateUi("Sandbox RAM MiB-seconds"); },
+    get singular() { return translateUi("Sandbox RAM MiB-second"); },
+    tokenFamily: false,
+  },
+  sandbox_disk_gib_seconds: {
+    get label() { return translateUi("Sandbox disk GiB-seconds"); },
+    get singular() { return translateUi("Sandbox disk GiB-second"); },
+    tokenFamily: false,
+  },
+  reasoning_tokens: { get label() { return translateUi("reasoning tokens"); }, get singular() { return translateUi("reasoning token"); }, tokenFamily: true },
+  image_input_tokens: { get label() { return translateUi("image input tokens"); }, get singular() { return translateUi("image input token"); }, tokenFamily: true },
+  image_output_tokens: { get label() { return translateUi("image output tokens"); }, get singular() { return translateUi("image output token"); }, tokenFamily: true },
+  audio_input_tokens: { get label() { return translateUi("audio input tokens"); }, get singular() { return translateUi("audio input token"); }, tokenFamily: true },
+  audio_output_tokens: { get label() { return translateUi("audio output tokens"); }, get singular() { return translateUi("audio output token"); }, tokenFamily: true },
   images: { get label() { return translateUi("images"); }, get singular() { return translateUi("image"); }, tokenFamily: false },
 };
 export function metricLabel(metric: string, quantity?: number): string {

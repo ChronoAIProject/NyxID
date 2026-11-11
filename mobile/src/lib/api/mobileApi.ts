@@ -1,4 +1,5 @@
 import { ApiError } from "./ApiError";
+import { buildApiUrl } from "./baseUrl";
 import {
   approveAuthDeviceRequest,
   denyAuthDeviceRequest,
@@ -14,6 +15,7 @@ import {
   listApprovalRequestsRequest,
   listChallengesRequest,
   loginWithPasswordRequest,
+  verifyMfaRequest,
   registerWithPasswordRequest,
   registerPushTokenRequest,
   revokeApprovalRequest,
@@ -64,21 +66,14 @@ type RegisterWithPasswordResponse = {
 
 type SocialProvider = "google" | "github" | "apple";
 
-function getApiBaseUrl(): string {
-  const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:3001/api/v1";
-  const normalized = rawBaseUrl.replace(/\/+$/, "");
-
-  if (normalized.endsWith("/mobile")) {
-    return normalized.slice(0, -"/mobile".length);
-  }
-
-  return normalized;
-}
-
 export const mobileApi = {
   previewAuthDevice: previewAuthDeviceRequest,
   approveAuthDevice: approveAuthDeviceRequest,
   denyAuthDevice: denyAuthDeviceRequest,
+  async verifyMfa(body: { code: string; mfa_token: string }): Promise<LoginWithPasswordResponse> {
+    const response = await verifyMfaRequest(body);
+    return { userId: response.user_id, accessToken: response.access_token, expiresIn: response.expires_in, refreshToken: response.refresh_token };
+  },
   async loginWithPassword(input: LoginWithPasswordInput): Promise<LoginWithPasswordResponse> {
     const response = await loginWithPasswordRequest({
       email: input.email,
@@ -109,7 +104,7 @@ export const mobileApi = {
   },
   getSocialAuthorizeUrl(provider: SocialProvider, redirectUri: string): string {
     const encodedRedirectUri = encodeURIComponent(redirectUri);
-    return `${getApiBaseUrl()}/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`;
+    return buildApiUrl(`/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`);
   },
   async getChallenges(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
     return listChallengesRequest(page, perPage);

@@ -6,9 +6,6 @@ use crate::{
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         assistant_voice::{REQUESTS, RequestState, VoiceRequest},
         assistant_voice_session::{COLLECTION_NAME as CALLS, VoiceSession},
-        credits::Credits,
-        service_billing::BillingMetric,
-        usage_meter::{COLLECTION_NAME as USAGE_METER, UsageMeterRow},
     },
 };
 use chrono::Utc;
@@ -57,60 +54,25 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
         .session(&mut *tx)
         .await?;
     let cards: Vec<Document> = card_cursor.stream(&mut *tx).try_collect().await?;
-    let mut meter_cursor = db
-        .collection::<UsageMeterRow>(USAGE_METER)
-        .find(usage_filter(&call.user_id, &call.id, call.created_at))
-        .session(&mut *tx)
-        .await?;
-    let meters: Vec<UsageMeterRow> = meter_cursor.stream(&mut *tx).try_collect().await?;
-    let pending_cost = !meters.is_empty()
-        && meters.iter().any(|row| {
-            row.funding
-                .as_ref()
-                .and_then(|funding| funding.total_charge)
-                .is_none()
-        });
-    let total_cost = (!pending_cost)
-        .then(|| {
-            Credits::checked_sum(meters.iter().filter_map(|row| {
-                row.funding
-                    .as_ref()
-                    .and_then(|funding| funding.total_charge)
-            }))
-            .ok()
-        })
-        .flatten();
-    let voice_cost = (!pending_cost)
-        .then(|| {
-            Credits::checked_sum(
-                meters
-                    .iter()
-                    .filter(|row| row.metric == BillingMetric::VoiceSeconds)
-                    .filter_map(|row| {
-                        row.funding
-                            .as_ref()
-                            .and_then(|funding| funding.total_charge)
-                    }),
-            )
-            .ok()
-        })
-        .flatten();
     let seconds = (call.closed_at.unwrap_or_else(Utc::now) - call.created_at)
         .num_seconds()
         .clamp(0, 1800);
-    let text = render(
-        seconds,
-        !meters.is_empty(),
-        pending_cost,
-        total_cost,
-        voice_cost,
-        &requests,
-        &source_map,
-        &cards,
-    );
+    let mut text = render(seconds, &requests, &source_map, &cards);
+    text.push_str("\n\n");
+    text.push_str(&super::progress::close_notice(
+        call.end_reason.as_deref(),
+        requests.iter().any(super::progress::pending),
+    ));
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            automation_work: None,
+            execution_task: None,
+            delegated_images: Default::default(),
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: None,
             platform_origin: None,
@@ -155,55 +117,19 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     Ok(())
 }
 
-fn usage_filter(user_id: &str, call_id: &str, created_at: chrono::DateTime<Utc>) -> Document {
-    let prefix = regex::escape(&format!("voice:{call_id}:"));
-    doc! {
-        "billing_owner_id": user_id,
-        "created_at": {"$gte": bson::DateTime::from_chrono(created_at)},
-        "billing_request_id": {"$regex": format!("^{prefix}")},
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn render(
     seconds: i64,
-    has_meters: bool,
-    pending_cost: bool,
-    total_cost: Option<Credits>,
-    voice_cost: Option<Credits>,
     requests: &[VoiceRequest],
     sources: &HashMap<String, AssistantMessage>,
     cards: &[Document],
 ) -> String {
     let mut text = format!("**Call receipt** · {}:{:02}", seconds / 60, seconds % 60);
-    if has_meters {
-        let cost_line = if pending_cost {
-            "Cost: pending".to_owned()
-        } else if let (Some(total), Some(voice)) = (total_cost, voice_cost)
-            && total == voice
-        {
-            format!("Cost: {total}")
-        } else if let Some(total) = total_cost {
-            match voice_cost {
-                Some(voice) => format!("Credits: {total} · Voice cost: {voice}"),
-                None => format!("Cost: {total}"),
-            }
-        } else {
-            "Cost: pending".to_owned()
-        };
-        text.push_str("\n\n");
-        text.push_str(&cost_line);
-    }
-    let has_work = !requests.is_empty();
-    text.push_str("\n\n");
-    text.push_str(if has_work {
-        "Handed to NyxBot:\n"
-    } else {
-        "Just a conversation, nothing handed off."
-    });
-    if !has_work {
+    // Direct service calls use ordinary live turns rather than VoiceRequests.
+    // An empty task list does not establish that the call performed no actions.
+    if requests.is_empty() {
         return text;
     }
+    text.push_str("\n\nTasks:\n");
     for request in requests {
         let title = sources
             .get(&request.message_id)
@@ -214,6 +140,11 @@ fn render(
             RequestState::Completed => "Done",
             RequestState::Claimed => "Running",
             RequestState::Queued => "Queued",
+            RequestState::Cancelled
+                if crate::services::assistant_voice::request_outcome(request) == Some("failed") =>
+            {
+                "Failed"
+            }
             RequestState::Cancelled => "Cancelled",
             RequestState::AwaitingConfirmation => "Needs your OK",
         };
@@ -244,6 +175,12 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            execution_enrolled: false,
+            model_task: None,
+            progress: None,
+            timing: Default::default(),
+            started_at: None,
+            terminal_error_code: None,
             async_operation_pending: false,
             id: id.into(),
             user_id: "owner".into(),
@@ -268,15 +205,32 @@ mod tests {
     }
 
     #[test]
+    fn voice_2142_receipt_distinguishes_failure_from_stop() {
+        let mut failed = request(RequestState::Cancelled, "failed", "m1");
+        failed.terminal_error_code = Some("model_authority_changed".into());
+        let stopped = request(RequestState::Cancelled, "stopped", "m2");
+        let text = render(20, &[failed, stopped], &HashMap::new(), &[]);
+        assert!(text.contains("— Failed"));
+        assert!(text.contains("— Cancelled"));
+    }
+
+    #[test]
     fn receipt_hides_empty_work_and_lists_human_statuses_and_results() {
-        let empty = render(12, false, false, None, None, &[], &HashMap::new(), &[]);
-        assert!(empty.contains("Just a conversation, nothing handed off"));
+        let empty = render(12, &[], &HashMap::new(), &[]);
+        assert_eq!(empty, "**Call receipt** · 0:12");
         assert!(!empty.contains("Cost:"));
         let done = request(RequestState::Completed, "r1", "m1");
         let queued = request(RequestState::Queued, "r2", "m2");
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                automation_work: None,
+                execution_task: None,
+                delegated_images: Default::default(),
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,
@@ -310,53 +264,14 @@ mod tests {
                 via: Some("voice".into()),
             },
         )]);
-        let text = render(
-            72,
-            true,
-            false,
-            Some(Credits::ZERO),
-            Some(Credits::ZERO),
-            &[done, queued],
-            &sources,
-            &[],
-        );
+        let text = render(72, &[done, queued], &sources, &[]);
+        assert!(text.contains("Tasks:\n"));
         assert!(text.contains("Check my calendar"));
         assert!(text.contains("Done"));
         assert!(text.contains("Queued"));
         assert!(text.contains("#message-result-1"));
-        let voice_only = render(
-            72,
-            true,
-            false,
-            Some(Credits::from_micros(7)),
-            Some(Credits::from_micros(7)),
-            &[],
-            &HashMap::new(),
-            &[],
-        );
-        assert!(voice_only.contains("Cost: 0.000007"));
-        assert!(!voice_only.contains("Credits:"));
-        let pending = render(72, true, true, None, None, &[], &HashMap::new(), &[]);
-        assert!(pending.contains("Cost: pending"));
-    }
-
-    #[test]
-    fn usage_filter_uses_the_indexed_billing_owner_prefix() {
-        let filter = usage_filter("owner", "call", Utc::now());
-        assert_eq!(filter.get_str("billing_owner_id").unwrap(), "owner");
-        assert!(
-            filter
-                .get_document("created_at")
-                .unwrap()
-                .contains_key("$gte")
-        );
-        assert!(
-            filter
-                .get_document("billing_request_id")
-                .unwrap()
-                .get_str("$regex")
-                .unwrap()
-                .starts_with("^voice:call:")
-        );
+        assert!(text.contains("**Call receipt** · 1:12"));
+        assert!(!text.contains("Cost:"));
+        assert!(!text.contains("Credits:"));
     }
 }

@@ -85,7 +85,7 @@ export function RotateKeyDialog({
               <DialogDescription>{t("Copy your new API key now. You will not be able to see it again.")}</DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all select-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-14 break-all select-all">
                 {newKeyValue}
               </code>
               <Button

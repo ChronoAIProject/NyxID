@@ -39,17 +39,22 @@ pub(crate) fn verified_message(
         "supergroup" => ManagerChatKind::Supergroup,
         _ => return None,
     };
-    let original = super::telegram_new_service::private_sender(message) == Some(sender_id);
+    let original = super::telegram_new_service::private_sender(message) == Some(sender_id)
+        && super::platform_pairing_link::original_message(update);
     Some(VerifiedManagerUpdate {
         profile_id: profile_id.into(),
         manager_bot_id: manager_bot_id.into(),
-        telegram_bot_id,
+        entry: EntryIdentity::TelegramV1 { telegram_bot_id },
         observation_id: observation_id.into(),
-        sender_id,
-        chat_id,
+        sender: SenderIdentity::TelegramV1 {
+            telegram_sender_id: sender_id,
+            telegram_chat_id: chat_id,
+        },
         chat_kind,
-        update_id: update["update_id"].as_i64().filter(|id| *id >= 0)?,
-        message_id: message["message_id"].as_i64().filter(|id| *id > 0)?,
+        event: EventIdentity::TelegramV1 {
+            update_id: update["update_id"].as_i64().filter(|id| *id >= 0)?,
+            message_id: message["message_id"].as_i64().filter(|id| *id > 0)?,
+        },
         command_eligibility: if original {
             ManagerCommandEligibility::OriginalPrivateMessage
         } else {
@@ -64,6 +69,7 @@ pub(crate) async fn admit_in_session(
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
     claim: &IngressClaim,
+    text: Option<&str>,
 ) -> AppResult<IngressAdmission> {
     // Deliberately precedes current authority resolution: retries keep history.
     if let Some(receipt) = ingress::find_in_session(db, session, update).await? {
@@ -76,7 +82,7 @@ pub(crate) async fn admit_in_session(
         session,
         &update.profile_id,
         &update.manager_bot_id,
-        update.telegram_bot_id,
+        &update.entry,
         Some(&update.observation_id),
     )
     .await?
@@ -88,6 +94,17 @@ pub(crate) async fn admit_in_session(
         ManagerAudience::Fixed(UnavailableReason::EmergencyStopped)
     } else if update.chat_kind != ManagerChatKind::Private {
         ManagerAudience::PrivateChatHandoff
+    } else if text == Some("/unsupported") {
+        ManagerAudience::Fixed(UnavailableReason::UnsupportedInput)
+    } else if !policy.public_enabled && text.is_some_and(explicit_faq) {
+        ManagerAudience::Fixed(UnavailableReason::PublicDisabled)
+    } else if policy.public_enabled && text.is_some_and(explicit_faq) {
+        ManagerAudience::Public(PublicIngress {
+            ingress: claim.clone(),
+            manager: policy.manager.clone(),
+            sender: update.sender.clone(),
+            public_policy_revision: policy.public_policy_revision,
+        })
     } else {
         match identity.resolve_sender(db, session, update).await? {
             SenderResolution::Personal { authority, .. } => {
@@ -96,15 +113,14 @@ pub(crate) async fn admit_in_session(
                 }
                 ManagerAudience::Personal(AdmittedPersonalUpdate {
                     ingress: claim.clone(),
-                    authority,
+                    authority: *authority,
                 })
             }
             SenderResolution::Unlinked if policy.public_enabled => {
                 ManagerAudience::Public(PublicIngress {
                     ingress: claim.clone(),
                     manager: policy.manager.clone(),
-                    sender_id: update.sender_id,
-                    chat_id: update.chat_id,
+                    sender: update.sender.clone(),
                     public_policy_revision: policy.public_policy_revision,
                 })
             }
@@ -112,14 +128,87 @@ pub(crate) async fn admit_in_session(
             SenderResolution::Unavailable(reason) => ManagerAudience::Fixed(reason),
         }
     };
-    ingress::record_admission_in_session(db, session, update, &policy.manager, claim, &audience)
-        .await
+    let faq = matches!(&audience, ManagerAudience::Public(_))
+        && (row.public_policy.is_none() || text.is_some_and(explicit_faq));
+    if faq {
+        let sender_key = super::mcp_service::canonical_sha256(serde_json::json!([
+            update.profile_id,
+            update.entry,
+            update.sender
+        ]));
+        for (namespace, key, limit) in [
+            ("manager_faq_profile", update.profile_id.as_str(), 200),
+            ("manager_faq_sender", sender_key.as_str(), 20),
+        ] {
+            if !super::coordination_service::RateWindowStore::admit_in_session(
+                db,
+                namespace,
+                key,
+                limit,
+                std::time::Duration::from_secs(60),
+                session,
+            )
+            .await?
+            {
+                return Err(AppError::RateLimited);
+            }
+        }
+    }
+    let result = ingress::record_admission_in_session(
+        db,
+        session,
+        update,
+        &policy.manager,
+        claim,
+        &audience,
+    )
+    .await?;
+    if matches!(
+        &result,
+        IngressAdmission::Claimed {
+            audience: ManagerAudience::Public(_),
+            ..
+        }
+    ) && (row.public_policy.is_none() || text.is_some_and(explicit_faq))
+    {
+        super::platform_manager_delivery::queue_faq_in_session(
+            db,
+            session,
+            update,
+            claim,
+            &row,
+            text.unwrap_or(""),
+        )
+        .await?;
+    }
+    Ok(result)
+}
+
+pub(crate) fn explicit_faq(text: &str) -> bool {
+    matches!(
+        text.split_whitespace()
+            .next()
+            .unwrap_or("")
+            .split('@')
+            .next()
+            .unwrap_or(""),
+        "/faq" | "/help" | "/start"
+    )
 }
 
 pub async fn admit_manager_update(
     db: &Database,
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
+) -> AppResult<IngressAdmission> {
+    admit_text_update(db, identity, update, None).await
+}
+
+pub(crate) async fn admit_text_update(
+    db: &Database,
+    identity: &dyn ManagerIdentityProducer,
+    update: &VerifiedManagerUpdate,
+    text: Option<&str>,
 ) -> AppResult<IngressAdmission> {
     let claim = IngressClaim {
         receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -129,11 +218,11 @@ pub async fn admit_manager_update(
     let result = session
         .start_transaction()
         .and_run(
-            (db, identity, update, claim),
-            |session, (db, identity, update, claim)| {
+            (db, identity, update, claim, text),
+            |session, (db, identity, update, claim, text)| {
                 Box::pin(async move {
                     transaction_result(
-                        admit_in_session(db, session, *identity, update, claim).await,
+                        admit_in_session(db, session, *identity, update, claim, *text).await,
                     )
                 })
             },
@@ -167,17 +256,35 @@ mod tests {
             original.command_eligibility,
             ManagerCommandEligibility::OriginalPrivateMessage
         );
-        for field in ["forward_origin", "forward_date", "via_bot"] {
+        for field in [
+            "forward_origin",
+            "forward_date",
+            "via_bot",
+            "quote",
+            "external_reply",
+        ] {
             update["message"][field] = serde_json::json!({"id":999});
             let forwarded = verified_message("profile", "99", 99, "obs", &update).unwrap();
-            assert_eq!(forwarded.sender_id, 123);
+            assert_eq!(
+                forwarded.sender,
+                SenderIdentity::TelegramV1 {
+                    telegram_sender_id: 123,
+                    telegram_chat_id: 123
+                }
+            );
             assert_eq!(
                 forwarded.command_eligibility,
                 ManagerCommandEligibility::Ineligible
             );
             assert!(
-                OriginalManagerCommand::from_verified(forwarded, TurnInput { text: "yes".into() })
-                    .is_none()
+                OriginalManagerCommand::from_verified(
+                    forwarded,
+                    TurnInput {
+                        channel_uploads: Vec::new(),
+                        text: "yes".into()
+                    }
+                )
+                .is_none()
             );
             update["message"].as_object_mut().unwrap().remove(field);
         }
@@ -236,7 +343,9 @@ mod tests {
             matches!(admit_manager_update(&db,&IdentityProducer,&update).await.unwrap(),IngressAdmission::Duplicate {receipt_id} if receipt_id==original.receipt_id)
         );
         let mut next = update.clone();
-        next.update_id += 1;
+        if let EventIdentity::TelegramV1 { update_id, .. } = &mut next.event {
+            *update_id += 1;
+        }
         assert!(matches!(
             admit_manager_update(&db, &IdentityProducer, &next)
                 .await

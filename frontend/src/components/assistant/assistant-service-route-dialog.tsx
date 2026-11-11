@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw, Server } from "lucide-react";
 import { z } from "zod";
@@ -116,7 +116,7 @@ export function AssistantServiceRouteDialog({
   readonly params: AssistantServiceRouteParams;
   readonly onComplete: (userServiceId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -231,24 +231,24 @@ export function AssistantServiceRouteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? t("Service routing updated") : t("Route connected service")}
+            {resultId ? translateUi("Service routing updated") : translateUi("Route connected service")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? t("NyxID verified node routing from authorization evidence.")
-              : t("Set a node UUID to route through a credential node, or leave empty to clear routing.")}
+              ? translateUi("NyxID verified node routing from authorization evidence.")
+              : translateUi("Set a node UUID to route through a credential node, or leave empty to clear routing.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-route-node">{t("Node ID")}</Label>
+              <Label htmlFor="assistant-service-route-node">{translateUi("Node ID")}</Label>
               <Input
                 id="assistant-service-route-node"
                 value={viaNodeId}
                 onChange={(event) => setViaNodeId(event.target.value)}
-                placeholder={t("Leave empty to clear routing")}
+                placeholder={translateUi("Leave empty to clear routing")}
                 maxLength={256}
               />
             </div>
@@ -257,21 +257,21 @@ export function AssistantServiceRouteDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="text-13 font-medium">
-                {observedNodeId ? t("Routed through node") : t("Direct routing")}
+              <p className="type-card-title">
+                {observedNodeId ? translateUi("Routed through node") : translateUi("Direct routing")}
               </p>
-              <p className="break-all font-mono text-12 text-muted-foreground">
-                {observedNodeId ?? t("no node")}
+              <p className="break-all font-mono text-14 text-muted-foreground">
+                {observedNodeId ?? translateUi("no node")}
               </p>
               {verified ? (
-                <p className="text-11 text-success">{t("Routing evidence verified.")}</p>
+                <p className="text-13 text-success">{translateUi("Routing evidence verified.")}</p>
               ) : null}
             </div>
           </div>
         )}
 
         {error ? (
-          <p role="alert" className="text-12 text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -287,7 +287,7 @@ export function AssistantServiceRouteDialog({
                   void verifyEvidence(resultId, viaNodeId, expectedStateVersion);
               }}
             >
-              <RefreshCw />{t("Retry verification")}</Button>
+              <RefreshCw />{translateUi("Retry verification")}</Button>
           ) : null}
           {resultId ? (
             <Button
@@ -295,14 +295,14 @@ export function AssistantServiceRouteDialog({
               variant="primary"
               disabled={!verified}
               onClick={() => onComplete(resultId)}
-            >{t("Report service")}</Button>
+            >{translateUi("Report service")}</Button>
           ) : (
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               onClick={() => void submit()}
-            >{t("Apply routing")}</Button>
+            >{translateUi("Apply routing")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

@@ -1,7 +1,7 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
@@ -48,7 +48,7 @@ export function DetailsCard({
   readonly expiresAt: string | null;
   readonly keyId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [editingName, setEditingName] = useState(false);
   const [editName, setEditName] = useState(name);
   const [editDesc, setEditDesc] = useState(description ?? "");
@@ -106,25 +106,25 @@ export function DetailsCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">{t("Key Details")}</CardTitle>
+          <CardTitle className="text-15">{translateUi("Key Details")}</CardTitle>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {editingName ? (
           <div className="space-y-2">
             <div className="space-y-1.5">
-              <Label>{t("Name")}</Label>
+              <Label>{translateUi("Name")}</Label>
               <Input
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
               />
             </div>
             <div className="space-y-1.5">
-              <Label>{t("Description")}</Label>
+              <Label>{translateUi("Description")}</Label>
               <Input
                 value={editDesc}
                 onChange={(e) => setEditDesc(e.target.value)}
-                placeholder={t("Optional description")}
+                placeholder={translateUi("Optional description")}
               />
             </div>
             <div className="flex justify-end gap-2">
@@ -152,9 +152,9 @@ export function DetailsCard({
         ) : (
           <div className="flex items-start justify-between">
             <div>
-              <p className="text-12 font-medium">{name}</p>
+              <p className="type-row-title">{name}</p>
               {description && (
-                <p className="text-xs text-muted-foreground">{description}</p>
+                <p className="text-13 text-muted-foreground">{description}</p>
               )}
             </div>
             <Button
@@ -168,32 +168,32 @@ export function DetailsCard({
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-13">
           <div className="min-w-0 space-y-1">
-            <p className="text-muted-foreground">{t("Prefix")}</p>
+            <p className="text-muted-foreground">{translateUi("Prefix")}</p>
             <code className="block truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
               {maskApiKey(keyPrefix)}
             </code>
           </div>
           <div className="space-y-1">
-            <p className="text-muted-foreground">{t("Status")}</p>
+            <p className="text-muted-foreground">{translateUi("Status")}</p>
             <div>
-              <Badge variant={statusVariant} className="text-10">
+              <Badge variant={statusVariant} className="text-12">
                 {statusLabel}
               </Badge>
             </div>
           </div>
           <div className="space-y-1">
-            <p className="text-muted-foreground">{t("Created")}</p>
+            <p className="text-muted-foreground">{translateUi("Created")}</p>
             <p className="text-foreground">{formatDate(createdAt)}</p>
           </div>
           <div className="space-y-1">
-            <p className="text-muted-foreground">{t("Last used")}</p>
-            <p className="text-foreground">{lastUsedAt ? formatRelativeTime(lastUsedAt) : t("Never")}</p>
+            <p className="text-muted-foreground">{translateUi("Last used")}</p>
+            <p className="text-foreground">{lastUsedAt ? formatRelativeTime(lastUsedAt) : translateUi("Never")}</p>
           </div>
           {expiresAt && (
             <div className="col-span-2 space-y-1">
-              <p className="text-muted-foreground">{t("Expires")}</p>
+              <p className="text-muted-foreground">{translateUi("Expires")}</p>
               <p className="text-foreground">{new Date(expiresAt).toLocaleString(getFormattingLocale())}</p>
             </div>
           )}
@@ -201,7 +201,7 @@ export function DetailsCard({
 
         <div>
           <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">{t("Scopes: ")}</span>
+            <span className="text-13 text-muted-foreground">{translateUi("Scopes: ")}</span>
             {!editingScopes && (
               <Button
                 size="icon"
@@ -230,7 +230,7 @@ export function DetailsCard({
                         )
                       }
                     />
-                    <Label htmlFor={`scope-${s}`} className="text-xs">
+                    <Label htmlFor={`scope-${s}`}>
                       {s}
                     </Label>
                   </div>
@@ -279,7 +279,7 @@ export function DetailsCard({
           ) : (
             <div className="mt-1 flex flex-wrap gap-1">
               {scopesList.map((s) => (
-                <Badge key={s} variant="secondary" className="text-xs">
+                <Badge key={s} variant="secondary" className="text-12">
                   {s}
                 </Badge>
               ))}

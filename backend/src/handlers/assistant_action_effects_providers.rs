@@ -3,7 +3,6 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
-use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -208,7 +207,13 @@ async fn credentials_match(
         return Ok(false);
     };
     let decrypted_client_id =
-        Zeroizing::new(state.encryption_keys.decrypt(encrypted_client_id).await?);
+        crate::services::credential_record_service::CredentialRecord::user_credentials(credentials)
+            .decrypt(
+                &state.encryption_keys,
+                "client_id_encrypted",
+                encrypted_client_id,
+            )
+            .await?;
     if !bool::from(decrypted_client_id.as_slice().ct_eq(client_id.as_bytes())) {
         return Ok(false);
     }
@@ -218,7 +223,12 @@ async fn credentials_match(
     ) {
         (None, None) => Ok(true),
         (Some(encrypted), Some(expected)) => {
-            let decrypted_secret = Zeroizing::new(state.encryption_keys.decrypt(encrypted).await?);
+            let decrypted_secret =
+                crate::services::credential_record_service::CredentialRecord::user_credentials(
+                    credentials,
+                )
+                .decrypt(&state.encryption_keys, "client_secret_encrypted", encrypted)
+                .await?;
             Ok(bool::from(
                 decrypted_secret.as_slice().ct_eq(expected.as_bytes()),
             ))
@@ -668,12 +678,22 @@ mod tests {
             )
             .await
             .expect("create receipt uniqueness index");
-        Some((db, Uuid::new_v4().to_string()))
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        Some((db, user_id))
     }
 
     fn connection(user_id: &str, service_id: &str) -> UserServiceConnection {
         let now = chrono::Utc::now();
         UserServiceConnection {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -688,17 +708,48 @@ mod tests {
         }
     }
 
-    fn provider_token(user_id: &str, provider_id: &str) -> UserProviderToken {
+    async fn provider_token(
+        db: &mongodb::Database,
+        user_id: &str,
+        provider_id: &str,
+    ) -> UserProviderToken {
         let now = chrono::Utc::now();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(provider(provider_id))
+            .await
+            .unwrap();
+        let keys = crate::test_utils::test_encryption_keys();
+        let id = Uuid::new_v4().to_string();
+        let mut versions = std::collections::BTreeMap::new();
+        let mut encrypted = Vec::new();
+        for (field, value) in [
+            ("access_token_encrypted", "fixture-access"),
+            ("refresh_token_encrypted", "fixture-refresh"),
+        ] {
+            encrypted.push(
+                crate::services::credential_record_service::encrypt(
+                    &keys,
+                    USER_PROVIDER_TOKENS,
+                    &id,
+                    user_id,
+                    field,
+                    value.as_bytes(),
+                )
+                .await
+                .unwrap(),
+            );
+            crate::services::credential_record_service::mark_version(&mut versions, &keys, field);
+        }
         UserProviderToken {
-            id: Uuid::new_v4().to_string(),
+            secret_context_versions: versions,
+            id,
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
             connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
-            access_token_encrypted: Some(vec![1, 2, 3]),
-            refresh_token_encrypted: Some(vec![4, 5, 6]),
+            access_token_encrypted: Some(encrypted.remove(0)),
+            refresh_token_encrypted: Some(encrypted.remove(0)),
             token_scopes: None,
             expires_at: None,
             api_key_encrypted: None,
@@ -718,6 +769,7 @@ mod tests {
     fn provider(provider_id: &str) -> ProviderConfig {
         let now = chrono::Utc::now();
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: provider_id.to_string(),
             slug: format!("test-{}", &provider_id[..8]),
             name: "Test Provider".to_string(),
@@ -748,6 +800,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
             revocation_seed_version: 0,
@@ -887,7 +940,7 @@ mod tests {
             return;
         };
         let provider_id = Uuid::new_v4().to_string();
-        let token = provider_token(&user_id, &provider_id);
+        let token = provider_token(&db, &user_id, &provider_id).await;
         let token_id = token.id.clone();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(token)
@@ -933,7 +986,7 @@ mod tests {
         };
         let provider_id = Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .insert_one(provider_token(&user_id, &provider_id))
+            .insert_one(provider_token(&db, &user_id, &provider_id).await)
             .await
             .unwrap();
         let state = test_app_state(db.clone());
@@ -970,7 +1023,7 @@ mod tests {
         };
         let provider_id = Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .insert_one(provider_token(&user_id, &provider_id))
+            .insert_one(provider_token(&db, &user_id, &provider_id).await)
             .await
             .unwrap();
         let state = test_app_state(db);

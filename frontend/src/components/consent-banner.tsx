@@ -1,25 +1,27 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
-/**
- * Telemetry consent banner.
- *
- * Rendered by the Root component when the user has never answered the
- * consent prompt (`useConsentStore.asked === false`). Offers a binary
- * opt-in / opt-out; either choice dismisses the banner for this browser.
- * Consent is scoped to the current browser — other devices, the mobile
- * app, and the CLI manage their own telemetry state. Users can reverse
- * their choice at any time from Settings → Privacy.
- *
- * See `docs/TELEMETRY.md` §7 + §D for privacy gate + consent model.
- */
-
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+/** Explicit account permission plus a separately retained device restriction. */
+import { useState } from 'react';
+import { toast } from 'sonner';
+import { useAuthStore } from '../stores/auth-store';
+import { saveAnalyticsConsent } from '../lib/analytics-consent';
 import { Button } from './ui/button';
 import { useConsentStore } from '../stores/consent-store';
 import { usePublicConfig } from '../hooks/use-public-config';
 
 export function ConsentBanner() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const asked = useConsentStore((s) => s.asked);
-  const setConsent = useConsentStore((s) => s.setConsent);
+  const accountId = useAuthStore((s) => s.user?.id);
+  const [saving, setSaving] = useState(false);
+  async function choose(enabled: boolean) {
+    if (!accountId) return;
+    setSaving(true);
+    try { await saveAnalyticsConsent(accountId, enabled); }
+    catch { toast.error(translateErrorMessage('Could not save account analytics permission. This browser remains off.')); }
+    finally { setSaving(false); }
+  }
   // Only fetch config if the banner could possibly render. Once the
   // user has answered (asked=true), we never render regardless of
   // config, so the fetch would be wasted. TanStack Query dedupes,
@@ -27,7 +29,7 @@ export function ConsentBanner() {
   // a free cache read.
   const { data: cfg } = usePublicConfig({ enabled: !asked });
 
-  if (asked) return null;
+  if (asked || !accountId) return null;
 
   // Default-off contract: when the backend's /public/config reports
   // no telemetry DSN AND share-back is not opted in, the app has
@@ -41,21 +43,23 @@ export function ConsentBanner() {
     <div
       role="dialog"
       aria-live="polite"
-      aria-label={t("Telemetry consent")}
+      aria-label={translateUi("Telemetry consent")}
       className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 backdrop-blur"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-12 text-muted-foreground">{t("We collect anonymous usage telemetry to help us improve NyxID. We never capture credentials, form content, or the contents of your requests. This choice applies to this browser only — other devices and the CLI manage their own telemetry settings. You can change this later in Settings.")}</div>
+        <div className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.")}</div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
             variant="ghost"
-            onClick={() => setConsent(false)}
-            aria-label={t("Decline telemetry")}
-          >{t("No Thanks")}</Button>
+            disabled={saving}
+            onClick={() => void choose(false)}
+            aria-label={translateUi("Decline telemetry")}
+          >{translateUi("No Thanks")}</Button>
           <Button
-            onClick={() => setConsent(true)}
-            aria-label={t("Accept telemetry")}
-          >{t("Allow")}</Button>
+            disabled={saving}
+            onClick={() => void choose(true)}
+            aria-label={translateUi("Accept telemetry")}
+          >{translateUi("Allow")}</Button>
         </div>
       </div>
     </div>

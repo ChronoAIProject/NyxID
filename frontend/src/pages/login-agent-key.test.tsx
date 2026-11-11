@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import { LoginAgentKeyPage } from "./login-agent-key";
 import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 import { agentKeySummarySchema } from "@/schemas/agent-key-login";
@@ -17,21 +18,25 @@ const mocks = vi.hoisted(() => ({
   remove: vi.fn(),
   preview: vi.fn(),
   logout: vi.fn(),
-  auth: { signedIn: true },
+  auth: { signedIn: true, actor: "user" },
   search: {} as { user_code?: string },
   navigate: vi.fn(),
 }));
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: { post: mocks.post, get: mocks.get, delete: mocks.remove },
   apiClient: mocks.preview,
 }));
-vi.mock("@/stores/auth-store", () => ({
-  useAuthStore: () => ({
-    user: { id: "user", display_name: "Human" },
+vi.mock("@/stores/auth-store", () => {
+  const state = () => ({
+    user: mocks.auth.signedIn
+      ? { id: mocks.auth.actor, display_name: "Human" }
+      : null,
     isAuthenticated: mocks.auth.signedIn,
     logout: mocks.logout,
-  }),
-}));
+  });
+  return { useAuthStore: Object.assign(state, { getState: state }) };
+});
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
@@ -101,6 +106,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
   vi.clearAllMocks();
   mocks.auth.signedIn = true;
+  mocks.auth.actor = "user";
   mocks.search = {};
   mocks.preview.mockResolvedValue(preview);
   mocks.post.mockImplementation(async (path: string) =>
@@ -151,6 +157,56 @@ describe("Login code minting and credential management", () => {
       can_revoke: false,
     });
   }
+  it.each(["replacement", "logout"])(
+    "clears the issued code and review on account %s",
+    async (transition) => {
+      mintResponses();
+      const view = mount(<LoginAgentKeyPage mint />);
+      await click("Full account session");
+      await click("Generate account login code");
+      expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+      mocks.auth.actor = "another-user";
+      mocks.auth.signedIn = transition !== "logout";
+      view.rerender(
+        <QueryClientProvider client={client}>
+          <LoginAgentKeyPage mint />
+        </QueryClientProvider>,
+      );
+      expect(screen.queryByText("ABCD-EFGH")).not.toBeInTheDocument();
+      if (transition === "replacement") {
+        expect(
+          screen.getByRole("button", { name: "Full account session" }),
+        ).toBeVisible();
+        expect(
+          screen.queryByRole("button", { name: "Generate account login code" }),
+        ).not.toBeInTheDocument();
+      } else {
+        expect(
+          screen.getByRole("link", { name: "Approve on this computer" }),
+        ).toBeVisible();
+      }
+      expect(
+        mocks.post.mock.calls.filter(([path]) => path === "/auth/login-code"),
+      ).toHaveLength(1);
+    },
+  );
+  it("steps up inline before retrying one-time code minting", async () => {
+    mintResponses();
+    const original = mocks.post.getMockImplementation()!;
+    let denied = false;
+    mocks.post.mockImplementation(async (path: string, body: unknown) => {
+      if (path === "/auth/login-code" && !denied) {denied = true; throw new ApiError(403, {error: "mfa_step_up_required", error_code: 2003, message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."});}
+      return original(path, body);
+    });
+    mount(<LoginAgentKeyPage mint />);
+    await click("Full account session"); await click("Generate account login code");
+    expect(screen.getByRole("region", {name: "Verify this session"})).toBeVisible();
+    expect(screen.queryByText("ABCD-EFGH")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Authenticator code"), {target: {value: "123456"}});
+    await click("Verify & continue");
+    expect(mocks.preview).toHaveBeenCalledWith("/auth/mfa/step-up", expect.objectContaining({body: {code: "123456"}}));
+    expect(screen.getByText("ABCD-EFGH")).toBeVisible();
+  });
   it("mints an account code only after confirmation and clears its value on expiry", async () => {
     mintResponses();
     mount(<LoginAgentKeyPage mint />);

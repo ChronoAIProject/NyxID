@@ -5,7 +5,23 @@ use mongodb::{ClientSession, Database, error::Result};
 pub(super) struct ConcurrentHeadCreation;
 pub(super) fn retryable(error: &mongodb::error::Error) -> bool {
     error.contains_label("TransientTransactionError")
+        || error
+            .get_custom::<crate::services::erasure_admission::OwnerFenceCreationRace>()
+            .is_some()
         || error.get_custom::<ConcurrentHeadCreation>().is_some()
+        || error
+            .get_custom::<crate::services::audit_chain_service::AuditHeadCollision>()
+            .is_some()
+}
+
+fn commit_error(error: mongodb::error::Error, was_unknown: bool) -> mongodb::error::Error {
+    if was_unknown || error.contains_label("UnknownTransactionCommitResult") {
+        crate::services::api_key_mutation_service::abort_transaction(
+            crate::services::transaction_service::indeterminate_commit(),
+        )
+    } else {
+        error
+    }
 }
 
 pub struct Transaction {
@@ -37,26 +53,99 @@ where
     };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        transaction.session.start_transaction().await?;
+        transaction
+            .session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
         match callback(&mut transaction).await {
-            Ok(value) => loop {
-                match transaction.session.commit_transaction().await {
-                    Ok(()) => return Ok(value),
-                    Err(error)
-                        if error.contains_label("UnknownTransactionCommitResult")
-                            && tokio::time::Instant::now() < deadline =>
-                    {
-                        continue;
+            Ok(value) => {
+                let mut commit_was_unknown = false;
+                loop {
+                    match transaction.session.commit_transaction().await {
+                        Ok(()) => return Ok(value),
+                        Err(error)
+                            if error.contains_label("UnknownTransactionCommitResult")
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            commit_was_unknown = true;
+                            continue;
+                        }
+                        Err(error)
+                            if !commit_was_unknown
+                                && error.contains_label("TransientTransactionError")
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            break;
+                        }
+                        Err(error) => return Err(commit_error(error, commit_was_unknown)),
                     }
-                    Err(error)
-                        if error.contains_label("TransientTransactionError")
-                            && tokio::time::Instant::now() < deadline =>
-                    {
-                        break;
-                    }
-                    Err(error) => return Err(error),
                 }
-            },
+            }
+            Err(error) => {
+                let _ = transaction.session.abort_transaction().await;
+                if !retryable(&error) || tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+// Explicit Send callback boundary for credential copy transactions. Owning
+// each retry snapshot avoids higher-ranked async-closure lifetime inference
+// leaking into callers that spawn credential resolution.
+pub(crate) async fn run_send<R, C: Sync, F>(
+    db: &Database,
+    context: &C,
+    mut callback: F,
+) -> Result<R>
+where
+    R: Send,
+    F: Send
+        + for<'a> FnMut(
+            &'a mut Transaction,
+            &'a C,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R>> + Send + 'a>>,
+{
+    let mut transaction = Transaction {
+        session: db.client().start_session().await?,
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        transaction
+            .session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
+        match callback(&mut transaction, context).await {
+            Ok(value) => {
+                let mut commit_was_unknown = false;
+                loop {
+                    match transaction.session.commit_transaction().await {
+                        Ok(()) => return Ok(value),
+                        Err(error)
+                            if error.contains_label("UnknownTransactionCommitResult")
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            commit_was_unknown = true;
+                            continue;
+                        }
+                        Err(error)
+                            if !commit_was_unknown
+                                && error.contains_label("TransientTransactionError")
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            break;
+                        }
+                        Err(error) => return Err(commit_error(error, commit_was_unknown)),
+                    }
+                }
+            }
             Err(error) => {
                 let _ = transaction.session.abort_transaction().await;
                 if !retryable(&error) || tokio::time::Instant::now() >= deadline {

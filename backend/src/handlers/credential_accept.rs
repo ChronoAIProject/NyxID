@@ -130,6 +130,7 @@ fn html_response(assets: CredentialAcceptAssets) -> Response {
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
             (header::CONTENT_SECURITY_POLICY, csp.as_str()),
         ],
         assets.html,

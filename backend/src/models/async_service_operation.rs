@@ -9,6 +9,8 @@ pub const QUOTAS_COLLECTION_NAME: &str = "assistant_async_quotas";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AsyncOperationContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<CmaOperationKind>,
     pub status_operation: String,
     pub result_operation: String,
     pub cancel_operation: Option<String>,
@@ -20,8 +22,74 @@ pub struct AsyncOperationContract {
     pub error_field: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CmaOperationKind {
+    #[serde(rename = "cma_provisioning")]
+    Provisioning,
+    #[serde(rename = "cma_response")]
+    Response,
+    #[serde(rename = "cma_agent")]
+    Agent,
+}
+
+/// Bounded identifiers and observed lifecycle metadata, never task input/output.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CmaOperation {
+    /// Server-captured personal connection identity; absent legacy rows are unattributed.
+    #[serde(default)]
+    pub observer_binding: Option<String>,
+    /// Internal deduplication for idempotent input receipts without an operation ID.
+    #[serde(default)]
+    pub receipt_id: Option<String>,
+    #[serde(default)]
+    pub seen_working: bool,
+    pub kind: CmaOperationKind,
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_ref_id: Option<String>,
+    #[serde(default)]
+    pub response_id: Option<String>,
+    /// Only bounded identifiers and a frozen event-page cursor. Approval
+    /// descriptions and task content never enter this plaintext projection.
+    #[serde(default)]
+    pub approval_scan: Option<CmaApprovalScan>,
+    /// CMA-supplied browser destination, never a webhook or polling target.
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub status: Option<String>,
+    pub phase: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub checked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CmaApprovalScan {
+    pub revision: i64,
+    pub turn_sequence: i64,
+    pub incarnation: Option<String>,
+    pub cursor: Option<String>,
+    pub complete: bool,
+    pub pending: Vec<CmaPendingApproval>,
+    /// Ordered replay binds unbound approval events only after the exact turn start.
+    #[serde(default)]
+    pub active_turn: bool,
+    #[serde(default)]
+    pub last_sequence: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CmaPendingApproval {
+    pub approval_id: String,
+    pub notified: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeliveryBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     #[serde(default)]
     pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
     /// Original result destination; independent of a later event turn's fresh
@@ -45,6 +113,27 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    /// Server-admitted original task, never caller-supplied authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
+    #[serde(default)]
+    pub instruction_receipt_version: u32,
+    /// Producer identity verified at generated-artifact admission. Missing legacy
+    /// snapshots cannot gain fresh acquisition authority from endpoint shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_catalog_service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_result: Option<super::generated_artifact::ResultManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_event_turn_id: Option<String>,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
+    #[serde(default)]
+    pub cma: Option<CmaOperation>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -57,6 +146,14 @@ pub struct AsyncServiceOperation {
     pub contract: AsyncOperationContract,
     pub delivery: DeliveryBinding,
     pub operation_id: Option<String>,
+    /// Submission-approved connection/config/key authority, never credential material.
+    #[serde(default)]
+    pub execution_binding: Option<String>,
+    /// Zero denotes a watch admitted before connection consent was introduced.
+    #[serde(default)]
+    pub authority_version: u8,
+    #[serde(default)]
+    pub contract_binding: Option<String>,
     /// submitting, waiting, cancelling, ready, queued, delivered, cancelled.
     pub state: String,
     pub reason: Option<String>,
@@ -72,7 +169,7 @@ pub struct AsyncServiceOperation {
     pub poll_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub result_encrypted: Option<Vec<u8>>,
 }
 

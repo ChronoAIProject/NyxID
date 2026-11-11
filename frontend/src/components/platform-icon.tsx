@@ -40,6 +40,7 @@ const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
 
 /** Cursor editor mark (brand glyph, `currentColor`). */
 function CursorGlyph(props: SVGProps<SVGSVGElement>) {
+  useUiTranslation();
   return (
     <svg
       viewBox="0 0 24 24"

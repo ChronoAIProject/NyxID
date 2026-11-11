@@ -23,6 +23,8 @@ fn layer(seconds: i64) -> LayerReservation {
         reserved_credits: Credits::ZERO,
         allowance_reservations: vec![],
         grant_reservations: vec![],
+        tax_cache_ttl_secs: 900,
+        applied_tax: None,
     }
 }
 
@@ -33,6 +35,8 @@ fn machine_funding_requires_a_finite_distinct_positive_reservation() {
         service_id: None,
         service_slug: SKU.into(),
         periods: vec![],
+        metric: BillingMetric::MachineRunningSeconds,
+        maximum_quantity: MAX_RUNTIME_WINDOW_SECONDS,
     };
     assert!(validate_layer(OWNER, &candidates, &layer(300)).is_ok());
     assert!(validate_layer(OWNER, &candidates, &layer(301)).is_err());
@@ -81,6 +85,7 @@ async fn fixture(name: &str, balance_seconds: i64) -> mongodb::Database {
         })
         .await
         .unwrap();
+    crate::services::billing::taxes::seed_test_profiles(&db).await;
     db
 }
 
@@ -120,11 +125,13 @@ fn row(id: &str, reservation: &BillingReservation) -> UsageMeterRow {
         "_id": id, "transaction_id": id, "billing_request_id": id,
         "layer": "platform", "billing_owner_id": OWNER, "wallet_id": WALLET,
         "actor_user_id": OWNER, "service_slug": SKU,
-        "metric": "machine_running_seconds", "lago_metric_code": &layer.lago_metric_code,
+        "metric": layer.metric.as_str(), "lago_metric_code": &layer.lago_metric_code,
         "credential_class": "no_auth", "reserved_credits": reservation.total_reserved_credits,
         "funding": bson::to_bson(&UsageFunding {
-            credits_per_unit_micros: 40, credits_per_unit_pico: Some(RATE_PICO),
-            settlement_rate: Some(credits(1)),
+            credits_per_unit_micros: layer.credits_per_unit_micros, credits_per_unit_pico: layer.credits_per_unit_pico,
+            settlement_rate: Some(Credits::from_pico(super::super::super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros)).unwrap()),
+            tax_accounting: true,
+            applied_tax: layer.applied_tax.clone(),
             allowance_reservations: layer.allowance_reservations.clone(),
             grant_reservations: layer.grant_reservations.clone(),
             ..UsageFunding::default()
@@ -355,21 +362,24 @@ async fn concurrent_machine_and_service_reservations_conserve_shared_grant() {
                     Err(error) => panic!("Machine grant reservation failed: {error}"),
                 }
             } else {
-                // This is the actual ordinary-service grant reservation
-                // primitive called by reserve_estimated_funding/reserve_layer.
-                super::super::reserve_grants(
+                match super::super::tests::ordinary(
                     &db,
                     OWNER,
                     None,
                     Some("ordinary-service"),
-                    credits(10),
+                    BillingMetric::Requests,
+                    10,
+                    credits(1),
                 )
                 .await
-                .unwrap()
-                .iter()
-                .map(|allocation| allocation.amount)
-                .try_fold(Credits::ZERO, Credits::checked_add)
-                .unwrap()
+                {
+                    Ok(hold) => Credits::checked_sum(
+                        hold.layers[0].grant_reservations.iter().map(|a| a.amount),
+                    )
+                    .unwrap(),
+                    Err(AppError::InsufficientCredits) => Credits::ZERO,
+                    Err(error) => panic!("Ordinary admission failed: {error}"),
+                }
             };
             (is_machine, reserved)
         })
@@ -691,6 +701,256 @@ async fn machine_background_settlement_recovers_failed_claim_and_benefit_crash_b
             .await
             .unwrap(),
         1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn capped_machine_window_and_pending_reclaim_retain_evidence_boundary() {
+    let db = fixture("machine_allocation_caps", 100).await;
+    benefits(&db).await;
+    db.collection::<Document>(ALLOWANCES)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let rule = crate::models::credit_service_limit::CreditServiceLimit {
+        key: "runtime".into(),
+        service_ids: vec!["runtime-catalog".into()],
+        service_slugs: vec![SKU.into()],
+        label: Some("Runtime".into()),
+        limit: credits(3),
+        consumed: Credits::ZERO,
+        reserved: Credits::ZERO,
+    };
+    db.collection::<Document>(GRANTS)
+        .update_one(
+            doc! { "_id": "grant" },
+            doc! { "$set": { "service_limits": bson::to_bson(&vec![rule]).unwrap() } },
+        )
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 10, "cap-window").await.unwrap();
+    assert_eq!(
+        reservation.layers[0].grant_reservations[0].amount,
+        credits(3)
+    );
+    assert_eq!(reservation.total_reserved_credits, credits(7));
+    let pending = super::super::super::grants::request_revoke_grant(&db, "grant", Some("admin"))
+        .await
+        .unwrap();
+    assert!(pending.revoke_requested_at.is_some());
+    let usage = usage(&db, "cap-window").await;
+    assert!(
+        super::super::release_usage_reservations(&db, &usage)
+            .await
+            .is_err()
+    );
+    assert!(
+        super::super::settle_usage_funding(&db, &usage)
+            .await
+            .is_err()
+    );
+    let next = reserve(&db, 2, "next-window").await.unwrap();
+    assert!(next.layers[0].grant_reservations.is_empty());
+    let grant = db
+        .collection::<CreditGrant>(GRANTS)
+        .find_one(doc! { "_id": "grant" })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.reserved, credits(3));
+    assert_eq!(grant.service_limits[0].reserved, credits(3));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_wallet_windows_hold_gross_tax_and_benefits_skip_profiles() {
+    let db = fixture("machine_gross_tax", 1).await;
+    let mut config = crate::services::billing::taxes::zero_config();
+    config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":"9"}]);
+    let profile =
+        crate::services::billing::taxes::resolve_config(OWNER, "subscription", &config).unwrap();
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    db.collection::<crate::models::billing_tax_profile::BillingTaxProfile>(
+        crate::models::billing_tax_profile::COLLECTION_NAME,
+    )
+    .insert_one(profile)
+    .await
+    .unwrap();
+    assert!(matches!(
+        reserve(&db, 1, "short-tax").await,
+        Err(AppError::InsufficientCredits)
+    ));
+    let gross =
+        crate::services::billing::taxes::gross_ceiling(credits(1), "9".parse().unwrap()).unwrap();
+    db.collection::<Document>(WALLETS)
+        .update_one(doc! {"_id":WALLET}, doc! {"$set":{"balance_credits":gross}})
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 1, "gross-window").await.unwrap();
+    assert_eq!(reservation.total_reserved_credits, gross);
+    assert_eq!(wallet(&db).await.reserved_credits, gross);
+    assert_eq!(
+        reservation.layers[0]
+            .applied_tax
+            .as_ref()
+            .unwrap()
+            .rate_percent,
+        "9".parse().unwrap()
+    );
+    db.drop().await.unwrap();
+
+    let db = fixture("machine_benefits_no_tax_profile", 0).await;
+    benefits(&db).await;
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 5, "benefit-window").await.unwrap();
+    assert_eq!(reservation.total_reserved_credits, Credits::ZERO);
+    assert_eq!(reservation.layers[0].allowance_reservations[0].quantity, 2);
+    assert_eq!(
+        reservation.layers[0].grant_reservations[0].amount,
+        credits(3)
+    );
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn sandbox_windows_bind_resource_units_and_reject_invalid_bounds() {
+    for metric in [
+        BillingMetric::SandboxCpuMillisSeconds,
+        BillingMetric::SandboxMemoryMibSeconds,
+        BillingMetric::SandboxDiskGibSeconds,
+    ] {
+        assert_eq!(
+            sandbox_window_quantity(metric, 8192, 300).unwrap(),
+            2_457_600
+        );
+        assert!(sandbox_window_quantity(metric, 1, 301).is_err());
+        assert!(sandbox_window_quantity(metric, 0, 300).is_err());
+        assert!(sandbox_window_quantity(metric, i64::MAX, 300).is_err());
+        let candidates = RuntimeFundingCandidates {
+            owner_id: OWNER.into(),
+            service_id: None,
+            service_slug: SKU.into(),
+            periods: vec![],
+            metric,
+            maximum_quantity: 2_457_600,
+        };
+        let mut request = layer(2_457_600);
+        request.metric = metric;
+        assert!(validate_layer(OWNER, &candidates, &request).is_ok());
+        assert!(validate_layer("another-owner", &candidates, &request).is_err());
+        request.estimated_quantity += 1;
+        assert!(validate_layer(OWNER, &candidates, &request).is_err());
+        request.estimated_quantity = 1;
+        request.metric = BillingMetric::MachineRunningSeconds;
+        assert!(validate_layer(OWNER, &candidates, &request).is_err());
+    }
+    assert!(sandbox_window_quantity(BillingMetric::Requests, 1, 300).is_err());
+    assert!(sandbox_window_quantity(BillingMetric::MachineRunningSeconds, 1, 300).is_err());
+}
+
+async fn sandbox_bundle(db: &mongodb::Database, prefix: &str) -> AppResult<Credits> {
+    let mut requests = Vec::new();
+    for (metric, per_second, rate_pico) in [
+        (BillingMetric::SandboxCpuMillisSeconds, 2000, 10_000),
+        (BillingMetric::SandboxMemoryMibSeconds, 8192, 1000),
+        (BillingMetric::SandboxDiskGibSeconds, 64, 40_000),
+    ] {
+        let candidates = prepare_sandbox_window_funding(
+            db,
+            OWNER,
+            None,
+            SKU,
+            metric,
+            per_second,
+            300,
+            Utc::now(),
+        )
+        .await?;
+        let mut request = layer(per_second * 300);
+        request.metric = metric;
+        request.credits_per_unit_micros = 0;
+        request.credits_per_unit_pico = Some(rate_pico);
+        request.lago_metric_code = format!("sandbox-test-{}", metric.as_str());
+        requests.push((candidates, request));
+    }
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let prefix = prefix.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<Credits> = async {
+                let mut total = Credits::ZERO;
+                for (index, (candidates, request)) in requests.iter().enumerate() {
+                    let reservation = reserve_runtime_window_in_session(
+                        &db,
+                        session,
+                        OWNER,
+                        WALLET,
+                        candidates,
+                        request.clone(),
+                        Utc::now(),
+                    )
+                    .await?;
+                    total = total.checked_add(reservation.total_reserved_credits)?;
+                    db.collection::<UsageMeterRow>("usage_meter")
+                        .insert_one(row(&format!("{prefix}-{index}"), &reservation))
+                        .session(&mut *session)
+                        .await?;
+                }
+                Ok(total)
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[tokio::test]
+async fn sandbox_bundle_reserves_exact_shared_funds_and_rolls_back_all_components() {
+    let db = fixture("sandbox_funding_atomic", 1000).await;
+    let expected: Credits = "0.009225600000".parse().unwrap();
+    assert_eq!(sandbox_bundle(&db, "first").await.unwrap(), expected);
+    assert_eq!(wallet(&db).await.reserved_credits, expected);
+    // Fail the last row after all three holds have been written. Every earlier
+    // component and its newly inserted usage row must roll back in this transaction.
+    let mut duplicate = usage(&db, "first-2").await;
+    duplicate.id = "duplicate-2".into();
+    duplicate.transaction_id = "duplicate-2".into();
+    db.collection::<UsageMeterRow>("usage_meter")
+        .insert_one(duplicate)
+        .await
+        .unwrap();
+    assert!(sandbox_bundle(&db, "duplicate").await.is_err());
+    assert_eq!(wallet(&db).await.reserved_credits, expected);
+    assert_eq!(
+        db.collection::<UsageMeterRow>("usage_meter")
+            .count_documents(doc! {"_id": {"$in": ["duplicate-0", "duplicate-1"]}})
+            .await
+            .unwrap(),
+        0
+    );
+    // Ordinary service usage competes with these exact same wallet holds.
+    let remaining = wallet(&db).await.available_credits().unwrap();
+    super::super::super::reservation::try_reserve_prepaid(&db, OWNER, remaining)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        sandbox_bundle(&db, "exhausted").await,
+        Err(AppError::InsufficientCredits)
+    ));
+    assert_eq!(
+        wallet(&db).await.available_credits().unwrap(),
+        Credits::ZERO
     );
     db.drop().await.unwrap();
 }

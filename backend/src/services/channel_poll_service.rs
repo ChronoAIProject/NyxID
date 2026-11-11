@@ -122,14 +122,19 @@ pub(crate) async fn poll_bot(
         let outcome = adapter
             .poll_inbound(&state.http_client, &credentials, bot.poll_cursor.as_deref())
             .await?;
-        let complete =
-            process_inbound_messages(InboundDeps::from(state), &bot, adapter, &outcome.messages)
-                .await
-                .map_err(|_| {
-                    AppError::ChannelPlatformError(
-                        "Inbound channel processing failed; the cursor was retained".to_string(),
-                    )
-                })?;
+        let complete = process_inbound_messages(
+            crate::services::channel_inbound_service::InboundSource::Poll,
+            InboundDeps::from(state),
+            &bot,
+            adapter,
+            &outcome.messages,
+        )
+        .await
+        .map_err(|_| {
+            AppError::ChannelPlatformError(
+                "Inbound channel processing failed; the cursor was retained".to_string(),
+            )
+        })?;
         if !complete {
             return Err(AppError::ChannelPlatformError(
                 "Inbound channel processing failed; the cursor was retained".to_string(),

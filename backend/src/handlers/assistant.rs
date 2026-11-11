@@ -719,7 +719,7 @@ fn resolve_forward_scope(service: &DownstreamService) -> &str {
     PROXY_SCOPE
 }
 
-fn build_forward_authorization(
+pub(crate) fn build_forward_authorization(
     state: &AppState,
     auth_user: &AuthUser,
     service: &DownstreamService,

@@ -141,7 +141,7 @@ pub struct UpdateServiceAccountRequest {
 
 // --- Response types ---
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct CreateServiceAccountResponse {
     pub id: String,
     pub name: String,
@@ -217,7 +217,7 @@ pub struct ServiceAccountListResponse {
     pub per_page: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct RotateSecretResponse {
     pub client_id: String,
     pub client_secret: String,
@@ -350,7 +350,8 @@ pub(crate) async fn create_service_account_with_id(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::AdminServiceAccountCreated,
-    );
+    )
+    .await;
 
     Ok(Json(CreateServiceAccountResponse {
         id: sa.id,
@@ -524,7 +525,8 @@ pub async fn delete_service_account(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::AdminServiceAccountDeleted,
-    );
+    )
+    .await;
 
     Ok(Json(AdminActionResponse {
         message: "Service account deactivated".to_string(),
@@ -565,7 +567,8 @@ pub async fn rotate_secret(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::AdminServiceAccountRotated,
-    );
+    )
+    .await;
 
     Ok(Json(RotateSecretResponse {
         client_id: updated.client_id,
@@ -679,6 +682,20 @@ pub async fn revoke_curation_grant(
         Some(serde_json::json!({"target_sa_id": id})),
     );
     Ok(Json(sa_to_item(sa)))
+}
+
+impl std::fmt::Debug for CreateServiceAccountResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateServiceAccountResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RotateSecretResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotateSecretResponse")
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { Command } from "cmdk";
 import { Check, ChevronsUpDown, Search } from "lucide-react";
@@ -38,7 +39,7 @@ export function OwnerSelect({
   readonly onChange: (owner: SelectedOwner) => void;
   readonly disabled?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
@@ -70,10 +71,10 @@ export function OwnerSelect({
           type="button"
           variant="outline"
           role="combobox"
-          aria-label={t("Destination owner")}
+          aria-label={translateUi("Destination owner")}
           aria-expanded={open && !disabled}
           disabled={disabled}
-          className="h-auto min-h-10 w-full justify-between gap-3 text-left font-normal"
+          className="h-auto min-h-10 w-full justify-between gap-3 text-left font-medium"
         >
           {value ? (
             <span className="min-w-0">
@@ -81,13 +82,13 @@ export function OwnerSelect({
                 {value.display_name || value.email}
               </span>
               {value.display_name && (
-                <span className="block truncate text-xs text-muted-foreground">
+                <span className="block truncate text-13 text-muted-foreground">
                   {value.email}
                 </span>
               )}
             </span>
           ) : (
-            <span className="text-muted-foreground">{t("Select destination owner")}</span>
+            <span className="text-muted-foreground">{translateUi("Select destination owner")}</span>
           )}
           <ChevronsUpDown
             className="h-4 w-4 shrink-0 text-muted-foreground"
@@ -99,7 +100,7 @@ export function OwnerSelect({
         align="start"
         className="w-[var(--radix-popover-trigger-width)] p-0"
       >
-        <Command label={t("Search owners")} shouldFilter={false}>
+        <Command label={translateUi("Search owners")} shouldFilter={false}>
           <div className="flex items-center gap-2 border-b px-3">
             <Search
               className="h-4 w-4 shrink-0 text-muted-foreground"
@@ -108,13 +109,13 @@ export function OwnerSelect({
             <Command.Input
               value={search}
               onValueChange={setSearch}
-              aria-label={t("Search owners")}
+              aria-label={translateUi("Search owners")}
               placeholder={
                 ownerType === "person"
-                  ? t("Search people or enter exact email…")
-                  : t("Search organizations or enter ID…")
+                  ? translateUi("Search people or enter exact email…")
+                  : translateUi("Search organizations or enter ID…")
               }
-              className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              className="h-10 w-full bg-transparent text-14 outline-none placeholder:text-muted-foreground"
             />
           </div>
           <Command.List
@@ -122,10 +123,10 @@ export function OwnerSelect({
             aria-busy={loading}
           >
             {loading && (
-              <p role="status" className="p-3 text-sm text-muted-foreground">{t("Searching…")}</p>
+              <p role="status" className="p-3 text-14 text-muted-foreground">{translateUi("Searching…")}</p>
             )}
             {!loading && !owners.error && candidates.length === 0 && (
-              <p className="p-3 text-sm text-muted-foreground">{t("No matching owners.")}</p>
+              <p className="p-3 text-14 text-muted-foreground">{translateUi("No matching owners.")}</p>
             )}
             {candidates.map((owner) => (
               <Command.Item
@@ -136,19 +137,19 @@ export function OwnerSelect({
                   onChange(owner);
                   setOpen(false);
                 }}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-14 data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
               >
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
                     {owner.display_name || owner.email}
                     {!owner.is_active
-                      ? t(" (inactive)")
+                      ? translateUi(" (inactive)")
                       : owner.id === currentOwnerId
-                        ? t(" (current owner)")
+                        ? translateUi(" (current owner)")
                         : ""}
                   </span>
                   {owner.display_name && (
-                    <span className="block truncate text-xs text-muted-foreground">
+                    <span className="block truncate text-13 text-muted-foreground">
                       {owner.email}
                     </span>
                   )}
@@ -160,14 +161,14 @@ export function OwnerSelect({
             ))}
           </Command.List>
           {owners.error && (
-            <div className="p-3 text-sm">
-              <p role="alert" className="text-destructive">{t("Could not load owners.")}</p>
+            <div className="p-3 text-14">
+              <p role="alert" className="text-destructive">{translateUi("Could not load owners.")}</p>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 onClick={() => void owners.refetch()}
-              >{t("Retry")}</Button>
+              >{translateUi("Retry")}</Button>
             </div>
           )}
           {(page > 1 || (owners.data?.total ?? 0) > 20) && (
@@ -178,14 +179,14 @@ export function OwnerSelect({
                 size="sm"
                 disabled={loading || page === 1}
                 onClick={() => setPage((current) => current - 1)}
-              >{t("Previous owners")}</Button>
+              >{translateUi("Previous owners")}</Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 disabled={loading || page * 20 >= (owners.data?.total ?? 0)}
                 onClick={() => setPage((current) => current + 1)}
-              >{t("More owners")}</Button>
+              >{translateUi("More owners")}</Button>
             </div>
           )}
         </Command>

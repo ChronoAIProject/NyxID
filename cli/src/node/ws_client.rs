@@ -798,7 +798,7 @@ fn handle_pending_credential_cleanup_frame(
     evicted
 }
 
-fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
+pub(super) fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
     let http_url = if let Some(rest) = ws_url.strip_prefix("ws://") {
         format!("http://{rest}")
     } else if let Some(rest) = ws_url.strip_prefix("wss://") {
@@ -989,6 +989,9 @@ async fn connect_and_serve(
         }) => response.map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))??,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
+    let machine_execution_approval = parsed["capabilities"]["machine_execution_approval_v1"]
+        .as_bool()
+        .unwrap_or(false);
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
             if let Some(binding) = &config.managed_runtime {
@@ -1141,10 +1144,15 @@ async fn connect_and_serve(
     // advertise the matching flag. Fire-and-forget — if the channel
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
+    capabilities.insert(
+        "machine_execution_approval_v1".into(),
+        machine_execution_approval.into(),
+    );
     capabilities.insert("http_signature_v2".to_string(), true.into());
     capabilities.insert("proxy_upload_v1".to_string(), true.into());
     capabilities.insert("http_cancellation".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());
+    capabilities.insert("credential_target_update_v1".to_string(), true.into());
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
         true.into(),
@@ -1164,6 +1172,7 @@ async fn connect_and_serve(
         if machine.connect(tx.clone(), &bytes).await.is_err() {
             tracing::warn!("Machine gateway could not start");
         }
+        machine.negotiate_execution_approval(machine_execution_approval);
     }
     let mut caps_msg = serde_json::json!({
         "type": "status_update",
@@ -3620,6 +3629,35 @@ fn process_credential_update(
     let injection_method = parsed["injection_method"].as_str().unwrap_or("header");
 
     let result = match injection_method {
+        "target_url" => (|| {
+            // No defaults: a malformed metadata frame must never clear or
+            // replace an installed secret or injection/OAuth configuration.
+            if ["header_name", "header_value", "param_name", "param_value"]
+                .iter()
+                .any(|field| parsed.get(field).is_some_and(|v| !v.is_null()))
+            {
+                return Err(super::error::Error::Validation(
+                    "Target update contains credential fields".into(),
+                ));
+            }
+            let target = parsed["target_url"].as_str().ok_or_else(|| {
+                super::error::Error::Validation("Target update requires target_url".into())
+            })?;
+            let mut config = NodeConfig::load(config_path)?;
+            let revision = parsed["target_revision"]
+                .as_i64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| {
+                    super::error::Error::Validation(
+                        "Target update requires a positive revision".into(),
+                    )
+                })?;
+            config.set_credential_target_revision(service_slug, target, revision)?;
+            let store = CredentialStore::from_config_with_backend(&config, backend)?;
+            config.save(config_path)?;
+            credential_sender.update(store);
+            Ok(())
+        })(),
         "ifttt_webhook" => (|| {
             let key = parsed["header_value"]
                 .as_str()
@@ -4107,7 +4145,9 @@ async fn handle_ws_proxy_open(
         .await;
         return;
     }
-    let raw_credential = cred.raw_credential().map(str::to_string);
+    let raw_credential = cred
+        .raw_credential()
+        .map(|raw| zeroize::Zeroizing::new(raw.to_owned()));
 
     // Resolve effective base URL.
     let effective_base_url = if base_url.is_empty() {
@@ -4171,40 +4211,28 @@ async fn handle_ws_proxy_open(
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut ws_request = match url.into_client_request() {
         Ok(r) => r,
-        Err(e) => {
-            let _ = send_ws_proxy_error(
-                &tx,
-                &session_id,
-                &format!("Failed to build WS request: {e}"),
-            )
-            .await;
+        Err(_) => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS request invalid").await;
             return;
         }
     };
 
-    // Forward headers from the proxy message.
-    if let Some(headers) = parsed["headers"].as_object() {
-        for (name, value) in headers {
-            // Values are already wire-safe (percent-encoded) per identity_service::sanitize_header_value.
-            if let Some(v) = value.as_str()
-                && let (Ok(hn), Ok(hv)) = (
-                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                    reqwest::header::HeaderValue::from_str(v),
-                )
-            {
-                ws_request.headers_mut().insert(hn, hv);
-            }
-        }
-    }
-
-    // Inject header credential.
-    if let Some((hdr_name, hdr_value)) = cred.header()
-        && let (Ok(hn), Ok(hv)) = (
-            reqwest::header::HeaderName::from_bytes(hdr_name.as_bytes()),
-            reqwest::header::HeaderValue::from_str(hdr_value),
-        )
+    // A configured authentication/default header may never disappear while
+    // connecting. Return one sanitized protocol error before opening a socket.
+    if install_ws_proxy_headers(
+        ws_request.headers_mut(),
+        parsed.get("headers"),
+        cred.header(),
+    )
+    .is_err()
     {
-        ws_request.headers_mut().insert(hn, hv);
+        let _ = send_ws_proxy_error(
+            &tx,
+            &session_id,
+            "Invalid downstream WS header configuration",
+        )
+        .await;
+        return;
     }
 
     // Connect to downstream WS with timeout and message size limits
@@ -4244,13 +4272,8 @@ async fn handle_ws_proxy_open(
                 .map(str::to_string);
             (ws, selected_protocol)
         }
-        Ok(Err(e)) => {
-            let _ = send_ws_proxy_error(
-                &tx,
-                &session_id,
-                &format!("Downstream WS connection failed: {e}"),
-            )
-            .await;
+        Ok(Err(_)) => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS connection failed").await;
             return;
         }
         Err(_) => {
@@ -4321,7 +4344,7 @@ async fn run_ws_proxy_session(
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
     ws_frame_injections: Vec<WsFrameInjection>,
-    raw_credential: Option<String>,
+    raw_credential: Option<zeroize::Zeroizing<String>>,
 ) {
     run_ws_proxy_session_with_limits(
         session_id,
@@ -4401,7 +4424,7 @@ async fn run_ws_proxy_session_with_limits<S>(
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
     ws_frame_injections: Vec<WsFrameInjection>,
-    raw_credential: Option<String>,
+    raw_credential: Option<zeroize::Zeroizing<String>>,
     max_duration_limit: Duration,
     idle_timeout_limit: Duration,
 ) where
@@ -4546,16 +4569,16 @@ async fn run_ws_proxy_session_with_limits<S>(
                         // Handled at protocol level by tungstenite
                     }
                     Some(Ok(Message::Frame(_))) => {}
-                    Some(Err(e)) => {
+                    Some(Err(_)) => {
                         tracing::debug!(
                             session_id = %session_id,
-                            error = %e,
+                            code = "downstream_ws_failed",
                             "Downstream WS error in node proxy"
                         );
                         let json = serde_json::json!({
                             "type": "ws_proxy_closed",
                             "session_id": session_id,
-                            "reason": format!("downstream error: {e}"),
+                            "reason": "Downstream WS connection failed",
                         });
                         let _ = send_ws_message(&tx, json.to_string()).await;
                         break;
@@ -4759,6 +4782,30 @@ async fn drain_active_ws_proxies(active_ws_proxies: &ActiveWsProxyMap) {
         entry.task_handle.abort();
         tracing::debug!(session_id = %session_id, "WS proxy drained on disconnect");
     }
+}
+
+/// Build the exact WS transport headers without dropping a malformed configured
+/// value. Partial construction cannot escape: the caller stops before connect.
+fn install_ws_proxy_headers(
+    target: &mut reqwest::header::HeaderMap,
+    forwarded: Option<&serde_json::Value>,
+    credential: Option<(&str, &str)>,
+) -> std::result::Result<(), ()> {
+    if let Some(forwarded) = forwarded {
+        let forwarded = forwarded.as_object().ok_or(())?;
+        for (name, value) in forwarded {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
+            let value = proxy_executor::sensitive_header_value(value.as_str().ok_or(())?)
+                .map_err(|_| ())?;
+            target.insert(name, value);
+        }
+    }
+    if let Some((name, value)) = credential {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
+        let value = proxy_executor::sensitive_header_value(value).map_err(|_| ())?;
+        target.insert(name, value);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5049,6 +5096,62 @@ mod tests {
         assert!(active_ws_proxies.lock().await.is_empty());
     }
 
+    #[tokio::test]
+    async fn malformed_ws_auth_and_defaults_never_open_downstream_socket() {
+        for (credential_name, credential_value, forwarded) in [
+            ("x-auth", "credential\r\nsecret", serde_json::json!({})),
+            ("x-bad\rname", "credential-secret", serde_json::json!({})),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-custom":"default\r\nsecret"}),
+            ),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-bad\n":"default-secret"}),
+            ),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-custom":123}),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_owned());
+            config.credentials.insert(
+                "custom".to_owned(),
+                CredentialConfig::new_header(
+                    credential_name.to_owned(),
+                    Some(encryption.encrypt(credential_value).unwrap()),
+                    Some(format!("ws://{addr}")),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let active: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let (tx, mut rx) = mpsc::channel(4);
+            handle_ws_proxy_open(&serde_json::json!({"session_id":"invalid-headers", "service_slug":"custom", "base_url":format!("ws://{addr}"),"path":"/socket","headers":forwarded}), &credentials, tx, active.clone(), None, replay_guard()).await;
+            let NodeWsMessage::Text(message) = rx.recv().await.unwrap() else {
+                panic!("expected bounded protocol error");
+            };
+            let response: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(response["type"], "ws_proxy_error");
+            assert_eq!(
+                response["error"],
+                "Invalid downstream WS header configuration"
+            );
+            assert!(!message.contains("secret"));
+            assert!(active.lock().await.is_empty());
+            assert_eq!(
+                listener.into_std().unwrap().accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
     async fn duplex_websocket_pair() -> (
         WebSocketStream<tokio::io::DuplexStream>,
         WebSocketStream<tokio::io::DuplexStream>,
@@ -5061,7 +5164,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::result_large_err)]
-    async fn node_websocket_injects_elevenlabs_api_key_on_upgrade() {
+    async fn node_websocket_valid_headers_reach_handshake_and_establish_session() {
         use tokio_tungstenite::tungstenite::handshake::server::{
             Request as WsRequest, Response as WsResponse,
         };
@@ -5071,22 +5174,30 @@ mod tests {
             .expect("bind downstream WebSocket");
         let addr = listener.local_addr().expect("downstream address");
         let (header_tx, header_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept downstream");
             let socket = tokio_tungstenite::accept_hdr_async(
                 stream,
                 move |request: &WsRequest, response: WsResponse| {
-                    let api_key = request
-                        .headers()
-                        .get("xi-api-key")
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    header_tx.send(api_key).expect("send captured API key");
+                    assert_eq!(
+                        request.uri().path(),
+                        "/v1/text-to-speech/voice-1/stream-input"
+                    );
+                    let values =
+                        ["xi-api-key", "x-forwarded-context", "x-unfamiliar-default"].map(|name| {
+                            request
+                                .headers()
+                                .get(name)
+                                .map(|value| value.as_bytes().to_vec())
+                        });
+                    header_tx.send(values).expect("send captured headers");
                     Ok(response)
                 },
             )
             .await
             .expect("complete downstream handshake");
+            release_rx.await.expect("release downstream socket");
             drop(socket);
         });
 
@@ -5116,7 +5227,11 @@ mod tests {
                 "service_slug": "api-elevenlabs",
                 "base_url": format!("ws://{addr}"),
                 "path": "/v1/text-to-speech/voice-1/stream-input",
-                "headers": {},
+                "headers": {
+                    "x-forwarded-context": "forwarded-wire-value",
+                    "x-unfamiliar-default": "default-wire-secret",
+                    "xi-api-key": "forwarded-auth-must-be-overridden"
+                },
             }),
             &credentials,
             tx.clone(),
@@ -5126,9 +5241,17 @@ mod tests {
         )
         .await;
 
+        let captured = tokio::time::timeout(Duration::from_secs(5), header_rx)
+            .await
+            .expect("handshake completed")
+            .expect("captured headers");
         assert_eq!(
-            header_rx.await.expect("captured API key"),
-            Some("elevenlabs-node-test-key".to_string())
+            captured,
+            [
+                Some(b"elevenlabs-node-test-key".to_vec()),
+                Some(b"forwarded-wire-value".to_vec()),
+                Some(b"default-wire-secret".to_vec()),
+            ]
         );
         let opened: serde_json::Value = serde_json::from_str(&unwrap_text(
             rx.recv().await.expect("ws_proxy_opened acknowledgement"),
@@ -5136,6 +5259,13 @@ mod tests {
         .expect("valid acknowledgement");
         assert_eq!(opened["type"], "ws_proxy_opened");
         assert_eq!(opened["session_id"], "elevenlabs-session");
+
+        assert!(
+            active_ws_proxies
+                .lock()
+                .await
+                .contains_key("elevenlabs-session")
+        );
 
         handle_ws_proxy_close(
             &serde_json::json!({
@@ -5147,7 +5277,13 @@ mod tests {
             &active_ws_proxies,
         )
         .await;
-        server_task.await.expect("downstream server task");
+        release_tx.send(()).expect("release established session");
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("downstream task terminates")
+            .expect("downstream server task");
+        drain_active_ws_proxies(&active_ws_proxies).await;
+        assert!(active_ws_proxies.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -5972,6 +6108,109 @@ mod tests {
     }
 
     #[test]
+    fn node_endpoint_2126_metadata_update_preserves_secrets_and_reloads_live_store() {
+        for keychain in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let backend = if keychain {
+                SecretBackend::new_mock_keychain("target-test")
+            } else {
+                SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap())
+            };
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            let secret = uuid::Uuid::new_v4().to_string();
+            config
+                .add_header_credential_via(
+                    "monitor",
+                    "Authorization",
+                    &secret,
+                    Some("http://old-monitor"),
+                    &backend,
+                )
+                .unwrap();
+            // The metadata handler must preserve OAuth refresh material too.
+            let credential = config.credentials.get_mut("monitor").unwrap();
+            credential.oauth_managed = true;
+            credential.oauth_token_url = Some("https://provider.example/token".into());
+            credential.oauth_scopes = Some("read write".into());
+            credential.oauth_access_token_encrypted = backend
+                .store_credential_value("monitor:oauth_access", &secret)
+                .unwrap();
+            credential.oauth_refresh_token_encrypted = backend
+                .store_credential_value("monitor:oauth_refresh", &uuid::Uuid::new_v4().to_string())
+                .unwrap();
+            config.save(&config_path).unwrap();
+            let original = serde_json::to_value(&config.credentials["monitor"]).unwrap();
+            let (sender, credentials) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            for (revision, target) in [(1, "http://new-monitor"), (2, "")] {
+                let frame = serde_json::json!({"type":"credential_update", "request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "injection_method":"target_url", "target_url":target, "target_revision": revision});
+                let ack =
+                    process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+                let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+                assert_eq!(ack["status"], "ok");
+                assert_eq!(ack["request_id"], frame["request_id"]);
+                let duplicate =
+                    process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&duplicate).unwrap()["status"],
+                    "ok"
+                );
+                let live = credentials.snapshot();
+                assert_eq!(live.get("monitor").unwrap().header().unwrap().1, secret);
+                assert_eq!(
+                    live.get("monitor").unwrap().target_url(),
+                    (!target.is_empty()).then_some(target)
+                );
+                let reloaded = NodeConfig::load(&config_path).unwrap();
+                let mut expected = original.clone();
+                expected["target_revision"] = revision.into();
+                if target.is_empty() {
+                    expected.as_object_mut().unwrap().remove("target_url");
+                } else {
+                    expected["target_url"] = target.into();
+                }
+                assert_eq!(
+                    serde_json::to_value(&reloaded.credentials["monitor"]).unwrap(),
+                    expected
+                );
+            }
+            let saved = std::fs::read(&config_path).unwrap();
+            for extra in [
+                serde_json::json!({}),
+                serde_json::json!({"target_url":"http://new", "header_value":uuid::Uuid::new_v4().to_string()}),
+                serde_json::json!({"target_url":"ftp://bad", "target_revision":3}),
+                serde_json::json!({"target_url":"http://stale-monitor", "target_revision":1}),
+                serde_json::json!({"target_url":"http://conflicting-monitor", "target_revision":2}),
+                serde_json::json!({"target_url":"http://new-monitor#secret", "target_revision":3}),
+            ] {
+                let mut frame =
+                    serde_json::json!({"service_slug":"monitor", "injection_method":"target_url"});
+                frame
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let ack =
+                    process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                    "error"
+                );
+                assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+            }
+            let missing = serde_json::json!({"service_slug":"absent", "injection_method":"target_url", "target_url":"http://new", "target_revision":3});
+            let ack = process_credential_update(&missing, &sender, &config_path, &backend).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                "error"
+            );
+            assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+        }
+    }
+
+    #[test]
     fn ifttt_server_push_stores_mode_and_failed_replacements_leave_key_intact() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
@@ -6487,6 +6726,49 @@ mod tests {
             validate_node_ssh_target(&config, "127.0.0.1", 22)
                 .await
                 .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod ws_proxy_header_tests {
+    #[test]
+    fn valid_ws_headers_preserve_exact_wire_bytes_and_sensitive_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        super::install_ws_proxy_headers(
+            &mut headers,
+            Some(&serde_json::json!({"x-custom":"exact-default"})),
+            Some(("x-auth", "exact-credential")),
+        )
+        .unwrap();
+        assert_eq!(headers["x-custom"].as_bytes(), b"exact-default");
+        assert_eq!(headers["x-auth"].as_bytes(), b"exact-credential");
+        assert!(headers.values().all(|value| value.is_sensitive()));
+    }
+}
+
+#[cfg(test)]
+mod machine_approval_compatibility_tests {
+    #[test]
+    fn old_node_auth_ok_parser_tolerates_machine_capability_and_old_server_defaults_legacy() {
+        // Main's auth_ok parser uses Value and reads these exact entries.
+        let old:serde_json::Value=serde_json::from_str(r#"{"type":"auth_ok","capabilities":{"proxy_binary_chunks":true,"machine_execution_approval_v1":true},"heartbeat_interval_secs":15}"#).unwrap();
+        assert_eq!(old["type"].as_str(), Some("auth_ok"));
+        assert!(
+            old["capabilities"]["proxy_binary_chunks"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+        assert_eq!(
+            old["heartbeat_interval_secs"].as_u64().filter(|v| *v > 0),
+            Some(15)
+        );
+        let legacy =
+            serde_json::json!({"type":"auth_ok","capabilities":{"proxy_binary_chunks":true}});
+        assert!(
+            !legacy["capabilities"]["machine_execution_approval_v1"]
+                .as_bool()
+                .unwrap_or(false)
         );
     }
 }

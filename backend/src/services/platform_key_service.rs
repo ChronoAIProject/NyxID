@@ -24,17 +24,34 @@ pub async fn credential_configured(
     keys: &crate::crypto::aes::EncryptionKeys,
     service: &DownstreamService,
 ) -> Option<bool> {
+    if super::catalog_credential_record_service::validate(service).is_err() {
+        return None;
+    }
     if service.credential_encrypted.is_empty() {
         return Some(false);
     }
-    match keys.decrypt(&service.credential_encrypted).await {
-        Ok(material) => Some(!zeroize::Zeroizing::new(material).is_empty()),
+    match super::catalog_credential_record_service::bytes(keys, service).await {
+        Ok(material) => Some(!material.is_empty()),
         Err(_) => None,
     }
 }
 
+pub fn model_only(service: &DownstreamService) -> bool {
+    service.platform_key.as_ref().is_some_and(|c| {
+        c.purpose != crate::models::downstream_service::PlatformKeyPurpose::Ordinary
+    })
+}
+
+pub fn require_ordinary_use(service: &DownstreamService) -> AppResult<()> {
+    if model_only(service) {
+        return Err(AppError::NotFound("Service not found".into()));
+    }
+    Ok(())
+}
+
 pub fn legacy_master_credential(service: &DownstreamService) -> bool {
-    !super::retired_service_service::is_retired(service)
+    !model_only(service)
+        && !super::retired_service_service::is_retired(service)
         && service.service_category == "internal"
         && service.auth_method != "none"
         && !service.requires_user_credential
@@ -44,7 +61,8 @@ pub fn legacy_master_credential(service: &DownstreamService) -> bool {
 }
 
 pub fn legacy_public_master(service: &DownstreamService) -> bool {
-    !super::retired_service_service::is_retired(service)
+    !model_only(service)
+        && !super::retired_service_service::is_retired(service)
         && service.visibility == "public"
         && service.service_category == "internal"
         && !matches!(service.auth_method.as_str(), "none" | "token_exchange")
@@ -157,7 +175,11 @@ impl PlatformKeyView<'_> {
             return false;
         }
         match &self.platform_key {
-            Some(config) => config.enabled,
+            Some(config) => {
+                config.enabled
+                    && config.purpose
+                        == crate::models::downstream_service::PlatformKeyPurpose::Ordinary
+            }
             None => {
                 self.visibility == "public"
                     && self.service_category == "internal"
@@ -230,7 +252,18 @@ impl OwnerGrants {
             .await?
             .try_collect()
             .await?;
-        let actor_active = owners.iter().any(|u| u.id == owner_id);
+        let actor = owners.iter().find(|u| u.id == owner_id);
+        let actor_active = actor.is_some();
+        let primary_org_id = actor.and_then(|user| user.primary_org_id.as_deref());
+        let mut ordered_memberships = memberships.to_vec();
+        ordered_memberships.sort_by(|left, right| {
+            let left_is_primary = primary_org_id == Some(left.org_user_id.as_str());
+            let right_is_primary = primary_org_id == Some(right.org_user_id.as_str());
+            right_is_primary
+                .cmp(&left_is_primary)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.org_user_id.cmp(&right.org_user_id))
+        });
         let org_owner_ids = owners
             .iter()
             .filter(|u| u.user_type.is_org())
@@ -259,8 +292,12 @@ impl OwnerGrants {
             active_owner_ids,
             readable_owner_ids,
             org_owner_ids,
-            memberships: memberships.to_vec(),
+            memberships: ordered_memberships,
         })
+    }
+
+    pub(crate) fn active_owner_ids(&self) -> &HashSet<String> {
+        &self.active_owner_ids
     }
 
     fn permits(&self, owner_id: &str, allowed: &[String]) -> bool {
@@ -444,6 +481,24 @@ pub async fn validate_config(
     config: &mut PlatformKeyConfig,
     provider_id: Option<&str>,
 ) -> AppResult<()> {
+    if config.purpose != crate::models::downstream_service::PlatformKeyPurpose::Ordinary {
+        if config.enabled {
+            super::security_readiness_service::require(
+                db,
+                super::platform_model_service::REGISTRY_READINESS,
+            )
+            .await?;
+        }
+        if config.audience != PlatformKeyAudience::Restricted
+            || !config.allowed_owner_ids.is_empty()
+            || provider_id.is_some()
+        {
+            return Err(AppError::ValidationError(
+                "Model-only catalog records cannot have public/owner grants or provider bindings"
+                    .into(),
+            ));
+        }
+    }
     if config.allowed_owner_ids.len() > 1000 {
         return Err(AppError::ValidationError(
             "platform_key allows at most 1000 owners".to_string(),
@@ -477,15 +532,13 @@ pub async fn validate_config(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests;
-
 pub fn no_auth_available_with_grants(
     service: &DownstreamService,
     owner_id: &str,
     grants: &OwnerGrants,
 ) -> bool {
-    service.is_active
+    !model_only(service)
+        && service.is_active
         && no_auth_platform_service(service)
         && service.service_type == "http"
         && service.service_category == "internal"
@@ -498,3 +551,61 @@ pub fn no_auth_available_with_grants(
                         || grants.permits(owner_id, &config.allowed_owner_ids))
             })
 }
+
+/// Validate the closed catalog shape on both create and every effective update.
+/// Ordinary rows are untouched; model records cannot be repurposed as OIDC or
+/// generic forwarding services by a legacy form or alternate catalog writer.
+pub fn validate_model_purpose(service: &DownstreamService) -> AppResult<()> {
+    use crate::models::downstream_service::PlatformKeyPurpose;
+    let purpose = service
+        .platform_key
+        .as_ref()
+        .map(|c| c.purpose)
+        .unwrap_or_default();
+    if purpose == PlatformKeyPurpose::Ordinary {
+        return Ok(());
+    }
+    if service.platform_key.as_ref().is_some_and(|config| {
+        config.audience != PlatformKeyAudience::Restricted || !config.allowed_owner_ids.is_empty()
+    }) {
+        return Err(AppError::ValidationError(
+            "Model-only records cannot have public or owner grants".into(),
+        ));
+    }
+    if service.service_type != "http"
+        || service.provider_config_id.is_some()
+        || !service.destination_targets.is_empty()
+        || service.forward_access_token
+        || service.inject_delegation_token
+        || service.identity_propagation_mode != "none"
+        || !service.anonymous_endpoints.is_empty()
+        || service.token_exchange_config.is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Model-only records cannot enable generic forwarding, identity or anonymous access"
+                .into(),
+        ));
+    }
+    match purpose {
+        PlatformKeyPurpose::ModelRoute
+            if service.visibility != "private"
+                || !matches!(service.auth_method.as_str(), "bearer" | "header")
+                || service.requires_user_credential =>
+        {
+            Err(AppError::ValidationError(
+                "Model routes require a private catalog master credential".into(),
+            ))
+        }
+        PlatformKeyPurpose::ModelOffering
+            if service.auth_method != "none" || !service.credential_encrypted.is_empty() =>
+        {
+            Err(AppError::ValidationError(
+                "Model offerings cannot hold credentials".into(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests;

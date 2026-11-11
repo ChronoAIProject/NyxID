@@ -146,6 +146,10 @@ async fn channel_link_telegram_worker_reserves_callback_without_browser_polling(
 
 pub(crate) async fn fixture() -> (crate::AppState, String, MockServer) {
     let db = connect_transaction_test_database("telegram_new").await;
+    fixture_with_database(db).await
+}
+
+async fn fixture_with_database(db: mongodb::Database) -> (crate::AppState, String, MockServer) {
     telegram_new_service::ensure_indexes(&db).await.unwrap();
     super::coordination_service::ensure_indexes(&db)
         .await
@@ -192,6 +196,7 @@ pub(crate) async fn fixture() -> (crate::AppState, String, MockServer) {
 
 pub(crate) fn service<'a>(state: &'a crate::AppState, base: &'a str) -> TelegramNewService<'a> {
     TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -383,7 +388,10 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
         })
         .unwrap();
     assert_eq!(creation["suggested_name"], "Support");
-    assert_eq!(creation["suggested_username"], "support_bot");
+    assert_eq!(
+        creation["suggested_username"],
+        crate::services::telegram_new_service::username_suggestions(&pending)[0]
+    );
     assert_eq!(pending.status, Status::WaitingConsent);
     let view = serde_json::to_value(crate::handlers::telegram_new::RequestResponse::from(
         pending.clone(),
@@ -501,25 +509,28 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
         message(json!({"text": format!("/start {challenge}")})),
     )
     .await;
-    webhook(&service, &headers, message(json!({"text": "/start"}))).await;
+    let mut retry = message(json!({"text": "/start"}));
+    retry["update_id"] = json!(2);
+    webhook(&service, &headers, retry).await;
 
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 4);
     for replies in sent.as_chunks::<2>().0 {
         let instructions = replies[0].body_json::<Value>().unwrap();
         assert_eq!(instructions["chat_id"], 700);
-        assert!(instructions.get("reply_markup").is_none());
+        assert!(instructions["reply_markup"]["keyboard"].is_null());
         let text = instructions["text"].as_str().unwrap();
         assert!(text.contains("Create your Telegram bot"));
         assert!(text.contains("Personal account:"));
         assert!(text.contains("https://app.nyxid.test"));
-        assert!(text.contains("latest Telegram app"));
+        assert!(text.contains("Open creation form"));
+        assert!(text.contains("update Telegram to the latest version"));
         assert!(!text.contains(&challenge));
         let keyboard = replies[1].body_json::<Value>().unwrap();
         assert_eq!(keyboard["chat_id"], 700);
         assert_eq!(
             keyboard["reply_markup"]["keyboard"][0][0]["request_managed_bot"],
-            json!({"request_id": 1, "suggested_name": "Customer Support", "suggested_username": "customer_support_bot"}),
+            json!({"request_id": 1, "suggested_name": "Customer Support", "suggested_username": crate::services::telegram_new_service::username_suggestions(&request)[0]}),
         );
     }
     let bound = service.get(&actor, &request.id).await.unwrap();
@@ -534,11 +545,7 @@ async fn telegram_new_keyboard_failure_is_acknowledged_after_instructions() {
     Mock::given(method("POST"))
         .and(path(format!("/bot{MANAGER}/sendMessage")))
         .and(|request: &wiremock::Request| {
-            request
-                .body_json::<Value>()
-                .unwrap()
-                .get("reply_markup")
-                .is_some()
+            request.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
         })
         .respond_with(ResponseTemplate::new(400))
         .with_priority(1)
@@ -556,7 +563,7 @@ async fn telegram_new_keyboard_failure_is_acknowledged_after_instructions() {
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 2);
     let instructions = sent[0].body_json::<Value>().unwrap();
-    assert!(instructions.get("reply_markup").is_none());
+    assert!(instructions["reply_markup"]["keyboard"].is_null());
     assert!(
         instructions["text"]
             .as_str()
@@ -594,13 +601,7 @@ async fn telegram_new_instruction_failure_remains_retryable_without_sending_keyb
     ));
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 1);
-    assert!(
-        sent[0]
-            .body_json::<Value>()
-            .unwrap()
-            .get("reply_markup")
-            .is_none()
-    );
+    assert!(sent[0].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null());
 }
 
 #[tokio::test]
@@ -1433,12 +1434,15 @@ async fn telegram_new_creation_webhook_completes_without_consent_or_browser_conn
     let completion = sent
         .iter()
         .filter_map(|request| request.body_json::<Value>().ok())
-        .find(|body| {
-            body["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("Setup is complete"))
-        })
+        .find(|body| body["reply_markup"]["inline_keyboard"][0][0]["text"] == "Open your bot")
         .expect("automatic connection should direct the creator to the new bot");
+    let text = completion["text"].as_str().unwrap();
+    assert!(text.contains("@CustomerBot is registered and connected to NyxID."));
+    assert!(text.contains("An AI agent must be linked before it can reply."));
+    assert!(text.contains("return to that setup to finish or check the link"));
+    assert!(text.contains("If no setup is in progress and no agent is linked"));
+    assert!(text.contains("send a message to verify the first reply"));
+    assert!(!text.contains("Setup is complete"));
     assert_eq!(completion["chat_id"], 700);
     assert_eq!(
         completion["reply_markup"]["inline_keyboard"][0][0],
@@ -1452,6 +1456,72 @@ async fn telegram_new_creation_webhook_completes_without_consent_or_browser_conn
             "text": "Bot settings", "url": format!("https://app.nyxid.test/channel-bots/{}", pending.id),
         })
     );
+    state.db.drop().await.unwrap();
+}
+
+/// After a domain move the manager and child webhooks registered at Telegram
+/// still name the previous API host, which is now a configured alias. Managed
+/// creation must keep connecting (it used to retry forever on an exact match).
+#[tokio::test]
+async fn telegram_new_creation_completes_when_webhooks_use_a_configured_api_alias() {
+    let (mut state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 200).await;
+    state.config.base_url = "https://api.moved.test".into();
+    state.config.domain_aliases.base_urls = vec!["https://api.nyxid.test".into()];
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    let connected = service.get(&actor, &pending.id).await.unwrap();
+    assert_eq!(connected.status, Status::Connected);
+    let saved = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id": &pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.status, "active");
+    assert!(saved.webhook_registered);
+    // The new canonical callback is what gets registered.
+    let set = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("setWebhook"))
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find(|body| {
+            body["url"]
+                .as_str()
+                .is_some_and(|url| url.contains(&pending.id))
+        })
+        .expect("child webhook registration");
+    assert_eq!(
+        set["url"],
+        format!(
+            "https://api.moved.test/api/v1/webhooks/channel/telegram-new/{}",
+            pending.id
+        )
+    );
+    state.db.drop().await.unwrap();
+}
+
+/// A manager webhook on a host that is not a configured API origin still
+/// blocks automatic connection.
+#[tokio::test]
+async fn telegram_new_creation_still_refuses_an_unconfigured_manager_host() {
+    let (mut state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 200).await;
+    state.config.base_url = "https://api.moved.test".into();
+    state.config.domain_aliases.base_urls = Vec::new();
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    let request = service.get(&actor, &pending.id).await.unwrap();
+    assert_ne!(request.status, Status::Connected);
+    assert!(request.connection_error.is_some());
     state.db.drop().await.unwrap();
 }
 
@@ -1805,7 +1875,7 @@ mod claims {
         let sent = server.received_requests().await.unwrap();
         assert_eq!(sent.len(), 2);
         let instructions = sent[0].body_json::<Value>().unwrap();
-        assert!(instructions.get("reply_markup").is_none());
+        assert!(instructions["reply_markup"]["keyboard"].is_null());
         assert!(
             instructions["text"]
                 .as_str()
@@ -2445,6 +2515,7 @@ pub(crate) async fn register_manager_channel(
         MANAGER,
         &callback,
         &created.webhook_secret,
+        &state.config,
     )
     .await
     .unwrap();
@@ -2703,9 +2774,9 @@ async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_on
             axum::body::Bytes::from(
                 serde_json::to_vec(&message(json!({
                     "text": "hello agent",
-                    "reply_to_message": {"message_id": 9, "text": "private-claim-code"},
+                    "reply_to_message": {"message_id": 9, "from":{"id":100}, "text": "private-claim-code"},
                     "quote": {"text": "private-claim-code"},
-                    "external_reply": {"text": "private-claim-code"},
+                    "external_reply": {"origin":{"type":"user","sender_user":{"id":100}},"text": "private-claim-code"},
                 })))
                 .unwrap(),
             ),
@@ -2851,6 +2922,8 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
     let channel = register_manager_channel(&state, &actor, &server).await;
     let now = Utc::now();
     let profile = PlatformBotConfig {
+        identity_version: None,
+        native_entry: None,
         guide: None,
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: channel.id.clone(),
@@ -2955,3 +3028,6 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
     );
     state.db.drop().await.unwrap();
 }
+
+#[path = "telegram_new_delivery_tests.rs"]
+mod delivery_tests;

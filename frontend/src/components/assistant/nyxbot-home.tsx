@@ -1,15 +1,13 @@
-import { useAppTranslation } from "@/i18n/use-app-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
-import { MessageSquare, Plus } from "lucide-react";
-import {
-  AgentAvatar,
-  AgentAvatarStack,
-} from "@/components/assistant/nyxbot-agent-avatar";
+import { MessageSquare, NotebookPen, Plus } from "lucide-react";
+import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
 import { Button } from "@/components/ui/button";
 import { nyxBotOf, useNyxBotAgent } from "@/hooks/use-nyxbot-agents";
-import { awayItems } from "@/lib/assistant/nyxbot-away";
+import { AWAY_PREVIEW, awayItems } from "@/lib/assistant/nyxbot-away";
 import {
   AGENT_STATUS_LABEL,
   agentHandle,
@@ -17,12 +15,12 @@ import {
   greetingFor,
 } from "@/lib/assistant/nyxbot-labels";
 import { formatRelativeTime } from "@/lib/utils";
-import type {
-  AssistantAgent,
-  AssistantGroup,
-} from "@/schemas/assistant-nyxagent";
+import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
+import type { NextStep } from "@/schemas/assistant-onboarding";
+import { NextStepCards } from "./onboarding/next-step-cards";
 
 const MEMORY_PREVIEW = 3;
+
 
 function Section({
   id,
@@ -35,10 +33,11 @@ function Section({
   readonly action?: ReactNode;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   return (
-    <section aria-labelledby={id} className="space-y-3">
+    <section aria-labelledby={id} data-tour={id} className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h2 id={id} className="text-15 font-semibold text-foreground">
+        <h2 id={id} className="type-card-title text-foreground">
           {title}
         </h2>
         {action}
@@ -49,14 +48,82 @@ function Section({
 }
 
 function Quiet({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   return (
-    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
-      {children}
-    </p>
+    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{children}</p>
   );
 }
 
-function AwayList({
+/**
+ * The home's list card, shared by "While you were away" and "What NyxBot
+ * remembers": a lead (avatar or icon), a title line, two lines of body and an
+ * optional action per row, then "and N more".
+ */
+function HomeList({
+  label,
+  more,
+  children,
+}: {
+  readonly label?: string;
+  readonly more?: ReactNode;
+  readonly children: ReactNode;
+}) {
+  useUiTranslation();
+  return (
+    <div className="overflow-hidden rounded-xl border border-border/50 bg-card">
+      <ul aria-label={label}>{children}</ul>
+      {more ? <div className="px-4 pb-3 text-13">{more}</div> : null}
+    </div>
+  );
+}
+
+function HomeListRow({
+  lead,
+  title,
+  body,
+  action,
+}: {
+  readonly lead: ReactNode;
+  readonly title: ReactNode;
+  readonly body: ReactNode;
+  readonly action?: ReactNode;
+}) {
+  useUiTranslation();
+  return (
+    <li className="flex items-start gap-3 px-4 py-3">
+      {lead}
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <div className="flex items-center gap-2 text-14">{title}</div>
+        <p className="line-clamp-2 text-14 text-muted-foreground">{body}</p>
+      </div>
+      {action}
+    </li>
+  );
+}
+
+function MoreButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  readonly onClick: () => void;
+  readonly disabled?: boolean;
+  readonly children: ReactNode;
+}) {
+  useUiTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="text-text-tertiary underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
+    >
+      {children}
+    </button>
+  );
+}
+
+export function AwayList({
   agents,
   onOpenAgent,
   onOpenConversation,
@@ -65,66 +132,60 @@ function AwayList({
   readonly onOpenAgent: (agent: AssistantAgent) => void;
   readonly onOpenConversation: (conversationId: string) => void;
 }) {
-  const { t } = useAppTranslation();
+  useUiTranslation();
   const items = awayItems(agents);
+  const [shown, setShown] = useState(AWAY_PREVIEW);
   if (!items.length) {
     return (
-      <Quiet>
-        {t(
-          "All caught up. Replies and requests from your specialists show up here.",
-        )}
-      </Quiet>
+      <Quiet>{translateUi("All caught up. Replies and requests from your specialists show up here.")}</Quiet>
     );
   }
   return (
-    <ul className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card">
-      {items.map((item) => (
-        <li key={item.key} className="flex items-start gap-3 px-4 py-3">
-          <AgentAvatar agent={item.agent} size="lg" />
-          <div className="min-w-0 flex-1 space-y-0.5">
-            <div className="flex items-center gap-2 text-12">
-              <span className="font-medium text-foreground">
-                {agentTitle(item.agent)}
-              </span>
+    <HomeList
+      more={items.length > AWAY_PREVIEW ? (
+        <MoreButton onClick={() => setShown(shown < items.length ? shown + AWAY_PREVIEW : AWAY_PREVIEW)}>
+          {shown < items.length ? translateUi("and {{value1}} more", { value1: items.length - shown }) : translateUi("Show less")}
+        </MoreButton>
+      ) : null}
+    >
+      {items.slice(0, shown).map((item) => (
+        <HomeListRow
+          key={item.key}
+          lead={<AgentAvatar agent={item.agent} size="lg" />}
+          title={
+            <>
+              <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
               {item.kind === "request" ? (
-                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
-                  {t("Needs a decision")}
-                </span>
+                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning light:border-transparent light:bg-warning light:text-white">{translateUi("Needs a decision")}</span>
               ) : (
-                <span className="flex items-center gap-1.5 text-11 text-text-tertiary">
+                <span className="flex items-center gap-1.5 text-13 text-text-tertiary">
                   <AgentStatusDot status={item.agent.status} />
-                  {t(AGENT_STATUS_LABEL[item.agent.status])}
+                  {translateUi(AGENT_STATUS_LABEL[item.agent.status])}
                   <span aria-hidden="true">·</span>
                   {formatRelativeTime(item.at)}
                 </span>
               )}
-            </div>
-            <p className="line-clamp-2 text-12 text-muted-foreground">
-              {item.kind === "request" ? item.request.summary : item.text}
-            </p>
-          </div>
-          {item.kind === "request" ? (
+            </>
+          }
+          body={item.kind === "request" ? item.request.summary : item.text}
+          action={item.kind === "request" ? (
             <Button
               size="sm"
               variant="outline"
-              aria-label={t("Review {{value}}'s request: {{summary}}", { value: agentTitle(item.agent), summary: item.request.summary })}
+              aria-label={translateUi("Review {{value1}}'s request: {{value2}}", { value1: agentTitle(item.agent), value2: item.request.summary })}
               onClick={() => onOpenConversation(item.request.conversation_id)}
-            >
-              {t("Review")}
-            </Button>
+            >{translateUi("Review")}</Button>
           ) : (
             <Button
               size="sm"
               variant="ghost"
-              aria-label={t("Open {{value}}", { value: agentTitle(item.agent) })}
+              aria-label={translateUi("Open {{value1}}", { value1: agentTitle(item.agent) })}
               onClick={() => onOpenAgent(item.agent)}
-            >
-              {t("Open")}
-            </Button>
+            >{translateUi("Open")}</Button>
           )}
-        </li>
+        />
       ))}
-    </ul>
+    </HomeList>
   );
 }
 
@@ -135,48 +196,46 @@ function MemoryPreview({
   readonly nyxbot: AssistantAgent | undefined;
   readonly onManage: () => void;
 }) {
-  const { t } = useAppTranslation();
+  useUiTranslation();
   const detail = useNyxBotAgent(nyxbot?.id);
   const notes = detail.data?.memory ?? [];
   return (
     <Section
       id="nyxbot-home-memory"
-      title={t("What NyxBot remembers")}
+      title={translateUi("What NyxBot remembers")}
       action={
-        <Button size="sm" variant="ghost" onClick={onManage} disabled={!nyxbot}>
-          {t("Manage")}
-        </Button>
+        <Button size="sm" variant="ghost" onClick={onManage} disabled={!nyxbot}>{translateUi("Manage")}</Button>
       }
     >
       {detail.isPending && nyxbot ? (
-        <Quiet>{t("Loading memory...")}</Quiet>
+        <Quiet>{translateUi("Loading memory...")}</Quiet>
       ) : notes.length ? (
-        <ul
-          aria-label={t("NyxBot memory preview")}
-          className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card"
+        <HomeList
+          label={translateUi("NyxBot memory preview")}
+          more={notes.length > MEMORY_PREVIEW ? (
+            <MoreButton onClick={onManage} disabled={!nyxbot}>{translateUi("and ")}{notes.length - MEMORY_PREVIEW}{translateUi(" more")}</MoreButton>
+          ) : null}
         >
           {notes.slice(0, MEMORY_PREVIEW).map((note) => (
-            <li
+            <HomeListRow
               key={note.id}
-              className="line-clamp-2 px-4 py-2.5 text-12 text-foreground"
-            >
-              {note.text}
-            </li>
+              lead={
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-text-tertiary">
+                  <NotebookPen aria-hidden="true" className="size-3.5" />
+                </span>
+              }
+              title={
+                <>
+                  <span className="font-medium text-foreground">{translateUi("Remembered")}</span>
+                  <span className="text-13 text-text-tertiary">{formatRelativeTime(note.updated_at)}</span>
+                </>
+              }
+              body={note.text}
+            />
           ))}
-          {notes.length > MEMORY_PREVIEW ? (
-            <li className="px-4 py-2 text-11 text-text-tertiary">
-              {t("and {{count}} more", {
-                count: notes.length - MEMORY_PREVIEW,
-              })}
-            </li>
-          ) : null}
-        </ul>
+        </HomeList>
       ) : (
-        <Quiet>
-          {t(
-            "Nothing yet. Tell NyxBot “Remember …” and it keeps that across every chat.",
-          )}
-        </Quiet>
+        <Quiet>{translateUi("Nothing yet. Tell NyxBot “Remember …” and it keeps that across every chat.")}</Quiet>
       )}
     </Section>
   );
@@ -189,7 +248,7 @@ function RosterCard({
   readonly agent: AssistantAgent;
   readonly onChat: (agent: AssistantAgent) => void;
 }) {
-  const { t } = useAppTranslation();
+  useUiTranslation();
   const nyxbot = agent.kind === "nyxbot";
   const handle = agentHandle(agent);
   return (
@@ -198,28 +257,26 @@ function RosterCard({
         <AgentAvatar agent={agent} size="lg" />
         <div className="min-w-0 flex-1">
           <p className="flex min-w-0 items-baseline gap-1.5">
-            <span className="truncate text-13 font-semibold text-foreground">
+            <span className="truncate type-card-title text-foreground">
               {agentTitle(agent)}
             </span>
             {handle ? (
-              <span className="shrink-0 text-11 text-text-tertiary">
+              <span className="shrink-0 text-13 text-text-tertiary">
                 {handle}
               </span>
             ) : null}
           </p>
-          <p className="flex items-center gap-1.5 text-11 text-text-tertiary">
+          <p className="flex items-center gap-1.5 text-13 text-text-tertiary">
             {nyxbot ? (
-              t("Your personal agent")
+              translateUi("Your personal agent")
             ) : (
               <>
                 <AgentStatusDot status={agent.status} />
-                {t(AGENT_STATUS_LABEL[agent.status])}
+                {translateUi(AGENT_STATUS_LABEL[agent.status])}
                 {agent.pending_requests.length ? (
                   <span className="text-warning">
-                    ·{" "}
-                    {t("{{count}} requests", {
-                      count: agent.pending_requests.length,
-                    })}
+                    · {agent.pending_requests.length}{" "}
+                    {agent.pending_requests.length === 1 ? translateUi("request") : translateUi("requests")}
                   </span>
                 ) : null}
               </>
@@ -227,25 +284,21 @@ function RosterCard({
           </p>
         </div>
       </div>
-      <p className="line-clamp-2 min-h-8 text-12 text-muted-foreground">
+      <p className="line-clamp-2 min-h-8 text-14 text-muted-foreground">
         {agent.description ||
           (nyxbot
-            ? t(
-                "Full access to your services and account. Delegates to your specialists.",
-              )
-            : t("No role described yet."))}
+            ? translateUi("Full access to your services and account. Delegates to your specialists.")
+            : translateUi("No role described yet."))}
       </p>
       <div className="flex justify-end">
         <Button
           size="sm"
           variant="outline"
-          aria-label={t("Chat with {{value}}", { value: agentTitle(agent) })}
+          aria-label={translateUi("Chat with {{value1}}", { value1: agentTitle(agent) })}
           disabled={agent.can_use === false}
           onClick={() => onChat(agent)}
         >
-          <MessageSquare aria-hidden="true" />
-          {t("Chat")}
-        </Button>
+          <MessageSquare aria-hidden="true" />{translateUi("Chat")}</Button>
       </div>
     </li>
   );
@@ -258,37 +311,31 @@ function GroupCard({
   readonly group: AssistantGroup;
   readonly onOpen: () => void;
 }) {
-  const { t } = useAppTranslation();
+  useUiTranslation();
   const working = group.working_agent_ids.length;
   return (
     <li>
       <button
         type="button"
         onClick={onOpen}
-        aria-label={t("Open group {{name}}", { name: group.name })}
+        aria-label={translateUi("Open crew {{value1}}", { value1: group.name })}
         className="flex w-full flex-col gap-2.5 rounded-xl border border-border/50 bg-card p-4 text-left transition-colors hover:bg-overlay"
       >
         <div className="flex w-full items-center gap-2">
           <AgentAvatarStack agents={group.members} size="sm" max={4} />
           {working ? (
-            <span className="ml-auto flex items-center gap-1.5 text-11 text-muted-foreground">
-              <span
-                aria-hidden="true"
-                className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
-              />
-              {working} {t("working")}
-            </span>
+            <span className="ml-auto flex items-center gap-1.5 text-13 text-muted-foreground">
+              <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
+              {working}{translateUi(" working")}</span>
           ) : null}
         </div>
-        <span className="truncate text-13 font-semibold text-foreground">
+        <span className="truncate type-card-title text-foreground">
           {group.name}
         </span>
-        <span className="truncate text-11 text-text-tertiary">
-          {group.owner?.type === "org" ? t("{{name}} · ", { name: group.owner.name }) : ""}
+        <span className="truncate text-13 text-text-tertiary">
+          {group.owner?.type === "org" ? translateUi("{{name}} · ", { name: group.owner.name }) : ""}
           {group.members.map((member) => agentTitle(member)).join(", ")}
-          {group.last_message_at
-            ? t(" · {{value}}", { value: formatRelativeTime(group.last_message_at) })
-            : ""}
+          {group.last_message_at ? translateUi(" · {{value}}", { value: formatRelativeTime(group.last_message_at) }) : ""}
         </span>
       </button>
     </li>
@@ -297,7 +344,7 @@ function GroupCard({
 
 /**
  * The NyxBot home: a greeting, what happened while the user was away, what
- * NyxBot remembers, the roster and the groups. The page renders the
+ * NyxBot remembers, the roster and the crews. The page renders the
  * "Message NyxBot" composer below it.
  */
 export function NyxBotHome({
@@ -312,6 +359,10 @@ export function NyxBotHome({
   onNewGroup,
   onNewAgent,
   onManageMemory,
+  nextSteps,
+  onStartNextStep,
+  onHideNextSteps,
+  onReplayIntro,
 }: {
   readonly userName: string | undefined;
   readonly agents: readonly AssistantAgent[];
@@ -324,8 +375,14 @@ export function NyxBotHome({
   readonly onNewGroup: () => void;
   readonly onNewAgent: () => void;
   readonly onManageMemory: () => void;
+  /** Suggested next steps; the section is hidden when there are none. */
+  readonly nextSteps?: readonly NextStep[];
+  readonly onStartNextStep?: (step: NextStep) => void;
+  /** Hides the whole section until the intro is retaken. */
+  readonly onHideNextSteps?: () => void;
+  readonly onReplayIntro?: () => void;
 }) {
-  const { t } = useAppTranslation();
+  useUiTranslation();
   const [now] = useState(() => new Date());
   const firstName = userName?.trim().split(/\s+/)[0];
   const nyxbot = nyxBotOf(agents);
@@ -333,37 +390,51 @@ export function NyxBotHome({
     .filter((agent) => agent.status !== "destroyed")
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
-    <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6">
-      {/* Same column as the composer below it: its 758px rail, side padding and 30px gutter. */}
+    <div data-chat-transcript="" data-scroll-fade="" className="assistant-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 sm:px-6">
       <div
-        className="mx-auto flex w-full max-w-[758px] flex-col gap-8 pl-[30px] pt-8 sm:pl-[54px] sm:pr-6"
+        className="mx-auto flex w-full max-w-[var(--chat-content-width,758px)] flex-col gap-8 pt-8"
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
         <header className="flex items-center gap-4">
-          <AgentAvatar
-            agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
-            size="lg"
-          />
+          <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
           <div className="min-w-0 space-y-1">
             <h1
-              className="text-22 font-bold leading-[1.1] text-foreground sm:text-28"
+              className="type-compact-page-title text-foreground sm:type-page-title"
               style={{ letterSpacing: "-0.03em" }}
             >
-              {firstName
-                ? t("{{greeting}}, {{name}}", { greeting: t(greetingFor(now)), name: firstName })
-                : t(greetingFor(now))}
+              {translateUi(greetingFor(now))}
+              {firstName ? `, ${firstName}` : ""}
             </h1>
-            <p className="text-12 text-muted-foreground">
-              {t(
-                "NyxBot is your personal agent. Ask it anything below, or check in on your team.",
-              )}
-            </p>
+            <p className="text-14 text-muted-foreground">{translateUi("NyxBot is your personal agent. Ask it anything below, or check in on your team.")}</p>
           </div>
         </header>
 
-        <Section id="nyxbot-home-away" title={t("While you were away")}>
+        {nextSteps?.length && onStartNextStep ? (
+          <Section
+            id="nyxbot-home-next-steps"
+            title={translateUi("Suggested for you")}
+            action={
+              <div className="flex items-center gap-1">
+                {onReplayIntro ? (
+                  <Button size="sm" variant="ghost" onClick={onReplayIntro}>{translateUi("Replay intro")}</Button>
+                ) : null}
+                {onHideNextSteps ? (
+                  <Button size="sm" variant="ghost" onClick={onHideNextSteps}>{translateUi("Hide")}</Button>
+                ) : null}
+              </div>
+            }
+          >
+            <NextStepCards
+              steps={nextSteps}
+              onStart={onStartNextStep}
+              className="sm:grid-cols-2"
+            />
+          </Section>
+        ) : null}
+
+        <Section id="nyxbot-home-away" title={translateUi("While you were away")}>
           {agentsLoading ? (
-            <Quiet>{t("Loading your agents...")}</Quiet>
+            <Quiet>{translateUi("Loading your agents...")}</Quiet>
           ) : (
             <AwayList
               agents={agents}
@@ -377,74 +448,54 @@ export function NyxBotHome({
 
         <Section
           id="nyxbot-home-agents"
-          title={t("Your agents")}
+          title={translateUi("Your agents")}
           action={
             <Button size="sm" variant="ghost" onClick={onNewAgent}>
-              <Plus aria-hidden="true" />
-              {t("New agent")}
-            </Button>
+              <Plus aria-hidden="true" />{translateUi("New agent")}</Button>
           }
         >
           {roster.length ? (
-            <div aria-label={t("Agents")} className="space-y-4">
+            <div aria-label={translateUi("Agents")} className="space-y-4">
               {agentOwnerSections(roster).map((section) => (
                 <section
                   key={section.id}
-                  aria-label={
-                    section.id === "personal" ? t("Personal") : section.label
-                  }
+                  aria-label={section.label}
                   className="space-y-2"
                 >
-                  <h3 className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                    {section.id === "personal" ? t("Personal") : section.label}
+                  <h3 className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
+                    {section.label}
                   </h3>
                   <ul className="grid gap-3 sm:grid-cols-2">
-                    {section.agents.map((agent) => (
-                      <RosterCard
-                        key={agent.id}
-                        agent={agent}
-                        onChat={onChat}
-                      />
-                    ))}
-                  </ul>
+              {section.agents.map((agent) => (
+                <RosterCard key={agent.id} agent={agent} onChat={onChat} />
+              ))}
+            </ul>
                 </section>
               ))}
             </div>
           ) : (
             <Quiet>
-              {agentsLoading
-                ? t("Loading your agents...")
-                : t("No agents yet.")}
+              {agentsLoading ? translateUi("Loading your agents...") : translateUi("No agents yet.")}
             </Quiet>
           )}
         </Section>
 
         <Section
           id="nyxbot-home-groups"
-          title={t("Groups")}
+          title={translateUi("Crews")}
           action={
             <Button size="sm" variant="ghost" onClick={onNewGroup}>
-              <Plus aria-hidden="true" />
-              {t("New group")}
-            </Button>
+              <Plus aria-hidden="true" />{translateUi("New crew")}</Button>
           }
         >
           {groups.length ? (
-            <ul aria-label={t("Groups")} className="grid gap-3 sm:grid-cols-2">
+            <ul aria-label={translateUi("Crews")} className="grid gap-3 sm:grid-cols-2">
               {groups.map((group) => (
-                <GroupCard
-                  key={group.id}
-                  group={group}
-                  onOpen={() => onOpenGroup(group.id)}
-                />
+                <GroupCard key={group.id} group={group} onOpen={() => onOpenGroup(group.id)} />
               ))}
             </ul>
           ) : (
-            <Quiet>
-              {t(
-                "Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest.",
-              )}
-            </Quiet>
+            <Quiet>{translateUi("Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest.")}</Quiet>
           )}
         </Section>
       </div>

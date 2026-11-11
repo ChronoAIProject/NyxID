@@ -33,6 +33,17 @@ export function AppRoot() {
 }
 ```
 
+`useNyxID()` exposes `getAccessToken()` and `refreshToken()`. The provider runs
+an expiry-aware refresh check while it is mounted, and applications should use
+`getAccessToken()` before authenticated API calls so rotated refresh tokens are
+used automatically. The context observes cross-tab token changes and clears
+when a definitive `invalid_grant` removes the token set; transient failures
+retain the session. The timer and storage listener are removed on unmount.
+Shared localStorage refresh uses Web Locks. In browsers without Web Locks,
+configure `storage: window.sessionStorage`; otherwise refresh retains tokens
+and raises retryable `refresh_coordination_unavailable` instead of racing another
+tab. See the core README for retry/backoff and custom-storage requirements.
+
 To request an additional allowed OAuth scope or service after the user has
 already authorized the app, pass the core SDK's incremental options through
 the same hook:

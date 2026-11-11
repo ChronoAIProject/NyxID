@@ -25,6 +25,35 @@ use crate::services::operation_descriptor::OperationDescriptor;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
+/// Caller interaction capability, independent of authorization and transport.
+/// Disabling requests never bypasses policy or invalidates an existing grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApprovalOptions {
+    pub allow_request: bool,
+}
+
+impl Default for ApprovalOptions {
+    fn default() -> Self {
+        Self {
+            allow_request: true,
+        }
+    }
+}
+
+impl ApprovalOptions {
+    pub const NO_REQUEST: Self = Self {
+        allow_request: false,
+    };
+
+    pub fn require_request_support(self) -> AppResult<()> {
+        if self.allow_request {
+            Ok(())
+        } else {
+            Err(AppError::ApprovalUnsupported)
+        }
+    }
+}
+
 /// Resolve the approval mode for a (user, service) pair.
 pub async fn resolve_approval_mode(
     db: &Database,
@@ -39,12 +68,24 @@ pub async fn resolve_approval_mode(
     Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
 }
 
-/// Check whether the user's global approval preference is currently enforceable.
-/// A stored opt-in is suspended while the user has no active notification channel.
-pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
-    Ok(user_global_approval_setting(db, user_id)
-        .await?
-        .unwrap_or(false))
+/// Resolve the explicit preference without materializing lazy notification settings.
+pub async fn user_approval_mode(
+    db: &Database,
+    user_id: &str,
+) -> AppResult<approval_policy::GlobalApprovalMode> {
+    Ok(approval_policy::GlobalApprovalMode::from_stored(
+        user_global_approval_setting(db, user_id).await?,
+    ))
+}
+
+/// Notification delivery never authorizes an otherwise gated effect. The
+/// unset preference allows reads and requires approval for writes/destruction.
+pub async fn user_requires_approval(
+    db: &Database,
+    user_id: &str,
+    verb: &crate::models::service_approval_config::ApprovalVerb,
+) -> AppResult<bool> {
+    Ok(user_approval_mode(db, user_id).await?.requires(verb))
 }
 
 // `requires_approval_for_service` was removed in favor of the org-aware
@@ -88,6 +129,7 @@ pub struct ApprovalResolution {
 
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
+    pub options: ApprovalOptions,
     pub resolution: ApprovalResolution,
     pub primary_owner_user_id: String,
     pub requester_type: String,
@@ -170,7 +212,7 @@ pub async fn resolve_org_aware_approval(
         let required = if is_auto_connected {
             false
         } else {
-            user_requires_approval(db, actor_user_id).await?
+            user_requires_approval(db, actor_user_id, &descriptor.verb).await?
         };
         (
             required,
@@ -226,6 +268,34 @@ pub async fn evaluate_and_check(
     bypass_approval_flow: bool,
     is_auto_connected: bool,
 ) -> AppResult<ApprovalOutcome> {
+    evaluate_and_check_with_options(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass_approval_flow,
+        is_auto_connected,
+        ApprovalOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_and_check_with_options(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass_approval_flow: bool,
+    is_auto_connected: bool,
+    options: ApprovalOptions,
+) -> AppResult<ApprovalOutcome> {
     let resolution = resolve_org_aware_approval(
         db,
         actor_user_id,
@@ -271,6 +341,7 @@ pub async fn evaluate_and_check(
     }
 
     Ok(ApprovalOutcome::NeedsApproval(PendingApproval {
+        options,
         resolution,
         primary_owner_user_id,
         requester_type: requester_type.to_string(),
@@ -297,7 +368,28 @@ pub async fn evaluate_for_chat(
     Option<super::assistant_acknowledgement_service::AutoAllowed>,
 )> {
     use super::assistant_acknowledgement_service as acks;
-    let outcome = evaluate_and_check(
+    if chat.is_some_and(|c| {
+        c.org_agent_access
+            .as_ref()
+            .and_then(|a| a.shared())
+            .is_some_and(|a| service_owner == a.owner() && actor != service_owner)
+    }) {
+        let owner_policy = resolve_org_aware_approval(
+            db,
+            service_owner,
+            service_owner,
+            service_id,
+            descriptor,
+            auto_connected,
+        )
+        .await?;
+        if owner_policy.required || owner_policy.effect == ApprovalEffect::Deny {
+            return Err(AppError::Forbidden(
+                "Shared agents cannot request or use the owner's approvals".into(),
+            ));
+        }
+    }
+    let outcome = evaluate_and_check_with_options(
         db,
         actor,
         service_owner,
@@ -307,6 +399,7 @@ pub async fn evaluate_for_chat(
         requester_id,
         bypass,
         auto_connected,
+        chat.map_or_else(ApprovalOptions::default, |chat| chat.approval_options()),
     )
     .await?;
     if let ApprovalOutcome::NeedsApproval(ref pending) = outcome
@@ -362,6 +455,9 @@ pub async fn approval_notification_recipients(
     approval_owner_user_id: &str,
     pending: &PendingApproval,
 ) -> AppResult<Vec<String>> {
+    // Called only after the dispatcher applies existing execution grants.
+    // Refuse before materializing notification defaults or creating a request.
+    pending.options.require_request_support()?;
     if !pending.resolution.from_org_policy {
         return Ok(vec![approval_owner_user_id.to_string()]);
     }
@@ -383,8 +479,7 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
         .collection::<NotificationChannel>(CHANNELS)
         .find_one(doc! { "user_id": user_id })
         .await?;
-    Ok(channel
-        .map(|c| c.approval_required && notification_service::has_active_notification_channel(&c)))
+    Ok(channel.and_then(|c| c.approval_required))
 }
 
 /// Pure resolution helper kept for unit-testable semantics. Used to be the
@@ -392,7 +487,10 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
 /// still exercise it directly.
 #[cfg(test)]
 fn resolve_approval_requirement(per_service: Option<bool>, global: Option<bool>) -> bool {
-    per_service.or(global).unwrap_or(false)
+    per_service.unwrap_or_else(|| {
+        approval_policy::GlobalApprovalMode::from_stored(global)
+            .requires(&crate::models::service_approval_config::ApprovalVerb::Write)
+    })
 }
 
 /// Check whether the request has a valid (non-expired, non-revoked) approval grant.
@@ -490,6 +588,7 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub approval: ApprovalOptions,
     pub assistant_group: Option<crate::models::approval_request::GroupApprovalBinding>,
     pub operation_summary: String,
     pub action_description: Option<String>,
@@ -503,6 +602,7 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            approval: ApprovalOptions::default(),
             assistant_group: None,
             operation_summary: descriptor.operation_summary(),
             action_description: Some(descriptor.summary.clone()),
@@ -540,6 +640,7 @@ pub async fn create_approval_request(
     notify_user_ids: Vec<String>,
     from_org_policy: bool,
 ) -> AppResult<ApprovalRequest> {
+    operation.approval.require_request_support()?;
     let notify_user_ids = if let Some(group) = &operation.assistant_group {
         vec![group.actor_user_id.clone()]
     } else if notify_user_ids.is_empty() {
@@ -611,6 +712,7 @@ pub async fn create_approval_request(
             .find_one(doc! {
                 "idempotency_key": &idempotency_key,
                 "status": "pending",
+                "execution_proposal": null,
             })
             .await?
         {
@@ -621,6 +723,9 @@ pub async fn create_approval_request(
         let expires_at = now + Duration::seconds(i64::from(timeout_secs));
 
         let request = ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: operation.assistant_group.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -838,16 +943,14 @@ pub async fn create_tool_approval_request(
     requester_type: &str,
     requester_id: &str,
     requester_label: Option<&str>,
+    options: ApprovalOptions,
 ) -> AppResult<ApprovalRequest> {
-    let channel = db
-        .collection::<NotificationChannel>(CHANNELS)
-        .find_one(doc! { "user_id": user_id })
-        .await?;
-
-    let timeout_secs = channel
-        .as_ref()
-        .map(|c| c.approval_timeout_secs)
-        .unwrap_or(30);
+    options.require_request_support()?;
+    // Materialize notification delivery/lifetime defaults without choosing a
+    // global approval preference on the user's behalf.
+    let timeout_secs = notification_service::get_or_create_channel(db, user_id)
+        .await?
+        .approval_timeout_secs;
 
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
 
@@ -861,6 +964,9 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
+        execution_proposal: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -993,6 +1099,7 @@ pub(crate) async fn process_decision_with_access(
     snapshot: Option<&Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<ApprovalRequest> {
     let current = get_request(db, request_id).await?;
+    super::execution_permission_dispatch::proposals::legacy_refusal(&current)?;
     if let Some(binding) = &current.assistant_group {
         super::org_group_service::authorize_approval(
             db,
@@ -1014,23 +1121,53 @@ pub(crate) async fn process_decision_with_access(
         update_set.insert("decision_idempotency_key", key);
     }
 
-    // Atomic update: only process if status is still "pending"
-    let updated = collection
-        .find_one_and_update(
-            doc! {
-                "_id": request_id,
-                "status": "pending",
-            },
-            doc! {
-                "$set": update_set
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
+    // Collaboration decisions serialize with departure/cancellation and keep
+    // their continuation bound to the same request. Unrelated approvals keep
+    // their existing single-write path with no collaboration reads.
+    let collaboration = if let Some(binding) = &current.assistant_group {
+        super::collaboration_group_service::marked(db, &binding.group_id).await?
+    } else {
+        false
+    };
+    let updated = if collaboration {
+        let binding = current
+            .assistant_group
+            .as_ref()
+            .expect("checked group binding");
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), binding.clone(), collection.clone(), request_id.to_owned(), update_set), |session, context| {let (db,binding,collection,request_id,update_set)=&*context;let request_id=request_id.as_str();Box::pin(async move {
+            let result:AppResult<Option<ApprovalRequest>>=async {
+                let row=db.collection::<crate::models::assistant_conversation::AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&binding.conversation_id,"collaboration.request_id":&binding.request_id}).session(&mut *session).await?
+                    .ok_or_else(||AppError::NotFound("Approval request not found".into()))?;
+                super::collaboration_group_service::runtime::fence_decision(db,&row,&binding.actor_user_id,session).await?;
+                let updated=collection.find_one_and_update(doc! {"_id":request_id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":update_set.clone()})
+                    .return_document(ReturnDocument::After).session(&mut *session).await?;
+                if updated.is_some() && row.active_turn.is_none() {
+                    super::collaboration_group_service::runtime::queue_decision(db,&row,session).await?;
+                }
+                Ok(updated)
+            }.await;
+            super::api_key_mutation_service::transaction_result(result)
+        })}).await.map_err(super::api_key_mutation_service::map_transaction_error)?
+    } else {
+        collection
+            .find_one_and_update(
+                doc! {
+                    "_id": request_id,
+                    "status": "pending",
+                },
+                doc! {
+                    "$set": update_set
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?
+    };
 
     let updated = match updated {
         Some(updated) => updated,
@@ -1111,6 +1248,10 @@ pub(crate) async fn process_decision_with_access(
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
         let grant = ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: updated.user_id.clone(),
             service_id: updated.service_id.clone(),
@@ -1213,6 +1354,7 @@ pub async fn expire_pending_requests(
         .collection::<ApprovalRequest>(REQUESTS)
         .find(doc! {
             "status": "pending",
+            "execution_proposal": null,
             "expires_at": { "$lte": sweep_time },
         })
         .with_options(
@@ -1318,7 +1460,8 @@ pub async fn expire_pending_requests(
                 service_slug: req.service_slug.clone(),
                 mode: req.approval_mode.as_str().to_string(),
             },
-        );
+        )
+        .await;
     }
 
     Ok(count)
@@ -1360,7 +1503,7 @@ pub(super) async fn retire_full_access_chat_requests(
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
     };
-    let mut filter = doc! {"status": "pending", "requester_type": "user",
+    let mut filter = doc! {"execution_proposal": null, "status": "pending", "requester_type": "user",
     "requester_label": {"$ne": bson::Bson::Null}, "created_at": {"$lte": sweep_time}};
     if let Some(user) = user {
         filter.insert("requester_id", user);
@@ -1487,6 +1630,7 @@ pub async fn wait_for_decision(
         tokio::time::sleep(poll_interval).await;
 
         let request = get_request(db, request_id).await?;
+        super::execution_permission_dispatch::proposals::legacy_refusal(&request)?;
 
         match request.status.as_str() {
             "approved" => return Ok(()),
@@ -1499,6 +1643,9 @@ pub async fn wait_for_decision(
                 return Err(AppError::Forbidden("Approval request expired".to_string()));
             }
             "pending" => {
+                if Utc::now() >= request.expires_at {
+                    return Err(AppError::Forbidden("Approval request expired".into()));
+                }
                 if Utc::now() >= deadline {
                     return Err(AppError::Forbidden(
                         "Approval request timed out".to_string(),
@@ -1525,11 +1672,41 @@ pub fn map_wait_for_decision_error(
     match error {
         AppError::Forbidden(reason) => AppError::ApprovalFailed {
             request_id: request_id.to_string(),
-            approve_url: format!("{}/approvals/history", frontend_url.trim_end_matches('/')),
+            approve_url: super::assistant_links::AssistantPage::Approvals.url(frontend_url),
             reason,
         },
         other => other,
     }
+}
+
+/// Model-facing outcome of a proxy approval wait. A returned identifier is
+/// not evidence of a still-pending card or a dispatched operation.
+pub fn wait_failure_result(error: AppError, request_id: &str, frontend: &str) -> serde_json::Value {
+    let (code, status, message) = match &error {
+        AppError::Forbidden(reason) if reason == "Approval request expired" => (
+            "approval_expired",
+            "expired",
+            "The approval request expired. Nothing was sent by this call. Ask the owner before requesting approval again.",
+        ),
+        AppError::Forbidden(reason) if reason == "Approval request timed out" => (
+            "approval_wait_timed_out",
+            "unavailable",
+            "This call stopped waiting for approval and sent nothing. Check the request in Approvals before requesting another; do not claim a card is still waiting.",
+        ),
+        AppError::Forbidden(reason) if reason == "Approval request was rejected" => (
+            "approval_denied",
+            "rejected",
+            "The approval request was denied. Nothing was sent by this call. Do not request it again unless the owner asks.",
+        ),
+        _ => (
+            "approval_unavailable",
+            "unavailable",
+            "The approval state could not be verified. Nothing was sent by this call; check Approvals before retrying.",
+        ),
+    };
+    serde_json::json!({"error":code,"code":code,"status":status,"request_id":request_id,
+        "message":message,"instructions":message,
+        "review_url":super::assistant_links::AssistantPage::Approvals.url(frontend)})
 }
 
 /// Listing-scope descriptor for one admin org branch on the
@@ -1632,10 +1809,28 @@ pub async fn list_requests(
     page: u64,
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalRequest>, u64)> {
+    list_requests_with_proposals(db, user_id, admin_branches, statuses, page, per_page, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn list_requests_with_proposals(
+    db: &Database,
+    user_id: &str,
+    admin_branches: &[OrgFilterBranch],
+    statuses: &[&str],
+    page: u64,
+    per_page: u64,
+    human: bool,
+) -> AppResult<(Vec<ApprovalRequest>, u64)> {
     let mut filter = build_requests_filter(user_id, admin_branches);
     // Org group cards have an explicit participant ACL and are projected by
     // the group transcript, not the organization-wide approvals inbox.
-    filter.insert("assistant_group", bson::Bson::Null);
+    if human {
+        filter = doc! {"$and":[filter,{"$or":[{"assistant_group":null,"execution_proposal":null},{"user_id":user_id,"execution_proposal.version":{"$exists":true}}]}]};
+    } else {
+        filter.insert("assistant_group", bson::Bson::Null);
+        filter.insert("execution_proposal", bson::Bson::Null);
+    }
     match statuses {
         [] => {}
         [single] => {
@@ -1785,7 +1980,8 @@ fn build_grants_filter(
 
 /// List active approval grants for a user.
 ///
-/// Only returns grants for services with current grant capability.
+/// Legacy rows require services with current grant capability. Execution rows
+/// are listed independently with the same owner/admin visibility boundaries.
 /// Capability may come from top-level `Grant` mode (including legacy
 /// configs with a missing field) or a `require_approval` rule whose
 /// mode is `Grant`. Services with no config default to `PerRequest`
@@ -1844,7 +2040,21 @@ pub async fn list_grants(
         v.extend(set);
     }
 
-    let filter = build_grants_filter(user_id, admin_branches, &grant_mode_by_owner, now);
+    let legacy = build_grants_filter(user_id, admin_branches, &grant_mode_by_owner, now);
+    // Explicit execution permission is independent of legacy Grant mode. Keep
+    // the same per-owner/admin service visibility; no additional lookups.
+    let mut execution_owners = vec![doc! {"user_id": user_id}];
+    for branch in admin_branches {
+        let mut owner = doc! {"user_id": &branch.org_id, "org_scoped": true};
+        if let Some(ids) = &branch.service_id_scope {
+            owner.insert("service_id", doc! {"$in": ids});
+        }
+        execution_owners.push(owner);
+    }
+    let filter = doc! {"$or": [legacy, doc! {
+        "execution": {"$type": "object"}, "revoked": false,
+        "expires_at": {"$gt": now}, "$or": execution_owners,
+    }]};
 
     let total = db
         .collection::<ApprovalGrant>(GRANTS)
@@ -1878,7 +2088,7 @@ pub async fn revoke_grant(db: &Database, user_id: &str, grant_id: &str) -> AppRe
                 "_id": grant_id,
                 "user_id": user_id,
             },
-            doc! { "$set": { "revoked": true } },
+            revoke_grant_update(Utc::now()),
         )
         .await?;
 
@@ -1896,7 +2106,7 @@ pub async fn revoke_all_grants(db: &Database, user_id: &str) -> AppResult<u64> {
         .collection::<ApprovalGrant>(GRANTS)
         .update_many(
             doc! { "user_id": user_id, "revoked": false },
-            doc! { "$set": { "revoked": true } },
+            revoke_grant_update(Utc::now()),
         )
         .await?;
 
@@ -2216,9 +2426,22 @@ async fn revoke_grants_for_service(
         filter.insert("scope", bson::Bson::Null);
     }
     db.collection::<ApprovalGrant>(GRANTS)
-        .update_many(filter, doc! { "$set": { "revoked": true } })
+        .update_many(filter, revoke_grant_update(Utc::now()))
         .await?;
     Ok(())
+}
+
+/// Existing legacy expiry is unchanged. Explicit permissions use a bounded
+/// terminal TTL, including persistent rows; no extra read and no index change.
+pub(crate) fn revoke_grant_update(now: chrono::DateTime<Utc>) -> Vec<bson::Document> {
+    vec![doc! {"$set": {
+        "revoked": true,
+        "expires_at": {"$cond": [
+            {"$eq": [{"$type": "$execution"}, "object"]},
+            bson::DateTime::from_chrono(super::execution_permission::terminal_expiry(now)),
+            "$expires_at"
+        ]}
+    }}]
 }
 
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
@@ -2233,6 +2456,707 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn noninteractive_callers_refuse_new_service_and_tool_requests_before_side_effects() {
+        let db = crate::test_utils::connect_test_database("approval_no_request_writers")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let descriptor = test_operation();
+        let mut operation = ApprovalRequestOperation::from_descriptor(&descriptor, None);
+        operation.approval = ApprovalOptions::NO_REQUEST;
+        let service_request = create_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "test-service",
+            "Test service",
+            "test-service",
+            "api_key",
+            "test-caller",
+            None,
+            operation,
+            ApprovalMode::PerRequest,
+            300,
+            vec![owner.clone()],
+            false,
+        )
+        .await;
+        assert!(matches!(
+            service_request,
+            Err(AppError::ApprovalUnsupported)
+        ));
+        let tool_request = create_tool_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "test_tool",
+            None,
+            None,
+            false,
+            "api_key",
+            "test-caller",
+            None,
+            ApprovalOptions::NO_REQUEST,
+        )
+        .await;
+        assert!(matches!(tool_request, Err(AppError::ApprovalUnsupported)));
+        for name in [REQUESTS, CHANNELS] {
+            assert_eq!(
+                db.collection::<Document>(name)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{name}"
+            );
+        }
+        // Other callers retain the ordinary default, including request creation.
+        let supported = create_tool_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "test_tool",
+            None,
+            None,
+            false,
+            "api_key",
+            "test-caller",
+            None,
+            ApprovalOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(supported.status, "pending");
+        assert_eq!(
+            db.collection::<Document>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn noninteractive_policy_retains_denials_and_existing_grants() {
+        let db = crate::test_utils::connect_test_database("approval_no_request_policy")
+            .await
+            .expect("configured Mongo required");
+        let owner = Uuid::new_v4().to_string();
+        let service = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let read =
+            crate::services::operation_descriptor::build_http_descriptor("GET", "/status", None);
+        assert!(matches!(
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &read,
+                Some("api_key"),
+                "ordinary-client",
+                false,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Allowed { required: false }
+        ));
+        set_service_approval_config(
+            &db,
+            &owner,
+            &service,
+            "Test",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let descriptor = test_operation();
+        let evaluate = || {
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                "ordinary-client",
+                false,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+        };
+        let ApprovalOutcome::NeedsApproval(pending) = evaluate().await.unwrap() else {
+            panic!("The missing grant must still require approval");
+        };
+        assert!(matches!(
+            approval_notification_recipients(&db, &owner, &pending).await,
+            Err(AppError::ApprovalUnsupported)
+        ));
+        assert!(matches!(
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                "ordinary-client",
+                true,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        insert_grant(
+            &db,
+            &make_grant(&owner, &service, "api_key", "ordinary-client", false, 1),
+        )
+        .await;
+        assert!(matches!(
+            evaluate().await.unwrap(),
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        set_service_approval_config(
+            &db,
+            &owner,
+            &service,
+            "Test",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+            None,
+            Some(&ApprovalEffect::Deny),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(evaluate().await.unwrap(), ApprovalOutcome::Denied));
+        assert!(matches!(
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                "ordinary-client",
+                true,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Denied
+        ));
+        assert_eq!(
+            db.collection::<Document>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Document>(CHANNELS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn first_tool_request_uses_new_timeout_and_preserves_legacy_read_default() {
+        let db = crate::test_utils::connect_test_database("tool_first_request_timeout")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            db.collection::<NotificationChannel>(CHANNELS)
+                .count_documents(doc! {"user_id": &owner})
+                .await
+                .unwrap(),
+            0
+        );
+        for expected in [300, 300, 30] {
+            if expected == 30 {
+                db.collection::<NotificationChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"user_id": &owner},
+                        doc! {"$unset": {"approval_timeout_secs": ""}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let request = create_tool_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "fixture_tool",
+                None,
+                None,
+                false,
+                "api_key",
+                "fixture_requester",
+                None,
+                ApprovalOptions::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(request.status, "pending");
+            assert!(request.notification_channel.is_none());
+            assert_eq!(
+                (request.expires_at - request.created_at).num_seconds(),
+                expected
+            );
+            let stored = get_request(&db, &request.id).await.unwrap();
+            assert_eq!(
+                stored.expires_at.timestamp_millis(),
+                request.expires_at.timestamp_millis()
+            );
+            assert_eq!(
+                (stored.expires_at - stored.created_at).num_seconds(),
+                expected
+            );
+            assert_eq!(
+                notification_service::get_or_create_channel(&db, &owner)
+                    .await
+                    .unwrap()
+                    .approval_timeout_secs,
+                expected as u32
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_web_approval_without_delivery_creates_lists_decides_and_expires() {
+        use axum::{
+            Json,
+            extract::{Path, State},
+            http::HeaderMap,
+        };
+        let db = crate::test_utils::connect_test_database("required_web_approval")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        // No prior settings GET, channel insert, device or provider credentials.
+        assert!(
+            user_requires_approval(
+                &db,
+                &owner,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            db.collection::<NotificationChannel>(CHANNELS)
+                .count_documents(doc! {"user_id": &owner})
+                .await
+                .unwrap(),
+            0
+        );
+        let operation = crate::services::operation_descriptor::build_http_descriptor(
+            "POST",
+            "/v1/actions",
+            None,
+        );
+        for mode in 0..4 {
+            let mut channel = notification_service::get_or_create_channel(&db, &owner)
+                .await
+                .unwrap();
+            match mode {
+                0 => {}
+                1 => {
+                    channel.telegram_enabled = true;
+                    channel.telegram_chat_id = Some(42);
+                } // server provider absent
+                2 => {
+                    channel.push_enabled = true;
+                    channel.push_devices = vec![crate::models::notification_channel::DeviceToken {
+                        device_id: "dummy".into(),
+                        platform: "fcm".into(),
+                        token: "dummy-registration".into(),
+                        device_name: None,
+                        app_id: None,
+                        registered_at: Utc::now(),
+                        last_used_at: None,
+                    }];
+                }
+                _ => {
+                    channel.push_devices.clear();
+                    channel.telegram_chat_id = None;
+                    channel.telegram_enabled = false;
+                } // removed/invalid device and disconnected channel
+            }
+            db.collection::<NotificationChannel>(CHANNELS)
+                .replace_one(doc! {"_id": &channel.id}, &channel)
+                .await
+                .unwrap();
+            assert!(!notification_service::approval_delivery_configured(
+                &channel,
+                &state.config,
+                false,
+                false
+            ));
+            for decision in [Some(true), Some(false), None] {
+                let service = uuid::Uuid::new_v4().to_string();
+                assert!(matches!(
+                    evaluate_and_check(
+                        &db,
+                        &owner,
+                        &owner,
+                        &service,
+                        &operation,
+                        Some("api_key"),
+                        "agent",
+                        false,
+                        false
+                    )
+                    .await
+                    .unwrap(),
+                    ApprovalOutcome::NeedsApproval(_)
+                ));
+                let request = create_approval_request(
+                    &db,
+                    &state.config,
+                    &state.http_client,
+                    None,
+                    None,
+                    &owner,
+                    &service,
+                    "Fixture",
+                    "fixture",
+                    "api_key",
+                    "agent",
+                    None,
+                    ApprovalRequestOperation::from_descriptor(&operation, None),
+                    ApprovalMode::PerRequest,
+                    300,
+                    vec![],
+                    false,
+                )
+                .await
+                .unwrap();
+                assert_eq!(request.status, "pending");
+                assert!(request.notification_channel.is_none());
+                let (listed, _) = list_requests(&db, &owner, &[], &["pending"], 1, 100)
+                    .await
+                    .unwrap();
+                assert!(listed.iter().any(|r| r.id == request.id));
+                if let Some(approved) = decision {
+                    let Json(result) = crate::handlers::approvals::decide_request(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(&owner),
+                        Path(request.id.clone()),
+                        Default::default(),
+                        HeaderMap::new(),
+                        Json(crate::handlers::approvals::DecideRequest {
+                            approved,
+                            duration_sec: None,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        result.status,
+                        if approved { "approved" } else { "rejected" }
+                    );
+                    assert_eq!(
+                        wait_for_decision(&db, &request.id, 1).await.is_ok(),
+                        approved
+                    );
+                    assert_eq!(
+                        get_request(&db, &request.id)
+                            .await
+                            .unwrap()
+                            .decision_channel
+                            .as_deref(),
+                        Some("web")
+                    );
+                } else {
+                    db.collection::<ApprovalRequest>(REQUESTS).update_one(doc! {"_id": &request.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+                    assert_eq!(
+                        expire_pending_requests(
+                            &db,
+                            &state.config,
+                            &state.http_client,
+                            None,
+                            None,
+                            None
+                        )
+                        .await
+                        .unwrap(),
+                        1
+                    );
+                    assert!(wait_for_decision(&db, &request.id, 1).await.is_err());
+                }
+                assert_eq!(
+                    db.collection::<ApprovalGrant>(GRANTS)
+                        .count_documents(doc! {"service_id": &service})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        // Clearing the choice restores writes-only, without changing any
+        // previously stored true/false preference on read.
+        db.collection::<NotificationChannel>(CHANNELS)
+            .update_one(
+                doc! {"user_id": &owner},
+                doc! {"$unset": {"approval_required": ""}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            user_requires_approval(
+                &db,
+                &owner,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !user_requires_approval(
+                &db,
+                &owner,
+                &crate::models::service_approval_config::ApprovalVerb::Read
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn writes_only_default_survives_lazy_tool_request_and_preserves_guest_org_and_deny_controls()
+     {
+        use crate::models::service_approval_config::ApprovalVerb;
+        use approval_policy::GlobalApprovalMode;
+        let db = crate::test_utils::connect_test_database("writes_only_policy_controls")
+            .await
+            .expect("real Mongo required");
+        let owner = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        let service = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_many([
+                crate::test_utils::test_user(&owner, crate::models::user::UserType::Person),
+                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
+            ])
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        for verb in [
+            ApprovalVerb::Read,
+            ApprovalVerb::Write,
+            ApprovalVerb::Destructive,
+        ] {
+            let mut operation = test_operation();
+            operation.verb = verb.clone();
+            let outcome = evaluate_and_check(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &operation,
+                Some("api_key"),
+                "guest",
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+            if verb == ApprovalVerb::Read {
+                assert!(matches!(
+                    outcome,
+                    ApprovalOutcome::Allowed { required: false }
+                ));
+                crate::services::agent_operation_scope_service::check_guest_approval(
+                    true, &outcome,
+                )
+                .unwrap();
+            } else {
+                assert!(matches!(outcome, ApprovalOutcome::NeedsApproval(_)));
+                assert!(
+                    crate::services::agent_operation_scope_service::check_guest_approval(
+                        true, &outcome
+                    )
+                    .is_err()
+                );
+            }
+        }
+        assert_eq!(
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        create_tool_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "fixture_write",
+            None,
+            None,
+            false,
+            "api_key",
+            "agent",
+            None,
+            ApprovalOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            user_approval_mode(&db, &owner).await.unwrap(),
+            GlobalApprovalMode::WritesOnly
+        );
+        assert!(
+            !user_requires_approval(&db, &owner, &ApprovalVerb::Read)
+                .await
+                .unwrap()
+        );
+        let raw = db
+            .collection::<Document>(CHANNELS)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!raw.contains_key("approval_required"));
+        // Existing stored booleans keep their exact meaning, even for rows
+        // lazily created by the unreleased W9.3 build (no provenance marker).
+        for (stored, mode) in [
+            (true, GlobalApprovalMode::All),
+            (false, GlobalApprovalMode::Off),
+        ] {
+            db.collection::<Document>(CHANNELS)
+                .update_one(
+                    doc! {"user_id":&owner},
+                    doc! {"$set":{"approval_required":stored}},
+                )
+                .await
+                .unwrap();
+            notification_service::get_or_create_channel(&db, &owner)
+                .await
+                .unwrap();
+            assert_eq!(user_approval_mode(&db, &owner).await.unwrap(), mode);
+            for verb in [
+                ApprovalVerb::Read,
+                ApprovalVerb::Write,
+                ApprovalVerb::Destructive,
+            ] {
+                assert_eq!(
+                    user_requires_approval(&db, &owner, &verb).await.unwrap(),
+                    stored
+                );
+            }
+            let after = db
+                .collection::<Document>(CHANNELS)
+                .find_one(doc! {"user_id":&owner})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.get_bool("approval_required").unwrap(), stored);
+        }
+        // An org's explicit policy wins over the actor's explicit Off.
+        set_service_approval_config(
+            &db,
+            &org,
+            &service,
+            "Org resource",
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let read = test_operation();
+        let org_outcome = evaluate_and_check(
+            &db,
+            &owner,
+            &org,
+            &service,
+            &read,
+            Some("api_key"),
+            "agent",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(org_outcome,ApprovalOutcome::NeedsApproval(ref p) if p.resolution.from_org_policy && p.primary_owner_user_id == org)
+        );
+        assert!(matches!(
+            evaluate_and_check(
+                &db, &owner, &org, &service, &read, None, "session", true, false
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        set_service_approval_config(
+            &db,
+            &org,
+            &service,
+            "Org resource",
+            None,
+            None,
+            None,
+            Some(&ApprovalEffect::Deny),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            evaluate_and_check(
+                &db, &owner, &org, &service, &read, None, "session", true, true
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Denied
+        ));
+    }
 
     fn test_operation() -> OperationDescriptor {
         crate::services::operation_descriptor::build_http_descriptor("GET", "/v1/models", None)
@@ -2241,6 +3165,9 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-1".to_string(),
@@ -2277,6 +3204,52 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn execution_revocation_preserves_legacy_expiry_and_unscoped_filter() {
+        let db = crate::test_utils::connect_test_database("execution_permission_revoke_filter")
+            .await
+            .expect("review Mongo required");
+        let rows = db.collection::<ApprovalGrant>(GRANTS);
+        let execution = super::super::execution_permission::tests::fixture();
+        let mut legacy = execution.clone();
+        legacy.id = uuid::Uuid::new_v4().to_string();
+        legacy.execution = None;
+        legacy.scope = None;
+        legacy.expires_at = chrono::DateTime::from_timestamp_millis(
+            (Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+        )
+        .unwrap();
+        rows.insert_many([&execution, &legacy]).await.unwrap();
+        revoke_grants_for_service(&db, "actor", "catalog", true)
+            .await
+            .unwrap();
+        let current = rows
+            .find_one(doc! {"_id": &execution.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!current.revoked);
+        assert_eq!(current.expires_at, execution.expires_at);
+        let old = rows
+            .find_one(doc! {"_id": &legacy.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old.revoked);
+        assert_eq!(old.expires_at, legacy.expires_at);
+        revoke_grants_for_service(&db, "actor", "catalog", false)
+            .await
+            .unwrap();
+        let current = rows
+            .find_one(doc! {"_id": &execution.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(current.revoked);
+        assert!(current.expires_at < Utc::now() + chrono::Duration::days(31));
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn grant_mode_recheck_only_applies_to_legacy_unscoped_grants() {
         let mut request = make_request("req-1", "pending");
@@ -2311,6 +3284,7 @@ mod tests {
             arguments: serde_json::json!({}),
             execution_authority_digest: None,
             execution_authority_binding: None,
+            optional_provider_authority_digest: None,
             redemption: None,
         };
 
@@ -2341,8 +3315,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_approval_requirement_defaults_to_false_when_no_settings() {
-        assert!(!resolve_approval_requirement(None, None));
+    fn resolve_approval_requirement_defaults_to_required_when_no_settings() {
+        assert!(resolve_approval_requirement(None, None));
     }
 
     #[test]
@@ -2639,6 +3613,99 @@ mod tests {
     }
 
     #[test]
+    fn invisible_card_2072_proxy_wait_failure_states_are_not_pending() {
+        for (reason, code, status) in [
+            ("Approval request expired", "approval_expired", "expired"),
+            (
+                "Approval request timed out",
+                "approval_wait_timed_out",
+                "unavailable",
+            ),
+            (
+                "Approval request was rejected",
+                "approval_denied",
+                "rejected",
+            ),
+            ("private diagnostic", "approval_unavailable", "unavailable"),
+        ] {
+            let result = wait_failure_result(
+                AppError::Forbidden(reason.into()),
+                "request",
+                "https://app.example/",
+            );
+            assert_eq!(result["code"], code);
+            assert_eq!(result["status"], status);
+            assert_eq!(
+                result["review_url"],
+                "https://app.example/assistant/approvals"
+            );
+            assert!(!result.to_string().contains("private diagnostic"));
+        }
+    }
+
+    #[tokio::test]
+    async fn invisible_card_2072_proxy_history_retains_expiry_and_uses_same_scope() {
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "card2072_proxy_history",
+        )
+        .await;
+        let key =
+            crate::services::key_service::get_api_key(&f.state.db, &f.owner, &f.chat.api_key_id)
+                .await
+                .unwrap();
+        let mut rows = Vec::new();
+        for (id, status, past) in [
+            ("pending", "pending", false),
+            ("lazy-expired", "pending", true),
+            ("denied", "rejected", false),
+            ("allowed", "approved", false),
+        ] {
+            let mut row = make_request(id, status);
+            row.user_id = f.owner.clone();
+            row.requester_id = f.owner.clone();
+            row.requester_type = "user".into();
+            row.requester_label = Some(key.name.clone());
+            row.expires_at = Utc::now() + Duration::seconds(if past { -1 } else { 60 });
+            rows.push(row);
+        }
+        let mut foreign = rows[0].clone();
+        foreign.id = "other-chat".into();
+        foreign.requester_label = Some("another key".into());
+        rows.push(foreign);
+        f.state
+            .db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .insert_many(rows)
+            .await
+            .unwrap();
+        let history =
+            crate::services::assistant_nyxagent::approval_history(&f.state.db, &f.owner, &key.id)
+                .await
+                .unwrap();
+        assert_eq!(history.len(), 4);
+        assert_eq!(
+            history
+                .iter()
+                .find(|r| r.id == "lazy-expired")
+                .unwrap()
+                .status,
+            "expired"
+        );
+        assert!(
+            history
+                .iter()
+                .all(|r| r.review_path == "/assistant/approvals")
+        );
+        let error = wait_for_decision(&f.state.db, "lazy-expired", 60)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            wait_failure_result(error, "lazy-expired", "https://app.example")["code"],
+            "approval_expired"
+        );
+    }
+
+    #[test]
     fn map_wait_for_decision_error_wraps_user_decision_failures() {
         let error = map_wait_for_decision_error(
             AppError::Forbidden("Approval request timed out".to_string()),
@@ -2653,7 +3720,7 @@ mod tests {
                 approve_url,
                 reason,
             } if request_id == "req-1"
-                && approve_url == "https://app.nyxid.dev/approvals/history"
+                && approve_url == "https://app.nyxid.dev/assistant/approvals"
                 && reason == "Approval request timed out"
         ));
     }
@@ -2836,6 +3903,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         config.rules.push(ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/chat/**".to_string(),
             verbs: vec![],
@@ -3205,7 +4273,8 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required,
+            approval_required: Some(approval_required),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: now,
@@ -3244,6 +4313,10 @@ mod tests {
     ) -> ApprovalGrant {
         let now = Utc::now();
         ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -3267,6 +4340,9 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -3341,15 +4417,37 @@ mod tests {
     // --- user_requires_approval ---
 
     #[tokio::test]
-    async fn user_requires_approval_false_when_no_channel() {
+    async fn user_requires_approval_true_before_first_settings_read() {
         let Some(db) = connect_test_database("appr_svc_user_req_no_ch").await else {
             eprintln!("skipping: no MongoDB");
             return;
         };
         let user_id = uuid::Uuid::new_v4().to_string();
 
-        let result = user_requires_approval(&db, &user_id).await.unwrap();
-        assert!(!result);
+        let result = user_requires_approval(
+            &db,
+            &user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write,
+        )
+        .await
+        .unwrap();
+        assert!(result);
+        assert_eq!(
+            notification_service::get_or_create_channel(&db, &user_id)
+                .await
+                .unwrap()
+                .approval_required,
+            None
+        );
+        assert!(
+            !user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Read
+            )
+            .await
+            .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -3362,12 +4460,18 @@ mod tests {
         let channel = make_channel(&user_id, true);
         insert_channel(&db, &channel).await;
 
-        let result = user_requires_approval(&db, &user_id).await.unwrap();
+        let result = user_requires_approval(
+            &db,
+            &user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write,
+        )
+        .await
+        .unwrap();
         assert!(result);
     }
 
     #[tokio::test]
-    async fn suspended_global_approval_fails_open_and_resumes_when_channel_returns() {
+    async fn required_approval_survives_channel_disconnect_and_reconnect() {
         let Some(db) = connect_test_database("appr_svc_suspended_global").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -3394,10 +4498,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(
-            suspended,
-            ApprovalOutcome::Allowed { required: false }
-        ));
+        assert!(matches!(suspended, ApprovalOutcome::NeedsApproval(_)));
         assert_eq!(
             db.collection::<ApprovalRequest>(REQUESTS)
                 .count_documents(doc! {})
@@ -3988,6 +5089,7 @@ mod tests {
         insert_grant(&db, &service_wide).await;
 
         let grant_rule = ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/chat/**".to_string(),
             verbs: vec![],
@@ -4064,6 +5166,7 @@ mod tests {
 
         let rules = vec![
             ApprovalRule {
+                mandatory_review: false,
                 methods: vec!["DELETE".to_string()],
                 resource_pattern: "/v1/admin/**".to_string(),
                 verbs: vec![],
@@ -4071,6 +5174,7 @@ mod tests {
                 mode: ApprovalMode::PerRequest,
             },
             ApprovalRule {
+                mandatory_review: false,
                 methods: vec!["POST".to_string()],
                 resource_pattern: "/v1/chat/**".to_string(),
                 verbs: vec![],
@@ -4496,6 +5600,7 @@ mod tests {
         let service_id = uuid::Uuid::new_v4().to_string();
         let mut config = make_service_config(&user_id, &service_id, true, ApprovalMode::PerRequest);
         config.rules.push(ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/chat/**".to_string(),
             verbs: vec![],

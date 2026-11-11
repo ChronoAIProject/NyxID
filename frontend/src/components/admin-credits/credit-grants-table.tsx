@@ -1,6 +1,13 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-import { credits } from "@/lib/billing-display";
+import { useEffect, useState } from "react";
+import {
+  decimalCredits,
+  exactCredits,
+  formatExactCredits,
+  parseCredits,
+} from "@/lib/credits";
 import { hasCredits } from "@/lib/credits";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Trash2 } from "lucide-react";
@@ -22,6 +29,7 @@ import {
 } from "@/components/ui/tooltip";
 
 interface CreditGrantsTableProps {
+  readonly allocationPolicies?: boolean;
   readonly grants: readonly AdminCreditGrant[];
   readonly canWrite: boolean;
   readonly revokePending: boolean;
@@ -35,6 +43,7 @@ interface CreditGrantsTableProps {
 
 export function CreditGrantsTable({
   grants,
+  allocationPolicies = false,
   canWrite,
   revokePending,
   page,
@@ -44,28 +53,36 @@ export function CreditGrantsTable({
   onPageChange,
   onRevoke,
 }: CreditGrantsTableProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const pageCount = Math.max(1, Math.ceil(total / perPage));
   return (
     <div className="space-y-3">
       <div className="overflow-x-auto rounded-lg border border-border">
-        <Table>
-          <TableHeader>
+        <Table className="max-sm:block">
+          <TableHeader className="max-sm:hidden">
             <TableRow>
-              <TableHead>{t("Recipient")}</TableHead>
-              <TableHead>{t("Remaining")}</TableHead>
-              <TableHead>{t("Scope")}</TableHead>
-              <TableHead>{t("Expiry")}</TableHead>
-              <TableHead>{t("Status")}</TableHead>
-              <TableHead>{t("Reason")}</TableHead>
+              <TableHead>{translateUi("Recipient")}</TableHead>
+              <TableHead>{translateUi("Allocated / used / remaining")}</TableHead>
+              <TableHead>{translateUi("Scope")}</TableHead>
+              <TableHead>{translateUi("Expiry")}</TableHead>
+              <TableHead>{translateUi("Status")}</TableHead>
+              <TableHead>{translateUi("Reason")}</TableHead>
               {canWrite ? (
-                <TableHead className="text-right">{t("Actions")}</TableHead>
+                <TableHead className="text-right">{translateUi("Actions")}</TableHead>
               ) : null}
             </TableRow>
           </TableHeader>
-          <TableBody>
+          <TableBody className="max-sm:block">
             {grants.map((grant) => (
-              <TableRow key={grant.id}>
+              <TableRow
+                key={grant.id}
+                className="max-sm:grid max-sm:gap-1 max-sm:p-3 max-sm:[&>td]:min-w-0 max-sm:[&>td]:whitespace-normal max-sm:[&>td]:break-words max-sm:[&>td]:border-0 max-sm:[&>td]:px-0"
+              >
                 <TableCell>
                   <div className="font-medium">
                     {grant.recipient_display_name ||
@@ -73,34 +90,46 @@ export function CreditGrantsTable({
                       grant.recipient_user_id}
                   </div>
                   {grant.recipient_display_name && grant.recipient_email ? (
-                    <div className="text-11 text-muted-foreground">
+                    <div className="text-13 text-muted-foreground">
                       {grant.recipient_email}
                     </div>
                   ) : null}
                   {grant.target_kind === "org_members" ||
                   grant.target_kind === "groups" ? (
-                    <div className="text-11 text-muted-foreground">
+                    <div className="text-13 text-muted-foreground">
                       {billingTargetLabel(grant)}
                     </div>
                   ) : null}
                   {!grant.recipient_billing_enabled ? <RolloutWarning /> : null}
                 </TableCell>
                 <TableCell>
-                  {formatCredits(grant.remaining ?? grant.remaining_micros)}{" "}
-                  <span className="text-11 text-muted-foreground">{t("of ")}{formatCredits(grant.amount ?? grant.amount_micros)}
-                  </span>
+                  <AllocationAmounts grant={grant} />
                 </TableCell>
                 <TableCell>
                   {scopeLabel(
                     grant.scope.all_services,
                     grant.scope.service_slugs,
                   )}
+                  {grant.service_limits?.map((rule) => (
+                    <div
+                      key={rule.key}
+                      className="mt-2 max-w-sm space-y-1 break-words text-13"
+                    >
+                      <p className="font-medium">
+                        {rule.label || translateUi("Service limit")}:{" "}
+                        {rule.service_slugs.join(", ")}
+                      </p>
+                      <p className="break-all">{translateUi("Up to ")}{formatExactCredits(rule.limit, 12)}{translateUi(" credits · used ")}{formatExactCredits(rule.consumed, 12)}{translateUi(" · held")}{" "}
+                        {formatExactCredits(rule.held ?? rule.reserved, 12)}
+                      </p>
+                    </div>
+                  ))}
                 </TableCell>
                 <TableCell>{formatDateTime(grant.expires_at)}</TableCell>
                 <TableCell>
-                  <GrantStatus grant={grant} />
+                  <GrantStatus grant={grant} now={now} />
                 </TableCell>
-                <TableCell className="max-w-56 truncate text-muted-foreground">
+                <TableCell className="max-w-56 whitespace-normal break-words text-muted-foreground">
                   {grant.reason || "-"}
                 </TableCell>
                 {canWrite ? (
@@ -109,10 +138,15 @@ export function CreditGrantsTable({
                       type="button"
                       size="icon"
                       variant="ghost"
-                      title={t("Revoke grant")}
+                      title={translateUi("Reclaim remaining credits")}
+                      aria-label={translateUi("Reclaim remaining credits")}
                       disabled={
                         grant.status !== "active" ||
-                        hasCredits(grant.reserved ?? grant.reserved_micros) ||
+                        Boolean(grant.revoke_requested_at) ||
+                        (!allocationPolicies &&
+                          hasCredits(
+                            grant.reserved ?? grant.reserved_micros,
+                          )) ||
                         revokePending
                       }
                       onClick={() => onRevoke(grant)}
@@ -128,15 +162,15 @@ export function CreditGrantsTable({
                 <TableCell
                   colSpan={canWrite ? 7 : 6}
                   className="py-10 text-center text-muted-foreground"
-                >{t("No credit grants.")}</TableCell>
+                >{translateUi("No credit grants.")}</TableCell>
               </TableRow>
             ) : null}
           </TableBody>
         </Table>
       </div>
       {pageCount > 1 ? (
-        <div className="flex items-center justify-between text-12 text-muted-foreground">
-          <span>{t("Page ")}{page}{t(" of ")}{pageCount}
+        <div className="flex items-center justify-between text-14 text-muted-foreground">
+          <span>{translateUi("Page ")}{page}{translateUi(" of ")}{pageCount}
           </span>
           <div className="flex gap-2">
             <Button
@@ -145,14 +179,14 @@ export function CreditGrantsTable({
               variant="outline"
               disabled={page <= 1 || fetching}
               onClick={() => onPageChange(Math.max(1, page - 1))}
-            >{t("Previous")}</Button>
+            >{translateUi("Previous")}</Button>
             <Button
               type="button"
               size="sm"
               variant="outline"
               disabled={page >= pageCount || fetching}
               onClick={() => onPageChange(Math.min(pageCount, page + 1))}
-            >{t("Next")}</Button>
+            >{translateUi("Next")}</Button>
           </div>
         </div>
       ) : null}
@@ -161,31 +195,50 @@ export function CreditGrantsTable({
 }
 
 function RolloutWarning() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="mt-1 inline-flex cursor-help" tabIndex={0}>
           <Badge variant="warning" className="gap-1">
-            <AlertTriangle className="h-3 w-3" />{t("Billing rollout off")}</Badge>
+            <AlertTriangle className="h-3 w-3" />{translateUi("Billing rollout off")}</Badge>
         </span>
       </TooltipTrigger>
-      <TooltipContent>{t("Not in billing rollout - user cannot see billing yet.")}</TooltipContent>
+      <TooltipContent>{translateUi("Not in billing rollout - user cannot see billing yet.")}</TooltipContent>
     </Tooltip>
   );
 }
 
-function GrantStatus({ grant }: { readonly grant: AdminCreditGrant }) {
-  const { t } = useUiTranslation();
-  if (grant.activation_state === "pending_activation") {
+function GrantStatus({
+  grant,
+  now,
+}: {
+  readonly grant: AdminCreditGrant;
+  readonly now: number;
+}) {
+  useUiTranslation();
+  if (grant.status === "active" && grant.revoke_requested_at)
+    return (
+      <Badge variant="warning">{translateUi("Reclaim pending — held requests finishing")}</Badge>
+    );
+  if (
+    grant.status === "active" &&
+    grant.expires_at &&
+    Date.parse(grant.expires_at) <= now
+  )
+    return <Badge variant="warning">{translateUi("Expired")}</Badge>;
+  if (
+    grant.status === "active" &&
+    grant.activation_state === "pending_activation"
+  ) {
     return (
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex cursor-help" tabIndex={0}>
-            <Badge variant="warning">{t("Pending activation")}</Badge>
+            <Badge variant="warning">{translateUi("Pending activation")}</Badge>
           </span>
         </TooltipTrigger>
-        <TooltipContent>{t("Waiting for billing-ledger confirmation. The grant is not spendable or visible to the recipient yet.")}</TooltipContent>
+        <TooltipContent>{translateUi("These issued credits are pending activation and cannot be used yet.")}</TooltipContent>
       </Tooltip>
     );
   }
@@ -204,17 +257,50 @@ function GrantStatus({ grant }: { readonly grant: AdminCreditGrant }) {
 }
 
 function scopeLabel(allServices: boolean, slugs: readonly string[]) {
-  return allServices
-    ? translateUi("All services")
-    : slugs.length <= 2
-      ? slugs.join(", ")
-      : `${slugs.slice(0, 2).join(", ")} +${String(slugs.length - 2)}`;
-}
-
-function formatCredits(value: string | number) {
-  return translateUi("{{value}} credits", { value: credits(value) });
+  return allServices ? translateUi("All services") : slugs.join(", ");
 }
 
 function formatDateTime(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString(getFormattingLocale()) : translateUi("Never");
+}
+
+function AllocationAmounts({ grant }: { readonly grant: AdminCreditGrant }) {
+  useUiTranslation();
+  const amount = exactCredits(grant.amount, grant.amount_micros) ?? "0";
+  const remaining =
+    exactCredits(grant.remaining, grant.remaining_micros) ?? "0";
+  const held =
+    grant.held ?? exactCredits(grant.reserved, grant.reserved_micros) ?? "0";
+  const terminal = grant.terminal_amount ?? "0";
+  const used =
+    grant.terminal_amount === undefined &&
+    (grant.status === "expired" || grant.status === "revoked")
+      ? null
+      : decimalCredits(
+          parseCredits(amount) -
+            parseCredits(remaining) -
+            parseCredits(terminal),
+        );
+  return (
+    <dl className="min-w-0 whitespace-normal space-y-1 text-14 tabular-nums">
+      {[
+        ["Allocated", amount],
+        ["Used", used],
+        ["Remaining", remaining],
+        ["Held", held],
+        ...(grant.reclaimed && parseCredits(grant.reclaimed) > 0n
+          ? [["Reclaimed", grant.reclaimed]]
+          : []),
+      ].map(([label, value]) => (
+        <div key={label} className="min-w-0">
+          <dt className="inline text-muted-foreground">{label}: </dt>
+          <dd className="inline break-all">
+            {value === null
+              ? translateUi("Unavailable from this server")
+              : translateUi("{{value1}} credits", { value1: formatExactCredits(value ?? "0", 12) })}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
 }

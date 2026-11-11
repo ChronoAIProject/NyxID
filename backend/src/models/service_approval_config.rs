@@ -76,6 +76,10 @@ fn default_rule_effect() -> ApprovalEffect {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalRule {
+    /// Reader-first marker for separately authored org per-operation review.
+    /// Existing rules retain their current Full-access semantics.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mandatory_review: bool,
     /// Match methods case-insensitively. Empty or ["*"] means any method.
     #[serde(default)]
     pub methods: Vec<String>,
@@ -98,6 +102,10 @@ pub struct ApprovalRule {
     pub mode: ApprovalMode,
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Per-service approval override for a user.
 ///
 /// When a user has global `approval_required = true`, they can exempt specific
@@ -106,7 +114,7 @@ pub struct ApprovalRule {
 ///
 /// If no config exists for a (user, service) pair, the active global
 /// `notification_channels.approval_required` setting applies. That global default
-/// is suspended without a notification channel and exempted for auto-connected
+/// remains enforced without notification delivery and is exempted for auto-connected
 /// services; this explicit configuration remains authoritative in both cases.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceApprovalConfig {
@@ -258,6 +266,7 @@ mod tests {
     fn approval_rule_roundtrips() {
         let cfg = ServiceApprovalConfig {
             rules: vec![ApprovalRule {
+                mandatory_review: false,
                 methods: vec!["POST".to_string()],
                 resource_pattern: "*".to_string(),
                 verbs: vec![ApprovalVerb::Write],

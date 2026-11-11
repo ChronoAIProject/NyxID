@@ -1,5 +1,4 @@
-import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
-
+import { translateUi } from "@/i18n/use-ui-translation";
 import { toast } from "sonner";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -18,7 +17,6 @@ export function useChangeReview<T>(
   conflict: boolean | ((payload: T) => boolean) = false,
   sourceId = "",
 ) {
-  useUiTranslation();
   const [pending, setPending] = useState<{
     payload: T;
     changes: FormChange[];
@@ -87,18 +85,18 @@ export function useChangeReview<T>(
           {pending?.changes.map((change) => (
             <div
               key={change.field}
-              className="space-y-2 rounded-md border border-border p-3 text-sm"
+              className="space-y-2 rounded-md border border-border p-3 text-14"
             >
               <p className="font-medium">{translateUi(change.field)}</p>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs text-muted-foreground">{translateUi("Current")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Current")}</p>
                   <pre className="whitespace-pre-wrap break-all font-sans">
                     {change.before}
                   </pre>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">{translateUi("New")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("New")}</p>
                   <pre className="whitespace-pre-wrap break-all font-sans">
                     {change.after}
                   </pre>

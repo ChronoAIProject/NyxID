@@ -38,14 +38,39 @@ use serde::Deserialize;
 /// The `base_url_root` is the user-facing NyxID origin (e.g.
 /// `https://auth.nyxid.dev`) with no trailing slash and no `/api/v1`
 /// suffix. `access_token` is the user's session bearer, loaded from
-/// `~/.nyxid/` by `ApiClient::from_auth` and handed in here. `profile`
-/// is needed so the proxy can refresh the access token on 401 using
-/// the saved refresh token for the correct profile.
-#[derive(Debug, Clone)]
+/// `~/.nyxid/` under the profile lock, or explicitly supplied by the caller.
+/// Only a saved account session may refresh. The profile and login generation
+/// bind renewal to that same login, using the same lock as other CLI commands.
+#[derive(Clone)]
 pub struct ProxyContext {
     pub base_url_root: String,
     pub access_token: String,
     pub profile: Option<String>,
+    pub refresh_enabled: bool,
+    pub login_generation: Option<String>,
+}
+
+impl ProxyContext {
+    fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        let _lock = if crate::auth::resolve_access_token_override(auth).is_none() {
+            Some(crate::auth::acquire_refresh_lock(auth.profile.as_deref())?)
+        } else {
+            None
+        };
+        let resolved = crate::auth::resolve_access_token_with_source(auth)?;
+        let base_url_root = auth.resolved_base_url()?.trim_end_matches('/').to_owned();
+        let refresh_enabled = resolved.source.allows_session_refresh();
+        if refresh_enabled {
+            crate::auth::validate_profile_destination(auth.profile.as_deref(), &base_url_root)?;
+        }
+        Ok(Self {
+            base_url_root,
+            access_token: resolved.token,
+            profile: auth.profile.clone(),
+            refresh_enabled,
+            login_generation: crate::auth::login_generation(auth.profile.as_deref()),
+        })
+    }
 }
 
 /// CLI-supplied prefill for the ai-key wizard. Any field set here is
@@ -381,13 +406,7 @@ pub async fn run_ai_key_wizard(
     let base_url = auth.resolved_base_url()?;
 
     let outcome = if is_wizard_eligible() {
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         run_flow("ai-key", proxy, prefill).await?
     } else {
         let prefill_json = pairing::prefill_ai_key(&prefill);
@@ -483,14 +502,7 @@ pub async fn run_node_register_token_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         server::run_flow(
             server::FlowKind::NodeRegisterToken,
             proxy,
@@ -570,14 +582,7 @@ pub async fn run_api_key_create_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         server::run_flow(
             server::FlowKind::ApiKeyCreate,
             proxy,
@@ -716,14 +721,7 @@ async fn run_rotation_wizard(
     let display_name_for_summary = prefill.display_name.clone();
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         server::run_flow(flow_kind, proxy, server::PrefillData::Rotate(prefill)).await?
     } else {
         // Map the local-server FlowKind to the pairing-transport
@@ -877,14 +875,7 @@ pub async fn run_service_account_create_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         server::run_flow(
             server::FlowKind::ServiceAccountCreate,
             proxy,
@@ -969,14 +960,7 @@ pub async fn run_developer_app_create_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         server::run_flow(
             server::FlowKind::DeveloperAppCreate,
             proxy,
@@ -1061,14 +1045,7 @@ pub async fn run_mfa_setup_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth)?;
         server::run_flow(
             server::FlowKind::MfaSetup,
             proxy,
@@ -1352,5 +1329,28 @@ fn print_wizard_summary(body: &serde_json::Value, base_url: &str) {
         None => {
             eprintln!("✓ Wizard completed (no service created).");
         }
+    }
+}
+
+impl std::fmt::Debug for ProxyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProxyContext([REDACTED])")
+    }
+}
+
+#[cfg(test)]
+mod context_debug_tests {
+    use super::ProxyContext;
+    #[test]
+    fn bearer_is_redacted_in_debug() {
+        let secret = "distinctive-wizard-session-b29c";
+        let context = ProxyContext {
+            base_url_root: "https://example.invalid".into(),
+            access_token: secret.into(),
+            profile: None,
+            refresh_enabled: false,
+            login_generation: None,
+        };
+        assert!(!format!("{context:?}").contains(secret));
     }
 }

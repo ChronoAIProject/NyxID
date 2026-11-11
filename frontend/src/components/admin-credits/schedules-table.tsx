@@ -1,5 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { exactCredits, formatExactCredits } from "@/lib/credits";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Pencil } from "lucide-react";
@@ -37,53 +38,73 @@ export function SchedulesTable({
   readonly onEdit: (schedule: CreditSchedule) => void;
   readonly onToggle: (schedule: CreditSchedule) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
-      <Table>
-        <TableHeader>
+      <Table className="max-sm:block">
+        <TableHeader className="max-sm:hidden">
           <TableRow>
-            <TableHead>{t("Amount")}</TableHead>
-            <TableHead>{t("Recurrence")}</TableHead>
-            <TableHead>{t("Expiry")}</TableHead>
-            <TableHead>{t("Targets")}</TableHead>
-            <TableHead>{t("Current period")}</TableHead>
-            <TableHead>{t("Status")}</TableHead>
+            <TableHead>{translateUi("Amount")}</TableHead>
+            <TableHead>{translateUi("Recurrence")}</TableHead>
+            <TableHead>{translateUi("Expiry")}</TableHead>
+            <TableHead>{translateUi("Targets")}</TableHead>
+            <TableHead>{translateUi("Current period")}</TableHead>
+            <TableHead>{translateUi("Status")}</TableHead>
             {canWrite ? (
-              <TableHead className="text-right">{t("Actions")}</TableHead>
+              <TableHead className="text-right">{translateUi("Actions")}</TableHead>
             ) : null}
           </TableRow>
         </TableHeader>
-        <TableBody>
+        <TableBody className="max-sm:block">
           {schedules.map((schedule) => (
-            <TableRow key={schedule.id}>
-              <TableCell className="font-medium">
+            <TableRow
+              key={schedule.id}
+              className="max-sm:grid max-sm:gap-1 max-sm:p-3 max-sm:[&>td]:min-w-0 max-sm:[&>td]:whitespace-normal max-sm:[&>td]:break-words max-sm:[&>td]:px-0"
+            >
+              <TableCell className="font-normal">
                 {formatExactCredits(
                   exactCredits(
                     schedule.amount,
                     schedule.amount_credits,
                     "whole",
                   ) ?? "0",
-                )}{" "}{t("credits")}</TableCell>
+                  12,
+                )}{" "}{translateUi("credits")}</TableCell>
               <TableCell className="capitalize">
                 {schedule.recurrence}
               </TableCell>
               <TableCell>{expiryLabel(schedule.expiry)}</TableCell>
               <TableCell>
                 <div>{billingTargetLabel(schedule)}</div>
+                <p className="text-13 text-muted-foreground">
+                  {schedule.scope.all_services
+                    ? translateUi("All services")
+                    : schedule.scope.service_slugs.join(", ")}
+                </p>
+                {schedule.service_limits?.map((rule) => (
+                  <p
+                    key={rule.key}
+                    className="max-w-sm whitespace-normal break-words text-13"
+                  >
+                    {rule.label || translateUi("Service limit")}:{" "}
+                    {rule.service_slugs.join(", ")}{translateUi(" · up to")}{" "}
+                    <span className="break-all">
+                      {formatExactCredits(rule.limit, 12)}
+                    </span>{" "}{translateUi("credits per issuance")}</p>
+                ))}
                 <RolloutSummary schedule={schedule} />
               </TableCell>
               <TableCell>
                 <div>{periodLabel(schedule)}</div>
                 {schedule.skipped_periods > 0 ? (
                   <Badge variant="warning" className="mt-1">
-                    {formatNumber(schedule.skipped_periods)}{t(" skipped period")}{schedule.skipped_periods === 1 ? "" : "s"}
+                    {formatNumber(schedule.skipped_periods)}{translateUi(" skipped period")}{schedule.skipped_periods === 1 ? "" : "s"}
                   </Badge>
                 ) : null}
               </TableCell>
               <TableCell>
                 <Badge variant={schedule.is_active ? "success" : "secondary"}>
-                  {schedule.is_active ? t("Active") : t("Paused")}
+                  {schedule.is_active ? translateUi("Active") : translateUi("Paused")}
                 </Badge>
               </TableCell>
               {canWrite ? (
@@ -93,7 +114,9 @@ export function SchedulesTable({
                       type="button"
                       size="icon"
                       variant="ghost"
-                      title={t("Edit schedule")}
+                      title={translateUi("Edit schedule")}
+                      aria-label={translateUi("Edit schedule")}
+                      disabled={updatePending}
                       onClick={() => onEdit(schedule)}
                     >
                       <Pencil className="h-4 w-4" />
@@ -103,8 +126,8 @@ export function SchedulesTable({
                       disabled={updatePending}
                       aria-label={
                         schedule.is_active
-                          ? t("Pause schedule")
-                          : t("Resume schedule")
+                          ? translateUi("Pause schedule")
+                          : translateUi("Resume schedule")
                       }
                       onCheckedChange={() => onToggle(schedule)}
                     />
@@ -118,7 +141,7 @@ export function SchedulesTable({
               <TableCell
                 colSpan={canWrite ? 7 : 6}
                 className="py-10 text-center text-muted-foreground"
-              >{t("No credit schedules.")}</TableCell>
+              >{translateUi("No credit schedules.")}</TableCell>
             </TableRow>
           ) : null}
         </TableBody>
@@ -128,7 +151,7 @@ export function SchedulesTable({
 }
 
 function RolloutSummary({ schedule }: { readonly schedule: CreditSchedule }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const disabled = schedule.recipients?.filter(
     (recipient) => !recipient.recipient_billing_enabled,
   ).length;
@@ -139,10 +162,10 @@ function RolloutSummary({ schedule }: { readonly schedule: CreditSchedule }) {
         <span className="mt-1 inline-flex cursor-help" tabIndex={0}>
           <Badge variant="warning" className="gap-1">
             <AlertTriangle className="h-3 w-3" />
-            {disabled}{t(" rollout off")}</Badge>
+            {disabled}{translateUi(" rollout off")}</Badge>
         </span>
       </TooltipTrigger>
-      <TooltipContent>{t("Selected owners outside the billing rollout cannot see billing yet.")}</TooltipContent>
+      <TooltipContent>{translateUi("Selected owners outside the billing rollout cannot see billing yet.")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -152,7 +175,7 @@ function expiryLabel(expiry: CreditExpiryPolicy) {
     case "end_of_period":
       return translateUi("End of period");
     case "after_days":
-      return translateUi(expiry.days === 1 ? "After {{count}} day" : "After {{count}} days", { count: expiry.days });
+      return `After ${String(expiry.days)} day${expiry.days === 1 ? "" : "s"}`;
     case "never":
       return translateUi("Never");
   }
@@ -164,7 +187,9 @@ function periodLabel(schedule: CreditSchedule) {
   if (period.status === "disbursing") {
     return translateUi("Disbursing {{amount}}", { amount: formatNumber(period.disbursed_count) });
   }
-  return translateUi("Complete - {{amount}} - expires {{expiry}}", { amount: formatNumber(period.disbursed_count), expiry: period.expires_at ? formatDate(period.expires_at) : translateUi("never") });
+  return `Complete - ${formatNumber(period.disbursed_count)} - expires ${
+    period.expires_at ? formatDate(period.expires_at) : "never"
+  }`;
 }
 
 function formatDate(value: string) {

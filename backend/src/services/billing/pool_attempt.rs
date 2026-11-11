@@ -297,6 +297,8 @@ mod tests {
                 reserved_credits: Credits::from_whole(1),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             })
             .collect();
         let total = Credits::from_whole(layers.len() as i64);

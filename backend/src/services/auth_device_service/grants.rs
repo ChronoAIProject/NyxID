@@ -42,10 +42,24 @@ pub async fn approve_with_agent_key(
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     input: ApproveInput,
-    selection: agent::Selection,
+    mut selection: agent::Selection,
     credential_expires_at: Option<DateTime<Utc>>,
+    authority: crate::services::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    let mfa_policy_revision = app_policy::authorize(db, &input.user_id, authority).await?;
+    let mfa_assured = authority.verified;
     let (collection, row) = pending_request(db, hmac_key, &input.user_code).await?;
+    let created_at = Utc::now();
+    let credential_expires_at = Some(
+        agent::prepare_issuance(
+            db,
+            &input.user_id,
+            &mut selection,
+            credential_expires_at,
+            created_at,
+        )
+        .await?,
+    );
     let key_id = match &selection {
         agent::Selection::Existing { api_key_id, .. } => {
             agent::eligible_key(db, &input.user_id, api_key_id)
@@ -64,6 +78,8 @@ pub async fn approve_with_agent_key(
         ..Default::default()
     };
     let mut transaction = db.client().start_session().await?;
+    let policy_used = mfa_policy_revision.is_some();
+    let policy_default = mfa_policy_revision.as_deref() == Some(app_policy::DEFAULT_REVISION);
     {
         let db_owned = db.clone();
         let hmac_owned = Zeroizing::new(hmac_key.to_vec());
@@ -75,17 +91,20 @@ pub async fn approve_with_agent_key(
         let db = &db_owned;
         let hmac_key = hmac_owned.as_slice();
         let operation: AppResult<()> = async {
+            app_policy::fence_approval(db, &input.user_id, authority, mfa_policy_revision.as_deref(), session).await?;
             let claimed = collection.find_one_and_update(
                 doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
                 doc! {"$set": {"status": "approved"}},
             ).session(&mut *session).await?;
             if claimed.is_none() { return Err(current_decision_error(&collection, &row.id).await?); }
             agent::issue_selected(db, &input.user_id, &row.id, &context, row.requested_profile.as_deref(), &selection,
-                credential_expires_at, &key_id, &credential_id, &secret, &mut *session).await?;
+                credential_expires_at, created_at, &key_id, &credential_id, &secret, &mut *session).await?;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AuthDeviceCodeExpired); }
             collection.update_one(doc! {"_id": &row.id}, doc! {"$set": {
                 "approved_user_id": &input.user_id,
+                "mfa_assured": mfa_assured,
+                "mfa_policy_revision": &mfa_policy_revision,
                 "approved_at": bson::DateTime::from_chrono(now),
                 "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| hmac_hex(hmac_key, ip.as_bytes())),
                 "expires_at": bson::DateTime::from_chrono(now + Duration::seconds(60)),
@@ -103,7 +122,7 @@ pub async fn approve_with_agent_key(
         Some(input.user_id),
         "auth_device_code_approved".into(),
         Some(
-            serde_json::json!({"request_id": row.id, "auth_kind": "agent_key", "api_key_id": key_id, "credential_id": credential_id}),
+            serde_json::json!({"request_id": row.id, "auth_kind": "agent_key", "mfa_policy": policy_used.then_some("approved_sign_in"), "policy_default": policy_default, "api_key_id": key_id, "credential_id": credential_id}),
         ),
         input.approver_ip,
         input.approver_user_agent,
@@ -131,6 +150,7 @@ pub async fn poll_agent_key(
         expire(db, &collection, &row).await?;
         return Err(AppError::AuthDeviceCodeExpired);
     }
+    require_delivery_mfa(db, &row).await?;
     let grant = row
         .agent_key_grant
         .as_ref()
@@ -145,13 +165,31 @@ pub async fn poll_agent_key(
         grant.key_was_created,
     )
     .await?;
-    let now = Utc::now();
-    let claimed = collection.find_one_and_update(
-        doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-            "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-            "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}},
-    ).await?;
+    let claimed = if let Some(revision) = row.mfa_policy_revision.as_deref() {
+        let context = (db.clone(), collection.clone(), row.clone());
+        let result = crate::services::transaction_service::run_db_only(db, &context, |tx, c| {
+            Box::pin(async move {
+                let (db, collection, row) = c;
+                app_policy::fence(
+                    db,
+                    row.approved_user_id
+                        .as_deref()
+                        .ok_or(AppError::AuthDeviceCodeDenied)?,
+                    row.mfa_policy_revision.as_deref(),
+                    tx,
+                )
+                .await?;
+                claim_agent_key_delivery(collection, row, Some(tx)).await
+            })
+        })
+        .await;
+        if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
+            app_policy::deny_undelivered(db, collection.name(), &row.id, revision).await?;
+        }
+        result?
+    } else {
+        claim_agent_key_delivery(&collection, &row, None).await?
+    };
     if claimed.is_none() {
         return Err(current_decision_error(&collection, &row.id).await?);
     }
@@ -168,6 +206,26 @@ pub async fn poll_agent_key(
         None,
     );
     Ok(delivery)
+}
+
+async fn claim_agent_key_delivery(
+    collection: &Collection<AuthDeviceCode>,
+    row: &AuthDeviceCode,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Option<AuthDeviceCode>> {
+    let now = Utc::now();
+    let claim = collection.find_one_and_update(
+        doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
+            "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
+            "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}},
+    );
+    let claimed = if let Some(tx) = transaction {
+        claim.session(tx).await?
+    } else {
+        claim.await?
+    };
+    Ok(claimed)
 }
 
 pub(super) async fn expire(

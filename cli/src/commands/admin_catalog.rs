@@ -18,10 +18,16 @@ use crate::api::ApiClient;
 use crate::cli::{AdminCatalogCommands, AdminProviderCommands, AuthArgs, OutputFormat};
 
 /// Built-in manifests for `nyxid admin catalog add --template`.
-const TEMPLATES: &[(&str, &str)] = &[(
-    "zoho-mail",
-    include_str!("../../templates/catalog/zoho-mail.yaml"),
-)];
+const TEMPLATES: &[(&str, &str)] = &[
+    (
+        "zoho-mail",
+        include_str!("../../templates/catalog/zoho-mail.yaml"),
+    ),
+    (
+        "telnyx-platform",
+        include_str!("../../templates/catalog/telnyx-platform.yaml"),
+    ),
+];
 
 /// Fields that would put an OAuth client secret into a file.
 const PROVIDER_SECRET_FIELDS: &[&str] = &["client_id", "client_secret", "clear_client_credentials"];
@@ -95,6 +101,7 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
+            playbook::validate_authorization_nonce(&body)?;
             let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let client = if client_required_at_creation(&body) {
                 if client_id_env.is_some()
@@ -154,6 +161,11 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
+            let mut effective = current.clone();
+            if let (Some(fields), Some(changes)) = (effective.as_object_mut(), body.as_object()) {
+                fields.extend(changes.clone());
+            }
+            playbook::validate_authorization_nonce(&effective)?;
             let client = if with_client {
                 api.require_credential_transport()?;
                 Some(read_client_values(
@@ -300,16 +312,23 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
         AdminCatalogCommands::Apply {
             manifest,
             dry_run,
+            allow_access_change,
             auth,
         } => {
             let manifest = Manifest::load(&manifest.file, &manifest.vars, false)?;
             let clients = clients_from_env(&manifest)?;
-            let mut api = if dry_run {
-                ApiClient::from_auth(&auth)?.without_token_refresh()
-            } else {
-                ApiClient::from_auth_with_credential_transport(&auth)?
-            };
-            let rows = apply(&mut api, &manifest, dry_run, &clients).await?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            if !dry_run {
+                api.require_credential_transport()?;
+            }
+            let rows = apply_with_access_change(
+                &mut api,
+                &manifest,
+                dry_run,
+                &clients,
+                allow_access_change,
+            )
+            .await?;
             print_apply(&rows, dry_run, auth.output)?;
             fail_on_errors(&rows)
         }
@@ -332,6 +351,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             client_secret_env,
             skip_credentials,
             yes,
+            dry_run,
             auth,
         } => {
             let interactive = std::io::stdin().is_terminal();
@@ -353,6 +373,12 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                 )
                 .with_context(|| format!("Failed to write {}", path.display()))?;
                 eprintln!("Saved manifest to {}", path.display());
+            }
+            if dry_run {
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
+                let rows = apply(&mut api, &manifest, true, &BTreeMap::new()).await?;
+                print_apply(&rows, true, auth.output)?;
+                return fail_on_errors(&rows);
             }
             if (client_id_env.is_some() || client_secret_env.is_some())
                 && manifest.providers.len() != 1
@@ -379,7 +405,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
 
             let redirect = redirect_uri(&auth)?;
 
-            let mut api = ApiClient::from_auth(&auth)?.without_token_refresh();
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let plan = apply(&mut api, &manifest, true, &clients).await?;
             print_apply(&plan, true, OutputFormat::Table)?;
             fail_on_errors(&plan)?;
@@ -556,58 +582,114 @@ fn resolve_variables(
     declared: &Value,
     provided: &BTreeMap<String, String>,
     interactive: bool,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<BTreeMap<String, Value>> {
     let declared = match declared {
         Value::Null => Map::new(),
         Value::Object(map) => map.clone(),
-        _ => bail!("`variables` must be a map of name to {{ prompt, default, allowed }}"),
+        _ => bail!("variables must be a map of variable specifications"),
     };
     if let Some(unknown) = provided.keys().find(|name| !declared.contains_key(*name)) {
         bail!("--set {unknown}: the manifest declares no such variable");
     }
     let mut values = BTreeMap::new();
     for (name, spec) in &declared {
-        let default = spec.get("default").and_then(Value::as_str);
-        let allowed: Vec<&str> = spec
+        let kind = spec.get("type").and_then(Value::as_str).unwrap_or("string");
+        if !["string", "model_id", "int"].contains(&kind) {
+            bail!("Unknown variable type for {name}");
+        }
+        let default = spec.get("default").filter(|v| !v.is_null()).map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string())
+        });
+        let allowed: Vec<String> = spec
             .get("allowed")
             .and_then(Value::as_array)
-            .map(|items| items.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect();
         let value = match provided.get(name) {
             Some(value) => value.clone(),
             None if interactive => {
                 let label = spec.get("prompt").and_then(Value::as_str).unwrap_or(name);
-                let label = if allowed.is_empty() {
-                    label.to_string()
-                } else {
-                    format!("{label} ({})", allowed.join(", "))
-                };
-                ask(&label, default)?
+                ask(
+                    &if allowed.is_empty() {
+                        label.into()
+                    } else {
+                        format!("{label} ({})", allowed.join(", "))
+                    },
+                    default.as_deref(),
+                )?
             }
             None => default
-                .map(str::to_string)
                 .ok_or_else(|| anyhow!("Set the manifest variable with --set {name}=<value>"))?,
         };
-        if !allowed.is_empty() && !allowed.contains(&value.as_str()) {
+        if !allowed.is_empty() && !allowed.contains(&value) {
             bail!("{name} must be one of: {}", allowed.join(", "));
         }
-        if value.is_empty()
-            || !value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        {
-            bail!("{name} may contain only letters, digits, '.', '-' and '_'");
-        }
-        values.insert(name.clone(), value);
+        let resolved = match kind {
+            "int" => {
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!("{name} must be a nonnegative integer");
+                }
+                let number = value
+                    .parse::<u64>()
+                    .with_context(|| format!("{name} is out of integer range"))?;
+                if spec
+                    .get("minimum")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|min| number < min)
+                    || spec
+                        .get("maximum")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|max| number > max)
+                {
+                    bail!("{name} is outside the declared integer bounds");
+                }
+                json!(number)
+            }
+            _ => {
+                if value.is_empty()
+                    || (kind == "model_id" && value.len() > 200)
+                    || !value.bytes().all(|b| {
+                        b.is_ascii_alphanumeric()
+                            || b"._-".contains(&b)
+                            || (kind == "model_id" && b"/:".contains(&b))
+                    })
+                {
+                    bail!("{name} contains characters outside its declared {kind} type");
+                }
+                json!(value)
+            }
+        };
+        values.insert(name.clone(), resolved);
     }
     Ok(values)
 }
 
-fn substitute(value: &mut Value, values: &BTreeMap<String, String>) -> Result<()> {
+fn substitute(value: &mut Value, values: &BTreeMap<String, Value>) -> Result<()> {
     match value {
         Value::String(text) => {
+            if let Some((_, replacement)) = values
+                .iter()
+                .find(|(name, _)| text == &format!("${{{name}}}"))
+            {
+                *value = replacement.clone();
+                return Ok(());
+            }
             for (name, replacement) in values {
-                *text = text.replace(&format!("${{{name}}}"), replacement);
+                *text = text.replace(
+                    &format!("${{{name}}}"),
+                    &replacement
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| replacement.to_string()),
+                );
             }
             if let Some(start) = text.find("${") {
                 bail!(
@@ -704,6 +786,16 @@ async fn apply(
     dry_run: bool,
     clients: &Clients,
 ) -> Result<Vec<ApplyRow>> {
+    apply_with_access_change(api, manifest, dry_run, clients, false).await
+}
+
+async fn apply_with_access_change(
+    api: &mut ApiClient,
+    manifest: &Manifest,
+    dry_run: bool,
+    clients: &Clients,
+    allow_access_change: bool,
+) -> Result<Vec<ApplyRow>> {
     let mut rows = Vec::new();
     let mut provider_ids: BTreeMap<String, Option<String>> = BTreeMap::new();
     let existing_providers = list_providers(api).await?;
@@ -727,6 +819,22 @@ async fn apply(
     if !rows.is_empty() {
         return Ok(rows);
     }
+
+    let mut warnings = Vec::new();
+    for desired in &manifest.services {
+        if let Some(current) = unambiguous_row(&existing_services, &text(desired, "slug"))?
+            && let Some(warning) = platform_access_warning(desired, current)
+        {
+            warnings.push(warning);
+        }
+    }
+    authorize_access_changes(
+        &warnings,
+        dry_run,
+        allow_access_change,
+        std::io::stdin().is_terminal(),
+        || confirm("Allow these live platform access changes?"),
+    )?;
 
     for authored in &manifest.providers {
         let fields = playbook::api_fields(authored);
@@ -877,11 +985,8 @@ async fn apply(
         let current = unambiguous_row(&existing_services, &slug)?;
         let row = match current {
             None if dry_run => ApplyRow::new("service", &slug, "create"),
-            None => match api.post::<Value, _>("/services", &body).await {
-                Ok(created) => ApplyRow {
-                    id: created["id"].as_str().map(str::to_string),
-                    ..ApplyRow::new("service", &slug, "created")
-                },
+            None => match create_service(api, &body).await {
+                Ok(created) => created,
                 Err(error) => ApplyRow::failed("service", &slug, error),
             },
             Some(current) if current["is_active"] == false => ApplyRow {
@@ -908,7 +1013,10 @@ async fn apply(
                 .await
             }
         };
-        if !["failed", "inactive"].contains(&row.action) && desired.get("operations").is_some() {
+        if !["failed", "inactive"].contains(&row.action)
+            && row.error.is_none()
+            && desired.get("operations").is_some()
+        {
             rows.extend(reconcile_operations(api, desired, row.id.as_deref(), dry_run).await?);
         }
         rows.push(row);
@@ -1014,6 +1122,58 @@ async fn list_operations(api: &mut ApiClient, service_id: &str) -> Result<Vec<Va
         .unwrap_or_default())
 }
 
+async fn create_service(api: &mut ApiClient, desired: &Value) -> Result<ApplyRow> {
+    let mut body = desired.clone();
+    let fields = body.as_object_mut().context("Service must be an object")?;
+    let update_only = ["identity_propagation_mode", "inject_delegation_token"];
+    fields.remove("requires_user_credential");
+    for key in update_only {
+        fields.remove(key);
+    }
+    let created: Value = api.post("/services", &body).await?;
+    let mut row = ApplyRow {
+        id: created["id"].as_str().map(str::to_owned),
+        ..ApplyRow::new("service", &text(desired, "slug"), "created")
+    };
+    let mut errors = Vec::new();
+    if let Some(error) = credential_requirement_error(desired, &created) {
+        errors.push(format!("created; {error}"));
+    }
+    let changed: Vec<_> = changed_fields(desired, &created, &[])
+        .into_iter()
+        .filter(|key| update_only.contains(&key.as_str()))
+        .collect();
+    if !changed.is_empty() {
+        let result = match row.id.as_deref() {
+            Some(id) => api
+                .put::<Value, _>(&format!("/services/{id}"), &pick(desired, &changed))
+                .await
+                .map(|_| ()),
+            None => Err(anyhow!("created response has no service id")),
+        };
+        if let Err(error) = result {
+            errors.push(format!(
+                "created; follow-up update of {} failed: {error}; rerun apply",
+                changed.join(", ")
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        row.error = Some(errors.join("; "));
+    }
+    Ok(row)
+}
+
+fn credential_requirement_error(desired: &Value, actual: &Value) -> Option<String> {
+    desired
+        .get("requires_user_credential")
+        .filter(|value| *value != &actual["requires_user_credential"])
+        .map(|_| {
+            "requires_user_credential differs from the server response and cannot be set directly; correct the manifest"
+                .to_string()
+        })
+}
+
 async fn apply_service_update(
     api: &mut ApiClient,
     slug: &str,
@@ -1045,7 +1205,7 @@ async fn apply_service_update(
             ),
         );
     }
-    let mut skip = vec!["slug", "provider_config_id"];
+    let mut skip = vec!["slug", "provider_config_id", "requires_user_credential"];
     skip.extend_from_slice(SERVICE_CREATE_ONLY);
     let mut changed = changed_fields(body, current, &skip);
     let relink = new_provider
@@ -1056,16 +1216,20 @@ async fn apply_service_update(
     if changed.is_empty() && !relink {
         return ApplyRow {
             id: Some(id),
+            error: credential_requirement_error(body, current),
             ..ApplyRow::new("service", slug, "unchanged")
         };
     }
+    let mut actual = current.clone();
     if !dry_run {
-        if !changed.is_empty()
-            && let Err(error) = api
+        if !changed.is_empty() {
+            match api
                 .put::<Value, _>(&format!("/services/{id}"), &pick(body, &changed))
                 .await
-        {
-            return ApplyRow::failed("service", slug, error);
+            {
+                Ok(updated) => actual = updated,
+                Err(error) => return ApplyRow::failed("service", slug, error),
+            }
         }
         if let (true, Some(provider_id)) = (relink, provider_id)
             && let Err(error) = api
@@ -1084,7 +1248,61 @@ async fn apply_service_update(
     ApplyRow {
         id: Some(id),
         changed,
+        error: if dry_run {
+            None
+        } else {
+            credential_requirement_error(body, &actual)
+        },
         ..ApplyRow::new("service", slug, if dry_run { "update" } else { "updated" })
+    }
+}
+
+fn authorize_access_changes(
+    warnings: &[String],
+    dry_run: bool,
+    allowed: bool,
+    interactive: bool,
+    confirm_change: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    for warning in warnings {
+        eprintln!("Warning: {warning}");
+    }
+    if warnings.is_empty() || dry_run || allowed {
+        return Ok(());
+    }
+    if interactive && confirm_change()? {
+        return Ok(());
+    }
+    bail!(
+        "Live platform access change requires confirmation; use `nyxid admin catalog apply --allow-access-change --file <manifest>`"
+    );
+}
+
+fn platform_access_warning(desired: &Value, current: &Value) -> Option<String> {
+    if current["is_active"] != true {
+        return None;
+    }
+    let next = desired.get("platform_key")?;
+    let disabled = next.get("enabled") == Some(&Value::Bool(false))
+        && current["platform_key"]["enabled"] != false;
+    let clears = next
+        .get("allowed_owner_ids")
+        .is_some_and(|v| v.as_array().is_some_and(Vec::is_empty))
+        && current["platform_key"]["allowed_owner_ids"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty());
+    if disabled || clears {
+        Some(format!(
+            "Applying this manifest to {} {}. Review pilot access before applying.",
+            text(current, "slug"),
+            match (disabled, clears) {
+                (true, true) => "disables the platform key and clears its allowlist",
+                (true, false) => "disables the platform key",
+                _ => "clears the platform-key allowlist",
+            }
+        ))
+    } else {
+        None
     }
 }
 
@@ -1096,7 +1314,18 @@ fn changed_fields(desired: &Value, current: &Value, skip: &[&str]) -> Vec<String
                 .iter()
                 .filter(|(key, _)| !skip.contains(&key.as_str()))
                 .filter(|(key, value)| match current.get(key.as_str()) {
+                    Some(existing) if key.as_str() == "billing" && !value.is_null() => {
+                        super::admin_billing::normalize_billing(existing)
+                            != super::admin_billing::normalize_billing(
+                                &super::admin_billing::merged_billing(existing, value),
+                            )
+                    }
                     Some(existing) => existing != *value,
+                    None if key.as_str() == "authorization_nonce_required"
+                        && *value == &Value::Bool(false) =>
+                    {
+                        false
+                    }
                     None => !value.is_null(),
                 })
                 .map(|(key, _)| key.clone())
@@ -1121,7 +1350,7 @@ fn pick(source: &Value, fields: &[String]) -> Value {
 fn fail_on_errors(rows: &[ApplyRow]) -> Result<()> {
     let failed = rows
         .iter()
-        .filter(|row| ["failed", "inactive"].contains(&row.action))
+        .filter(|row| row.error.is_some() || ["failed", "inactive"].contains(&row.action))
         .count();
     if failed > 0 {
         bail!("{failed} manifest row(s) failed");
@@ -1141,14 +1370,20 @@ fn print_apply(rows: &[ApplyRow], dry_run: bool, output: OutputFormat) -> Result
             }
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["Kind", "Slug", "Action", "Details"]);
+            table.set_header(["Kind", "Slug", "Action", "ID", "Details"]);
             for row in rows {
                 let details = row
                     .error
                     .clone()
                     .or_else(|| row.note.clone())
                     .unwrap_or_else(|| row.changed.join(", "));
-                table.add_row([row.kind, row.slug.as_str(), row.action, details.as_str()]);
+                table.add_row([
+                    row.kind,
+                    row.slug.as_str(),
+                    row.action,
+                    row.id.as_deref().unwrap_or("-"),
+                    details.as_str(),
+                ]);
             }
             eprintln!("{table}");
         }
@@ -1262,13 +1497,21 @@ async fn validate(
                     "extra_auth_params",
                     "token_endpoint_auth_method",
                     "supports_pkce",
+                    "authorization_nonce_required",
                     "supports_oauth_scopes",
                     "credential_mode",
                     "revocation_url",
                     "revocation",
                 ] {
+                    let live = if field == "authorization_nonce_required"
+                        && provider.get(field).is_none()
+                    {
+                        &Value::Bool(false)
+                    } else {
+                        &provider[field]
+                    };
                     if let Some(value) = fields.get(field)
-                        && !playbook::matches_fields(value, &provider[field])
+                        && !playbook::matches_fields(value, live)
                     {
                         failures.push(format!("provider {field} differs from the manifest"));
                     }
@@ -1857,6 +2100,16 @@ fn provider_wizard(current: Option<&Value>) -> Result<Value> {
         .and_then(|row| row["supports_pkce"].as_bool())
         .map_or("yes", |on| if on { "yes" } else { "no" });
     provider["supports_pkce"] = (ask_choice("PKCE", &["yes", "no"], pkce_now)? == "yes").into();
+    if provider_type == "oauth2" {
+        let nonce_now = current
+            .and_then(|row| row["authorization_nonce_required"].as_bool())
+            .map_or("no", |on| if on { "yes" } else { "no" });
+        provider["authorization_nonce_required"] = (ask_choice(
+            "Requires a generated authorization nonce (hosted OAuth only; upgrade all backend replicas first)",
+            &["yes", "no"],
+            nonce_now,
+        )? == "yes").into();
+    }
     provider["credential_mode"] = ask_choice(
         "Who supplies the OAuth app (admin = NyxID managed, user = each user's own, both)",
         &["admin", "user", "both"],
@@ -2018,6 +2271,14 @@ fn print_provider(provider: &Value, auth: &AuthArgs) -> Result<()> {
             eprintln!("Icon URL:      {}", text(provider, "icon_url"));
             eprintln!("Authorize URL: {}", text(provider, "authorization_url"));
             eprintln!("Token URL:     {}", text(provider, "token_url"));
+            eprintln!(
+                "Auth nonce:    {} (hosted OAuth only)",
+                yes_no(Some(
+                    provider["authorization_nonce_required"]
+                        .as_bool()
+                        .unwrap_or(false)
+                ))
+            );
             let scopes = provider["default_scopes"]
                 .as_array()
                 .map(|items| {
@@ -2512,6 +2773,102 @@ mod tests {
         assert_eq!(service.changed, ["provider"]);
     }
 
+    #[test]
+    fn authorization_nonce_cli_validation_is_scoped_and_manifest_roundtrips() {
+        for required in [false, true] {
+            let mut row = provider_row(true);
+            row["authorization_nonce_required"] = required.into();
+            // Standalone validation does not impose catalog playbook evidence.
+            row["playbook"] = json!({"unknown_legacy_field": true});
+            assert!(playbook::validate_authorization_nonce(&row).is_ok());
+            row.as_object_mut().unwrap().remove("playbook");
+            let manifest =
+                Manifest::from_document(json!({"providers":[row.clone()]}), &[], false).unwrap();
+            assert_eq!(
+                playbook::api_fields(&manifest.providers[0])["authorization_nonce_required"],
+                required
+            );
+            for (url, param) in [
+                ("https://example.com/auth?nonce=x", "client_id"),
+                ("https://example.com/auth?%6eonce=x", "client_id"),
+                ("https://example.com/auth#fragment", "client_id"),
+                ("https://example.com/auth", " nonce "),
+            ] {
+                row["authorization_url"] = url.into();
+                row["client_id_param_name"] = param.into();
+                assert_eq!(
+                    playbook::validate_authorization_nonce(&row).is_ok(),
+                    !required
+                );
+            }
+            row["provider_type"] = "api_key".into();
+            assert_eq!(
+                playbook::validate_authorization_nonce(&row).is_ok(),
+                !required
+            );
+        }
+        let partial = Manifest::from_document(
+            json!({"providers":[{"slug":"hubstaff","authorization_nonce_required":true}]}),
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(partial.providers[0]["authorization_nonce_required"], true);
+        assert!(
+            playbook::validate_authorization_nonce(&json!({"authorization_nonce_required":"true"}))
+                .is_err()
+        );
+        assert!(
+            changed_fields(
+                &json!({"authorization_nonce_required":false}),
+                &json!({}),
+                &[]
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            changed_fields(
+                &json!({"authorization_nonce_required":true}),
+                &json!({}),
+                &[]
+            ),
+            ["authorization_nonce_required"]
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_catalog_readback_treats_legacy_absence_as_false() {
+        for (live, desired, drift) in [
+            (None, false, false),
+            (None, true, true),
+            (Some(false), false, false),
+            (Some(true), true, false),
+            (Some(true), false, true),
+        ] {
+            let server = MockServer::start().await;
+            let mut provider = provider_row(true);
+            if let Some(live) = live {
+                provider["authorization_nonce_required"] = live.into();
+            }
+            listing(&server, json!([provider]), json!([service_row()])).await;
+            let mut manifest = zoho(&[]).unwrap();
+            manifest.providers[0]["authorization_nonce_required"] = desired.into();
+            let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+            let report = validate(&mut api, &manifest, "https://nyx.example/cb")
+                .await
+                .unwrap();
+            assert_eq!(
+                report[0]
+                    .issues
+                    .iter()
+                    .any(|issue| issue.contains("provider authorization_nonce_required differs")),
+                drift,
+                "{:?}",
+                report[0].issues
+            );
+        }
+    }
+
     #[tokio::test]
     async fn validate_accepts_user_supplied_oauth_apps() {
         let server = MockServer::start().await;
@@ -2587,6 +2944,7 @@ mod tests {
         }
         result.unwrap();
     }
+
     #[test]
     fn manifest_evidence_is_strict_and_never_in_api_fields() {
         let manifest=Manifest::from_document(json!({
@@ -3077,5 +3435,153 @@ mod tests {
                 .iter()
                 .all(|request| request.method == wiremock::http::Method::GET)
         );
+    }
+
+    #[test]
+    fn catalog_billing_sync_and_bson_dates_do_not_create_drift() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/billing/managed-service.json"
+        ))
+        .unwrap();
+        let desired: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/billing/set-managed.golden.json"
+        ))
+        .unwrap();
+        assert!(changed_fields(&desired, &raw, &[]).is_empty());
+    }
+
+    #[test]
+    fn catalog_billing_normalization_preserves_explicit_clear() {
+        assert_eq!(
+            changed_fields(
+                &json!({"billing":null}),
+                &json!({"billing":{"platform_billable":true}}),
+                &[]
+            ),
+            vec!["billing"]
+        );
+    }
+
+    #[test]
+    fn catalog_billing_normalization_keeps_authored_strings_exact() {
+        let before = json!({"managed_execution":{"tariff_version":"2026-10-20T00:00:00Z"}});
+        let after = json!({"managed_execution":{"tariff_version":"2026-10-19T19:00:00-05:00"}});
+        assert_ne!(
+            super::super::admin_billing::normalize_billing(&before),
+            super::super::admin_billing::normalize_billing(&after)
+        );
+    }
+
+    #[test]
+    fn telnyx_template_pins_one_disabled_restricted_operation_with_typed_variables() {
+        let manifest = Manifest::from_document(
+            template_document("telnyx-platform").unwrap(),
+            &["model=org/model:1".into(), "max_output_tokens=1024".into()],
+            false,
+        )
+        .unwrap();
+        assert!(manifest.providers.is_empty());
+        assert_eq!(manifest.services.len(), 1);
+        let service = &manifest.services[0];
+        assert_eq!(service["service_category"], "internal");
+        for field in [
+            "requires_user_credential",
+            "identity_propagation_mode",
+            "inject_delegation_token",
+        ] {
+            assert!(service.get(field).is_none(), "{field} uses server defaults");
+        }
+        assert_eq!(service["forward_access_token"], false);
+        assert_eq!(
+            service["platform_key"],
+            json!({"enabled":false,"audience":"restricted","allowed_owner_ids":[]})
+        );
+        assert!(service.get("billing").is_none());
+        let operations = service["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0]["method"], "POST");
+        assert_eq!(operations[0]["path"], "/ai/openai/chat/completions");
+        assert_eq!(
+            operations[0]["request_body_schema"]["properties"]["model"]["enum"],
+            json!(["org/model:1"])
+        );
+        assert_eq!(
+            operations[0]["request_body_schema"]["properties"]["max_tokens"]["maximum"],
+            1024
+        );
+        for bad in ["-1", "0", "32769", "1.5", "1e3"] {
+            assert!(
+                Manifest::from_document(
+                    template_document("telnyx-platform").unwrap(),
+                    &[
+                        "model=org/model:1".into(),
+                        format!("max_output_tokens={bad}")
+                    ],
+                    false
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn typed_variables_preserve_default_charset_and_reject_unknown_types() {
+        for spec in [
+            json!({}),
+            json!({"type":"string"}),
+            json!({"type":"unknown"}),
+        ] {
+            assert!(
+                resolve_variables(
+                    &json!({"model":spec}),
+                    &BTreeMap::from([("model".into(), "org/model:1".into())]),
+                    false
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            resolve_variables(
+                &json!({"model":{"type":"model_id"}}),
+                &BTreeMap::from([("model".into(), "org/model:1".into())]),
+                false
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn catalog_apply_warns_before_disabling_or_clearing_live_platform_access() {
+        let live = json!({"slug":"telnyx-platform","is_active":true,"platform_key":{"enabled":true,"allowed_owner_ids":["person"]}});
+        for patch in [
+            json!({"platform_key":{"enabled":false}}),
+            json!({"platform_key":{"allowed_owner_ids":[]}}),
+        ] {
+            assert!(platform_access_warning(&patch, &live).is_some());
+        }
+        assert!(
+            platform_access_warning(&json!({"platform_key":{"enabled":true}}), &live).is_none()
+        );
+        assert!(
+            platform_access_warning(
+                &json!({"platform_key":{"enabled":false}}),
+                &json!({"is_active":false})
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn live_access_changes_require_confirmation_flag_or_dry_run() {
+        let warnings = vec!["Disables live access".into()];
+        assert!(
+            authorize_access_changes(&warnings, false, false, false, || panic!("no terminal"))
+                .is_err()
+        );
+        assert!(authorize_access_changes(&warnings, false, false, true, || Ok(false)).is_err());
+        authorize_access_changes(&warnings, false, false, true, || Ok(true)).unwrap();
+        authorize_access_changes(&warnings, false, true, false, || panic!("explicit flag"))
+            .unwrap();
+        authorize_access_changes(&warnings, true, false, false, || panic!("dry run")).unwrap();
     }
 }

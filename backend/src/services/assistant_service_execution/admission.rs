@@ -1,0 +1,336 @@
+use super::*;
+
+/// Private admission carried from the confirmation gate to concrete egress.
+/// It is deliberately not deserializable from HTTP headers or MCP arguments.
+#[derive(Clone)]
+pub struct Admission {
+    /// Installed only by the server-internal bound Ornn skill reader. It
+    /// bypasses the specialist's ordinary Ornn grant while retaining the
+    /// owner's exact-connection authority fence.
+    pub(super) bound_skill_read: bool,
+    pub(super) owner_instruction_receipt: bool,
+    pub(super) shared_detached: Option<crate::models::assistant_sharing::SharedExecution>,
+    pub(super) shared_permit: Option<crate::services::shared_agent_consent::Permit>,
+    pub(super) connection: String,
+    pub(super) binding: String,
+    pub(super) execution: Option<String>,
+    pub(super) execution_credential: bool,
+    pub(super) operation: String,
+    pub(super) operation_identity: Value,
+    pub(super) native_execution: Option<Value>,
+    pub(super) read: bool,
+    pub(super) api_key_id: String,
+    pub(super) summary: String,
+    pub(super) job_id: Option<String>,
+    pub(super) async_continuation: Option<AsyncContinuation>,
+    pub(super) chat: acks::ChatAuthority,
+}
+impl Admission {
+    pub(crate) fn shared_execution(
+        &self,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        let Some(access) = self.chat.org_agent_access.as_ref().and_then(|a| a.shared()) else {
+            return Ok(None);
+        };
+        let (consent_id, consent_claim) = self
+            .shared_permit
+            .as_ref()
+            .map(|p| {
+                let (id, claim) = p.durable();
+                (Some(id), claim)
+            })
+            .unwrap_or_default();
+        Ok(Some(crate::models::assistant_sharing::SharedExecution {
+            voice: false,
+            model: matches!(
+                self.operation_identity["kind"].as_str(),
+                Some("raw_inference" | "legacy_inference")
+            ),
+            actor: self.chat.user_id.clone(),
+            owner: access.owner().into(),
+            agent: self.chat.agent_id.clone(),
+            conversation: self.chat.conversation_id.clone(),
+            key: self.api_key_id.clone(),
+            turn: self
+                .chat
+                .turn_id
+                .clone()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            connection: self.connection.clone(),
+            revision: access.revision(),
+            behavior: crate::services::shared_agent_consent::behavior(access),
+            binding: self.binding.clone(),
+            consent_id,
+            consent_claim,
+        }))
+    }
+
+    /// Evidence from the shared HTTP stream gate, never caller-supplied metadata.
+    pub(crate) fn shared_stream(
+        &self,
+        method: &str,
+    ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {
+        if !is_shared_chat(&self.chat) {
+            return Ok(None);
+        }
+        let transport = if method == "CONNECT" {
+            "connect"
+        } else {
+            "websocket"
+        };
+        if self.operation_identity["transport"] != transport {
+            return Err(AppError::Forbidden(
+                "Shared stream admission required".into(),
+            ));
+        }
+        self.shared_execution()
+    }
+
+    pub fn bind_ssh(
+        &mut self,
+        connection: &UserService,
+        config: &crate::models::downstream_service::SshServiceConfig,
+    ) {
+        self.native_execution = Some(crate::services::assistant_native_execution::ssh_projection(
+            connection, config,
+        ));
+    }
+    pub fn revalidate<'a>(
+        &'a self,
+        db: &'a Database,
+        connection: &'a str,
+        target: Option<&'a crate::services::proxy_service::ProxyTarget>,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(self.revalidate_inner(db, connection, target))
+    }
+
+    async fn revalidate_inner(
+        &self,
+        db: &Database,
+        connection: &str,
+        target: Option<&crate::services::proxy_service::ProxyTarget>,
+    ) -> AppResult<()> {
+        if let Some(permit) = self
+            .chat
+            .execution_permission
+            .as_ref()
+            .and_then(|c| c.permit())
+        {
+            permit
+                .revalidate(target.ok_or_else(|| {
+                    AppError::Forbidden("Execution permission requires HTTP egress".into())
+                })?)
+                .await?;
+        }
+        if self.chat.guest && self.operation_identity["kind"] == "raw_inference" {
+            super::guest_model::require(
+                db,
+                &self.chat,
+                Some(connection),
+                target.ok_or(AppError::GuestModelRouteRequired)?,
+                &mut self.operation_identity.clone(),
+            )
+            .await?;
+        }
+        if let Some(pool) = self.operation_identity["pool_id"].as_str()
+            && let Some(revision) = self.operation_identity["pool_revision"].as_i64()
+            && db
+                .collection::<Document>("service_pools")
+                .find_one(doc! {
+                    "_id":pool,"is_active":true,"config_revision":revision,
+                    "members":{"$elemMatch":{"user_service_id":connection,"enabled":true}},
+                })
+                .await?
+                .is_none()
+        {
+            return Err(AppError::Conflict("Confirmed service pool changed".into()));
+        }
+        if let Some(job) = &self.job_id {
+            let service =
+                crate::services::user_service_service::find_user_service_by_id(db, connection)
+                    .await?
+                    .ok_or(AppError::MachineAuthorityStale)?;
+            crate::services::assistant_job_service_use::validate(
+                db,
+                job,
+                connection,
+                &service.user_id,
+            )
+            .await?;
+        }
+        if let Some(projection) = &self.native_execution {
+            let row =
+                crate::services::user_service_service::find_user_service_by_id(db, connection)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("SSH connection unavailable".into()))?;
+            let catalog = row
+                .catalog_service_id
+                .as_deref()
+                .ok_or_else(|| AppError::Conflict("SSH catalog changed".into()))?;
+            let config = crate::services::ssh_service::get_ssh_service(db, catalog).await?;
+            if *projection
+                != crate::services::assistant_native_execution::ssh_projection(&row, &config)
+            {
+                return Err(AppError::Conflict("Resolved SSH execution changed".into()));
+            }
+        }
+        if let Some(watch) = &self.async_continuation {
+            watch.revalidate(db, &self.chat).await?;
+        } else if self.job_id.is_none() {
+            if self.bound_skill_read {
+                super::selection::bound_skill_authority(
+                    db,
+                    &self.chat,
+                    "assistant.skill_read",
+                    Some(connection),
+                )
+                .await?;
+            } else {
+                personal_authority(
+                    db,
+                    &self.chat,
+                    "assistant.service_egress",
+                    Some(connection),
+                    !matches!(
+                        self.operation_identity["kind"].as_str(),
+                        Some("raw_inference" | "legacy_inference")
+                    ),
+                )
+                .await?;
+            }
+        }
+        // Owning the guard changes its lifetime, never its personal authority.
+        // Managed dispatch still requires the original live turn; dispatched work
+        // can settle later using its durable binding. Watches have their separate
+        // leased, exact-operation authority above.
+        if let Some(binding) = &self.shared_detached {
+            crate::services::shared_agent_transport::revalidate(db, binding).await?;
+        }
+        let service =
+            crate::services::user_service_service::find_user_service_by_id(db, connection)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?;
+        if let Some(original) = self
+            .chat
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.channel())
+        {
+            let fresh = crate::services::org_channel_service::validate(
+                db,
+                original.origin(),
+                &self.chat.user_id,
+                &self.chat.agent_id,
+            )
+            .await?;
+            let channel = fresh
+                .channel()
+                .ok_or_else(crate::services::org_channel_service::denied)?;
+            let model = matches!(
+                self.operation_identity["kind"].as_str(),
+                Some("raw_inference" | "legacy_inference")
+            );
+            if channel.execution().guest
+                && ((self.job_id.is_some() || self.native_execution.is_some())
+                    || service.node_id.is_some()
+                    || service.service_type != "http"
+                    || !(fresh.allows_service(&service)
+                        || (model && service.user_id == channel.execution().org_id)))
+            {
+                return Err(crate::services::org_channel_service::denied());
+            }
+        }
+        if let Some(original) = self.chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+            if self.job_id.is_some() || self.native_execution.is_some() {
+                return Err(AppError::Forbidden(
+                    "Shared connections require foreground HTTP execution".into(),
+                ));
+            }
+            let access = crate::services::shared_agent_service::require(
+                db,
+                &self.chat.user_id,
+                original.agent(),
+            )
+            .await?;
+            let model = matches!(
+                self.operation_identity["kind"].as_str(),
+                Some("raw_inference" | "legacy_inference")
+            ) && access.allows_model_connection(&service);
+            if !(access.allows_connection(&service) || model)
+                || access.revision() != original.revision()
+                || crate::services::shared_agent_consent::behavior(&access)
+                    != crate::services::shared_agent_consent::behavior(original)
+            {
+                return Err(AppError::Forbidden(
+                    "Shared service authority changed".into(),
+                ));
+            }
+            if service.user_id == self.chat.user_id
+                && !shared_platform_model(&self.chat, &service, &self.operation_identity, target)
+                && !crate::services::execution_permission_dispatch::covers(
+                    &self.chat,
+                    crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent,
+                    connection,
+                )
+            {
+                self.shared_permit
+                    .as_ref()
+                    .ok_or_else(|| AppError::Forbidden("Connection consent required".into()))?
+                    .revalidate(db, &access, &self.chat.user_id)
+                    .await?;
+            }
+        } else {
+            let access = crate::services::org_service::resolve_owner_access(
+                db,
+                &self.chat.user_id,
+                &service.user_id,
+            )
+            .await?;
+            let eligible = match &access {
+                crate::services::org_service::OwnerAccess::Direct
+                | crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => true,
+                crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                    role.can_proxy() && !service.admin_only
+                }
+                crate::services::org_service::OwnerAccess::Forbidden => false,
+            };
+            if !eligible || !access.allows_resource(connection) {
+                return Err(AppError::Forbidden("Service access revoked".into()));
+            }
+        }
+        let model =
+            self.operation_identity["kind"] == "raw_inference" && !is_shared_chat(&self.chat);
+        let binding_matches = if model {
+            super::authority::model_bindings_match(
+                db,
+                connection,
+                &self.api_key_id,
+                &[&self.binding],
+            )
+            .await?
+        } else {
+            self.binding == connection_binding(db, connection, &self.api_key_id).await?
+        };
+        if self.connection != connection || !binding_matches {
+            if model {
+                return Err(AppError::AssistantModelAuthorityChanged);
+            }
+            return Err(AppError::Conflict(
+                "Service selection changed; request a new exact confirmation".into(),
+            ));
+        }
+        if self.execution.as_ref()
+            != target
+                .map(|target| execution_projection_digest(target, self.execution_credential))
+                .as_ref()
+        {
+            if model {
+                return Err(AppError::AssistantModelAuthorityChanged);
+            }
+            return Err(AppError::Conflict(
+                "Resolved service execution changed".into(),
+            ));
+        }
+        Ok(())
+    }
+}

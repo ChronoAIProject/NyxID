@@ -15,6 +15,7 @@ use mongodb::{
 };
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::announcements::ensure_indexes(db).await?;
     db.collection::<VoiceSession>(COLLECTION_NAME)
         .create_indexes([
             IndexModel::builder()
@@ -47,6 +48,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn admit(
     db: &Database,
     user: &str,
@@ -56,10 +58,84 @@ pub async fn admit(
     credential_identity: String,
     worker: &str,
 ) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        client_request_id,
+        preferences,
+        credential_identity,
+        worker,
+        false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn admit_for_client_key(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    request: &str,
+    preferences: VoicePreferences,
+    identity: String,
+    worker: &str,
+    key: Option<super::client_key::ClientKey>,
+) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        request,
+        preferences,
+        identity,
+        worker,
+        false,
+        key,
+    )
+    .await
+}
+
+pub async fn admit_dictation(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    request: &str,
+    preferences: VoicePreferences,
+    identity: String,
+    worker: &str,
+) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        request,
+        preferences,
+        identity,
+        worker,
+        true,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn admit_audio(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    client_request_id: &str,
+    preferences: VoicePreferences,
+    credential_identity: String,
+    worker: &str,
+    dictation: bool,
+    client_key: Option<super::client_key::ClientKey>,
+) -> AppResult<VoiceSession> {
     super::super::assistant_voice::require_enabled(db, user)
         .await
         .map_err(|e| crate::errors::voice_start::Stage::Flag.error(e))?;
-    super::super::assistant_voice::thread(db, user, conversation).await?;
+    let thread = super::super::assistant_voice::thread(db, user, conversation).await?;
     if uuid::Uuid::parse_str(client_request_id).is_err() {
         return Err(AppError::ValidationError(
             "Invalid voice request identity".into(),
@@ -81,7 +157,14 @@ pub async fn admit(
             return Err(AppError::RateLimited);
         }
     }
+    let shared_execution =
+        super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        execution_enrolled: false,
+        responses: Default::default(),
+        client_key,
+        last_work_at: None,
+        shared_execution,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user.into(),
         conversation_id: conversation.into(),
@@ -92,6 +175,7 @@ pub async fn admit(
         voice_claim_fence: 0,
         purge_requested: false,
         protocol: None,
+        dictation,
         measured_ms: 0,
         state: SessionState::Starting,
         live_slot: true,
@@ -125,10 +209,13 @@ pub async fn admit(
     };
     let mut tx = db.client().start_session().await?;
     let db = db.clone();
+    let audit_db = db.clone();
     let saved = row.clone();
-    tx.start_transaction()
+    let admitted = tx
+        .start_transaction()
         .and_run2(async move |tx| {
             let result: AppResult<VoiceSession> = Box::pin(async {
+                super::client_key::fence_call(&db, &saved, tx).await?;
                 if db
                     .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
                     .update_one(
@@ -159,7 +246,25 @@ pub async fn admit(
             super::super::api_key_mutation_service::transaction_result(result)
         })
         .await
-        .map_err(super::super::api_key_mutation_service::map_transaction_error)
+        .map_err(super::super::api_key_mutation_service::map_transaction_error)?;
+    if admitted.shared_execution.is_some() {
+        let mut event = serde_json::json!({"session_id":admitted.id,"conversation_id":admitted.conversation_id});
+        crate::services::shared_agent_transport::annotate(
+            &mut event,
+            admitted.shared_execution.as_ref(),
+        );
+        crate::services::audit_service::log_async(
+            audit_db,
+            Some(user.into()),
+            "assistant_shared_voice_admitted".into(),
+            Some(event),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    Ok(admitted)
 }
 
 pub fn fence(row: &VoiceSession) -> Document {
@@ -174,6 +279,7 @@ pub async fn write(db: &Database, row: &VoiceSession, set: Document) -> AppResul
         .ok_or_else(|| AppError::Conflict("Voice session ownership changed".into()))
 }
 pub async fn refresh(db: &Database, row: &VoiceSession) -> AppResult<VoiceSession> {
+    super::shared::revalidate(db, row).await?;
     write(db,row,doc!{"lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(LEASE_SECONDS))}).await
 }
 pub async fn get(
@@ -236,13 +342,17 @@ pub async fn close(
                 if purge && !closed.purge_requested {
                     db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":&closed.id},doc! {"$set":{"purge_requested":true}}).session(&mut *tx).await?;
                 }
-                if closed.receipt_message_id.is_none() && !purge {
+                if closed.receipt_message_id.is_none() && !purge && !closed.dictation {
                     super::receipt::append(&db, tx, &closed).await?;
                 }
                 if purge
                     && closed.billing_finalized
                     && (closed.final_usage_confirmed || Utc::now() >= closed.reconcile_deadline)
                 {
+                    db.collection::<Document>(super::announcements::COLLECTION)
+                        .delete_many(doc! {"user_id":&closed.user_id,"session_id":&closed.id})
+                        .session(&mut *tx)
+                        .await?;
                     db.collection::<VoiceSession>(COLLECTION_NAME)
                         .delete_one(doc! {"_id":&closed.id})
                         .session(&mut *tx)
@@ -274,6 +384,7 @@ pub async fn claim_orphans(db: &Database, worker: &str) -> AppResult<Vec<VoiceSe
     Ok(claimed)
 }
 
+#[cfg(test)]
 pub async fn control(
     db: &Database,
     user: &str,
@@ -282,6 +393,30 @@ pub async fn control(
     command_id: &str,
     expected_revision: i64,
     action: &str,
+) -> AppResult<VoiceSession> {
+    control_for_caller(
+        db,
+        user,
+        conversation,
+        id,
+        command_id,
+        expected_revision,
+        action,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn control_for_caller(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    id: &str,
+    command_id: &str,
+    expected_revision: i64,
+    action: &str,
+    require_source: bool,
 ) -> AppResult<VoiceSession> {
     if uuid::Uuid::parse_str(command_id).is_err() || !matches!(action, "mute" | "unmute" | "end") {
         return Err(AppError::ValidationError("Invalid voice control".into()));
@@ -308,11 +443,40 @@ pub async fn control(
     if action != "end" {
         filter.insert("control_revision", expected_revision);
     }
-    db.collection::<VoiceSession>(COLLECTION_NAME)
-        .find_one_and_update(filter, doc! {"$set":set,"$inc":{"control_revision":1}})
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Conflict("Voice controls changed; refresh the session".into()))
+    let mut tx = db.client().start_session().await?;
+    let db = db.clone();
+    tx.start_transaction()
+        .and_run2(async move |tx| {
+            let result = Box::pin(async {
+                if require_source {
+                    super::client_key::fence_call(&db, &row, tx).await?;
+                    super::client_key::call_operation(
+                        &db,
+                        &row,
+                        "POST",
+                        &format!("/voice/sessions/{}/control", row.id),
+                        false,
+                        tx,
+                    )
+                    .await?;
+                }
+                db.collection::<VoiceSession>(COLLECTION_NAME)
+                    .find_one_and_update(
+                        filter.clone(),
+                        doc! {"$set":&set,"$inc":{"control_revision":1}},
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut *tx)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Conflict("Voice controls changed; refresh the session".into())
+                    })
+            })
+            .await;
+            super::super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn heartbeat(

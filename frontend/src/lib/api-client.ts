@@ -62,21 +62,47 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/reset-password",
   "/auth/verify-email",
   "/auth/setup",
+  "/auth/mfa/verify",
+  "/auth/mfa/cancel",
 ]);
+
+let sessionConfirmation: Promise<boolean> | null = null;
+let lastSessionConfirmation: { at: number; valid: boolean; user: unknown } | null = null;
+
+async function confirmSessionStillValid(): Promise<boolean> {
+  const now = Date.now();
+  const user = useAuthStore.getState().user;
+  if (lastSessionConfirmation && lastSessionConfirmation.user === user && now - lastSessionConfirmation.at < 500) {
+    return lastSessionConfirmation.valid;
+  }
+  if (!sessionConfirmation) {
+    sessionConfirmation = fetch(apiUrl("/users/me"), {
+      ...buildFetchConfig({ preserveSessionOn401: true }),
+      method: "GET",
+    })
+      // Only a confirmed identity 401 proves that the NyxID session is gone.
+      // A 2xx, another HTTP status, or a transient network failure must keep
+      // the browser session intact.
+      .then((response) => response.status !== 401 || useAuthStore.getState().user !== user)
+      .catch(() => true)
+      .then((valid) => {
+        lastSessionConfirmation = { at: Date.now(), valid, user };
+        return valid;
+      })
+      .finally(() => {
+        sessionConfirmation = null;
+      });
+  }
+  return sessionConfirmation;
+}
 
 export function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
-  // Surface identification for server-side telemetry. Only attached
-  // once the runtime telemetry client has been constructed on this
-  // page load. Keying off the live `isTelemetryActive()` (not just
-  // persisted consent) means a browser with stale consent from an
-  // earlier telemetry-on deploy will NOT leak these headers after
-  // the operator turns telemetry off at the backend — the PostHog
-  // client never initialized this session, so the surface header is
-  // pointless anyway.
+  // This device header only narrows the persisted account permission. The
+  // backend rechecks it and consent revisions at admission and dispatch.
   const telemetryHeaders: Record<string, string> = isTelemetryActive()
-    ? { "X-NyxID-Client": "ui" }
+    ? { "X-NyxID-Client": "ui", "X-NyxID-Analytics": "enabled", "X-NyxID-Analytics-Account": useAuthStore.getState().user?.id ?? "" }
     : {};
 
   const config: RequestInit = {
@@ -152,6 +178,7 @@ export async function apiFetch(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<Response> {
+  const userAtRequest = useAuthStore.getState().user;
   const actorId = options.creditsDenial ? currentCreditsActor() : null;
   options.authorityGuard?.();
   const response = await fetch(
@@ -171,7 +198,21 @@ export async function apiFetch(
     !options.preserveSessionOn401 &&
     !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)
   ) {
-    useAuthStore.getState().setUser(null);
+    // The identity endpoint is authoritative and can clear immediately. A
+    // downstream/provider endpoint gets one debounced, single-flight session
+    // check so an unrelated 401 cannot make the SPA appear logged out.
+    if (endpoint === "/users/me") {
+      useAuthStore.getState().setUser(null);
+    } else {
+      const sessionStillValid = await confirmSessionStillValid();
+      // The original request may have crossed an account switch while the
+      // identity check was in flight. Re-run the caller's fence immediately
+      // before mutating global auth state.
+      options.authorityGuard?.();
+      if (!sessionStillValid && useAuthStore.getState().user === userAtRequest) {
+        useAuthStore.getState().setUser(null);
+      }
+    }
   }
 
   if (!response.ok) {

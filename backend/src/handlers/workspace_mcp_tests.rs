@@ -10,6 +10,8 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
         .unwrap();
     seed_legacy(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
+    crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
     connect(&db, &owner, "api-google-workspace").await;
     connect(&db, &owner, "api-google-docs").await;
     connect(&db, &owner, "api-google-drive").await;

@@ -1,5 +1,7 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Copy, Network, Trash2 } from "lucide-react";
@@ -74,49 +76,49 @@ function UpstreamResponse({
   readonly envelope: AssistantUpstreamEnvelope;
   readonly index: number;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const outcome = envelope.upstreamOutcome ?? "unknown";
   const response = envelope.degraded ? null : envelope.response;
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-10 font-semibold uppercase text-text-tertiary">{t("Upstream response ")}{index + 1}
+        <h4 className="type-table-header uppercase text-text-tertiary">{translateUi("Upstream response ")}{index + 1}
         </h4>
         {response ? (
-          <Badge variant={statusVariant(response.status)}>{t("Aevatar ")}{response.status}
+          <Badge variant={statusVariant(response.status)}>{translateUi("Aevatar ")}{response.status}
           </Badge>
         ) : null}
       </div>
       {outcome === "no_response" ? (
-        <p className="text-11 text-warning">{t("No upstream response.")}</p>
+        <p className="text-13 text-warning">{translateUi("No upstream response.")}</p>
       ) : outcome === "unknown" ? (
-        <p className="text-11 text-text-tertiary">{t("Response metadata not reported by this backend.")}</p>
+        <p className="text-13 text-text-tertiary">{translateUi("Response metadata not reported by this backend.")}</p>
       ) : response ? (
-        <div className="rounded-lg border border-border/60 bg-background/50 p-3 text-11">
-          <p className="text-muted-foreground">{t("Backend-observed Aevatar response metadata")}</p>
-          <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 font-mono text-10">
-            <dt className="text-text-tertiary">{t("status")}</dt>
+        <div className="rounded-lg border border-border/60 bg-background/50 p-3 text-13">
+          <p className="text-muted-foreground">{translateUi("Backend-observed Aevatar response metadata")}</p>
+          <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 font-mono text-12">
+            <dt className="text-text-tertiary">{translateUi("status")}</dt>
             <dd>{response.status}</dd>
-            <dt className="text-text-tertiary">{t("SSE")}</dt>
-            <dd>{response.sse ? t("yes") : t("no")}</dd>
+            <dt className="text-text-tertiary">{translateUi("SSE")}</dt>
+            <dd>{response.sse ? translateUi("yes") : translateUi("no")}</dd>
             {Object.entries(response.headers).map(([name, header]) => (
               <div key={name} className="contents">
                 <dt className="break-all text-text-tertiary">{name}</dt>
                 <dd className="min-w-0 break-all">
                   {header.value}
-                  {header.truncated ? t(" [truncated]") : ""}
+                  {header.truncated ? translateUi(" [truncated]") : ""}
                 </dd>
               </div>
             ))}
           </dl>
           {!envelope.degraded && envelope.droppedHeaders ? (
-            <p className="mt-2 text-10 text-warning">{t("Allowlisted response headers were dropped by the wire-log size ladder.")}</p>
+            <p className="mt-2 text-12 text-warning">{translateUi("Allowlisted response headers were dropped by the wire-log size ladder.")}</p>
           ) : null}
         </div>
       ) : envelope.degraded && envelope.status ? (
-        <p className="text-11 text-muted-foreground">{t("Minimal backend echo retained status ")}{envelope.status}{t("; response headers were degraded.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Minimal backend echo retained status ")}{envelope.status}{translateUi("; response headers were degraded.")}</p>
       ) : (
-        <p className="text-11 text-text-tertiary">{t("Backend reported a response, but its metadata was degraded.")}</p>
+        <p className="text-13 text-text-tertiary">{translateUi("Backend reported a response, but its metadata was degraded.")}</p>
       )}
     </section>
   );
@@ -135,16 +137,16 @@ function ResponseCapture({
   readonly visibleLines: number;
   readonly onShowMore: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const capture = entry.capture;
   if (!capture) {
     return (
-      <p className="text-11 text-text-tertiary">{t("Delivered-body capture is not available for this persisted exchange.")}</p>
+      <p className="text-13 text-text-tertiary">{translateUi("Delivered-body capture is not available for this persisted exchange.")}</p>
     );
   }
   if (capture.state === "evicted") {
     return (
-      <p className="text-11 text-text-tertiary">{t("Delivered-body capture was evicted from session memory.")}</p>
+      <p className="text-13 text-text-tertiary">{translateUi("Delivered-body capture was evicted from session memory.")}</p>
     );
   }
   const hasSse = Boolean(capture.sse);
@@ -152,15 +154,15 @@ function ResponseCapture({
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-10 font-semibold uppercase text-text-tertiary">{t("Delivered response")}</h4>
+        <h4 className="type-table-header uppercase text-text-tertiary">{translateUi("Delivered response")}</h4>
         <Badge variant="secondary">
-          {capture.state === "settled" ? capture.outcome : t("capturing")}
+          {capture.state === "settled" ? capture.outcome : translateUi("capturing")}
         </Badge>
-        {truncated ? <Badge variant="warning">{t("Truncated")}</Badge> : null}
+        {truncated ? <Badge variant="warning">{translateUi("Truncated")}</Badge> : null}
         {hasSse ? (
           <div
             role="tablist"
-            aria-label={t("Delivered response view")}
+            aria-label={translateUi("Delivered response view")}
             className="ml-auto flex h-7 items-center rounded-lg border border-border/60 p-0.5"
           >
             <button
@@ -169,37 +171,37 @@ function ResponseCapture({
               aria-selected={!rendered}
               onClick={() => onRenderedChange(false)}
               className={cn(
-                "h-6 rounded-md px-2 text-10 font-medium",
+                "h-6 rounded-md px-2 type-group-label ",
                 !rendered
                   ? "bg-overlay-strong text-foreground"
                   : "text-text-tertiary hover:text-muted-foreground",
               )}
-            >{t("Raw")}</button>
+            >{translateUi("Raw")}</button>
             <button
               type="button"
               role="tab"
               aria-selected={rendered}
               onClick={() => onRenderedChange(true)}
               className={cn(
-                "h-6 rounded-md px-2 text-10 font-medium",
+                "h-6 rounded-md px-2 type-group-label ",
                 rendered
                   ? "bg-overlay-strong text-foreground"
                   : "text-text-tertiary hover:text-muted-foreground",
               )}
-            >{t("Rendered")}</button>
+            >{translateUi("Rendered")}</button>
           </div>
         ) : null}
       </div>
-      <p className="text-11 text-muted-foreground">{t("Decoded response entity as delivered by NyxID to this browser.")}</p>
+      <p className="text-13 text-muted-foreground">{translateUi("Decoded response entity as delivered by NyxID to this browser.")}</p>
       {capture.sse && rendered ? (
         <AssistantWireReplayView exchange={entry} />
       ) : capture.sse ? (
         <div className="overflow-hidden rounded-lg border border-border/60 bg-background/60">
-          <div className="max-h-96 overflow-auto font-mono text-10 leading-5">
+          <div className="max-h-96 overflow-auto font-mono text-12">
             {capture.sse.lines.slice(0, visibleLines).map((line, index) => (
               <div
                 key={`${String(index)}-${line.ending}`}
-                title={t("Line ending: {{value}}", { value: line.ending || t("unterminated") })}
+                title={translateUi("Line ending: {{value1}}", { value1: line.ending || "unterminated" })}
                 className="grid min-h-5 grid-cols-[3rem_1fr] border-b border-border/30 last:border-0"
               >
                 <span className="select-none border-r border-border/30 px-2 text-right text-text-tertiary">
@@ -218,20 +220,20 @@ function ResponseCapture({
                 variant="ghost"
                 size="sm"
                 onClick={onShowMore}
-              >{t("Show")}{" "}
+              >{translateUi("Show")}{" "}
                 {Math.min(
                   RAW_LINE_WINDOW_STEP,
                   capture.sse.lines.length - visibleLines,
-                )}{" "}{t("more")}</Button>
+                )}{" "}{translateUi("more")}</Button>
             </div>
           ) : null}
         </div>
       ) : capture.body ? (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-5 text-muted-foreground">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 text-muted-foreground">
           {capture.body.text}
         </pre>
       ) : (
-        <p className="text-11 text-text-tertiary">{t("Waiting for delivered response data.")}</p>
+        <p className="text-13 text-text-tertiary">{translateUi("Waiting for delivered response data.")}</p>
       )}
     </section>
   );
@@ -246,7 +248,7 @@ function WireLogPayload({
   readonly droppedEchoCount: number | undefined;
   readonly showResponses: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <>
       {upstreamEchoes.map((envelope, index) => (
@@ -254,16 +256,16 @@ function WireLogPayload({
           key={`${envelope.path}-${String(index)}`}
           className="space-y-2"
         >
-          <h4 className="text-10 font-semibold uppercase text-text-tertiary">{t("Request ")}{index + 1}{t(" - backend echo")}</h4>
-          <p className="text-11 leading-5 text-muted-foreground">{t("Reconstructed request assembled by NyxID before credential and identity injection; headers are an allowlisted subset.")}</p>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-5 text-muted-foreground">
+          <h4 className="type-table-header uppercase text-text-tertiary">{translateUi("Request ")}{index + 1}{translateUi(" - backend echo")}</h4>
+          <p className="text-13 text-muted-foreground">{translateUi("Reconstructed request assembled by NyxID before credential and identity injection; headers are an allowlisted subset.")}</p>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 text-muted-foreground">
             {requestJson(envelope)}
           </pre>
         </section>
       ))}
       {droppedEchoCount ? (
-        <p className="text-11 text-warning">
-          {droppedEchoCount}{t(" later backend echo")}{droppedEchoCount === 1 ? t(" was") : t("es were")}{t(" dropped by the wire-log size ladder.")}</p>
+        <p className="text-13 text-warning">
+          {droppedEchoCount}{translateUi(" later backend echo")}{droppedEchoCount === 1 ? translateUi(" was") : translateUi("es were")}{translateUi(" dropped by the wire-log size ladder.")}</p>
       ) : null}
       {showResponses
         ? upstreamEchoes.map((envelope, index) => (
@@ -285,22 +287,22 @@ function LazyWireLogPayload({
   readonly wireLogId: string;
   readonly showResponses: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const wireLog = useAssistantWireLog(wireLogId, true);
 
   if (wireLog.isPending) {
     return (
-      <p className="text-11 text-muted-foreground">{t("Loading wire log...")}</p>
+      <p className="text-13 text-muted-foreground">{translateUi("Loading wire log...")}</p>
     );
   }
   if (wireLog.isError) {
     return (
-      <p className="text-11 text-destructive">{t("Could not load wire log.")}</p>
+      <p className="text-13 text-destructive">{translateUi("Could not load wire log.")}</p>
     );
   }
   if (wireLog.data?.status === "expired") {
     return (
-      <p className="text-11 text-warning">{t("Wire log expired or unavailable.")}</p>
+      <p className="text-13 text-warning">{translateUi("Wire log expired or unavailable.")}</p>
     );
   }
   if (wireLog.data?.status !== "loaded") return null;
@@ -333,7 +335,7 @@ function WireLogEntry({
   readonly onRenderedChange: (rendered: boolean) => void;
   readonly onShowMore: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const queryClient = useQueryClient();
 
   function copyExchange() {
@@ -361,7 +363,7 @@ function WireLogEntry({
           type="button"
           onClick={onExpandedChange}
           aria-expanded={isExpanded}
-          aria-label={t("Toggle {{label}} details", { label: entry.label })}
+          aria-label={translateUi("Toggle {{value1}} details", { value1: entry.label })}
           className="flex min-w-0 flex-1 items-start gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <ChevronDown
@@ -372,7 +374,7 @@ function WireLogEntry({
           />
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-1.5">
-              <span className="text-10 tabular-nums text-text-tertiary">
+              <span className="text-12 tabular-nums text-text-tertiary">
                 {new Date(entry.ts).toLocaleTimeString(getFormattingLocale(), {
                   hour: "2-digit",
                   minute: "2-digit",
@@ -380,17 +382,18 @@ function WireLogEntry({
                 })}
               </span>
               <Badge variant="secondary">
-                {entry.kind === "sse" ? t("SSE") : t("Header")}
+                {entry.kind === "sse" ? translateUi("SSE") : translateUi("Header")}
               </Badge>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Badge variant={statusVariant(entry.status)}>{t("NyxID ")}{entry.status}
+                  <Badge variant={statusVariant(entry.status)}>
+                    NyxID {entry.status}
                   </Badge>
                 </TooltipTrigger>
-                <TooltipContent>{t("NyxID response to this browser")}</TooltipContent>
+                <TooltipContent>{translateUi("NyxID response to this browser")}</TooltipContent>
               </Tooltip>
             </span>
-            <span className="mt-1 block break-all font-mono text-11 leading-5 text-muted-foreground">
+            <span className="mt-1 block break-all font-mono text-13 text-muted-foreground">
               {entry.label}
             </span>
           </span>
@@ -401,14 +404,14 @@ function WireLogEntry({
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={t("Copy {{label}} exchange as JSON", { label: entry.label })}
+              aria-label={translateUi("Copy {{value1}} exchange as JSON", { value1: entry.label })}
               className="h-7 w-7 shrink-0"
               onClick={copyExchange}
             >
               <Copy />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{t("Copy exchange as JSON")}</TooltipContent>
+          <TooltipContent>{translateUi("Copy exchange as JSON")}</TooltipContent>
         </Tooltip>
       </div>
       {isExpanded ? (
@@ -425,7 +428,7 @@ function WireLogEntry({
               showResponses={showResponses}
             />
           ) : (
-            <p className="text-11 text-warning">{t("Wire log payload unavailable.")}</p>
+            <p className="text-13 text-warning">{translateUi("Wire log payload unavailable.")}</p>
           )}
           {showResponses ? (
             <ResponseCapture
@@ -447,7 +450,7 @@ export function AssistantWireLogPanel({
 }: {
   readonly activeConversationId: string | null;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const queryClient = useQueryClient();
   const entries = useAssistantWireLogStore((state) => state.entries);
   const captureEnabled = useAssistantWireLogStore(
@@ -504,14 +507,14 @@ export function AssistantWireLogPanel({
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={t("Aevatar wire log")}
+              aria-label={translateUi("Aevatar wire log")}
               className="shrink-0 text-text-tertiary"
             >
               <Network className="h-4 w-4" />
             </Button>
           </SheetTrigger>
         </TooltipTrigger>
-        <TooltipContent>{t("Aevatar wire log")}</TooltipContent>
+        <TooltipContent>{translateUi("Aevatar wire log")}</TooltipContent>
       </Tooltip>
 
       <SheetContent
@@ -519,41 +522,41 @@ export function AssistantWireLogPanel({
         className="flex w-full flex-col gap-0 p-0 sm:max-w-2xl"
       >
         <SheetHeader className="shrink-0 border-b border-border/60 px-5 py-5 pr-12">
-          <SheetTitle>{t("Aevatar wire log")}</SheetTitle>
-          <SheetDescription className="sr-only">{t("Backend-sourced Aevatar request echoes, response metadata, and response entities delivered by NyxID.")}</SheetDescription>
+          <SheetTitle>{translateUi("Aevatar wire log")}</SheetTitle>
+          <SheetDescription className="sr-only">{translateUi("Backend-sourced Aevatar request echoes, response metadata, and response entities delivered by NyxID.")}</SheetDescription>
         </SheetHeader>
 
         <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border/60 px-5 py-3">
-          <label
+          <Label
             htmlFor="wire-log-capture"
-            className="flex items-center gap-2 text-12 font-medium text-foreground"
+            className="flex items-center gap-2 text-foreground"
           >
             <Switch
               id="wire-log-capture"
               checked={captureEnabled}
               onCheckedChange={setCaptureEnabled}
-              aria-label={t("Capture Aevatar exchanges")}
-            />{t("Capture")}</label>
-          <label
+              aria-label={translateUi("Capture Aevatar exchanges")}
+            />{translateUi("Capture")}</Label>
+          <Label
             htmlFor="wire-log-responses"
-            className="flex items-center gap-2 text-12 font-medium text-foreground"
+            className="flex items-center gap-2 text-foreground"
           >
             <Switch
               id="wire-log-responses"
               checked={showResponses}
               onCheckedChange={setShowResponses}
-              aria-label={t("Show Aevatar responses")}
-            />{t("Responses")}</label>
-          <label
+              aria-label={translateUi("Show Aevatar responses")}
+            />{translateUi("Responses")}</Label>
+          <Label
             htmlFor="wire-log-all-conversations"
-            className="flex items-center gap-2 text-12 font-medium text-foreground"
+            className="flex items-center gap-2 text-foreground"
           >
             <Switch
               id="wire-log-all-conversations"
               checked={allConversations}
               onCheckedChange={setAllConversations}
-              aria-label={t("Show all conversations")}
-            />{t("All conversations")}</label>
+              aria-label={translateUi("Show all conversations")}
+            />{translateUi("All conversations")}</Label>
           <Button
             type="button"
             variant="ghost"
@@ -562,14 +565,14 @@ export function AssistantWireLogPanel({
             onClick={clearWireLogs}
             disabled={entries.length === 0}
           >
-            <Trash2 />{t("Clear")}</Button>
+            <Trash2 />{translateUi("Clear")}</Button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {entries.length === 0 ? (
-            <div className="flex min-h-40 items-center justify-center px-6 text-center text-12 text-text-tertiary">{t("No captured requests")}</div>
+            <div className="flex min-h-40 items-center justify-center px-6 text-center text-14 text-text-tertiary">{translateUi("No captured requests")}</div>
           ) : visibleEntries.length === 0 ? (
-            <div className="flex min-h-40 items-center justify-center px-6 text-center text-12 text-text-tertiary">{t("No captured requests for this conversation")}</div>
+            <div className="flex min-h-40 items-center justify-center px-6 text-center text-14 text-text-tertiary">{translateUi("No captured requests for this conversation")}</div>
           ) : (
             <div className="space-y-2">
               {[...visibleEntries].reverse().map((entry) => {
@@ -603,10 +606,10 @@ export function AssistantWireLogPanel({
           )}
         </div>
 
-        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-11 leading-4 text-text-tertiary">
-          <p>{t("Raw captures are session-only and may contain sensitive payloads verbatim without the chat renderer's credential redaction, including in replay placeholders.")}</p>
-          <p>{t("WebSocket exchanges are not captured.")}</p>
-          <p>{t("Final AppError responses do not carry debug echoes, including errors after an upstream response was observed.")}</p>
+        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-13 text-text-tertiary">
+          <p>{translateUi("Raw captures are session-only and may contain sensitive payloads verbatim without the chat renderer's credential redaction, including in replay placeholders.")}</p>
+          <p>{translateUi("WebSocket exchanges are not captured.")}</p>
+          <p>{translateUi("Final AppError responses do not carry debug echoes, including errors after an upstream response was observed.")}</p>
         </div>
       </SheetContent>
     </Sheet>
@@ -618,6 +621,7 @@ export function AssistantWireLogAction({
 }: {
   readonly activeConversationId: string | null;
 }) {
+  useUiTranslation();
   // Runtime feature flag (`experimental:aevatar-chat-wire-log`), resolved
   // server-side for this user on the personal surface. Fail-closed: unknown,
   // loading, or an older backend that omits the key all read as off.

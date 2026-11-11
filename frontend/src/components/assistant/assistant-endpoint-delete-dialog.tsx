@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -52,7 +52,7 @@ export function AssistantEndpointDeleteDialog({
   readonly params: AssistantEndpointDeleteParams;
   readonly onComplete: (endpointId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -134,19 +134,19 @@ export function AssistantEndpointDeleteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? t("Endpoint already deleted") : t("Delete endpoint")}
+            {result?.replayed ? translateUi("Endpoint already deleted") : translateUi("Delete endpoint")}
           </DialogTitle>
           <DialogDescription>
             {result
-              ? t("NyxID verified the endpoint is gone through its authorization evidence returning 404. This action is never remembered.")
-              : t("This permanently deletes the endpoint. Confirm every time — NyxID will not remember this choice.")}
+              ? translateUi("NyxID verified the endpoint is gone through its authorization evidence returning 404. This action is never remembered.")
+              : translateUi("This permanently deletes the endpoint. Confirm every time — NyxID will not remember this choice.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Endpoint")}</span>
+              <span className="text-muted-foreground">{translateUi("Endpoint")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -158,26 +158,26 @@ export function AssistantEndpointDeleteDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-11 text-success">{t("Endpoint absence verified.")}</p>
+          <p className="text-13 text-success">{translateUi("Endpoint absence verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!result ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void deleteEndpoint()}
-              >{t("Delete endpoint")}</Button>
+              >{translateUi("Delete endpoint")}</Button>
             </>
           ) : (
             <>
@@ -190,7 +190,7 @@ export function AssistantEndpointDeleteDialog({
                     void verifyAbsence(result.resource.endpointId)
                   }
                 >
-                  <RefreshCw />{t("Retry verification")}</Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -200,7 +200,7 @@ export function AssistantEndpointDeleteDialog({
                   onComplete(result.resource.endpointId);
                   close();
                 }}
-              >{t("Report deletion")}</Button>
+              >{translateUi("Report deletion")}</Button>
             </>
           )}
         </DialogFooter>

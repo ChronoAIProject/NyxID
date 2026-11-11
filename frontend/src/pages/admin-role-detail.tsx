@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import {
   changedFields,
   describeChanges,
@@ -53,12 +53,13 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRoleDetailPage() {
+  useUiTranslation();
   const { roleId } = useParams({ strict: false }) as { roleId: string };
   return <AdminRoleDetailPageEditor key={roleId} roleId={roleId} />;
 }
 
 function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -154,7 +155,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
         roleId,
         data: { all: true },
       });
-      toast.success(result.message);
+      toast.success(translateUi(result.message));
       setBulkAssignOpen(false);
     } catch (err) {
       toast.error(
@@ -176,12 +177,12 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">{t("Role not found")}</h3>
-        <p className="mb-4 text-sm text-muted-foreground">{t("The role you are looking for does not exist or has been deleted.")}</p>
+        <h3 className="mb-2 font-display type-card-title">{translateUi("Role not found")}</h3>
+        <p className="mb-4 text-14 text-muted-foreground">{translateUi("The role you are looking for does not exist or has been deleted.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: "/admin/roles" })}
-        >{t("Back to Roles")}</Button>
+        >{translateUi("Back to Roles")}</Button>
       </div>
     );
   }
@@ -197,11 +198,11 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
               <Button variant="outline" onClick={() => setBulkAssignOpen(true)}>
                 <ButtonIcon>
                   <Users className="h-3 w-3" />
-                </ButtonIcon>{t("Assign All")}</Button>
+                </ButtonIcon>{translateUi("Assign All")}</Button>
               <Button variant="outline" onClick={openEditDialog}>
                 <ButtonIcon>
                   <Pencil className="h-3 w-3" />
-                </ButtonIcon>{t("Edit")}</Button>
+                </ButtonIcon>{translateUi("Edit")}</Button>
               {!role.is_system && (
                 <Button
                   variant="destructive"
@@ -209,41 +210,41 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 >
                   <ButtonIcon variant="destructive">
                     <Trash2 className="h-3 w-3 text-destructive" />
-                  </ButtonIcon>{t("Delete")}</Button>
+                  </ButtonIcon>{translateUi("Delete")}</Button>
               )}
             </>
           ) : null
         }
       />
 
-      <DetailSection title={t("Role Information")}>
-        <DetailRow label={t("ID")} value={role.id} copyable />
-        <DetailRow label={t("Name")} value={role.name} />
-        <DetailRow label={t("Slug")} value={role.slug} copyable />
+      <DetailSection title={translateUi("Role Information")}>
+        <DetailRow label={translateUi("ID")} value={role.id} copyable />
+        <DetailRow label={translateUi("Name")} value={role.name} />
+        <DetailRow label={translateUi("Slug")} value={role.slug} copyable />
         <DetailRow
-          label={t("Type")}
+          label={translateUi("Type")}
           value={role.is_system ? "System" : "Custom"}
           badge
           badgeVariant={role.is_system ? "secondary" : "default"}
         />
         <DetailRow
-          label={t("Default")}
+          label={translateUi("Default")}
           value={role.is_default ? "Yes" : "No"}
           badge
           badgeVariant={role.is_default ? "success" : "secondary"}
         />
         {role.client_id && (
-          <DetailRow label={t("Client ID")} value={role.client_id} copyable />
+          <DetailRow label={translateUi("Client ID")} value={role.client_id} copyable />
         )}
-        <DetailRow label={t("Created")} value={formatDate(role.created_at)} />
-        <DetailRow label={t("Updated")} value={formatDate(role.updated_at)} />
+        <DetailRow label={translateUi("Created")} value={formatDate(role.created_at)} />
+        <DetailRow label={translateUi("Updated")} value={formatDate(role.updated_at)} />
       </DetailSection>
 
-      <DetailSection title={t("Permissions")}>
+      <DetailSection title={translateUi("Permissions")}>
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">{t("No permissions assigned.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("No permissions assigned.")}</p>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2 px-4 py-3">
@@ -251,7 +252,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
               <Badge
                 key={perm}
                 variant="secondary"
-                className="font-mono text-xs"
+                className="font-mono text-12"
               >
                 {perm}
               </Badge>
@@ -265,8 +266,8 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Edit Role")}</DialogTitle>
-            <DialogDescription>{t("Update role details for ")}{role.name}.
+            <DialogTitle>{translateUi("Edit Role")}</DialogTitle>
+            <DialogDescription>{translateUi("Update role details for ")}{role.name}.
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
@@ -279,10 +280,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Name")}</FormLabel>
+                    <FormLabel>{translateUi("Name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder={t("Role name")}
+                        placeholder={translateUi("Role name")}
                         disabled={role.is_system}
                         {...field}
                       />
@@ -296,10 +297,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Slug")}</FormLabel>
+                    <FormLabel>{translateUi("Slug")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder={"role-slug"}
+                        placeholder="role-slug"
                         disabled={role.is_system}
                         {...field}
                       />
@@ -313,9 +314,9 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Description")}</FormLabel>
+                    <FormLabel>{translateUi("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder={t("Optional description")} {...field} />
+                      <Input placeholder={translateUi("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -326,10 +327,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="permissions"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Permissions")}</FormLabel>
+                    <FormLabel>{translateUi("Permissions")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder={t("e.g. users:read, users:write")}
+                        placeholder={translateUi("e.g. users:read, users:write")}
                         {...field}
                       />
                     </FormControl>
@@ -348,7 +349,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                         onCheckedChange={field.onChange}
                       />
                     </FormControl>
-                    <FormLabel className="!mt-0">{t("Auto-assign to new users")}</FormLabel>
+                    <FormLabel className="!mt-0">{translateUi("Auto-assign to new users")}</FormLabel>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -358,12 +359,12 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                   type="button"
                   variant="outline"
                   onClick={() => setEditOpen(false)}
-                >{t("Cancel")}</Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={updateMutation.isPending}
-                >{t("Save Changes")}</Button>
+                >{translateUi("Save Changes")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -374,16 +375,16 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete Role")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to delete \"")}{role.name}{t("\"? It will be removed from all users and groups. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete Role")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete \"")}{role.name}{translateUi("\"? It will be removed from all users and groups. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Delete Role")}</Button>
+            >{translateUi("Delete Role")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -392,15 +393,15 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       <Dialog open={bulkAssignOpen} onOpenChange={setBulkAssignOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Assign Role to All Users")}</DialogTitle>
-            <DialogDescription>{t("This will assign the \"")}{role.name}{t("\" role to every existing user who does not already have it. Users who already have this role will not be affected.")}</DialogDescription>
+            <DialogTitle>{translateUi("Assign Role to All Users")}</DialogTitle>
+            <DialogDescription>{translateUi("This will assign the \"")}{role.name}{translateUi("\" role to every existing user who does not already have it. Users who already have this role will not be affected.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               onClick={() => void handleBulkAssignAll()}
               isLoading={bulkAssignMutation.isPending}
-            >{t("Assign to All Users")}</Button>
+            >{translateUi("Assign to All Users")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

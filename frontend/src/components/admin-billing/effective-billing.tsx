@@ -1,5 +1,8 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { titleCase } from "@/schemas/platform-models";
+import { Link } from "@tanstack/react-router";
+import { PriceRows } from "@/components/platform-models/shared";
 import { Badge } from "@/components/ui/badge";
 import { useAdminBillingService } from "@/hooks/use-admin-billing";
 import { metricLabel } from "@/schemas/billing-metrics";
@@ -41,6 +44,7 @@ const CLASS_LABELS: Record<CredentialClass, string> = {
 };
 
 const REASON_TEXT: Record<EffectiveReason, string> = {
+  model_tariff_required: "A complete model tariff is required. Base and legacy prices never apply.",
   billing_disabled:
     "Billing is disabled for this deployment (BILLING_ENABLED).",
   nyxid_credentials_only:
@@ -67,9 +71,9 @@ const ORIGIN_LABELS: Record<EffectivePrice["origin"], string> = {
 };
 
 export function SourceBadge({ source }: { readonly source: BillingSource }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
-    <Badge variant={SOURCE_VARIANTS[source]} title={t("Source: {{source}}", { source: source })}>
+    <Badge variant={SOURCE_VARIANTS[source]} title={translateUi("Source: {{value1}}", { value1: source })}>
       {SOURCE_LABELS[source]}
     </Badge>
   );
@@ -80,15 +84,15 @@ function SyncBadge({
 }: {
   readonly status: EffectivePrice["sync_status"];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (!status) return null;
   return (
     <Badge variant={status === "synced" ? "success" : "warning"}>
       {status === "synced"
-        ? t("Synced")
+        ? translateUi("Synced")
         : status === "failed"
-          ? t("Failed")
-          : t("Pending")}
+          ? translateUi("Failed")
+          : translateUi("Pending")}
     </Badge>
   );
 }
@@ -105,18 +109,18 @@ function priceLabel(price: EffectivePrice): string {
 }
 
 export function PriceLine({ price }: { readonly price: EffectivePrice }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
-    <li className="flex flex-wrap items-center gap-1.5 text-12">
+    <li className="flex flex-wrap items-center gap-1.5 text-14">
       <span>{priceLabel(price)}</span>
       <SourceBadge source={price.source} />
       <SyncBadge status={price.sync_status} />
-      {price.cached_rate?.stale && <Badge variant="warning">{t("Stale rate")}</Badge>}
+      {price.cached_rate?.stale && <Badge variant="warning">{translateUi("Stale rate")}</Badge>}
       {price.cached_rate?.retired && (
-        <Badge variant="destructive">{t("Retired rate")}</Badge>
+        <Badge variant="destructive">{translateUi("Retired rate")}</Badge>
       )}
       {price.sync_error && (
-        <span className="text-11 text-destructive">{price.sync_error}</span>
+        <span className="text-13 text-destructive">{price.sync_error}</span>
       )}
     </li>
   );
@@ -127,21 +131,21 @@ export function EffectiveClassBlock({
 }: {
   readonly group: EffectiveClass;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="space-y-1" data-testid="effective-class">
-      <div className="flex flex-wrap items-center gap-1.5 text-12 font-medium">
+      <div className="flex flex-wrap items-center gap-1.5 type-row-title">
         <span>
           {group.credential_classes.map((c) => CLASS_LABELS[c]).join(", ")}
         </span>
         <SourceBadge source={group.source} />
         {group.platform_charged ? (
-          <Badge variant="default">{t("Charged")}</Badge>
+          <Badge variant="default">{translateUi("Charged")}</Badge>
         ) : (
-          <Badge variant="secondary">{t("Not charged")}</Badge>
+          <Badge variant="secondary">{translateUi("Not charged")}</Badge>
         )}
       </div>
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {REASON_TEXT[group.reason]}
       </p>
       {group.prices.length > 0 && (
@@ -156,7 +160,7 @@ export function EffectiveClassBlock({
       )}
       {group.pending.length > 0 && (
         <div className="space-y-1">
-          <div className="text-11 text-muted-foreground">{t("Configured, not charged until synced:")}</div>
+          <div className="text-13 text-muted-foreground">{translateUi("Configured, not charged until synced:")}</div>
           <ul className="space-y-1">
             {group.pending.map((price) => (
               <PriceLine
@@ -176,7 +180,7 @@ export function EffectiveBilling({
 }: {
   readonly service: BillingService;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { resale } = service.effective;
   return (
     <div className="space-y-3">
@@ -186,11 +190,16 @@ export function EffectiveBilling({
           group={group}
         />
       ))}
+      {service.effective.model_prices?.map((price, i) => <section key={i} className="rounded-lg border border-border/40 p-3 space-y-2">
+        <Link to="/admin/platform-models/$modelId" params={{ modelId: price.model_id }} className="type-row-title text-primary">{translateUi("Model tariff · ")}{titleCase(price.lane)}</Link>
+        <p className="type-secondary">{price.available ? translateUi("Prices ready") : translateUi("Unavailable: {{value1}}", { value1: titleCase(price.blocking_reason ?? "unknown") })}</p>
+        {price.available && <PriceRows components={price.components} />}
+      </section>)}
       {resale.configured && (
-        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">{t("Resale")}{" "}
+        <p className="flex items-center gap-1.5 text-13 text-muted-foreground">{translateUi("Resale")}{" "}
           {resale.applied
-            ? t("applies to NyxID platform-key traffic")
-            : t("is configured but disabled")}
+            ? translateUi("applies to NyxID platform-key traffic")
+            : translateUi("is configured but disabled")}
           <SourceBadge source={resale.source} />
         </p>
       )}
@@ -204,20 +213,20 @@ export function EffectiveBillingSummary({
 }: {
   readonly serviceId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data, isLoading, error } = useAdminBillingService(serviceId);
   return (
     <section className="space-y-2 rounded-lg border border-border/50 p-3">
-      <h3 className="text-13 font-semibold">{t("Effective billing")}</h3>
+      <h3 className="type-card-title">{translateUi("Effective billing")}</h3>
       {isLoading && (
-        <p className="text-12 text-muted-foreground">{t("Resolving prices…")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Resolving prices…")}</p>
       )}
       {error && (
-        <p className="text-12 text-destructive">{t("Effective billing is unavailable: ")}{translateUi(error.message ?? "")}
+        <p className="text-14 text-destructive">{translateUi("Effective billing is unavailable: ")}{error.message}
         </p>
       )}
       {data && <EffectiveBilling service={data} />}
-      <p className="text-11 text-muted-foreground">{t("Resolved by the server from the saved configuration exactly as billing charges it. Global defaults live in Admin → Billing.")}</p>
+      <p className="text-13 text-muted-foreground">{translateUi("Resolved by the server from the saved configuration exactly as billing charges it. Global defaults live in Admin → Billing.")}</p>
     </section>
   );
 }

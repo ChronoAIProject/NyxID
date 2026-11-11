@@ -391,5 +391,9 @@
   "Choose a file between 1 byte and 20 MB.": "Choose a file between 1 byte and 20 MB.",
   "Select the conversation to retry.": "Select the conversation to retry.",
   "Approval required": "Approval required",
-  "Attachment expired per retention policy. Upload it again to continue.": "Attachment expired per retention policy. Upload it again to continue."
+  "Attachment expired per retention policy. Upload it again to continue.": "Attachment expired per retention policy. Upload it again to continue.",
+  "OAuth authority is temporarily unavailable; retry the request": "OAuth authority is temporarily unavailable; retry the request",
+  "Service monitoring is unavailable": "Service monitoring is unavailable",
+  "Service monitoring is not configured": "Service monitoring is not configured",
+  "Security rollout is not ready; inspect admin security readiness": "Security rollout is not ready; inspect admin security readiness"
 }

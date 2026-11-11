@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useEffect } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
 import { GitHubButton } from "@/components/shared/github-button";
@@ -18,7 +19,7 @@ const INTERVAL_MS = 6000;
 const FADE_MS = 1200;
 
 export function AuthLayout() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   useApplyTheme();
   const [activeIndex, setActiveIndex] = useState(0);
   const logoHref = useLogoHref();
@@ -42,31 +43,31 @@ export function AuthLayout() {
         }}
       >
         {/* Logo — top-left */}
-        <div className="flex shrink-0 items-center px-10 pt-8">
+        <div className="flex shrink-0 items-center px-4 pt-8 sm:px-10">
           <Link to={logoHref} className="flex items-center">
             <NyxidLogo className="h-7 w-auto" />
           </Link>
         </div>
 
         {/* Form area — vertically centered */}
-        <div className="flex flex-1 items-center justify-center overflow-y-auto px-10 py-10">
+        <div className="flex flex-1 items-center justify-center overflow-y-auto px-4 py-10 sm:px-10">
           <div className="w-full max-w-[400px]">
             <Outlet />
           </div>
         </div>
 
         {/* Footer — sticky bottom */}
-        <div className="mt-auto shrink-0 px-10 pb-8">
+        <div className="mt-auto shrink-0 px-4 pb-8 sm:px-10">
           <div className="mb-4 flex justify-center">
             <GitHubButton
-              label={t("View source on GitHub")}
+              label={translateUi("View source on GitHub")}
               size={16}
-              className="text-11 font-medium text-muted-foreground hover:text-foreground"
+              className="type-secondary-emphasis text-muted-foreground hover:text-foreground"
             />
           </div>
-          <p className="text-center text-11 leading-relaxed text-muted-foreground">{t("By continuing, you agree to NyxID's")}{" "}
-            <a href="/terms" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{t("Terms of Service")}</a>{" "}{t("and")}<br />
-            <a href="/privacy" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{t("Privacy Policy")}</a>{t(", and to receive periodic emails with updates.")}</p>
+          <p className="text-center text-13 text-muted-foreground">{translateUi("By continuing, you agree to NyxID's")}{" "}
+            <a href="/terms" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Terms of Service")}</a>{" "}{translateUi("and")}<br />
+            <a href="/privacy" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Privacy Policy")}</a>{translateUi(", and to receive periodic emails with updates.")}</p>
         </div>
       </div>
 

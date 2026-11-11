@@ -538,5 +538,7 @@
   "cache-write tokens": "缓存写入 Token",
   "complete": "已完成",
   "Claude Code": "Claude Code",
-  "Couldn't reach NyxID. Check your connection and try again.": "无法连接到 NyxID。请检查网络连接后重试。"
+  "Couldn't reach NyxID. Check your connection and try again.": "无法连接到 NyxID。请检查网络连接后重试。",
+  "e.g. media.write": "例如 media.write",
+  "e.g. repo,read:org": "例如 repo,read:org"
 }

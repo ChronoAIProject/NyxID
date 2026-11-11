@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -21,6 +22,8 @@ interface NyxIDContextValue {
   readonly loginWithRedirect: (options?: LoginRedirectOptions) => Promise<void>;
   readonly handleRedirectCallback: (url?: string) => Promise<NyxIDTokenSet>;
   readonly clearSession: () => void;
+  readonly refreshToken: () => Promise<NyxIDTokenSet>;
+  readonly getAccessToken: () => Promise<string>;
   readonly getUserInfo: (accessToken?: string) => Promise<OAuthUserInfo>;
 }
 
@@ -62,8 +65,47 @@ export function NyxIDProvider({
     setTokens(null);
   }, [client]);
 
+  const refreshToken = useCallback(async () => {
+    try {
+      return await client.refreshToken();
+    } finally {
+      setTokens(client.getStoredTokens());
+    }
+  }, [client]);
+
+  const getAccessToken = useCallback(async () => {
+    try {
+      return await client.getAccessToken();
+    } finally {
+      setTokens(client.getStoredTokens());
+    }
+  }, [client]);
+
+  useEffect(() => {
+    setTokens(client.getStoredTokens());
+    const sync = () => setTokens(client.getStoredTokens());
+    window.addEventListener("storage", sync);
+    const tick = () => {
+      void client.getAccessToken()
+        .then(() => setTokens(client.getStoredTokens()))
+        .catch(() => setTokens(client.getStoredTokens()));
+    };
+    tick();
+    const timer = window.setInterval(tick, 30_000);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("storage", sync);
+    };
+  }, [client]);
+
   const getUserInfo = useCallback(
-    async (accessToken?: string) => client.getUserInfo(accessToken),
+    async (accessToken?: string) => {
+      try {
+        return await client.getUserInfo(accessToken);
+      } finally {
+        setTokens(client.getStoredTokens());
+      }
+    },
     [client],
   );
 
@@ -75,6 +117,8 @@ export function NyxIDProvider({
       loginWithRedirect,
       handleRedirectCallback,
       clearSession,
+      refreshToken,
+      getAccessToken,
       getUserInfo,
     }),
     [
@@ -83,6 +127,8 @@ export function NyxIDProvider({
       loginWithRedirect,
       handleRedirectCallback,
       clearSession,
+      refreshToken,
+      getAccessToken,
       getUserInfo,
     ],
   );

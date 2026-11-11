@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { Label } from "@/components/ui/label";
 import {
   formToPayload,
   type CreateEndpointPayload,
@@ -101,6 +102,7 @@ function buildEndpointFormSchema(existingDescription?: string | null) {
 }
 
 export function EndpointFormDialog(props: EndpointFormDialogProps) {
+  useUiTranslation();
   return (
     <EndpointFormEditor
       key={`${props.serviceId ?? props.endpoint?.service_id ?? ""}:${props.endpoint?.id ?? "new"}`}
@@ -118,7 +120,7 @@ function EndpointFormEditor({
   serviceId,
   currentEndpoint,
 }: EndpointFormDialogProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const isEditing = endpoint !== null && endpoint !== undefined;
   const formSchema = buildEndpointFormSchema(
     isEditing ? endpoint?.description : undefined,
@@ -233,12 +235,12 @@ function EndpointFormEditor({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {isEditing ? t("Edit Endpoint") : t("Add Endpoint")}
+            {isEditing ? translateUi("Edit Endpoint") : translateUi("Add Endpoint")}
           </DialogTitle>
           <DialogDescription>
             {isEditing
-              ? t("Update the endpoint configuration.")
-              : t("Define a new API endpoint for this service.")}
+              ? translateUi("Update the endpoint configuration.")
+              : translateUi("Define a new API endpoint for this service.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -248,8 +250,8 @@ function EndpointFormEditor({
             className="space-y-4"
           >
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                {translateUi(form.formState.errors.root.message ?? "")}
+              <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
+                {form.formState.errors.root.message}
               </div>
             )}
 
@@ -258,9 +260,9 @@ function EndpointFormEditor({
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Name")}</FormLabel>
+                  <FormLabel>{translateUi("Name")}</FormLabel>
                   <FormControl>
-                    <Input placeholder={"get_users"} {...field} />
+                    <Input placeholder="get_users" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -272,11 +274,11 @@ function EndpointFormEditor({
               name="description"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Description")}</FormLabel>
+                  <FormLabel>{translateUi("Description")}</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder={t("Optional description of this endpoint")}
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      placeholder={translateUi("Optional description of this endpoint")}
                       {...field}
                     />
                   </FormControl>
@@ -291,11 +293,11 @@ function EndpointFormEditor({
                 name="method"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Method")}</FormLabel>
+                    <FormLabel>{translateUi("Method")}</FormLabel>
                     <Select value={field.value} onValueChange={field.onChange}>
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder={t("Method")} />
+                          <SelectValue placeholder={translateUi("Method")} />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
@@ -316,7 +318,7 @@ function EndpointFormEditor({
                 name="path"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("Path")}</FormLabel>
+                    <FormLabel>{translateUi("Path")}</FormLabel>
                     <FormControl>
                       <Input placeholder="/users/{id}" {...field} />
                     </FormControl>
@@ -331,11 +333,11 @@ function EndpointFormEditor({
               name="parameters"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Parameters (JSON)")}</FormLabel>
+                  <FormLabel>{translateUi("Parameters (JSON)")}</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder={"[{\"name\": \"id\", \"in\": \"path\", \"required\": true}]"}
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-13 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      placeholder='[{"name": "id", "in": "path", "required": true}]'
                       {...field}
                     />
                   </FormControl>
@@ -349,11 +351,11 @@ function EndpointFormEditor({
               name="request_body_schema"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Request Body Schema (JSON)")}</FormLabel>
+                  <FormLabel>{translateUi("Request Body Schema (JSON)")}</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder={"{\"type\": \"object\", \"properties\": {...}}"}
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-13 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      placeholder='{"type": "object", "properties": {...}}'
                       {...field}
                     />
                   </FormControl>
@@ -367,10 +369,10 @@ function EndpointFormEditor({
               name="response_description"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Response Description")}</FormLabel>
+                  <FormLabel>{translateUi("Response Description")}</FormLabel>
                   <FormControl>
                     <Input
-                      placeholder={t("Returns an array of user objects")}
+                      placeholder={translateUi("Returns an array of user objects")}
                       {...field}
                     />
                   </FormControl>
@@ -399,7 +401,7 @@ function EndpointFormEditor({
                   },
                 ] as const
               ).map((field) => (
-                <label key={field.name} className="text-12">
+                <Label key={field.name}>
                   {field.label}
                   <Select
                     value={form.watch(field.name) ?? "unspecified"}
@@ -415,7 +417,7 @@ function EndpointFormEditor({
                     </SelectTrigger>
                     <SelectContent>
                       {field.name !== "execution" && (
-                        <SelectItem value="unspecified">{t("Unspecified")}</SelectItem>
+                        <SelectItem value="unspecified">{translateUi("Unspecified")}</SelectItem>
                       )}
                       {field.values.map((value) => (
                         <SelectItem key={value} value={value}>
@@ -424,7 +426,7 @@ function EndpointFormEditor({
                       ))}
                     </SelectContent>
                   </Select>
-                </label>
+                </Label>
               ))}
             </div>
             <DialogFooter>
@@ -432,14 +434,14 @@ function EndpointFormEditor({
                 type="button"
                 variant="outline"
                 onClick={() => onOpenChange(false)}
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 type="submit"
                 isLoading={isPending}
                 disabled={!form.formState.isValid || isPending}
               >
-                {isEditing ? t("Save Changes") : t("Create Endpoint")}
+                {isEditing ? translateUi("Save Changes") : translateUi("Create Endpoint")}
               </Button>
             </DialogFooter>
           </form>

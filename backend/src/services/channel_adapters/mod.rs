@@ -19,6 +19,91 @@ use super::channel_platform::PlatformAdapter;
 use super::provider_token_exchange_service::TokenExchangeCache;
 use crate::errors::{AppError, AppResult};
 
+/// Verification errors describe the HTTP outcome, never a provider error body
+/// (which may contain credentials or an HTML edge-proxy response).
+fn check_token_verification_status(
+    response: &reqwest::Response,
+    endpoint: &str,
+    rejected_credentials: &str,
+) -> AppResult<()> {
+    let status = response.status();
+    match status.as_u16() {
+        200..=299 => Ok(()),
+        401 | 403 => Err(AppError::ValidationError(rejected_credentials.into())),
+        429 => Err(AppError::RateLimitedWithRetry {
+            retry_after: response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite())
+                .map(|seconds| seconds.ceil().clamp(1.0, 86400.0) as u64)
+                .unwrap_or(1),
+        }),
+        _ => Err(AppError::ChannelPlatformError(format!(
+            "{endpoint} failed (HTTP {})",
+            status.as_u16()
+        ))),
+    }
+}
+
+#[cfg(test)]
+async fn assert_token_verification_statuses(
+    adapter: &dyn PlatformAdapter,
+    server: &wiremock::MockServer,
+    token: &str,
+    endpoint: &str,
+) {
+    use axum::response::IntoResponse;
+    use wiremock::{Mock, ResponseTemplate, matchers::any};
+    for status in [401, 403, 429, 500, 503] {
+        server.reset().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("Retry-After", "1.5")
+                    .set_body_string(format!("<html>private provider response: {token}</html>")),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+        let error = adapter
+            .verify_bot_token(
+                &reqwest::Client::new(),
+                &super::channel_platform::BotCredentials::from(token),
+            )
+            .await
+            .expect_err("HTTP rejection must not be parsed as success");
+        if matches!(status, 401 | 403) {
+            assert!(
+                matches!(&error, AppError::ValidationError(message) if message.contains("rejected"))
+            );
+        } else if status != 429 {
+            assert!(matches!(&error, AppError::ChannelPlatformError(message)
+                if message == &format!("{endpoint} failed (HTTP {status})")));
+        }
+        let response = error.into_response();
+        assert_eq!(
+            response.status().as_u16(),
+            match status {
+                401 | 403 => 400,
+                429 => 429,
+                _ => 502,
+            }
+        );
+        if status == 429 {
+            assert_eq!(response.headers()["retry-after"], "2");
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!body.contains(token));
+        assert!(!body.contains("<html>"));
+        server.verify().await;
+    }
+}
+
 /// Single adapter registry. Lark/Feishu share the process-wide token exchange
 /// cache with proxy callers. OpenClaw resolves for its separate integration,
 /// but its descriptor disables channel-bot registration and webhook routes.
@@ -77,8 +162,23 @@ pub fn conversation_capabilities(
     capabilities
 }
 
+pub enum RegisteredInterface {
+    Messaging(Box<dyn PlatformAdapter>),
+    Nyxbot(super::call_channels::profiles::Adapter),
+}
+
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
-    vec![
+    registered_interfaces(cache)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            RegisteredInterface::Messaging(adapter) => Some(adapter),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn registered_interfaces(cache: &Arc<TokenExchangeCache>) -> Vec<RegisteredInterface> {
+    let legacy: Vec<Box<dyn PlatformAdapter>> = vec![
         Box::new(telegram::TelegramAdapter::default()),
         Box::new(telegram_new::TelegramNewAdapter::default()),
         Box::new(discord::DiscordAdapter::default()),
@@ -88,8 +188,42 @@ pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn Platf
         Box::new(whatsapp::WhatsAppAdapter),
         Box::new(x::XAdapter::default()),
         Box::new(openclaw::OpenClawAdapter),
-        Box::new(aurinko::AurinkoAdapter::default()),
-    ]
+        Box::new(aurinko::registered_adapter()),
+    ];
+    let mut entries: Vec<_> = legacy
+        .into_iter()
+        .map(RegisteredInterface::Messaging)
+        .collect();
+    use crate::models::channel_adapter::Profile;
+    for profile in [
+        Profile::TelnyxRelay,
+        Profile::TelnyxSms,
+        Profile::TwilioRelay,
+        Profile::TwilioSms,
+        Profile::ElevenlabsCustomLlm,
+    ] {
+        entries.push(RegisteredInterface::Nyxbot(
+            super::call_channels::profiles::Adapter::new(profile),
+        ));
+    }
+    entries
+}
+
+pub fn resolve_nyxbot_profile(
+    id: &str,
+    cache: &Arc<TokenExchangeCache>,
+) -> AppResult<super::call_channels::profiles::Adapter> {
+    registered_interfaces(cache)
+        .into_iter()
+        .find_map(|entry| match entry {
+            RegisteredInterface::Nyxbot(adapter)
+                if super::call_channels::profiles::id(adapter.profile()) == id =>
+            {
+                Some(adapter)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| AppError::ValidationError("Unknown adapter or unsupported version".into()))
 }
 
 #[cfg(test)]

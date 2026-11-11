@@ -1,4 +1,10 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
 import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
 import {
@@ -18,60 +24,111 @@ import {
 } from "@/components/ui/dialog";
 
 export function PlatformPersonalBindings() {
+  useUiTranslation();
   const actor = useAuthStore((state) => state.user?.id);
   return <OwnedBindings key={actor ?? "signed-out"} />;
 }
 function OwnedBindings() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const query = usePersonalBindings();
   const revoke = useRevokePersonalBinding();
   const [review, setReview] = useState<PersonalBinding>();
   const rows = query.data?.pages.flatMap((page) => page.bindings) ?? [];
   return (
-    <section aria-label={t("Personal Telegram links")} className="space-y-3 text-12">
-      <p>{t("These platform-operated Telegram bots use your existing NyxBot permissions and personal billing. Each verified identity has its own thread.")}</p>
-      {query.isPending && <p role="status">{t("Loading personal links...")}</p>}
-      {query.error && (
-        <ErrorBanner
-          message={t("Personal Telegram links are unavailable.")}
-          onRetry={() => void query.refetch()}
-        />
-      )}
-      {query.isSuccess && rows.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-muted-foreground">{t("No personal Telegram links. Send /link in a platform bot's private chat to begin.")}</p>
-      )}
-      {rows.map((row) => (
-        <div
-          key={row.id}
-          className="space-y-2 rounded-lg border border-border p-4"
-        >
-          <p className="font-medium">{row.manager.display_name}</p>
-          <p className="text-muted-foreground">{t("Telegram account ")}{row.sender.display_name ?? row.sender.id} ·{" "}
-            {row.state === "active" ? t("Linked") : t("Disconnected")}
-          </p>
-          {row.conversation_id ? (
-            <a
-              className="underline"
-              href={`/assistant?c=${encodeURIComponent(row.conversation_id)}`}
-            >{t("Open saved Telegram thread")}</a>
-          ) : row.state === "active" ? (
-            <p>{t("Send your first private message to create the Telegram thread.")}</p>
-          ) : null}
-          {row.state === "active" && (
-            <div>
-              <Button variant="outline" onClick={() => setReview(row)}>{t("Disconnect personal access")}</Button>
-            </div>
-          )}
-        </div>
-      ))}
-      {query.hasNextPage && (
-        <Button
-          variant="outline"
-          onClick={() => void query.fetchNextPage()}
-          isLoading={query.isFetchingNextPage}
-        >{t("More personal links")}</Button>
-      )}
-      {revoke.error && <ErrorBanner message={revoke.error.message} />}
+    <section className="space-y-3 text-14">
+      <GroupedList
+        title={translateUi("Personal chat links")}
+        footer={
+          <>
+            <p>{translateUi("These platform-operated chat bots use your existing NyxBot permissions and personal billing. Each verified identity has its own thread.")}</p>
+            {query.error && (
+              <ErrorBanner
+                message={translateUi("Personal chat links are unavailable.")}
+                onRetry={() => void query.refetch()}
+              />
+            )}
+            {revoke.error && <ErrorBanner message={revoke.error.message} />}
+          </>
+        }
+      >
+        {query.isPending && (
+          <GroupedRow role="status" title={translateUi("Loading personal links...")} />
+        )}
+        {query.isSuccess && rows.length === 0 && (
+          <GroupedRow
+            title={translateUi("No personal chat links")}
+            description={translateUi("Use the login control shown by a platform bot's private chat help to begin.")}
+          />
+        )}
+        {query.hasNextPage && (
+          <GroupedRow asChild interactive>
+            <button
+              type="button"
+              onClick={() => void query.fetchNextPage()}
+              disabled={query.isFetchingNextPage}
+            >{translateUi("More personal links")}</button>
+          </GroupedRow>
+        )}
+      </GroupedList>
+      {rows.map((row) => {
+        const consentActive = (row.consent_state ?? row.state) === "active";
+        const availability = !consentActive
+          ? "disconnected"
+          : (row.availability ??
+            (row.state === "active" ? "available" : "reconnect_required"));
+        const label = {
+          available: "Linked",
+          temporarily_unavailable: "Temporarily unavailable",
+          paused: "Personal access paused",
+          reconnect_required: "Reconnect required",
+          disconnected: "Disconnected",
+        }[availability];
+        return (
+          <GroupedList key={row.id} title={row.manager.display_name}>
+            <GroupedRow
+              title={translateUi("{{value1}} account", { value1: row.chat.display_name })}
+              description={
+                row.sender.display_name
+                  ? `${row.sender.display_name} (${row.sender.id})`
+                  : row.sender.id
+              }
+              accessory={label}
+            />
+            <GroupedFooter>
+              {availability === "temporarily_unavailable" && (
+                <p>{translateUi("The bot connection is unavailable. Your consent is retained and access can return when the connection is restored. Disconnect personal access to prevent that restoration.")}</p>
+              )}
+              {availability === "paused" && (
+                <p>{translateUi("Personal work is paused for this bot. Your consent is retained. Disconnect personal access to prevent it returning when the bot resumes.")}</p>
+              )}
+              {availability === "reconnect_required" && (
+                <p>{translateUi("This saved link no longer grants personal access. Start a fresh login request in the bot's private chat to reconnect.")}</p>
+              )}
+            </GroupedFooter>
+            {row.conversation_id ? (
+              <GroupedRow asChild interactive>
+                <a
+                  href={`/assistant?c=${encodeURIComponent(row.conversation_id)}`}
+                >{translateUi("Open saved ")}{row.chat.display_name}{translateUi(" thread")}</a>
+              </GroupedRow>
+            ) : availability === "available" ? (
+              <GroupedFooter>
+                <p>
+                  {row.chat.question_instruction}{translateUi(" This creates its saved thread.")}</p>
+              </GroupedFooter>
+            ) : null}
+            {consentActive && (
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  className="text-destructive"
+                  onClick={() => setReview(row)}
+                >{translateUi("Disconnect personal access")}</button>
+              </GroupedRow>
+            )}
+          </GroupedList>
+        );
+      })}
       <Dialog
         open={!!review}
         onOpenChange={(open) => {
@@ -80,11 +137,11 @@ function OwnedBindings() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Disconnect personal Telegram access?")}</DialogTitle>
-            <DialogDescription>{t("Work already started may keep running in NyxID; stop it from the app. Your saved thread and pending approvals remain available. This disconnects only personal access for this identity.")}</DialogDescription>
+            <DialogTitle>{translateUi("Disconnect personal ")}{review?.chat.display_name ?? translateUi("chat")}{translateUi(" access?")}</DialogTitle>
+            <DialogDescription>{translateUi("Work already started may keep running in NyxID; stop it from the app. Your saved thread and pending approvals remain available. This disconnects only personal access for this identity.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReview(undefined)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setReview(undefined)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={revoke.isPending}
@@ -94,7 +151,7 @@ function OwnedBindings() {
                     onSuccess: () => setReview(undefined),
                   });
               }}
-            >{t("Disconnect")}</Button>
+            >{translateUi("Disconnect")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

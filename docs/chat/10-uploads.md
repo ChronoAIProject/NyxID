@@ -1,7 +1,7 @@
 # Assistant uploads
 
-Normative contract for human uploads to NyxAgent conversations and owner-posted
-group messages. This extends [08](08-nyxagent-engine.md) and
+Normative contract for human uploads to NyxAgent conversations, owner-posted
+group messages and verified owner Lark/Feishu media. This extends [08](08-nyxagent-engine.md) and
 [09](09-nyxbot-orchestrator.md). Tool images are owner-readable and may also be fetched by the bound thread key
 during their producing live turn, including that same guest turn; see
 [Tool images](08-nyxagent-engine.md#tool-images). Their default retention is the
@@ -9,7 +9,7 @@ conversation lifetime. User-upload selection and access rules are unchanged.
 
 ## Admission and storage
 
-Only a first-party human owner may upload or remove a pending upload. Guest,
+Only a first-party human owner may use the browser routes to upload or remove a pending upload. Guest,
 OAuth-client, delegated and API-key callers cannot upload. Conversation uploads
 belong to that conversation; group uploads belong to the owner's group thread.
 Draft chats acquire a durable conversation before their first upload.
@@ -32,6 +32,263 @@ reused by another message, conversation, owner or group. Apply the runtime
 retention policy below to existing and new files. Conversation/group deletion
 and owner purge remove all payload chunks, extracted text and expiry markers.
 Removing an unsent attachment deletes it.
+
+## Collaboration request images
+
+Authenticated collaboration participants may post uploads to a group. Pending
+uploads stay private; accepted message uploads are public to current participants.
+A collaboration guest execution (an authenticated NyxID participant using the
+agent owner's guest opt-in) may receive only the image attachments on the exact
+request it answers. It uses the same per-model modality gate and ordinary
+`image_plan` capability/size/type checks as owner turns; known text-only models
+receive the `model_text_only` notice without an image URL. It uses
+the same canonical `/api/v1/assistant-attachments/{id}/content` URL fetched with
+its bound thread key. The guest's model usage continues to bill the agent owner.
+
+Every preparation/download checks the exact group, request, trigger message,
+original uploader, membership revision, live turn/key, retention and current
+owner guest opt-in. Downloads recheck after decryption. Another request's images,
+other people's uploads, earlier history, pending drafts and owner uploads are
+not available. Guest discovery lists only this request's images; document reads,
+upload authoring and managed attachment egress stay denied. Channel/platform
+guests keep their existing media refusal.
+
+Never silently drop a request attachment: absent capabilities, unsupported image
+types and size/count limits produce `IMAGE_FALLBACK`; expiry and missing data
+produce explicit availability notices. Non-image files in guest requests are
+explicitly described as withheld. No notice implies that pixels or document
+contents were seen. Machine suggestions apply only where machine authority
+exists; collaboration guests have none. Retention belongs to the original
+uploader even when a guest turn runs on the agent owner's key. The delete-after-
+turn policy recognizes that requester's collaboration execution and still
+expires images at settlement.
+
+## Inbound channel media
+
+The per-person `assistant:channel-media` flag defaults off. When enabled, verified
+owners can send images, files and rich `post` messages to a linked Lark/Feishu
+NyxBot or specialist through NyxID's relay or the Agent Event Gateway, including
+admitted followed threads. Telegram owner files use the same flag and shared
+byte budget; their preparation before turn admission and per-file fallback are
+described in [Telegram forwarding](../TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
+Discord, Slack, WhatsApp and X owner media also use late binding through
+NyxID's relay adapters, gated by the all-replica `assistant:channel-media-v2`
+readiness capability. This includes relay-through-CMA events when CMA admits
+and delivers the `nyxid_relay` activity; it does not add a CMA raw-event verifier.
+Native CMA Discord/WhatsApp downloads remain on hold for CMA#1402. Lark/Feishu
+audio/video and Aurinko keep their existing behavior. By default, platform/channel guests never download media or
+create uploads; their admitted turn receives the fixed note
+`attachments from guests are not shared with the assistant`. The opt-in guest scope below is the only exception. Media-bearing messages cannot answer
+approval cards or text decisions and do not enter duplicate-question coalescing.
+
+### Personal channel guest media
+
+The default-off `assistant:channel-guest-media` flag is evaluated for the linking
+person alongside `assistant:channel-media`. Enable it only after the fleet reports
+both `assistant:channel-media-v2` and `assistant:channel-guest-media` ready, with
+old workers drained. Stage A replicas do not advertise the guest capability.
+This admits personal-agent guest media from authenticated relay selectors on
+Lark/Feishu, Discord, Slack, WhatsApp, X and Telegram, including relay-through-CMA.
+Native Discord/WhatsApp retrieval remains deferred to CMA#1402. Org-specialist
+guest media and org public transcript attachments are not enabled by this flag.
+
+Guest files bind after admission to the guest's private channel conversation or
+the existing shared group/topic conversation. They never bind to the owner's
+home. The human owner can view them through the ordinary authorized upload GETs,
+with exactly the existing image/document retention, settlement and erasure rules.
+No platform guest gains a human download/history API.
+
+An optional server-authored `source.guest` on each upload pins version, channel,
+source event and sender; `source.turn_id`, the bound message and immutable receipt
+pin the consuming turn and exact attachment allowlist. Model image GETs use a
+separate live guest validator before and after decryption: current key/turn,
+flags/readiness, source route/identity, audience/follow rules, and retention must
+still agree. Earlier owner or guest images in the same shared thread are denied.
+Ordinary attachment read/list/egress tools remain unavailable to guests, and
+retained guest bytes cannot be read by a subsequent owner model turn either.
+
+Images use the existing capability and selected-model modality gate. Current
+message documents supply at most 16,000 extracted characters across ten files,
+quoted as untrusted guest data; unsupported originals remain downloadable by the
+human owner with an explicit model limitation. Files, image text and names never
+confer identity, instructions, approval, tools or owner memory. Inputs are
+rechecked before model requests and continuations. Settlement clears the disposable
+upstream session so another guest cannot inherit previously fetched image/document
+context; the ordinary transcript remains. Failed or revoked inputs get
+an explicit unavailable notice, never an implicit claim that they were read.
+
+The existing cold-model setup wait retains only media event IDs and revalidates
+on resume. Busy guest messages still receive the existing busy/retry response;
+they do not enter the owner pending-event queue. Turning the guest flag off stops
+new guest downloads and model reads, including waiting work. Already retained
+human-owner reads continue until normal expiry. Drain admitted work before a
+binary rollback; do not run old replicas against enabled guest-media traffic.
+
+Admission records source selectors, not bytes. Gateway source IDs are accepted
+only from `nyxid_relay` activities on these supported relay platforms and must match NyxID's own inbound
+row, owner, bot, route, chat, sender and thread/follow binding. Provider handles
+from the gateway are never dereferenced. A missing source produces a fixed
+unavailable-media note; a foreign source is refused. Each fetch rechecks live
+owner, org-admin, specialist and follow authority before resolving the bot
+credential. New relay adapters additionally recheck after the download and
+before binding; a revoked source cannot become a visible upload. Revocation
+before fetch means no download.
+
+Ingestion is the first step of the consuming turn's run, after the conversation
+and user message exist. A busy conversation queues the media event IDs and sent
+time; no upload exists while queued. The run sniffs and validates each file,
+then stores it encrypted through the ordinary user-upload service with a unique
+source selector and a content digest. It binds uploads in one transaction that
+writes the active-turn conversation fence, rejects Stop, and records first use
+for retention. The immutable `media_bound` receipt holds the bound IDs and
+per-item outcomes. A retry reads that receipt first, so it cannot bind twice,
+reset retention dates or change a committed result. Bound images use the same
+upstream capability negotiation and explicit fallback as browser images.
+
+Discord uses its pinned CDN hosts; Slack uses its authenticated file endpoints;
+WhatsApp resolves the stored numeric media ID through Graph before a validated
+CDN download; X uses its live OAuth connection and pinned media hosts. No
+callback URL, Markdown link or gateway-supplied locator authorizes a fetch.
+Valid PNG/JPEG/GIF/WebP bytes render inline through authenticated assistant
+attachment GETs, including extensionless platform images. Other retained files
+use the existing download chip. New relay adapters preserve an unsupported
+original (including audio/video) as download-only, just like Telegram, with a
+`stored_original` receipt and an explicit model limitation notice. MIME claims
+alone never make an invalid image model input. Files follow ordinary document
+retention; validated rasters follow image retention. Remote Markdown images
+remain inert links, and historical link-only messages are not backfilled.
+Queued channel messages settle as `event` transcript rows. Web and mobile show
+their retained attachments outside the collapsed event notice, through the same
+scoped attachment components used for ordinary messages.
+
+Stop, failure, timeout and orphan recovery call `media_finalize` outside the
+cancellable run. It clears `media_pending`, records terminal per-item outcomes
+and deletes known unbound uploads and chunks for that turn. Bound uploads retain
+the ordinary retention policy, including `images_delete_after_turn` on stopped
+or failed turns. An uncertain upload commit that lands after finalization stays
+unbound, can never be adopted by a later turn, and is purged by pending retention.
+
+| Limit | Channel behavior |
+| --- | --- |
+| Items | At most 10 ingested per event; extra items produce an omitted-count note |
+| Payload | At most `min(CHANNEL_MEDIA_MAX_BYTES, 20 MiB)` per item; ordinary upload type and rate limits apply |
+| Collection | At most 90 seconds to collect media; unfinished items receive timeout outcomes and a fixed note, successful items are still bound, and the turn continues. Stop cancels the turn |
+| Event retention / native dedup | 24 hours for text events; 7 days for media events. Native replays after that horizon are outside the dedup guarantee |
+| Queue lifetime | After 6 days, the maintenance sweep converts queued media to a durable owner transcript notice before removing it |
+
+Media admission and native dedup share one atomic event insert keyed by bot,
+platform, native chat and native message. A duplicate with a different relay
+UUID records an alias to the winning event and starts no fetch, turn or reply.
+Health reuses the winner's result. An accepted media event still without a turn
+or queue binding after five minutes is marked `interrupted`; the next owner
+turn in that chat receives its fixed interruption note once.
+
+Failures, omitted items and post text-cap notices appear in the current agent
+request and persisted message, including when every item fails. Expired queued
+media produces `a photo sent at HH:MM UTC expired before it could be processed;
+please resend` in the owner's app transcript. The original text is quoted
+history, never re-executed as a new request. Revoked queued authority is also
+removed with a durable notice. Guest and trigger turns never consume queued
+owner media.
+
+### Shared byte budget
+
+One process-wide weighted semaphore provides 192 MiB across owners, browser
+uploads, channel downloads and managed attachment egress. Each item reserves
+`2 × payload_limit` before reading or decrypting and holds that reservation
+through extraction/encryption or its outbound response. Readers enforce the
+payload limit, not the doubled reservation. Reservations are per item, never
+for a whole batch, and cancellation releases them.
+
+Browser requests reserve the full 20 MiB payload capacity before their single
+body read; four concurrent files reserve 160 MiB. Channel GETs begin at the
+smaller of a positive declared size, 4 MiB and the configured payload maximum;
+unknown, zero or invalid sizes begin at 4 MiB, capped by that maximum. If the
+body exceeds that limit, the reader drops its partial buffer, releases the
+reservation, rechecks live authority and retries once with the full channel
+maximum (up to 20 MiB). It acquires a fresh reservation before retrying. Egress
+reserves twice the exact stored size. Failed attempts still count against upload
+admission; no partially held reservation waits for a larger one.
+
+### Channel rollout and rollback
+
+Upgrade **all NyxID replicas** and drain pre-release workers before enabling
+`assistant:channel-media`. The added Discord/Slack/WhatsApp/X path requires a
+ready `assistant:channel-media-v2` report at admission and every fetch/recheck;
+legacy Lark/Feishu/Telegram owner paths do not acquire this new gate. With the
+existing flag already on, new adapters activate only after the complete roster
+advertises this capability and old workers are declared drained. A red report
+produces the unavailable-media note rather than a download. No new environment
+variable or guest-media authority is introduced in this stage.
+Lark/Feishu gateway delivery also requires CMA at least
+`a570be21` and `CMAEG_MEDIA_ENABLED=true`. CMA's default provider header budget is
+30 seconds (`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`); admission performs no downloads,
+and ingestion begins only in the run after admission. For inbound downloads,
+the channel bot app needs any one of `im:message`, `im:message:readonly`, or
+`im:message.history:readonly`, configured in the Lark/Feishu developer console.
+The official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get)
+API (`/reference/im-v1/message-resource/get`) lists these alternatives. These
+bot-app permissions are separate from the service connection's permissions
+for writing files to Base.
+
+For rollback, disable both `assistant:channel-media` and
+`assistant:attachment-writes`. The flags stop new admission/calls; normal turn
+processing and the media maintenance sweep continue draining accepted work.
+Keep the new binaries and sweep running. A first-party human platform admin may
+convert queued media early with:
+
+```http
+POST /api/v1/admin/assistant/channel-media/drain
+```
+
+The response is `{"converted": N}`. Repeat until `converted` is zero, then check
+the completion gates below on the application database. Each call is bounded
+and writes the durable expiry notice before removing a queued event; it neither
+downloads files nor executes the queued request.
+
+```javascript
+db.assistant_conversations.countDocuments({
+  pending_events: {$elemMatch: {"media_event_ids.0": {$exists: true}}}
+}) // must be 0
+db.assistant_messages.countDocuments({media_pending: {$ne: null}}) // must be 0
+db.lark_base_writes.countDocuments({
+  state: {$in: ["uploading", "dispatching"]}
+}) // must be 0
+```
+
+Without the admin conversion, queue conversion becomes eligible after six days.
+Orphan recovery uses the existing 75-second stale-heartbeat threshold; stale
+managed writes become eligible after their 180-second deadline. Bounded sweeps
+must finish; no fixed waiting period proves completion.
+
+After all three gates are zero, a human platform admin must delete the two
+attachment operation rows, `bitable_media_upload` and
+`bitable_record_create_with_attachments`, for **each** catalog slug `api-lark`,
+`api-lark-bot`, `api-feishu`, and `api-feishu-bot`. List each catalog's rows with:
+
+```bash
+nyxid catalog endpoint list <catalog-slug> --output json
+```
+
+Match the two operation names and retain their endpoint UUIDs. The listing's
+`service_id` is the catalog service UUID, not a UserService/connection UUID.
+Delete each matching row through the authenticated admin API:
+
+```http
+DELETE /api/v1/services/{service_id}/endpoints/{endpoint_id}
+```
+
+This physically deletes the operation row. The catalog CLI's `endpoint disable`
+command only pauses publication and is not this deletion step. Repeat the list
+for all four slugs and verify both names are absent. Keep the drained new
+replicas running until deletion is complete, then cut over to the old release
+without restarting a new replica or running new-release spec synchronization:
+startup additively upserts these compiled overlay rows and would recreate them.
+
+Before the old binary starts, also remove every scope using `JsonShape::Number`,
+including compiled key copies. See
+[operation-scope compatibility](../AGENT_OPERATION_SCOPES.md#compatibility)
+and the managed Base-write rollout in [API discovery](../API_DISCOVERY.md).
 
 ## Retention
 
@@ -173,6 +430,8 @@ NyxAgent restricts remote images to its configured NyxID origin and the attachme
 content path, forbids redirects and credentials in URLs, uses the request's own
 key, and validates size and raster type before handing image input to Codex.
 Sessions and responses use the same validation. No arbitrary remote image fetches.
+Operators must keep NyxAgent's `NYXID_BASE_URL` aligned with NyxID's canonical
+`BASE_URL`; NyxID does not bypass or relax this origin check.
 An absent/older capability gives an explicit user and agent notice: the image was
 received but this agent version cannot view it. Offer
 `nyx__machine_save_attachment`; never silently omit an image or claim it was seen.
@@ -207,11 +466,41 @@ saved draft never keeps a handle: pasted text returns inline (bounded like the
 textbox) and other files become their description. File names never add an
 `@mention`. Images show above the text of the message they belong to.
 
+### Per-model image support
+
+Model discovery requests `GET /v1/models?include_capabilities=true`. NyxID returns
+optional `input_modalities` with each model, retaining the bounded 60-second
+per-owner success/failure cache and ordinary-private credential selection. A
+missing or malformed field is unknown and preserves existing image behavior.
+The model picker labels known text-only models, and the composer warns when an
+image is attached without blocking Send.
+
+For owner image turns, the existing account-metadata adapter reads that same
+cache, with at most a five-second lookup on a miss. Text-only turns make no
+additional metadata request. Failure or an unknown model leaves the deployment
+capability check and ordinary image plan unchanged. All owner transports reuse the same cached metadata. Transports without account
+model discovery retain unknown support on a miss. Known text-only models omit image URLs
+and receive a fixed notice in the turn context; the owner sees the matching
+transcript notice, without a machine-save suggestion. Tool-image continuations
+also honor known text-only support and preserve the completed answer.
+
+Delivery keeps the existing `image_input: sent|unavailable` values. The optional
+`image_input_reason` distinguishes `model_text_only`, `agent_unsupported`, and
+NyxAgent's `image_input_unsupported` notice. Only the recognized bounded
+machine code is consumed from response `nyxagent_notices`; unknown codes and
+all notice prose are ignored. The parser accepts only `[a-z0-9_]{1,64}`, inspects
+at most 32 notices, and stores no provider text. A recognized unsupported-image
+notice marks the delivered images unavailable and prevents further image
+URLs in that turn. The existing `image_input_unavailable` stream event
+refreshes the transcript. Old readers can ignore the additive reason and keep
+displaying the ordinary fallback.
+
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,
 delete/purge, paging, prompt listing, upstream capability fallback, Codex image
-forwarding and composer behavior. Inbound channel media is a follow-up: its sender
-verification and download lifecycle require a separate ingress review.
+forwarding and composer behavior. Inbound channel coverage also exercises live
+sender/route authority, native dedup, queued media, Stop/finalization and the
+shared byte budget described above.
 
 ## HTTP and rollout
 
@@ -228,8 +517,9 @@ image PR independently: missing capability metadata is a supported fallback.
 Protocol version 1 advertises ten images, 8 MiB each and 16 MiB total; larger
 NyxID uploads remain downloadable and machine-transferable but are explicitly
 marked unviewable by that agent. This protocol version, not a guessed package
-version, is the compatibility boundary. Four upload requests and two parser
-workers may run concurrently per replica. Busy admission asks the owner to retry.
+version, is the compatibility boundary. The shared byte budget admits four full
+browser uploads concurrently when otherwise idle; two parser workers may run
+concurrently per replica. Budget waits are cancellable.
 
 ### Retention rollout
 
@@ -260,7 +550,7 @@ variables. Retention is the runtime admin policy above:
 | Raw upload body | 1 byte through 20 MiB (20,971,520 bytes), inclusive; larger bodies return HTTP 400 with `Attachment exceeds 20 MiB.` |
 | Attachments per message | 10 distinct files |
 | Owner rate | 30 attempts per UTC minute across replicas; excess returns HTTP 429 |
-| Concurrent work per replica | 4 upload handlers and 2 extraction workers; full upload admission returns HTTP 400 with a retry message |
+| Concurrent work per replica | 192 MiB shared byte budget (2 × payload capacity per item); four full browser uploads fit when idle; 2 extraction workers |
 | Extraction | 8-second worker wall deadline, 6 CPU seconds, 1 GiB address-space limit on Linux |
 | Document expansion | 200 PDF pages, 1,000,000 extracted characters, 40 MiB actual DOCX expansion and 1,000 ZIP entries |
 | Image decoding | 32 million pixels; 192 MiB decoder allocation budget |
@@ -269,3 +559,92 @@ variables. Retention is the runtime admin policy above:
 An ingress-generated HTTP 413 below these limits indicates that a proxy's body
 limit needs updating. Invalid/encrypted documents and extraction deadlines return
 HTTP 400 with a fixed actionable message. No filenames or content are logged.
+
+
+## Generated Sandbox files
+
+The default-off `assistant:generated-artifacts` flag uses the normal personal,
+organization and global resolution. It admits files only for the owner's private
+Web NyxAgent chat, from the compiled Sandbox catalog and its exact submit/status/
+result contract. Shared, guest, group, channel, voice and invocation lanes retain
+the ordinary watch path. Async watches preserve main’s execution-permission Phase B task lineage and live
+permission checks; legacy unmarked watches keep their existing authority.
+
+The result adapter reads status, result and status again through the existing
+async execution authority. Operation identity, catalog/target/contract, lifecycle
+version presence/value, lease and source expiry must agree. It never fetches an
+output URL. The envelope is at most 13 MiB with eight entries, 9 MiB accepted
+bytes total, 5 MiB per raster and 8 MiB per other file. Actual decoded bytes decide
+size/type; unsupported preview types download as octet-stream. Paths are hashed
+for content identity and reduced to a sanitized basename; the full path is never
+stored. Process stdout/stderr are discarded. Only success, exit code and verified
+file count enter the encrypted model summary.
+
+Two acquisitions may run concurrently per process. A separate two-permit CPU
+semaphore bounds blocking parser work. MP4 validation indexes media extents and
+shares box, track, sample, table-entry and step limits across the entire file.
+A byte reservation begins before response buffering and stays with the blocking
+task through cancellation. Materialization and recovery acquire their reservation
+outside MongoDB transactions and retain it across transaction retries.
+
+Encrypted pending bytes live in `async_service_operation_artifacts`. Completion
+atomically materializes immutable `assistant_attachments`, saves the per-file
+outcome on the reply, and writes `assistant_artifact_deliveries`. The conversation
+keeps the newest delivery's ID/sequence even after its TTL; an owner's initiating
+message freezes that ID. Recovery and action-card continuation can therefore never
+fall back to an older result. `generated_artifact_content_series` tracks successful
+same-path content revisions. Failed modifications do not advance earlier revisions.
+New content-series UUIDs after idle cleanup start a new lineage.
+
+Rasters use `image_days`; videos and other files use `document_days`.
+`tool_image_days` applies only to tool images. Every generated read and cleanup
+uses the earlier of its immutable stored cap and attachment creation time plus the
+current kind policy. Shortening takes effect immediately; extending cannot exceed
+the stored cap. Source acquisition expiry is independent of materialized-file
+retention. Pending/delivery metadata has a `purge_after` TTL with 30 days' grace;
+content-series metadata expires after 395 idle days. Conversation deletion and
+personal erasure include all three collections. Operator encryption walks register
+pending bytes and generated attachments with their contextual AAD.
+
+Generated GETs return the complete 200 response, ignore Range/If-Range, and hold
+the memory permit with the actual HTTP buffer. Headers are private/no-store,
+nosniff and sandboxed, with safe UTF-8 Content-Disposition. Verified rasters and
+supported MP4 can render inline; other files download. A conversation key can read
+generated files only in its bound conversation. Existing uploads/tool images keep
+their exact legacy read and response path.
+
+An empty-body human-owner POST to
+`/api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery`
+recovers the saved result onto that reply while the conversation is idle.
+`nyx__artifact_delivery` accepts exactly `{}` during a live owner Web turn and uses
+the frozen server target. Both transports preflight retained authority/bytes before
+an artifact audit or action card, revalidate transactionally and reuse file IDs.
+They never submit another Sandbox execution. Recovery updates the saved outcome
+and association atomically. Missing/expired bytes cannot be recreated.
+
+Ship tolerant frontend readers first, then every API/async writer/worker and normal
+startup indexes. Configure the existing replica roster/drain readiness before
+enabling `assistant:generated-artifacts`; acquisition requires that capability.
+Disabling hides generated rows/outcomes from history and active turns and disables
+both recovery transports. Admitted watches drain and retained owner GETs remain
+readable until expiry. Re-enabling restores exposure/recovery. Keep upgraded
+binaries for draining and the compatible frontend floor; disabling does not make
+old binaries safe against newly admitted generated state. Real Sandbox-to-Web
+acceptance, including video playback and exact-byte recovery, is a pre-enable gate.
+
+### Platform-model assistant bridge
+
+Platform-selected assistant turns reuse the existing image plan, authenticated
+attachment URLs, delivery receipts and omitted/expired notices. Their initial
+and tool-image bounds also intersect the certified model/tariff limits from
+[PLATFORM_MODELS.md](../PLATFORM_MODELS.md#assistant-chat-bridge-pr-5). The NyxAgent
+bridge converts delivered Responses image parts into bounded Chat data parts;
+NyxID accepts those bytes only after an authorized attachment read for the exact
+live turn and rechecks retention/source authority before dispatch. The retained
+proof contains a content digest and attachment ID, never image bytes. An earlier
+turn's proof is not reusable. Collaboration guests keep legacy models; they do
+not acquire platform inference through their public attachment access.
+
+This integration stays disabled pending the paired NyxAgent bridge release and
+real-runtime image/long-conversation/compaction certification. It does not change
+the canonical image-origin check or silently replace undeliverable images.

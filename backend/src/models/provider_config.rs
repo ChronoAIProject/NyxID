@@ -33,8 +33,23 @@ fn default_supports_oauth_scopes() -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationEffectScope {
+    TokenOnly,
+    GrantWide,
+    /// Reviewed API has distinct single-token and whole-grant endpoints.
+    RequestScoped,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationConfig {
+    /// Explicitly reviewed remote effect scope. Absent legacy/default-false
+    /// metadata does not prove RFC 7009 revocation is limited to one token.
+    /// This is privileged provider configuration, never inferred from token
+    /// inequality or local connection identity.
+    #[serde(default)]
+    pub effect_scope: Option<RevocationEffectScope>,
     /// RFC 7009 form encoding, or a JSON token object without the optional hint.
     #[serde(default = "default_request_encoding")]
     pub request_encoding: String,
@@ -89,6 +104,10 @@ mod public_oauth_headers {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Explicit field storage dispatch. Missing entries use the documented
+    /// legacy decoder only while trusted legacy reads remain enabled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub slug: String,
@@ -113,6 +132,9 @@ pub struct ProviderConfig {
     pub client_secret_encrypted: Option<Vec<u8>>,
     #[serde(default)]
     pub supports_pkce: bool,
+    /// Generate an outbound nonce for each hosted OAuth2 authorization-code attempt.
+    #[serde(default)]
+    pub authorization_nonce_required: bool,
 
     // --- Device code flow fields ---
     /// For device_code flow: the URL to request a device code (RFC 8628 step 1)
@@ -171,7 +193,7 @@ pub struct ProviderConfig {
 
     /// Provider-specific extra auth URL parameters (e.g., {"access_type": "offline"} for Google)
     /// Blocklist: client_id, client_secret, redirect_uri, response_type, state, code,
-    ///            code_challenge, code_challenge_method, scope
+    ///            code_challenge, code_challenge_method, scope, nonce
     #[serde(default)]
     pub extra_auth_params: Option<HashMap<String, String>>,
 
@@ -223,6 +245,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_oauth2() {
         let config = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: "google".to_string(),
             name: "Google".to_string(),
@@ -232,6 +255,7 @@ mod tests {
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
@@ -259,6 +283,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: true,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
             revocation_seed_version: 1,
@@ -270,6 +295,7 @@ mod tests {
         assert_eq!(config.slug, restored.slug);
         assert_eq!(config.provider_type, restored.provider_type);
         assert!(restored.supports_pkce);
+        assert!(restored.authorization_nonce_required);
         assert_eq!(restored.credential_mode, "admin");
         assert!(!restored.requires_gateway_url);
         assert_eq!(config.revocation, restored.revocation);
@@ -279,6 +305,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key() {
         let config = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: "anthropic".to_string(),
             name: "Anthropic".to_string(),
@@ -309,6 +336,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
             revocation_seed_version: 0,
@@ -336,6 +364,7 @@ mod tests {
             "updated_at": bson::DateTime::from_chrono(Utc::now()),
         };
         let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.authorization_nonce_required);
         assert_eq!(restored.credential_mode, "admin");
         assert!(restored.revocation.is_none());
         assert_eq!(restored.revocation_seed_version, 0);
@@ -356,6 +385,7 @@ mod tests {
         assert!(!revocation.revokes_grant);
 
         let unknown = RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "future_style".to_string(),
             url: "https://example.com/future-revoke".to_string(),

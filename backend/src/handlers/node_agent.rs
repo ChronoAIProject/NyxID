@@ -327,6 +327,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: hash_token(raw_auth_token),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,

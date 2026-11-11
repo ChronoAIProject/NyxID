@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useId } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -29,25 +30,25 @@ export function PlatformServiceScope({
   readonly orgOwned?: boolean;
   readonly disabled?: boolean;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const prefix = useId();
   if (orgOwned && !services.some((service) => service.auto_connected)) {
     return (
-      <p className="text-12 text-muted-foreground">{t("This org-owned key cannot use platform services from your personal account.")}</p>
+      <p className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("This org-owned key cannot use platform services from your personal account.")}</p>
     );
   }
   return (
     <section
-      aria-label={t("Auto-connected platform services")}
+      aria-label={translateUi("Auto-connected platform services")}
       className="space-y-2 border-t border-border/50 pt-3"
     >
-      <p className="text-12 font-medium">{t("Auto-connected platform services")}</p>
-      <Label className="flex items-start gap-2 text-12">
+      <p className="type-row-title unthemed:text-12">{translateUi("Auto-connected platform services")}</p>
+      <Label className="flex items-start gap-2 unthemed:text-14">
         <Checkbox
           checked={allowAll}
           disabled={disabled}
           onCheckedChange={(value) => onAllowAllChange(value === true)}
-        />{t("Allow all auto-connected platform services (includes ones added later)")}</Label>
+        />{translateUi("Allow all auto-connected platform services (includes ones added later)")}</Label>
       {services
         .filter((service) => service.auto_connected)
         .map((service) => {
@@ -56,7 +57,7 @@ export function PlatformServiceScope({
             <Label
               key={service.id}
               htmlFor={`${prefix}-${service.id}`}
-              className={`flex items-center gap-2 text-12 ${implied ? "text-muted-foreground" : ""}`}
+              className={`flex items-center gap-2 unthemed:text-12 ${implied ? "text-muted-foreground" : ""}`}
             >
               <Checkbox
                 id={`${prefix}-${service.id}`}
@@ -66,7 +67,7 @@ export function PlatformServiceScope({
               />
               {service.label || service.name || service.slug || service.id}
               {service.platform_grant_eligible === false &&
-                t(" (Organization; select individually)")}
+                " (Organization; select individually)"}
             </Label>
           );
         })}

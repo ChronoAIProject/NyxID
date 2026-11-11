@@ -1,7 +1,8 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -54,7 +55,7 @@ import {
 const PERSONAL_OWNER_VALUE = "__personal__";
 
 export function DevicesOnboardPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const onboardDevice = useOnboardDevice();
   const revokeOnboardDevice = useRevokeOnboardDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
@@ -161,7 +162,7 @@ export function DevicesOnboardPage() {
       {onboardedDevice && qrDataUrl ? (
         <div className="hidden min-h-screen items-center justify-center bg-white p-8 print:flex">
           <img
-            alt={t("Device onboarding QR code")}
+            alt={translateUi("Device onboarding QR code")}
             className="h-auto w-[78vmin] max-w-[520px]"
             src={qrDataUrl}
           />
@@ -173,8 +174,8 @@ export function DevicesOnboardPage() {
         style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
       >
         <header className="flex flex-col gap-1">
-          <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">{t("Onboard device")}</h1>
-          <p className="break-words text-13 text-muted-foreground">{t("Generate a one-scan provisioning QR for a headless device.")}</p>
+          <h1 className="type-section-heading text-foreground sm:type-metric">{translateUi("Onboard device")}</h1>
+          <p className="break-words text-15 text-muted-foreground">{translateUi("Generate a one-scan provisioning QR for a headless device.")}</p>
         </header>
 
         {onboardedDevice ? (
@@ -189,8 +190,8 @@ export function DevicesOnboardPage() {
         ) : (
           <Card className="rounded-lg">
             <CardHeader>
-              <CardTitle>{t("QR provisioning")}</CardTitle>
-              <CardDescription>{t("NyxID creates a short-lived bootstrap token. WiFi details are added to the QR in this browser.")}</CardDescription>
+              <CardTitle>{translateUi("QR provisioning")}</CardTitle>
+              <CardDescription>{translateUi("NyxID creates a short-lived bootstrap token. WiFi details are added to the QR in this browser.")}</CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...form}>
@@ -207,7 +208,7 @@ export function DevicesOnboardPage() {
                     name="org_id"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Owner")}</FormLabel>
+                        <FormLabel>{translateUi("Owner")}</FormLabel>
                         <Select
                           disabled={isOrgsLoading}
                           value={field.value ?? PERSONAL_OWNER_VALUE}
@@ -222,12 +223,12 @@ export function DevicesOnboardPage() {
                           }}
                         >
                           <FormControl>
-                            <SelectTrigger className="h-11 text-sm">
-                              <SelectValue placeholder={t("Personal account")} />
+                            <SelectTrigger className="h-11 text-14">
+                              <SelectValue placeholder={translateUi("Personal account")} />
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value={PERSONAL_OWNER_VALUE}>{t("Personal account")}</SelectItem>
+                            <SelectItem value={PERSONAL_OWNER_VALUE}>{translateUi("Personal account")}</SelectItem>
                             {adminOrgs.map((org) => (
                               <SelectItem key={org.id} value={org.id}>
                                 {org.display_name || org.slug}
@@ -245,13 +246,13 @@ export function DevicesOnboardPage() {
                     name="label"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Label")}</FormLabel>
+                        <FormLabel>{translateUi("Label")}</FormLabel>
                         <FormControl>
                           <Input
                             {...field}
-                            className="h-11 text-sm"
+                            className="h-11 text-14"
                             maxLength={128}
-                            placeholder={t("Kitchen Camera")}
+                            placeholder={translateUi("Kitchen Camera")}
                             value={field.value ?? ""}
                           />
                         </FormControl>
@@ -266,14 +267,14 @@ export function DevicesOnboardPage() {
                       name="wifi_ssid"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>{t("WiFi SSID")}</FormLabel>
+                          <FormLabel>{translateUi("WiFi SSID")}</FormLabel>
                           <FormControl>
                             <Input
                               {...field}
                               autoComplete="off"
-                              className="h-11 text-sm"
+                              className="h-11 text-14"
                               maxLength={32}
-                              placeholder={t("MyHomeNetwork")}
+                              placeholder={translateUi("MyHomeNetwork")}
                               value={field.value ?? ""}
                             />
                           </FormControl>
@@ -287,15 +288,15 @@ export function DevicesOnboardPage() {
                       name="wifi_password"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>{t("WiFi password")}</FormLabel>
+                          <FormLabel>{translateUi("WiFi password")}</FormLabel>
                           <FormControl>
                             <Input
                               {...field}
                               autoComplete="off"
-                              className="h-11 text-sm"
+                              className="h-11 text-14"
                               maxLength={63}
                               minLength={8}
-                              placeholder={t("At least 8 characters")}
+                              placeholder={translateUi("At least 8 characters")}
                               type="password"
                               value={field.value ?? ""}
                             />
@@ -333,16 +334,16 @@ export function DevicesOnboardPage() {
                         : [];
                       return (
                         <FormItem>
-                          <FormLabel>{t("Grant proxy access to (optional)")}</FormLabel>
-                          <FormDescription className="text-12 leading-relaxed">{t("Pick which of your services this device should be allowed to proxy through. You can add more later from the API Keys page.")}</FormDescription>
+                          <FormLabel>{translateUi("Grant proxy access to (optional)")}</FormLabel>
+                          <FormDescription className="text-14">{translateUi("Pick which of your services this device should be allowed to proxy through. You can add more later from the API Keys page.")}</FormDescription>
                           <div className="relative max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                             {isServicesLoading ? (
-                              <p className="px-2 py-3 text-12 text-muted-foreground">{t("Loading services...")}</p>
+                              <p className="px-2 py-3 text-14 text-muted-foreground">{translateUi("Loading services...")}</p>
                             ) : grantableServices.length === 0 ? (
-                              <p className="px-2 py-3 text-12 text-muted-foreground">
+                              <p className="px-2 py-3 text-14 text-muted-foreground">
                                 {selectedOwner
-                                  ? t("This org has no services available for device access.")
-                                  : t("Your personal account has no services available for device access.")}
+                                  ? translateUi("This org has no services available for device access.")
+                                  : translateUi("Your personal account has no services available for device access.")}
                               </p>
                             ) : (
                               grantableServices
@@ -370,17 +371,17 @@ export function DevicesOnboardPage() {
                                           )
                                         }
                                       />
-                                      <label
+                                      <Label
                                         htmlFor={checkboxId}
                                         className="min-w-0 flex-1 cursor-pointer"
                                       >
-                                        <span className="block truncate text-13 font-medium text-foreground">
+                                        <span className="block truncate text-foreground">
                                           {service.label}
                                         </span>
-                                        <span className="block truncate font-mono text-12 text-muted-foreground">
+                                        <FieldHelp variant="body" className="block truncate font-mono text-muted-foreground">
                                           {service.slug}
-                                        </span>
-                                      </label>
+                                        </FieldHelp>
+                                      </Label>
                                     </div>
                                   );
                                 })
@@ -392,11 +393,11 @@ export function DevicesOnboardPage() {
                     }}
                   />
 
-                  <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-12 leading-relaxed text-muted-foreground">{t("Your WiFi password stays in this browser. NyxID receives only the owner, label, and optional service grants needed to create a short-lived bootstrap token.")}</p>
+                  <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-14 text-muted-foreground">{translateUi("Your WiFi password stays in this browser. NyxID receives only the owner, label, and optional service grants needed to create a short-lived bootstrap token.")}</p>
 
                   <div className="flex justify-end">
                     <Button
-                      className="h-11 w-full text-sm sm:w-auto"
+                      className="h-11 w-full text-14 sm:w-auto"
                       disabled={onboardDevice.isPending}
                       isLoading={onboardDevice.isPending}
                       type="submit"
@@ -404,7 +405,7 @@ export function DevicesOnboardPage() {
                     >
                       <ButtonIcon variant="primary">
                         <QrCode />
-                      </ButtonIcon>{t("Generate QR")}</Button>
+                      </ButtonIcon>{translateUi("Generate QR")}</Button>
                   </div>
                 </form>
               </Form>
@@ -431,7 +432,7 @@ function OnboardSuccess({
   readonly onPrint: () => void;
   readonly onRevoke: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Card className="rounded-lg">
       <CardHeader>
@@ -440,8 +441,8 @@ function OnboardSuccess({
             <CheckCircle2 className="h-5 w-5 text-emerald-400" />
           </div>
           <div className="min-w-0">
-            <CardTitle>{t("Device onboarded")}</CardTitle>
-            <CardDescription>{t("Scan this QR from the headless device camera before it expires.")}</CardDescription>
+            <CardTitle>{translateUi("Device onboarded")}</CardTitle>
+            <CardDescription>{translateUi("Scan this QR from the headless device camera before it expires.")}</CardDescription>
           </div>
         </div>
       </CardHeader>
@@ -449,29 +450,29 @@ function OnboardSuccess({
         <div className="flex justify-center rounded-lg border border-border bg-white p-4">
           {qrDataUrl ? (
             <img
-              alt={t("Device onboarding QR code")}
+              alt={translateUi("Device onboarding QR code")}
               className="h-auto w-full max-w-[360px]"
               src={qrDataUrl}
             />
           ) : (
-            <div className="flex h-[360px] w-full max-w-[360px] items-center justify-center text-13 text-muted-foreground">
-              {qrError ? t("QR code rendering failed.") : t("Rendering QR...")}
+            <div className="flex h-[360px] w-full max-w-[360px] items-center justify-center text-15 text-muted-foreground">
+              {qrError ? translateUi("QR code rendering failed.") : translateUi("Rendering QR...")}
             </div>
           )}
         </div>
 
-        <dl className="grid gap-3 text-13 sm:grid-cols-2">
-          <DetailRow label={t("Device")} value={device.label} />
+        <dl className="grid gap-3 text-15 sm:grid-cols-2">
+          <DetailRow label={translateUi("Device")} value={device.label} />
           <DetailRow
-            label={t("Bootstrap")}
+            label={translateUi("Bootstrap")}
             value={maskIdentifier(device.bootstrap_id)}
           />
-          <DetailRow label={t("Expires")} value={formatExpiry(device.expires_at)} />
+          <DetailRow label={translateUi("Expires")} value={formatExpiry(device.expires_at)} />
         </dl>
 
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button
-            className="h-11 w-full text-sm sm:w-auto"
+            className="h-11 w-full text-14 sm:w-auto"
             disabled={isRevoking}
             isLoading={isRevoking}
             onClick={onRevoke}
@@ -480,9 +481,9 @@ function OnboardSuccess({
           >
             <ButtonIcon variant="destructive">
               <XCircle />
-            </ButtonIcon>{t("Revoke QR")}</Button>
+            </ButtonIcon>{translateUi("Revoke QR")}</Button>
           <Button
-            className="h-11 w-full text-sm sm:w-auto"
+            className="h-11 w-full text-14 sm:w-auto"
             disabled={!qrDataUrl}
             onClick={onPrint}
             type="button"
@@ -490,7 +491,7 @@ function OnboardSuccess({
           >
             <ButtonIcon>
               <Printer />
-            </ButtonIcon>{t("Print fullscreen")}</Button>
+            </ButtonIcon>{translateUi("Print fullscreen")}</Button>
         </div>
       </CardContent>
     </Card>
@@ -504,12 +505,13 @@ function DetailRow({
   readonly label: string;
   readonly value: string;
 }) {
+  useUiTranslation();
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/30 px-3 py-2">
-      <dt className="text-11 font-medium uppercase text-muted-foreground">
+      <dt className="type-secondary-emphasis uppercase text-muted-foreground">
         {label}
       </dt>
-      <dd className="mt-1 truncate font-mono text-13 text-foreground">
+      <dd className="mt-1 truncate font-mono text-15 text-foreground">
         {value}
       </dd>
     </div>

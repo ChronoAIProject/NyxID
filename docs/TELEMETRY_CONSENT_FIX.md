@@ -1,3 +1,5 @@
+> Historical planning record (2026-04). This entire document, including its checkboxes and proposed audit deletion/TTL steps, is superseded for current implementation by [TELEMETRY.md](TELEMETRY.md) and [the W1–W4 tracker](SECURITY_REMEDIATION_W1_W4.md). Do not execute the historic audit deletion/TTL proposal: W8 must preserve chain integrity. Historical legal/vendor assertions are not verified deployment facts.
+
 # Telemetry Consent — Failings & Fix Checklist
 
 Status: Pre-fix audit. Use this document as the checklist for closing the consent-withdrawal gaps before NyxID telemetry v1 is considered shippable to EU users.

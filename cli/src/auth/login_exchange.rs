@@ -31,6 +31,7 @@ pub enum LoginError {
     Unsupported,
     Storage,
     InputUnavailable,
+    MfaStepUpRequired,
 }
 
 impl LoginError {
@@ -49,6 +50,7 @@ impl LoginError {
             Self::Unsupported => "login_unsupported",
             Self::Storage => "login_storage_failed",
             Self::InputUnavailable => "login_input_unavailable",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
         }
     }
     pub fn exit_code(self) -> i32 {
@@ -66,6 +68,7 @@ impl LoginError {
             Self::Unsupported => 20,
             Self::Storage => 21,
             Self::InputUnavailable => 22,
+            Self::MfaStepUpRequired => 23,
         }
     }
     pub fn json(self) -> serde_json::Value {
@@ -88,6 +91,7 @@ impl std::fmt::Display for LoginError {
             Self::Unsupported => "This backend does not support the requested login flow. Upgrade the server or use browser login.",
             Self::Storage => "The credential could not be saved. Start a new login after checking local storage.",
             Self::InputUnavailable => "The login code could not be read securely from this terminal.",
+            Self::MfaStepUpRequired => "Verify the approving session with your authenticator, then start a new login or generate a fresh login code.",
         })
     }
 }
@@ -614,6 +618,7 @@ fn state_error(state: &str) -> LoginError {
     match state {
         "login_denied" => LoginError::Denied,
         "login_expired" => LoginError::Expired,
+        "mfa_step_up_required" => LoginError::MfaStepUpRequired,
         _ => LoginError::Delivered,
     }
 }
@@ -625,7 +630,11 @@ fn finish_error(
     let error = error.into();
     if matches!(
         error.kind,
-        LoginError::Denied | LoginError::Expired | LoginError::Delivered | LoginError::InvalidCode
+        LoginError::Denied
+            | LoginError::Expired
+            | LoginError::Delivered
+            | LoginError::InvalidCode
+            | LoginError::MfaStepUpRequired
     ) {
         pending.device_code.zeroize();
         pending.state = error.kind.code().into();
@@ -666,6 +675,7 @@ async fn poll_error(response: reqwest::Response) -> (LoginFailure, Option<u64>) 
         .or(retry_after)
         .unwrap_or(0);
     let (kind, interval) = match code {
+        Some(2003) => (LoginError::MfaStepUpRequired, None),
         Some(11202 | 11902) => (LoginError::Pending, None),
         Some(11203 | 11903) => (LoginError::Pending, Some(interval)),
         Some(11204 | 11904) => (LoginError::Denied, None),

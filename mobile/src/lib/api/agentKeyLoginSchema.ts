@@ -92,11 +92,14 @@ export const newAgentKeySchema = z.object({
   allow_auto_connected_services: z.boolean().default(false),
   allow_all_nodes: z.boolean().default(false),
   expires_at: futureExpirySchema,
+  never_expires: z.boolean().transform((value): boolean | undefined => value || undefined).optional(),
   target_org_id: z.string().optional(),
   platform: z.string().max(64).nullable().optional(),
   rate_limit_per_second: z.number().int().positive().max(4294967295).optional(),
   rate_limit_burst: z.number().int().positive().max(4294967295).optional(),
   scope_plan_digest: z.string().optional(),
+}).refine((value) => !(value.never_expires && value.expires_at), {
+  path: ["expires_at"], message: "Choose either an expiry date or no expiry",
 });
 export const agentKeyApproveSchema = z
   .object({

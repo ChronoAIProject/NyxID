@@ -140,11 +140,13 @@ function ServiceIconImage({
   const [mode, setMode] = useState<"image" | "mask" | "failed">(() =>
     corsReadable.get(iconUrl) === true ? "mask" : "image",
   );
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     if (corsReadable.has(iconUrl)) return;
     let active = true;
     void probeCorsReadable(iconUrl).then((readable) => {
       if (active && readable) {
+        setLoaded(true);
         setMode((current) => (current === "image" ? "mask" : current));
       }
     });
@@ -156,18 +158,21 @@ function ServiceIconImage({
   if (mode === "failed") {
     return <ServiceIcon slug={slug ?? "custom"} size={size} className={className} />;
   }
-  if (mode === "mask") {
-    const mask = `url(${JSON.stringify(iconUrl)})`;
-    return (
+  const mask = `url(${JSON.stringify(iconUrl)})`;
+  return (
+    <span className={cn(SIZE_CLASS[size], "relative inline-flex shrink-0", className)}>
+      {!loaded && <ServiceIcon slug={slug ?? "custom"} size={size} className={className} />}
+      {mode === "mask" && (
       <span
         aria-hidden="true"
         data-icon-mode="mask"
         className={cn(
           SIZE_CLASS[size],
-          "inline-block shrink-0 bg-current text-muted-foreground",
+          "absolute inset-0 inline-block shrink-0 bg-current text-muted-foreground",
           className,
         )}
         style={{
+          visibility: loaded ? "visible" : "hidden",
           maskImage: mask,
           WebkitMaskImage: mask,
           maskSize: "contain",
@@ -178,24 +183,26 @@ function ServiceIconImage({
           WebkitMaskPosition: "center",
         }}
       />
-    );
-  }
-  return (
+      )}
     <img
       src={iconUrl}
       alt=""
       aria-hidden="true"
-      data-icon-mode="image"
+      data-icon-mode={mode === "image" ? "image" : undefined}
+      data-icon-monitor={mode === "mask" ? "" : undefined}
       referrerPolicy="no-referrer"
       onError={() => setMode("failed")}
+      onLoad={() => setLoaded(true)}
+      style={{ visibility: loaded && mode === "image" ? "visible" : "hidden" }}
       // Until (or unless) the mask upgrade applies, uploaded brand art renders
       // monochrome so it sits with the built-in glyphs; dark themes lift it so
       // mid-tone logos stay legible.
       className={cn(
         SIZE_CLASS[size],
-        "shrink-0 object-contain grayscale dark:brightness-150",
+        "absolute inset-0 shrink-0 object-contain grayscale dark:brightness-150",
         className,
       )}
     />
+    </span>
   );
 }

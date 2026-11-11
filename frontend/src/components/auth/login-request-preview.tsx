@@ -16,6 +16,7 @@ export function LoginDeviceShell({
 }: {
   readonly children: React.ReactNode;
 }) {
+  useUiTranslation();
   return (
     <main className="flex min-h-dvh items-start justify-center bg-background px-4 py-8 text-foreground sm:items-center sm:py-10">
       <div className="flex w-full max-w-xl flex-col gap-5">{children}</div>

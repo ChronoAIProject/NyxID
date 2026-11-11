@@ -16,6 +16,7 @@ export function ThemeToggle({ className }: { readonly className?: string }) {
 
   return (
     <button
+      data-icon-button=""
       type="button"
       onClick={toggle}
       aria-label={t(isDark ? "Switch to light mode" : "Switch to dark mode")}

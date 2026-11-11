@@ -1,7 +1,9 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { LarkBotSetupStatus, LARK_VERIFY_SUCCESS } from "@/components/channels/lark-bot-setup-status";
 import { ChannelActivities, LatestActivity } from "@/components/channels/channel-activities";
+import { WhatsappNativeSection } from "@/components/channels/whatsapp-native";
 import { useChannelActivities } from "@/hooks/use-channel-activities";
 import type { ChannelActivityDescriptor, ChannelActivityItem } from "@/types/channels";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
@@ -121,14 +123,14 @@ function ConversationRow({
   readonly activityError: boolean;
   readonly activityLoading: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const agentName =
     apiKeyNames.get(conversation.agent_api_key_id) ??
     conversation.agent_api_key_id.slice(0, 8);
 
   return (
     <TableRow>
-      <TableCell className="text-xs">
+      <TableCell className="text-14">
         {conversation.platform_conversation_id ||
           conversation.platform_sender_id ||
           "-"}
@@ -138,32 +140,32 @@ function ConversationRow({
           {conversationTypeLabel(conversation.platform_conversation_type)}
         </Badge>
       </TableCell>
-      <TableCell className="font-medium">{agentName}</TableCell>
+      <TableCell className="font-normal">{agentName}</TableCell>
       <TableCell>
         {conversation.default_agent ? (
-          <Badge variant="info">{t("Default")}</Badge>
+          <Badge variant="info">{translateUi("Default")}</Badge>
         ) : (
-          <span className="text-xs text-muted-foreground">-</span>
+          <span className="text-13 text-muted-foreground">-</span>
         )}
       </TableCell>
       <TableCell>
         {conversation.is_active ? (
-          <Badge variant="success">{t("Active")}</Badge>
+          <Badge variant="success">{translateUi("Active")}</Badge>
         ) : (
-          <Badge variant="secondary">{t("Inactive")}</Badge>
+          <Badge variant="secondary">{translateUi("Inactive")}</Badge>
         )}
       </TableCell>
-      <TableCell className="text-xs text-muted-foreground">
+      <TableCell className="text-14 text-muted-foreground">
         {activities.length ? <LatestActivity activity={latest} descriptors={activities} unavailable={activityError} loading={activityLoading} /> : conversation.last_message_at
           ? formatRelativeTime(conversation.last_message_at)
-          : t("Never")}
+          : translateUi("Never")}
       </TableCell>
       <TableCell className="w-10">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-7 w-7">
               <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
-              <span className="sr-only">{t("Actions")}</span>
+              <span className="sr-only">{translateUi("Actions")}</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -171,13 +173,13 @@ function ConversationRow({
               <Link
                 to={`/channel-bots/${botId}/conversations/${conversation.id}` as string}
               >
-                <MessageSquare className="mr-2 h-4 w-4" aria-hidden="true" />{t("View messages")}</Link>
+                <MessageSquare className="mr-2 h-4 w-4" aria-hidden="true" />{translateUi("View messages")}</Link>
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => onDelete(conversation.id)}
               className="text-destructive focus:text-destructive"
             >
-              <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />{t("Delete")}</DropdownMenuItem>
+              <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />{translateUi("Delete")}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </TableCell>
@@ -203,7 +205,7 @@ function ConversationsSection({
   readonly ownerLabel: string;
   readonly isTelegramManager: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: conversations, isLoading, error } = useChannelConversations({
     botId,
     orgId: ownerOrgId,
@@ -221,17 +223,17 @@ function ConversationsSection({
       {activities.length > 0 && <ChannelActivities scope="bot" id={botId} descriptors={activities} />}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <h3 className="text-lg font-medium">{t("Conversation Routes")}</h3>
-          <p className="text-12 text-muted-foreground">{t("Map conversations to AI agents for message relay.")}</p>
+          <h3 className="type-card-title">{translateUi("Conversation Routes")}</h3>
+          <p className="text-14 text-muted-foreground">{translateUi("Map conversations to AI agents for message relay.")}</p>
         </div>
         <div className="shrink-0">
-          <AddCtaButton label={t("Add Route")} onClick={() => setAddOpen(true)} />
+          <AddCtaButton label={translateUi("Add Route")} onClick={() => setAddOpen(true)} />
         </div>
       </div>
 
-      {keys.error ? <ErrorBanner message={t("Agent keys could not be loaded for this owner. Retry the page.")} /> : !keys.isLoading && keys.data && <RouteReadiness keys={keys.data} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} conversations={conversations} />}
+      {keys.error ? <ErrorBanner message={translateUi("Agent keys could not be loaded for this owner. Retry the page.")} /> : !keys.isLoading && keys.data && <RouteReadiness keys={keys.data} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} conversations={conversations} />}
 
-      {error ? <ErrorBanner message={t("Conversation routes could not be loaded. Retry the page.")} /> : isLoading ? (
+      {error ? <ErrorBanner message={translateUi("Conversation routes could not be loaded. Retry the page.")} /> : isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 2 }, (_, i) => (
             <Skeleton key={`conv-skel-${String(i)}`} className="h-12 w-full" />
@@ -240,7 +242,7 @@ function ConversationsSection({
       ) : !conversations || conversations.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
           <ArticleIcon className="h-48 w-48 text-muted-foreground" />
-          <p className="text-12 text-muted-foreground">{t("No conversation routes configured. Add a route to start relaying messages to an AI agent.")}</p>
+          <p className="text-14 text-muted-foreground">{translateUi("No conversation routes configured. Add a route to start relaying messages to an AI agent.")}</p>
         </div>
       ) : (
         <>
@@ -260,24 +262,24 @@ function ConversationsSection({
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem asChild>
                           <Link to={`/channel-bots/${botId}/conversations/${conv.id}` as string}>
-                            <MessageSquare className="mr-2 h-4 w-4" />{t(" View messages")}</Link>
+                            <MessageSquare className="mr-2 h-4 w-4" />{translateUi(" View messages")}</Link>
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => setDeleteTarget(conv.id)} className="text-destructive focus:text-destructive">
-                          <Trash2 className="mr-2 h-4 w-4 text-destructive" />{t(" Delete")}</DropdownMenuItem>
+                          <Trash2 className="mr-2 h-4 w-4 text-destructive" />{translateUi(" Delete")}</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
-                  <p className="pr-10 text-13 font-semibold text-foreground truncate">
+                  <p className="pr-10 type-card-title text-foreground truncate">
                     {conv.platform_conversation_id || conv.platform_sender_id || "—"}
                   </p>
-                  <p className="text-11 text-muted-foreground">{t("Agent: ")}{agentName}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Agent: ")}{agentName}</p>
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <Badge variant="secondary">{conversationTypeLabel(conv.platform_conversation_type)}</Badge>
-                    {conv.is_active ? <Badge variant="success">{t("Active")}</Badge> : <Badge variant="secondary">{t("Inactive")}</Badge>}
-                    {conv.default_agent && <Badge variant="info">{t("Default")}</Badge>}
+                    {conv.is_active ? <Badge variant="success">{translateUi("Active")}</Badge> : <Badge variant="secondary">{translateUi("Inactive")}</Badge>}
+                    {conv.default_agent && <Badge variant="info">{translateUi("Default")}</Badge>}
                   </div>
-                  <div className="mt-3 text-11 text-muted-foreground">
-                    {activities.length ? <LatestActivity activity={latest(conv.id)} descriptors={activities} unavailable={!!activityQuery.error} loading={activityQuery.isPending} /> : conv.last_message_at ? t("Last message {{value}}", { value: formatRelativeTime(conv.last_message_at) }) : t("No messages")}
+                  <div className="mt-3 text-13 text-muted-foreground">
+                    {activities.length ? <LatestActivity activity={latest(conv.id)} descriptors={activities} unavailable={!!activityQuery.error} loading={activityQuery.isPending} /> : conv.last_message_at ? translateUi("Last message {{value1}}", { value1: formatRelativeTime(conv.last_message_at) }) : translateUi("No messages")}
                   </div>
                 </div>
               );
@@ -289,13 +291,13 @@ function ConversationsSection({
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Conversation ID")}</TableHead>
-                  <TableHead>{t("Type")}</TableHead>
-                  <TableHead>{t("Agent")}</TableHead>
-                  <TableHead>{t("Default")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{activities.length ? t("Latest activity") : t("Last Message")}</TableHead>
-                  <TableHead className="w-10">{t("Actions")}</TableHead>
+                  <TableHead>{translateUi("Conversation ID")}</TableHead>
+                  <TableHead>{translateUi("Type")}</TableHead>
+                  <TableHead>{translateUi("Agent")}</TableHead>
+                  <TableHead>{translateUi("Default")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{activities.length ? translateUi("Latest activity") : translateUi("Last Message")}</TableHead>
+                  <TableHead className="w-10">{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -351,7 +353,7 @@ export function AddRouteDialog({
   readonly ownerLabel: string;
   readonly isTelegramManager: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: apiKeys, isLoading: keysLoading, error: keysError, refetch: refetchKeys } = useApiKeys({ orgId: ownerOrgId });
   const createConversation = useCreateChannelConversation();
 
@@ -438,8 +440,8 @@ export function AddRouteDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("Add Conversation Route")}</DialogTitle>
-          <DialogDescription>{t("Route a conversation to an AI agent using one of your API keys.")}</DialogDescription>
+          <DialogTitle>{translateUi("Add Conversation Route")}</DialogTitle>
+          <DialogDescription>{translateUi("Route a conversation to an AI agent using one of your API keys.")}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
@@ -453,20 +455,20 @@ export function AddRouteDialog({
                   checked={watch("default_agent") ?? false}
                   onCheckedChange={(value) => setValue("default_agent", value)}
                 />
-                <Label htmlFor="public_default_route">{t("Use a public default route")}</Label>
+                <Label htmlFor="public_default_route">{translateUi("Use a public default route")}</Label>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {watch("default_agent")
-                  ? t("Receives ordinary messages from anyone contacting this bot when no exact route matches. Choose a dedicated agent with restricted permissions for public use.")
-                  : t("Enter an exact Telegram chat ID to route only that conversation. Turn on the public default route to handle unmatched chats.")}
+                  ? translateUi("Receives ordinary messages from anyone contacting this bot when no exact route matches. Choose a dedicated agent with restricted permissions for public use.")
+                  : translateUi("Enter an exact Telegram chat ID to route only that conversation. Turn on the public default route to handle unmatched chats.")}
               </p>
             </div>
           )}
 
-          {keysError ? <ErrorBanner message={t("Agent keys could not be loaded for this owner.")} onRetry={() => void refetchKeys()} /> : keysLoading ? <p className="text-xs text-muted-foreground">{t("Loading agent keys…")}</p> : <RouteReadiness keys={apiKeys ?? []} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} />}
+          {keysError ? <ErrorBanner message={translateUi("Agent keys could not be loaded for this owner.")} onRetry={() => void refetchKeys()} /> : keysLoading ? <p className="text-13 text-muted-foreground">{translateUi("Loading agent keys…")}</p> : <RouteReadiness keys={apiKeys ?? []} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} />}
 
           <div className="space-y-2">
-            <Label htmlFor="agent_api_key_id">{t("Agent (API Key)")}</Label>
+            <Label htmlFor="agent_api_key_id">{translateUi("Agent (API Key)")}</Label>
             {(
               <Select
                 disabled={keysLoading || Boolean(keysError) || eligibleKeys.length === 0}
@@ -474,7 +476,7 @@ export function AddRouteDialog({
                 onValueChange={(value) => setValue("agent_api_key_id", value)}
               >
                 <SelectTrigger id="agent_api_key_id">
-                  <SelectValue placeholder={t("Select an API key")} />
+                  <SelectValue placeholder={translateUi("Select an API key")} />
                 </SelectTrigger>
                 <SelectContent>
                   {(apiKeys ?? []).map((key) => (
@@ -484,16 +486,16 @@ export function AddRouteDialog({
                       disabled={Boolean(routeAgentIssue(key, ownerOrgId))}
                     >
                       {key.name}
-                      {key.platform ? t(" ({{platform}})", { platform: key.platform }) : ""}
-                      {routeAgentIssue(key, ownerOrgId) ? t(" — {{value}}", { value: t(routeAgentIssue(key, ownerOrgId) ?? "") }) : ""}
+                      {key.platform ? translateUi(" ({{platform}})", { platform: key.platform }) : ""}
+                      {routeAgentIssue(key, ownerOrgId) ? ` — ${routeAgentIssue(key, ownerOrgId)}` : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             )}
             {errors.agent_api_key_id && (
-              <p className="text-xs text-destructive">
-                {translateUi(errors.agent_api_key_id.message ?? "")}
+              <p className="text-13 text-destructive">
+                {errors.agent_api_key_id.message}
               </p>
             )}
           </div>
@@ -503,33 +505,33 @@ export function AddRouteDialog({
               <div className="space-y-2">
                 <Label htmlFor="platform_conversation_id">
                   {isTelegramManager
-                    ? t("Telegram chat ID")
-                    : t("Conversation ID (optional)")}
+                    ? translateUi("Telegram chat ID")
+                    : translateUi("Conversation ID (optional)")}
                 </Label>
                 <Input
                   id="platform_conversation_id"
                   aria-required={isTelegramManager || undefined}
                   placeholder={
                     isTelegramManager
-                      ? t("Exact Telegram chat ID")
-                      : t("Leave empty for default route")
+                      ? translateUi("Exact Telegram chat ID")
+                      : translateUi("Leave empty for default route")
                   }
                   {...register("platform_conversation_id")}
                 />
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {isTelegramManager
-                    ? t("Only messages from this chat will use this route.")
-                    : t("Platform-specific chat/channel ID. Leave empty to create a default route for all unmatched conversations.")}
+                    ? translateUi("Only messages from this chat will use this route.")
+                    : translateUi("Platform-specific chat/channel ID. Leave empty to create a default route for all unmatched conversations.")}
                 </p>
                 {errors.platform_conversation_id && (
-                  <p className="text-xs text-destructive">
-                    {translateUi(errors.platform_conversation_id.message ?? "")}
+                  <p className="text-13 text-destructive">
+                    {errors.platform_conversation_id.message}
                   </p>
                 )}
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="platform_conversation_type">{t("Conversation Type")}</Label>
+                <Label htmlFor="platform_conversation_type">{translateUi("Conversation Type")}</Label>
                 <Select
                   value={watch("platform_conversation_type") ?? ""}
                   onValueChange={(value) =>
@@ -540,12 +542,12 @@ export function AddRouteDialog({
                   }
                 >
                   <SelectTrigger id="platform_conversation_type">
-                    <SelectValue placeholder={t("Select type (optional)")} />
+                    <SelectValue placeholder={translateUi("Select type (optional)")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="private">{t("Private")}</SelectItem>
-                    <SelectItem value="group">{t("Group")}</SelectItem>
-                    <SelectItem value="channel">{t("Channel")}</SelectItem>
+                    <SelectItem value="private">{translateUi("Private")}</SelectItem>
+                    <SelectItem value="group">{translateUi("Group")}</SelectItem>
+                    <SelectItem value="channel">{translateUi("Channel")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -559,7 +561,7 @@ export function AddRouteDialog({
                 checked={watch("default_agent") ?? false}
                 onCheckedChange={(v) => setValue("default_agent", v)}
               />
-              <Label htmlFor="default_agent" className="text-12">{t("Set as default agent for this bot")}</Label>
+              <Label htmlFor="default_agent">{translateUi("Set as default agent for this bot")}</Label>
             </div>
           )}
 
@@ -568,7 +570,7 @@ export function AddRouteDialog({
               type="button"
               variant="outline"
               onClick={() => handleOpenChange(false)}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               type="submit"
@@ -582,7 +584,7 @@ export function AddRouteDialog({
                     watch("platform_conversation_id")?.trim() === "*"))
               }
             >
-              {createConversation.isPending ? t("Adding...") : t("Add Route")}
+              {createConversation.isPending ? translateUi("Adding...") : translateUi("Add Route")}
             </Button>
           </DialogFooter>
         </form>
@@ -598,7 +600,7 @@ function DeleteRouteDialog({
   readonly routeId: string | null;
   readonly onClose: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const deleteMutation = useDeleteChannelConversation();
 
   async function handleDelete() {
@@ -621,17 +623,17 @@ function DeleteRouteDialog({
     <Dialog open={routeId !== null} onOpenChange={() => onClose()}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("Remove Conversation Route")}</DialogTitle>
-          <DialogDescription>{t("This will remove the routing for this conversation. Messages will no longer be relayed to the assigned agent.")}</DialogDescription>
+          <DialogTitle>{translateUi("Remove Conversation Route")}</DialogTitle>
+          <DialogDescription>{translateUi("This will remove the routing for this conversation. Messages will no longer be relayed to the assigned agent.")}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>{t("Cancel")}</Button>
+          <Button variant="outline" onClick={onClose}>{translateUi("Cancel")}</Button>
           <Button
             variant="destructive"
             onClick={() => void handleDelete()}
             disabled={deleteMutation.isPending}
           >
-            {deleteMutation.isPending ? t("Removing...") : t("Remove")}
+            {deleteMutation.isPending ? translateUi("Removing...") : translateUi("Remove")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -652,23 +654,23 @@ function DeleteBotDialog({
   readonly isPending: boolean;
   readonly deletionNote?: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("Delete Channel Bot")}</DialogTitle>
-          <DialogDescription>{t("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && t(" {{deletionNote}}", { deletionNote: deletionNote })}
+          <DialogTitle>{translateUi("Delete Channel Bot")}</DialogTitle>
+          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && translateUi(" {{deletionNote}}", { deletionNote: deletionNote })}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>{t("Cancel")}</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{translateUi("Cancel")}</Button>
           <Button
             variant="destructive"
             onClick={onConfirm}
             disabled={isPending}
           >
-            {isPending ? t("Deleting...") : t("Delete")}
+            {isPending ? translateUi("Deleting...") : translateUi("Delete")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -691,23 +693,23 @@ function LarkPermissionSetupSection({
 }: {
   readonly bot: ChannelBotDetail;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   if (!bot.permission_setup_url) {
     return null;
   }
   const scopes = bot.permission_setup_scopes ?? [];
 
   return (
-    <DetailSection title={t("Configure Permissions")}>
+    <DetailSection title={translateUi("Configure Permissions")}>
       <div className="p-4">
-        <p className="text-12 text-muted-foreground">{t("Open this link to grant the scopes NyxID's adapter needs in the Lark/Feishu developer console. The required scopes are pre-selected — confirm and bulk-enable them to finish setup.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Open this link to grant the scopes NyxID's adapter needs in the Lark/Feishu developer console. The required scopes are pre-selected — confirm and bulk-enable them to finish setup.")}</p>
         {scopes.length > 0 && (
           <div className="mt-3">
-            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">{t("Scopes pre-selected")}</p>
+            <p className="type-secondary-emphasis text-text-tertiary uppercase tracking-wide">{translateUi("Scopes pre-selected")}</p>
             <ul className="mt-2 flex flex-wrap gap-2">
               {scopes.map((scope) => (
                 <li key={scope}>
-                  <Badge variant="secondary" className="text-xs">
+                  <Badge variant="secondary" className="text-12">
                     {scope}
                   </Badge>
                 </li>
@@ -721,7 +723,7 @@ function LarkPermissionSetupSection({
               href={bot.permission_setup_url}
               target="_blank"
               rel="noopener noreferrer"
-            >{t("Open Permissions Page")}<ButtonIcon variant="primary"><ExternalLink className="h-3 w-3" /></ButtonIcon>
+            >{translateUi("Open Permissions Page")}<ButtonIcon variant="primary"><ExternalLink className="h-3 w-3" /></ButtonIcon>
             </a>
           </Button>
         </div>
@@ -731,11 +733,11 @@ function LarkPermissionSetupSection({
 }
 
 function TelegramNewSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
-  const { t } = useUiTranslation();
-  return <DetailSection title={t("Telegram connection")}>
-    <DetailRow label={t("Webhook")} value={bot.webhook_registered ? "Connected" : "Setup pending"} />
-    <p className="p-4 text-xs text-muted-foreground">{bot.status === "suspended" ? t("Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the Telegram bot token option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with the Telegram option.") : t("NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message.")}</p>
-    {bot.status === "pending" && <div className="p-4"><Button variant="outline" asChild><a href="/channel-bots?connect=telegram-new">{t("Continue Telegram setup")}</a></Button></div>}
+  useUiTranslation();
+  return <DetailSection title={translateUi("Telegram connection")}>
+    <DetailRow label={translateUi("Webhook")} value={bot.webhook_registered ? "Connected" : "Setup pending"} />
+    <p className="p-4 text-13 text-muted-foreground">{bot.status === "suspended" ? translateUi("Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the Telegram bot token option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with the Telegram option.") : translateUi("NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message.")}</p>
+    {bot.status === "pending" && <div className="p-4"><Button variant="outline" asChild><a href="/channel-bots?connect=telegram-new">{translateUi("Continue Telegram setup")}</a></Button></div>}
   </DetailSection>;
 }
 
@@ -746,7 +748,7 @@ function EditBotNameDialog({
   readonly bot: ChannelBotDetail;
   readonly onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const updateBot = useUpdateChannelBot();
   const {
     register,
@@ -782,12 +784,12 @@ function EditBotNameDialog({
     }}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("Edit bot name")}</DialogTitle>
-          <DialogDescription>{t("Choose a name to identify this bot in NyxID.")}</DialogDescription>
+          <DialogTitle>{translateUi("Edit bot name")}</DialogTitle>
+          <DialogDescription>{translateUi("Choose a name to identify this bot in NyxID.")}</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="bot-name">{t("Bot name")}</Label>
+            <Label htmlFor="bot-name">{translateUi("Bot name")}</Label>
             <Input
               id="bot-name"
               maxLength={128}
@@ -797,14 +799,14 @@ function EditBotNameDialog({
               {...register("label")}
             />
             {errors.label && (
-              <p id="bot-name-error" role="alert" className="text-xs text-destructive">
-                {translateUi(errors.label.message ?? "")}
+              <p id="bot-name-error" role="alert" className="text-13 text-destructive">
+                {errors.label.message}
               </p>
             )}
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={updateBot.isPending} onClick={() => onOpenChange(false)}>{t("Cancel")}</Button>
-            <Button type="submit" variant="primary" disabled={!isDirty || !isValid || updateBot.isPending} isLoading={updateBot.isPending}>{t("Save name")}</Button>
+            <Button type="button" variant="outline" disabled={updateBot.isPending} onClick={() => onOpenChange(false)}>{translateUi("Cancel")}</Button>
+            <Button type="submit" variant="primary" disabled={!isDirty || !isValid || updateBot.isPending} isLoading={updateBot.isPending}>{translateUi("Save name")}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -817,7 +819,7 @@ function EditVerificationSection({
 }: {
   readonly bot: ChannelBotDetail;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const botId = bot.id;
   const updateBot = useUpdateChannelBot();
@@ -837,7 +839,7 @@ function EditVerificationSection({
       return value ? [[name, value]] : [];
     }));
     if (Object.keys(payload).length === 0) {
-      toast.error(translateUi("Enter at least one value to update"));
+      toast.error(translateErrorMessage("Enter at least one value to update"));
       return;
     }
     updateBot.mutate({ id: botId, data: payload }, {
@@ -851,27 +853,27 @@ function EditVerificationSection({
   }
 
   return (
-    <DetailSection title={t("Edit Credentials")}>
+    <DetailSection title={translateUi("Edit Credentials")}>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 p-5">
         {fields.map((field) => (
           <div key={field.name} className="space-y-2">
             <div className="flex items-center justify-between gap-3">
               <Label htmlFor={field.name}>{field.label}</Label>
-              {field.configuredKey && bot[field.configuredKey] && <Badge variant="secondary">{t("Configured")}</Badge>}
+              {field.configuredKey && bot[field.configuredKey] && <Badge variant="secondary">{translateUi("Configured")}</Badge>}
             </div>
             <Input id={field.name} type={field.secret ? "password" : "text"} autoComplete={field.secret ? "new-password" : "off"}
-              placeholder={t("Leave blank to keep current value")} {...register(field.name)} />
-            {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
-            {errors[field.name] && <p className="text-xs text-destructive">{translateUi(errors[field.name]?.message ?? "")}</p>}
+              placeholder={translateUi("Leave blank to keep current value")} {...register(field.name)} />
+            {field.hint && <p className="text-13 text-muted-foreground">{field.hint}</p>}
+            {errors[field.name] && <p className="text-13 text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
         {bot.platform === "whatsapp" ? (
-          <p className="text-xs text-muted-foreground">{t("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
-          <p className="text-xs text-muted-foreground">{t("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
         )}
         <div className="flex justify-end">
-          <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty} isLoading={updateBot.isPending}>{t("Save Credentials")}</Button>
+          <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty} isLoading={updateBot.isPending}>{translateUi("Save Credentials")}</Button>
         </div>
       </form>
     </DetailSection>
@@ -887,6 +889,7 @@ interface ChecklistRow {
 }
 
 function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
+  useUiTranslation();
   const icon =
     row.status === "done" ? (
       <Check className="h-3.5 w-3.5 text-success" aria-hidden />
@@ -907,7 +910,7 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
       <span className="flex flex-col gap-0.5">
         <span
           className={cn(
-            "text-12",
+            "text-14",
             row.status === "done"
               ? "text-muted-foreground line-through"
               : "text-foreground",
@@ -916,7 +919,7 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
           {row.label}
         </span>
         {row.hint ? (
-          <span className="text-11 text-muted-foreground">{row.hint}</span>
+          <span className="text-13 text-muted-foreground">{row.hint}</span>
         ) : null}
       </span>
     </li>
@@ -932,8 +935,8 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
  *
  * Wave B item B.1.
  */
-function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
-  const { t } = useUiTranslation();
+export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
+  useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const { data: runtimeConfig } = useRuntimeConfig();
   // `runtimeConfig.api_base_url` is the authoritative public base for the
@@ -944,6 +947,7 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
   const apiBase = runtimeConfig?.api_base_url ?? window.location.origin;
   const webhookUrl = bot.webhook_url ?? `${apiBase}/api/v1/webhooks/channel/${bot.platform}/${bot.id}`;
   const isLark = bot.platform === "lark" || bot.platform === "feishu";
+  const isDiscord = bot.platform === "discord";
 
   const rows: ChecklistRow[] = [];
 
@@ -963,17 +967,18 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
         : "Optional — only required when Encrypt is enabled in the Lark/Feishu console.",
     });
     rows.push({
-      status: bot.app_secret_configured ? "done" : "todo",
+      status: bot.last_verification?.status === "verified" || bot.app_secret_configured ? "done" : "waiting",
       label: "App ID + App Secret",
-      hint: bot.app_secret_configured
-        ? "Credentials configured."
-        : "Set under Edit Verification below — needed for NyxID to call the Lark/Feishu APIs and post replies.",
+      hint: bot.last_verification?.status === "verified"
+        ? "App credentials verified. Callback and member verification are separate."
+        : bot.app_secret_configured ? "Credentials configured; use Verify Bot to check them."
+          : "Use Verify Bot to check the saved app credentials. If credentials are missing, set them under Edit Verification below.",
     });
     if (bot.permission_setup_url) {
       rows.push({
-        status: "todo",
+        status: "waiting",
         label: "Bot permissions",
-        hint: "Bulk-enable the recommended scopes in the Permissions section below.",
+        hint: "Not inspected by NyxID. Review the recommended scopes in the Permissions section below.",
       });
     }
   } else {
@@ -995,15 +1000,20 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
   return (
     <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6">
       <div className="space-y-1">
-        <p className="text-13 font-medium text-foreground">{t("Finish webhook setup")}</p>
-        <p className="text-12 text-muted-foreground">{t("Register the URL below in ")}{getPlatform(bot.platform).label}{t(" and complete the checklist. The bot moves to Active automatically once")}{" "}
-          {getPlatform(bot.platform).label}{t(" delivers a verified inbound message.")}</p>
+        <p className="type-card-title text-foreground">
+          {isDiscord ? translateUi("Finish Discord setup") : isLark ? translateUi("Finish Lark / Feishu setup") : translateUi("Finish webhook setup")}
+        </p>
+        <p className="text-14 text-muted-foreground">
+          {isDiscord ? translateUi("Ordinary chat arrives through the Gateway connection. Send the bot a DM or @mention it; the first authenticated message activates the bot. The Interactions Endpoint URL is optional and only needed for slash commands/components.") : <>{translateUi("Register the URL below in ")}{getPlatform(bot.platform).label}{translateUi(" and complete the checklist. The bot moves to Active automatically once")}{" "}
+          {getPlatform(bot.platform).label}{translateUi(" delivers a verified inbound message.")}</>}
+          {isLark ? translateUi(" The URL challenge checks callback reachability only; it does not activate the bot or verify a member. Review Setup status below for the separate steps.") : null}
+        </p>
       </div>
 
       <CopyableUrlCallout
-        label={t("Webhook URL")}
+        label={isDiscord ? translateUi("Interactions Endpoint URL (optional)") : translateUi("Webhook URL")}
         url={webhookUrl}
-        description={t("Paste this into {{label}}'s Event Subscriptions / webhook settings.", { label: getPlatform(bot.platform).label })}
+        description={isDiscord ? translateUi("For slash commands/components, paste this into Discord Developer Portal > General Information > Interactions Endpoint URL. Do not use Event Webhooks.") : translateUi("Paste this into {{value1}}'s Event Subscriptions / webhook settings.", { value1: getPlatform(bot.platform).label })}
         docsHref={getPlatform(bot.platform).webhookDocs}
       />
 
@@ -1017,7 +1027,7 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
 }
 
 export function ChannelBotDetailPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const { botId } = useParams({ strict: false }) as { botId: string };
   const navigate = useNavigate();
@@ -1081,8 +1091,9 @@ export function ChannelBotDetailPage() {
     setVerificationContext({ id: bot.id, updatedAt: bot.updated_at, previousCheckId: bot.last_verification?.id ?? null });
     try {
       const result = await verifyMutation.mutateAsync(botId);
-      if (result.last_verification?.status === "verified") toast.success(translateUi("WhatsApp credentials verified"));
-      else if (result.status === "failed" || result.status === "invalid") toast.error(translateUi("Bot verification failed"));
+      if (result.last_verification?.status === "verified") toast.success(translateUi(bot.platform === "lark" || bot.platform === "feishu" ? LARK_VERIFY_SUCCESS : "WhatsApp credentials verified"));
+      else if (result.status === "failed" || result.status === "invalid") toast.error(translateErrorMessage("Bot verification failed"));
+      else if (bot.platform === "lark" || bot.platform === "feishu") toast.success(translateUi(LARK_VERIFY_SUCCESS));
       else if (result.status === "active") toast.success(translateUi("Bot verified successfully"));
       else toast.success(translateUi("Bot verification completed"));
     } catch (err) {
@@ -1104,12 +1115,12 @@ export function ChannelBotDetailPage() {
   if (error || !bot) {
     return (
       <div className="space-y-8">
-        <PageHeader title={t("Bot Not Found")} />
+        <PageHeader title={translateUi("Bot Not Found")} />
         <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : t("Bot not found or failed to load.")
+              : translateUi("Bot not found or failed to load.")
           }
           onRetry={refetch}
         />
@@ -1121,7 +1132,7 @@ export function ChannelBotDetailPage() {
     <div className="space-y-8">
       <PageHeader
         title={bot.label}
-        description={t("Manage bot settings and conversation routes.")}
+        description={translateUi("Manage bot settings and conversation routes.")}
         actions={
           <div className="flex gap-2">
             <Button
@@ -1131,13 +1142,13 @@ export function ChannelBotDetailPage() {
               disabled={verifyMutation.isPending}
             >
               <ButtonIcon><ShieldCheck className="h-3 w-3" /></ButtonIcon>
-              {verifyMutation.isPending ? t("Verifying...") : t("Verify Bot")}
+              {verifyMutation.isPending ? translateUi("Verifying...") : translateUi("Verify Bot")}
             </Button>
             <Button
               variant="destructive"
               onClick={() => setShowDeleteDialog(true)}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Delete")}</Button>
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Delete")}</Button>
           </div>
         }
       />
@@ -1150,52 +1161,57 @@ export function ChannelBotDetailPage() {
       />}
 
       {bot.platform !== "whatsapp" && (verifyMutation.variables === botId && verifyMutation.isError ? (
-        <div role="alert"><ErrorBanner message={verifyMutation.error instanceof ApiError ? verifyMutation.error.message : t("Failed to verify bot")} /></div>
+        <div role="alert"><ErrorBanner message={verifyMutation.error instanceof ApiError ? verifyMutation.error.message : translateUi("Failed to verify bot")} /></div>
       ) : bot.credential_source === "telegram_manager" && bot.error ? (
         <div role="alert"><ErrorBanner message={bot.error} /></div>
       ) : verifyMutation.variables === botId && verifyMutation.isSuccess && (
-        <p role="status" className="text-xs text-muted-foreground">{t("Verification complete. Status: ")}{statusLabel(verifyMutation.data.status)}.
+        <p role="status" className="text-13 text-muted-foreground">
+          {bot.platform === "lark" || bot.platform === "feishu"
+            ? verifyMutation.data.last_verification?.status === "verified" ? LARK_VERIFY_SUCCESS : translateUi("Credential check finished. Review setup status below; callback and member verification are separate.")
+            : translateUi("Verification complete. Status: {{value1}}.", { value1: statusLabel(verifyMutation.data.status) })}
         </p>
       ))}
 
-      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-xs text-muted-foreground">{t("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? t("Managed setup needs attention. Review the setup status below.") : t("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
+      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
+
+      {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
 
       {/* Bot Information */}
       <DetailSection
-        title={t("Bot Information")}
+        title={translateUi("Bot Information")}
         action={
           <Button variant="ghost" size="sm" onClick={() => setShowEditNameDialog(true)}>
-            <Pencil className="mr-1.5 h-3 w-3" aria-hidden="true" />{t("Edit name")}</Button>
+            <Pencil className="mr-1.5 h-3 w-3" aria-hidden="true" />{translateUi("Edit name")}</Button>
         }
       >
-        <DetailRow label={t("Bot name")} value={bot.label} />
-        <DetailRow label={t("Credential source")} value={bot.credential_source === "telegram_manager" ? "Telegram manager" : bot.credential_source === "connection" ? getPlatform(bot.platform).connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
+        <DetailRow label={translateUi("Bot name")} value={bot.label} />
+        <DetailRow label={translateUi("Credential source")} value={bot.credential_source === "telegram_manager" ? "Telegram manager" : bot.credential_source === "connection" ? getPlatform(bot.platform).connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
         <DetailRow
-          label={t("Platform")}
+          label={translateUi("Platform")}
           value={getPlatform(bot.platform).label}
           badge
           badgeVariant="secondary"
         />
-        <DetailRow label={t("Bot Username")} value={bot.platform_bot_username || "-"} />
-        <DetailRow label={getPlatform(bot.platform).identityLabel ?? t("Platform Bot ID")} value={bot.platform_bot_id || "-"} copyable />
+        <DetailRow label={translateUi("Bot Username")} value={bot.platform_bot_username || "-"} />
+        <DetailRow label={getPlatform(bot.platform).identityLabel ?? translateUi("Platform Bot ID")} value={bot.platform_bot_id || "-"} copyable />
         {getPlatform(bot.platform).detailFields?.map(({ name, label }) => typeof bot[name] === "string" && bot[name] ? <DetailRow key={name} label={label} value={String(bot[name])} copyable /> : null)}
-        <DetailRow label={bot.platform === "whatsapp" ? t("Webhook lifecycle") : t("Status")} value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
-        {bot.webhook_ingestion === false ? <DetailRow label={t("Ingestion")} value="Polling" /> : <DetailRow label={t("Webhook")} value={bot.platform === "whatsapp" ? (bot.webhook_registered ? "Previously observed (historical)" : "Not yet observed") : bot.webhook_registered ? "Registered" : "Not registered"} />}
-        <DetailRow label={t("Owner")} value={ownerLabel} />
-        <DetailRow label={t("Created")} value={formatDate(bot.created_at)} />
-        <DetailRow label={t("Updated")} value={formatRelativeTime(bot.updated_at)} />
+        <DetailRow label={bot.platform === "whatsapp" ? translateUi("Webhook lifecycle") : translateUi("Status")} value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
+        {bot.webhook_ingestion === false ? <DetailRow label={translateUi("Ingestion")} value="Polling" /> : <DetailRow label={translateUi("Webhook")} value={bot.platform === "whatsapp" ? (bot.webhook_registered ? "Previously observed (historical)" : "Not yet observed") : bot.webhook_registered ? "Registered" : "Not registered"} />}
+        <DetailRow label={translateUi("Owner")} value={ownerLabel} />
+        <DetailRow label={translateUi("Created")} value={formatDate(bot.created_at)} />
+        <DetailRow label={translateUi("Updated")} value={formatRelativeTime(bot.updated_at)} />
         <DetailRow
-          label={t("Configured routes")}
+          label={translateUi("Configured routes")}
           value={String(bot.conversations_count)}
         />
-        {activityTypes.length > 0 && <DetailRow label={t("Received activities (30 days)")} value={activitySummary.error ? "Unavailable" : activitySummary.data ? String(activitySummary.data.total) : "Loading…"} />}
+        {activityTypes.length > 0 && <DetailRow label={translateUi("Received activities (30 days)")} value={activitySummary.error ? "Unavailable" : activitySummary.data ? String(activitySummary.data.total) : "Loading…"} />}
       </DetailSection>
 
       {Boolean(bot.setup_instructions?.length) && (
-        <DetailSection title={t("{{label}} Setup", { label: getPlatform(bot.platform).label })}>
+        <DetailSection title={translateUi("{{value1}} Setup", { value1: getPlatform(bot.platform).label })}>
           <div className="space-y-4 p-5">
-            <CopyableUrlCallout label={t("Callback URL")} url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
-            <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
+            <CopyableUrlCallout label={bot.platform === "discord" ? translateUi("Interactions Endpoint URL") : translateUi("Callback URL")} url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
+            <ol className="list-decimal space-y-2 pl-4 text-13 text-muted-foreground">
               {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
             </ol>
           </div>
@@ -1204,16 +1220,16 @@ export function ChannelBotDetailPage() {
       {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
       {bot.platform === "telegram-new" && <TelegramNewSetupSection bot={bot} />}
       {bot.credential_source === "telegram_manager" && (
-        <DetailSection title={t("Telegram manager routing")}>
-          <div className="space-y-3 p-5 text-xs text-muted-foreground">
-            <p>{t("This manager can also act as a public channel bot. Add a public default route for ordinary messages from anyone contacting it, using a dedicated agent with restricted permissions. To handle one chat, add its exact Telegram chat ID with the public default route off. Exact routes take priority over the default.")}</p>
-            <p>{t("All manager chat callbacks carry signed callback authentication and a reply token only. They do not carry the owner's X-NyxID-User-Token. Telegram senders are not mapped to NyxID identities, including on exact chat routes.")}</p>
+        <DetailSection title={translateUi("Telegram manager routing")}>
+          <div className="space-y-3 p-5 text-13 text-muted-foreground">
+            <p>{translateUi("This manager can also act as a public channel bot. Add a public default route for ordinary messages from anyone contacting it, using a dedicated agent with restricted permissions. To handle one chat, add its exact Telegram chat ID with the public default route off. Exact routes take priority over the default.")}</p>
+            <p>{translateUi("All manager chat callbacks carry signed callback authentication and a reply token only. They do not carry the owner's X-NyxID-User-Token. Telegram senders are not mapped to NyxID identities, including on exact chat routes.")}</p>
             <p>
               /start, /recover, and all callback queries remain reserved for bot
               creation and recovery. Ordinary chat delivery is capped at 32 concurrent
               requests per backend process. Messages arriving at capacity are dropped.
             </p>
-            <p>{t("Rotate the manager token in Admin → Platform Credentials → Telegram — bot creation. Deleting this channel connection keeps the manager and bot creation available.")}</p>
+            <p>{translateUi("Rotate the manager token in Admin → Platform Credentials → Telegram — bot creation. Deleting this channel connection keeps the manager and bot creation available.")}</p>
           </div>
         </DetailSection>
       )}
@@ -1225,6 +1241,7 @@ export function ChannelBotDetailPage() {
       })()}
 
       {/* Conversation Routes */}
+      {bot.platform === "whatsapp" && <WhatsappNativeSection botId={bot.id} />}
       <ConversationsSection
         platform={bot.platform}
         botId={botId}

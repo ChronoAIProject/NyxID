@@ -11,8 +11,9 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
 
-    // If the caller already provided NYXID_GIT_HASH (e.g. Docker build arg in
-    // CI, where .git is not in the build context), honor it verbatim.
+    // Preserve explicit build-time stamps for standalone binaries. Docker does
+    // not pass its per-commit hash to Cargo: /health reads the runtime image
+    // stamp instead, allowing unchanged source to reuse the compiled layer.
     let full = std::env::var("NYXID_GIT_HASH")
         .ok()
         .filter(|v| !v.is_empty())

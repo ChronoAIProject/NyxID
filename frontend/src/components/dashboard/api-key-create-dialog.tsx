@@ -1,10 +1,13 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   createApiKeySchema,
+  newApiKeyDefaults,
   type CreateApiKeyFormData,
 } from "@/schemas/api-keys";
 import { PLATFORM_OPTIONS } from "@/schemas/agent-bindings";
@@ -92,12 +95,13 @@ export function ApiKeyCreateDialog({
   readonly setupMode?: boolean;
   readonly initialServiceId?: string | null;
 } = {}) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [internalOpen, setInternalOpen] = useState(false);
   const open = externalOpen ?? internalOpen;
   const setOpen = onExternalOpenChange ?? setInternalOpen;
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
+  const [createdExpiry, setCreatedExpiry] = useState<string | null | undefined>();
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
 
@@ -115,21 +119,10 @@ export function ApiKeyCreateDialog({
 
   const form = useAppForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
-    defaultValues: {
-      name: "",
-      scopes: [],
-      expires_at: null,
-      description: null,
-      allow_all_services: true,
-      allow_all_nodes: true,
-      allowed_service_ids: [],
-      allowed_node_ids: [],
-      callback_url: null,
-      target_org_id: undefined,
-    },
+    defaultValues: newApiKeyDefaults(),
   });
 
-  const watchAllServices = form.watch("allow_all_services") ?? true;
+  const watchAllServices = form.watch("allow_all_services") ?? false;
   const watchAllowedServices = form.watch("allowed_service_ids") ?? [];
   const watchTargetOrg = form.watch("target_org_id");
   const setupRequiresServiceSelection =
@@ -160,15 +153,16 @@ export function ApiKeyCreateDialog({
         ? serviceSource.org_id
         : undefined;
     form.reset({
+      ...newApiKeyDefaults(),
       name: "Claude Code Agent",
       scopes: ["proxy", "services:read"],
-      expires_at: null,
       description: initialService
         ? `Isolated Agent Key for ${initialService.label}`
         : "Isolated Agent Key",
       allow_all_services: false,
-      allow_all_nodes: true,
-      allowed_service_ids: initialService ? [initialService.id] : [],
+      allow_all_nodes: false,
+      allowed_service_ids: initialService && serviceCanBeScopedToKey(initialService, targetOrgId)
+        ? [initialService.id] : [],
       allowed_node_ids: [],
       callback_url: null,
       platform: "claude-code",
@@ -181,12 +175,13 @@ export function ApiKeyCreateDialog({
       const result = await createMutation.mutateAsync(data);
       setCreatedKey(result.full_key);
       setCreatedKeyId(result.id);
+      setCreatedExpiry(result.expires_at);
       toast.success(translateUi("API key created successfully"));
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error(translateUi("Failed to create API key"));
+        toast.error(translateErrorMessage("Failed to create API key"));
       }
     }
   }
@@ -202,8 +197,9 @@ export function ApiKeyCreateDialog({
     setOpen(false);
     setCreatedKey(null);
     setCreatedKeyId(null);
+    setCreatedExpiry(undefined);
     setCopied(false);
-    form.reset();
+    form.reset(newApiKeyDefaults());
   }
 
   return (
@@ -213,7 +209,7 @@ export function ApiKeyCreateDialog({
     >
       {!hideTrigger && (
         <DialogTrigger asChild>
-          <AddCtaButton label={t("Create API Key")} onClick={() => {}} />
+          <AddCtaButton label={translateUi("Create API Key")} onClick={() => {}} />
         </DialogTrigger>
       )}
       <DialogContent>
@@ -221,15 +217,19 @@ export function ApiKeyCreateDialog({
           <>
             <DialogHeader>
               <DialogTitle>
-                {setupMode ? t("Agent Key Created") : t("API Key Created")}
+                {setupMode ? translateUi("Agent Key Created") : translateUi("API Key Created")}
               </DialogTitle>
-              <DialogDescription>{t("Copy your API key now. You will not be able to see it again.")}{setupMode
-                  ? t(" Open the Agent Key detail page next to review service scope, add credential bindings only when this agent needs overrides, and verify proxy access.")
+              <DialogDescription>{translateUi("Copy your API key now. You will not be able to see it again. ")}{createdExpiry === undefined
+                  ? translateUi("Refresh key details to confirm its expiry.")
+                  : createdExpiry === null ? translateUi("This key has no expiry.")
+                  : translateUi("Expires {{value1}}.", { value1: new Date(createdExpiry).toLocaleString(getFormattingLocale()) })}
+                {setupMode
+                  ? translateUi(" Open the Agent Key detail page next to review service scope, add credential bindings only when this agent needs overrides, and verify proxy access.")
                   : ""}
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-14 break-all">
                 {createdKey}
               </code>
               <Button
@@ -251,22 +251,22 @@ export function ApiKeyCreateDialog({
                     to="/keys/api-key/$keyId"
                     params={{ keyId: createdKeyId }}
                     onClick={handleClose}
-                  >{t("Review Scope & Bindings")}</Link>
+                  >{translateUi("Review Scope & Bindings")}</Link>
                 </Button>
               )}
-              <Button variant="primary" onClick={handleClose}>{t("Done")}</Button>
+              <Button variant="primary" onClick={handleClose}>{translateUi("Done")}</Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
               <DialogTitle>
-                {setupMode ? t("Create Agent Key") : t("Create API Key")}
+                {setupMode ? translateUi("Create Agent Key") : translateUi("Create API Key")}
               </DialogTitle>
               <DialogDescription>
                 {setupMode
-                  ? t("Create a scoped Agent Key using the existing key creation and service-scope controls.")
-                  : t("Create a new API key to access the NyxID API.")}
+                  ? translateUi("Create a scoped Agent Key using the existing key creation and service-scope controls.")
+                  : translateUi("Create a new API key to access the NyxID API.")}
               </DialogDescription>
             </DialogHeader>
 
@@ -276,8 +276,8 @@ export function ApiKeyCreateDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                    {translateUi(form.formState.errors.root.message ?? "")}
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
+                    {form.formState.errors.root.message}
                   </div>
                 )}
 
@@ -289,7 +289,7 @@ export function ApiKeyCreateDialog({
                     name="platform"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Platform")}</FormLabel>
+                        <FormLabel>{translateUi("Platform")}</FormLabel>
                         <div className="flex flex-wrap gap-2">
                           {PLATFORM_OPTIONS.map((platform) => (
                             <Badge
@@ -307,7 +307,7 @@ export function ApiKeyCreateDialog({
                             </Badge>
                           ))}
                         </div>
-                        <p className="text-xs text-muted-foreground">{t("Stored on the key for audit attribution. You can change it later on the Agent Key detail page.")}</p>
+                        <p className="text-13 text-muted-foreground">{translateUi("Stored on the key for audit attribution. You can change it later on the Agent Key detail page.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -320,12 +320,14 @@ export function ApiKeyCreateDialog({
                     name="target_org_id"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Owner")}</FormLabel>
+                        <FormLabel>{translateUi("Owner")}</FormLabel>
                         <FormControl>
                           <OrgScopeSelect
                             value={field.value ?? null}
                             onChange={(next) => {
                               field.onChange(next ?? undefined);
+                              form.setValue("never_expires", false);
+                              form.setValue("expires_at", newApiKeyDefaults().expires_at);
                               // Reset service scope selections when owner
                               // changes so stale selections do not
                               // round-trip to the backend.
@@ -335,13 +337,13 @@ export function ApiKeyCreateDialog({
                               );
                               form.setValue("allowed_service_ids", []);
                               form.setValue("allowed_node_ids", []);
-                              form.setValue("allow_all_services", true);
-                              form.setValue("allow_all_nodes", true);
+                              form.setValue("allow_all_services", false);
+                              form.setValue("allow_all_nodes", false);
                             }}
-                            label={t("Owner")}
+                            label={translateUi("Owner")}
                           />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">{t("Org-owned keys are shared with every admin of that organization and can only scope to services owned by the same org.")}</p>
+                        <p className="text-13 text-muted-foreground">{translateUi("Org-owned keys are shared with every admin of that organization and can only scope to services owned by the same org.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -357,8 +359,8 @@ export function ApiKeyCreateDialog({
                   name="callback_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Callback URL")}{" "}
-                        <span className="text-muted-foreground">{t("(optional)")}</span>
+                      <FormLabel>{translateUi("Callback URL")}{" "}
+                        <span className="text-muted-foreground">{translateUi("(optional)")}</span>
                       </FormLabel>
                       <FormControl>
                         <Input
@@ -371,7 +373,7 @@ export function ApiKeyCreateDialog({
                           }
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">{t("Where NyxID sends channel relay messages. Required for Channel Bot routing.")}</p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Where NyxID sends channel relay messages. Required for Channel Bot routing.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -399,7 +401,7 @@ export function ApiKeyCreateDialog({
                 />
 
                 <DialogFooter>
-                  <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
+                  <Button type="button" variant="outline" onClick={handleClose}>{translateUi("Cancel")}</Button>
                   <Button
                     variant="primary"
                     type="submit"
@@ -409,7 +411,7 @@ export function ApiKeyCreateDialog({
                       setupRequiresServiceSelection
                     }
                   >
-                    {setupMode ? t("Create Agent Key") : t("Create Key")}
+                    {setupMode ? translateUi("Create Agent Key") : translateUi("Create Key")}
                   </Button>
                 </DialogFooter>
               </form>

@@ -1,4 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeys } from "@/hooks/use-keys";
 import {
@@ -44,7 +46,7 @@ export function VerifyKeyCard({
 }: {
   readonly apiKey: ApiKey;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [pastedKey, setPastedKey] = useState("");
   const [status, setStatus] = useState<ResultStatus>("idle");
   const [results, setResults] = useState<
@@ -199,41 +201,41 @@ export function VerifyKeyCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">{t("Verify key")}</CardTitle>
+          <CardTitle className="text-15">{translateUi("Verify key")}</CardTitle>
         </div>
-        <CardDescription>{t("Prove this key is scoped correctly — it should reach an allowed service and be blocked from a denied one.")}</CardDescription>
+        <CardDescription>{translateUi("Prove this key is scoped correctly — it should reach an allowed service and be blocked from a denied one.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="space-y-1.5">
-          <label
+          <Label
             htmlFor="verify-key-paste"
-            className="text-11 font-medium text-foreground"
-          >{t("Agent key")}</label>
+            className="text-foreground"
+          >{translateUi("Agent key")}</Label>
           <Input
             id="verify-key-paste"
             type="password"
             autoComplete="off"
             spellCheck={false}
-            placeholder={t("nyx_…")}
+            placeholder={translateUi("nyx_…")}
             value={pastedKey}
             onChange={(e) => setPastedKey(e.target.value)}
             disabled={status === "pending"}
           />
-          <p className="text-11 leading-relaxed text-muted-foreground">{t("Paste the agent key you copied when you created it. NyxID does not store this paste — it's only used for this test.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Paste the agent key you copied when you created it. NyxID does not store this paste — it's only used for this test.")}</p>
         </div>
 
         {candidateSlugs.length > 1 && (
           <div className="space-y-1.5">
-            <label
+            <Label
               htmlFor="verify-key-slug-picker"
-              className="text-11 font-medium text-foreground"
-            >{t("Test against")}</label>
+              className="text-foreground"
+            >{translateUi("Test against")}</Label>
             <select
               id="verify-key-slug-picker"
               value={allowedSlug ?? ""}
               onChange={(e) => setOverrideSlug(e.target.value)}
               disabled={status === "pending"}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-12 focus:outline-none focus:ring-2 focus:ring-ring"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-14 focus:outline-none focus:ring-2 focus:ring-ring"
             >
               {candidateSlugs.map((c) => (
                 <option key={c.slug} value={c.slug}>
@@ -241,7 +243,7 @@ export function VerifyKeyCard({
                 </option>
               ))}
             </select>
-            <p className="text-11 leading-relaxed text-muted-foreground">{t("Pick a service whose downstream credential is fully configured. The test will probe this slug (should return 2xx) and a deliberately-invalid slug (should return 4xx).")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Pick a service whose downstream credential is fully configured. The test will probe this slug (should return 2xx) and a deliberately-invalid slug (should return 4xx).")}</p>
           </div>
         )}
 
@@ -251,14 +253,14 @@ export function VerifyKeyCard({
             onClick={runTest}
             disabled={!canRun}
             isLoading={status === "pending"}
-          >{t("Test key")}</Button>
+          >{translateUi("Test key")}</Button>
           {status === "success" && (
             <Badge variant="success">
-              <Check className="mr-1 h-3 w-3" />{t("Scope verified")}</Badge>
+              <Check className="mr-1 h-3 w-3" />{translateUi("Scope verified")}</Badge>
           )}
           {status === "failure" && (
             <Badge variant="destructive">
-              <X className="mr-1 h-3 w-3" />{t("Unexpected result")}</Badge>
+              <X className="mr-1 h-3 w-3" />{translateUi("Unexpected result")}</Badge>
           )}
         </div>
 
@@ -269,7 +271,7 @@ export function VerifyKeyCard({
                 key={`${r.expected}-${r.slug}`}
                 className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2"
               >
-                <span className="inline-flex items-center gap-2 text-12">
+                <span className="inline-flex items-center gap-2 text-14">
                   {r.ok ? (
                     <Check className="h-3.5 w-3.5 text-success" />
                   ) : (
@@ -282,13 +284,13 @@ export function VerifyKeyCard({
                 </span>
                 <span
                   className={cn(
-                    "text-11 font-medium",
+                    "type-secondary-emphasis ",
                     r.expected === "allowed"
                       ? "text-success/80"
                       : "text-destructive/80",
                   )}
                 >
-                  {r.expected === "allowed" ? t("allowed") : t("denied (expected)")}
+                  {r.expected === "allowed" ? translateUi("allowed") : translateUi("denied (expected)")}
                 </span>
               </li>
             ))}
@@ -296,18 +298,18 @@ export function VerifyKeyCard({
         )}
 
         {errorMessage && (
-          <p className="text-11 leading-relaxed text-destructive">
+          <p className="text-13 text-destructive">
             {errorMessage}
           </p>
         )}
 
         {allowedSlug === null && (
-          <p className="text-11 leading-relaxed text-muted-foreground">{t("Connect a service first so this key has something allowed to call.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Connect a service first so this key has something allowed to call.")}</p>
         )}
 
         {status === "pending" && (
-          <p className="inline-flex items-center gap-1.5 text-11 text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />{t("Probing…")}</p>
+          <p className="inline-flex items-center gap-1.5 text-13 text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />{translateUi("Probing…")}</p>
         )}
       </CardContent>
     </Card>

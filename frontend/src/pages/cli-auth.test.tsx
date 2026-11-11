@@ -28,13 +28,16 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("@/stores/auth-store", () => ({
-  useAuthStore: () => storeState,
+  useAuthStore: Object.assign(() => storeState, { getState: () => storeState }),
 }));
 
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: { post: mockPost },
+  apiClient: (path: string, options: { body?: unknown }) => mockPost(path, options.body),
 }));
 
+import { ApiError } from "@/lib/api-client";
 import { CliAuthPage } from "./cli-auth";
 
 let assignSpy: ReturnType<typeof vi.spyOn>;
@@ -55,6 +58,54 @@ afterEach(() => {
 });
 
 describe("CliAuthPage", () => {
+  it("shows a terminal cancellation state without retrying the CLI callback", async () => {
+    storeState.isAuthenticated = true;
+    searchState.value = { port: "5555", state: "cancel-step-up" };
+    mockPost.mockRejectedValueOnce(
+      new ApiError(403, {
+        error: "mfa_step_up_required",
+        error_code: 2003,
+        message: "Verify this session with your authenticator.",
+      }),
+    );
+    render(<CliAuthPage />);
+    const user = userEvent.setup();
+    expect(
+      await screen.findByRole("region", { name: "Verify this session" }),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Verification cancelled. Run nyxid login again.",
+    );
+    expect(
+      screen.queryByRole("region", { name: "Verify this session" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Sending credentials to the NyxID CLI..."),
+    ).not.toBeInTheDocument();
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockPost).toHaveBeenCalledWith("/auth/cli-token", {
+      client_ua: undefined,
+    });
+    expect(storeState.isAuthenticated).toBe(true);
+  });
+
+  it("steps up inline and retries the CLI callback without signing out", async () => {
+    storeState.isAuthenticated = true;
+    searchState.value = { port: "5555", state: "step-up" };
+    mockPost.mockRejectedValueOnce(new ApiError(403, {error: "mfa_step_up_required", error_code: 2003,
+      message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."}));
+    render(<CliAuthPage />);
+    const user = userEvent.setup();
+    expect(await screen.findByRole("region", {name: "Verify this session"})).toBeVisible();
+    expect(assignSpy).not.toHaveBeenCalled();
+    mockPost.mockResolvedValueOnce({message: "Session verified"}).mockResolvedValueOnce({access_token: "access", refresh_token: "refresh"});
+    await user.type(screen.getByLabelText("Authenticator code"), "123456");
+    await user.click(screen.getByRole("button", {name: "Verify & continue"}));
+    await waitFor(() => expect(assignSpy).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls.map(([path]) => path)).toEqual(["/auth/cli-token", "/auth/mfa/step-up", "/auth/cli-token"]);
+  });
   it("shows a skeleton (no redirect, no token POST) while auth is still loading", () => {
     storeState.isLoading = true;
     searchState.value = { port: "5555" };

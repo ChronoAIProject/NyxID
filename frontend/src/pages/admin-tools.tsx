@@ -1,5 +1,7 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { PublicationOperations } from "@/components/services/tool-publication";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -42,7 +44,7 @@ import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata
 import { ServiceIcon } from "@/components/service-icon";
 
 export function AdminToolsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: services = [], isLoading, error, refetch } = useServices(true);
   const user = useAuthStore((state) => state.user);
   const admin = canManageTools(user);
@@ -55,25 +57,25 @@ export function AdminToolsPage() {
   );
   const suppliers = Array.from(new Set(tools.map((s) => s.supplier ?? s.name)));
   if (!admin)
-    return <ErrorBanner message={t("Tools management authority required")} />;
+    return <ErrorBanner message={translateUi("Tools management authority required")} />;
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t("Tools")}
-        description={t("Prepare tools and operations. Admins approve audience, prices and publication.")}
+        title={translateUi("Tools")}
+        description={translateUi("Prepare tools and operations. Admins approve audience, prices and publication.")}
         actions={
-          <AddCtaButton label={t("Add tool")} onClick={() => setAdding(true)} />
+          <AddCtaButton label={translateUi("Add tool")} onClick={() => setAdding(true)} />
         }
       />
       {isLoading ? (
         <Skeleton className="h-48" />
       ) : error ? (
-        <ErrorBanner message={t("Unable to load tool catalog")} onRetry={refetch} />
+        <ErrorBanner message={translateUi("Unable to load tool catalog")} onRetry={refetch} />
       ) : (
         <Tabs defaultValue="providers" className="space-y-6">
           <TabsList>
-            <TabsTrigger value="providers">{t("Providers")}</TabsTrigger>
-            <TabsTrigger value="tools">{t("Tools")}</TabsTrigger>
+            <TabsTrigger value="providers">{translateUi("Providers")}</TabsTrigger>
+            <TabsTrigger value="tools">{translateUi("Tools")}</TabsTrigger>
           </TabsList>
           <TabsContent value="providers" className="space-y-4">
             {suppliers.map((supplier) => (
@@ -81,12 +83,12 @@ export function AdminToolsPage() {
                 key={supplier}
                 className="rounded-xl border border-border/50 bg-card p-4"
               >
-                <h2 className="text-15 font-semibold">{supplier}</h2>
-                <p className="text-11 text-text-tertiary">
+                <h2 className="type-card-title">{supplier}</h2>
+                <p className="text-13 text-text-tertiary">
                   {
                     tools.filter((t) => (t.supplier ?? t.name) === supplier)
                       .length
-                  }{" "}{t("tools")}</p>
+                  }{" "}{translateUi("tools")}</p>
                 {tools
                   .filter((t) => (t.supplier ?? t.name) === supplier)
                   .map((tool) => (
@@ -97,12 +99,12 @@ export function AdminToolsPage() {
           </TabsContent>
           <TabsContent value="tools">
             <div className="overflow-x-auto rounded-xl border border-border/50">
-              <table className="w-full text-left text-12">
+              <table className="w-full text-left text-14">
                 <thead className="bg-overlay text-text-tertiary">
                   <tr>
-                    <th className="p-4">{t("Tool")}</th>
-                    <th className="p-4">{t("Supplier")}</th>
-                    <th className="p-4">{t("Operations")}</th>
+                    <th className="p-4">{translateUi("Tool")}</th>
+                    <th className="p-4">{translateUi("Supplier")}</th>
+                    <th className="p-4">{translateUi("Operations")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -115,15 +117,15 @@ export function AdminToolsPage() {
                         {tool.icon_url && (
                           <ServiceIcon iconUrl={tool.icon_url} size="md" />
                         )}
-                        <h2 className="text-15 font-semibold">{tool.name}</h2>
+                        <h2 className="type-card-title">{tool.name}</h2>
                         <Button variant="ghost" asChild>
                           <Link
                             to="/services/$serviceId/edit"
                             params={{ serviceId: tool.id }}
-                          >{t("Service settings")}</Link>
+                          >{translateUi("Service settings")}</Link>
                         </Button>
                         <details>
-                          <summary className="cursor-pointer">{t("Edit metadata")}</summary>
+                          <summary className="cursor-pointer">{translateUi("Edit metadata")}</summary>
                           <CatalogToolMetadata service={tool} />
                         </details>
                       </td>
@@ -141,7 +143,7 @@ export function AdminToolsPage() {
       )}
       {createdTool && <CreatedToolStatus tool={createdTool} />}
       {!isLoading && tools.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">{t("No tools yet. Add a tool and publish validated operations.")}</p>
+        <p className="rounded-lg border border-dashed border-border p-6 text-14 text-muted-foreground">{translateUi("No tools yet. Add a tool and publish validated operations.")}</p>
       )}
       <AddToolDialog
         open={adding}
@@ -153,7 +155,7 @@ export function AdminToolsPage() {
   );
 }
 function ProviderStatus({ tool }: { tool: DownstreamService }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: operations = [] } = useEndpoints(tool.id);
   const published = operations.filter(
     (e) => e.publication === "published" && e.is_active,
@@ -179,19 +181,19 @@ function ProviderStatus({ tool }: { tool: DownstreamService }) {
               ? "Restricted audience"
               : "Ready";
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 py-3 text-12">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 py-3 text-14">
       <span>{tool.name}</span>
       <span>
-        {published}{t(" published · ")}{drafts}{t(" draft")}</span>
-      <span>{t("Credential")}{" "}
+        {published}{translateUi(" published · ")}{drafts}{translateUi(" draft")}</span>
+      <span>{translateUi("Credential")}{" "}
         {tool.auth_method === "none"
-          ? t("not required")
+          ? translateUi("not required")
           : tool.credential_configured
-            ? t("configured")
-            : t("missing")}
+            ? translateUi("configured")
+            : translateUi("missing")}
       </span>
       <Badge variant={blocker === "Ready" ? "success" : "warning"}>
-        {t(blocker)}
+        {translateUi(blocker)}
       </Badge>
     </div>
   );
@@ -207,7 +209,7 @@ function AddToolDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
   const user = useAuthStore((state) => state.user);
@@ -231,8 +233,8 @@ function AddToolDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Add tool")}</DialogTitle>
-          <DialogDescription>{t("Create a tool, then configure its credential and pricing in Service settings.")}</DialogDescription>
+          <DialogTitle>{translateUi("Add tool")}</DialogTitle>
+          <DialogDescription>{translateUi("Create a tool, then configure its credential and pricing in Service settings.")}</DialogDescription>
         </DialogHeader>
         <form
           className="space-y-3"
@@ -275,34 +277,34 @@ function AddToolDialog({
               form.reset();
               toast.success(translateUi("Tool created"));
             } catch {
-              toast.error(translateUi("Tool creation failed"));
+              toast.error(translateErrorMessage("Tool creation failed"));
             }
           })}
         >
-          <label className="block text-12">{t("Creation method")}<Select
+          <Label className="block">{translateUi("Creation method")}<Select
               value={form.watch("creation_mode")}
               onValueChange={(value) =>
                 form.setValue("creation_mode", value as "twin" | "new")
               }
             >
-              <SelectTrigger aria-label={t("Creation method")}>
+              <SelectTrigger aria-label={translateUi("Creation method")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="twin">{t("From an existing catalog service")}</SelectItem>
-                <SelectItem value="new">{t("New service")}</SelectItem>
+                <SelectItem value="twin">{translateUi("From an existing catalog service")}</SelectItem>
+                <SelectItem value="new">{translateUi("New service")}</SelectItem>
               </SelectContent>
             </Select>
-          </label>
+          </Label>
           {form.watch("creation_mode") === "twin" && (
-            <label className="block text-12">{t("Source service")}<Select
+            <Label className="block">{translateUi("Source service")}<Select
                 value={form.watch("twin_of_service_id")}
                 onValueChange={(value) =>
                   form.setValue("twin_of_service_id", value)
                 }
               >
-                <SelectTrigger aria-label={t("Source service")}>
-                  <SelectValue placeholder={t("Choose a service")} />
+                <SelectTrigger aria-label={translateUi("Source service")}>
+                  <SelectValue placeholder={translateUi("Choose a service")} />
                 </SelectTrigger>
                 <SelectContent>
                   {services
@@ -321,24 +323,24 @@ function AddToolDialog({
                     ))}
                 </SelectContent>
               </Select>
-              <p className="mt-1 text-11 text-muted-foreground">{t("Copies transport and operations as drafts. Credentials stay with the source.")}</p>
-            </label>
+              <FieldHelp as="p" className="mt-1 text-muted-foreground">{translateUi("Copies transport and operations as drafts. Credentials stay with the source.")}</FieldHelp>
+            </Label>
           )}
           {["name", "slug", "supplier"].map((name) => (
-            <label key={name} className="block text-12">
+            <Label key={name} className="block">
               {name.replaceAll("_", " ")}
               <Input
                 {...form.register(
                   name as "name" | "slug" | "supplier" | "openapi_spec_url",
                 )}
               />
-            </label>
+            </Label>
           ))}
           {form.watch("creation_mode") === "new" && (
             <fieldset className="space-y-3">
-              <label className="block text-12">{t("Base URL")}<Input {...form.register("base_url")} />
-              </label>
-              <label className="block text-12">{t("Auth method")}<Select
+              <Label className="block">{translateUi("Base URL")}<Input {...form.register("base_url")} />
+              </Label>
+              <Label className="block">{translateUi("Auth method")}<Select
                   value={form.watch("auth_method")}
                   onValueChange={(value) =>
                     form.setValue(
@@ -347,20 +349,20 @@ function AddToolDialog({
                     )
                   }
                 >
-                  <SelectTrigger aria-label={t("Auth method")}>
+                  <SelectTrigger aria-label={translateUi("Auth method")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="none">{t("None")}</SelectItem>
-                    <SelectItem value="bearer">{t("Bearer")}</SelectItem>
-                    <SelectItem value="header">{t("Header")}</SelectItem>
+                    <SelectItem value="none">{translateUi("None")}</SelectItem>
+                    <SelectItem value="bearer">{translateUi("Bearer")}</SelectItem>
+                    <SelectItem value="header">{translateUi("Header")}</SelectItem>
                   </SelectContent>
                 </Select>
-              </label>
-              <label className="block text-12">{t("Key header")}<Input {...form.register("auth_key_name")} />
-              </label>
-              <label className="block text-12">{t("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
-              </label>
+              </Label>
+              <Label className="block">{translateUi("Key header")}<Input {...form.register("auth_key_name")} />
+              </Label>
+              <Label className="block">{translateUi("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
+              </Label>
             </fieldset>
           )}
           <div className="flex flex-wrap gap-1">
@@ -393,7 +395,7 @@ function AddToolDialog({
               type="button"
               variant="ghost"
               onClick={() => onOpenChange(false)}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               type="submit"
@@ -406,7 +408,7 @@ function AddToolDialog({
                   : !form.watch("twin_of_service_id"))
               }
               isLoading={mutation.isPending}
-            >{t("Create tool")}</Button>
+            >{translateUi("Create tool")}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -415,33 +417,33 @@ function AddToolDialog({
 }
 
 function CreatedToolStatus({ tool }: { tool: DownstreamService }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: operations = [] } = useEndpoints(tool.id);
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   return (
     <section
-      className="rounded-xl border border-border/50 bg-card p-4 text-12"
+      className="rounded-xl border border-border/50 bg-card p-4 text-14"
       role="status"
     >
       <p>
-        {tool.name}{t(" created ·")}{" "}
+        {tool.name}{translateUi(" created ·")}{" "}
         {
           operations.filter((operation) => operation.publication === "draft")
             .length
-        }{" "}{t("draft operations")}</p>
+        }{" "}{translateUi("draft operations")}</p>
       <div className="mt-3 flex gap-2">
         <Button variant="secondary" asChild>
           <Link to="/services/$serviceId/edit" params={{ serviceId: tool.id }}>
             {admin
-              ? t("Configure credential and pricing")
-              : t("Configure credential")}
+              ? translateUi("Configure credential and pricing")
+              : translateUi("Configure credential")}
           </Link>
         </Button>
         <Button variant="ghost" asChild>
           <Link to="/services/$serviceId" params={{ serviceId: tool.id }}>
             {admin
-              ? t("Review and publish operations")
-              : t("Review and validate operations")}
+              ? translateUi("Review and publish operations")
+              : translateUi("Review and validate operations")}
           </Link>
         </Button>
       </div>

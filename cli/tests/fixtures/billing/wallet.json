@@ -1,0 +1,20 @@
+{
+  "owner_id": "owner-1",
+  "plan_kind": "prepaid",
+  "collection_state": "good",
+  "balance_credits": 0,
+  "reserved_credits": 0,
+  "pending_lago_debits": 0,
+  "available_credits": 0,
+  "available_with_overdraft_credits": 0,
+  "has_payment_instrument": false,
+  "overdraft_cap_credits": 0,
+  "suspended": false,
+  "lago_customer_id": "customer-1",
+  "lago_subscription_id": "subscription-1",
+  "lago_wallet_id": "wallet-1",
+  "balance_synced_at": "2026-06-26T00:00:00Z",
+  "created_at": "2026-06-26T00:00:00Z",
+  "updated_at": "2026-06-26T00:00:00Z",
+  "created": false
+}

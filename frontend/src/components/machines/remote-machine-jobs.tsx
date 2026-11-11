@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -21,21 +22,23 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-  useAppForm,
-} from "@/components/ui/form";
+  GroupedInput as Input,
+  GroupedSelectTrigger as SelectTrigger,
+  GroupedList,
+  GroupedRow,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField as FormItem,
+  GroupedLabel as FormLabel,
+  GroupedMessage as FormMessage,
+} from "@/components/ui/grouped-fields";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { Form, FormControl, FormField, useAppForm } from "@/components/ui/form";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import {
@@ -77,10 +80,10 @@ function subjectText(subject: RemoteMachineSubject) {
       : translateUi("Assistant or legacy principal; Agent identity not reported");
   if (subject.kind === "oauth")
     return translateUi("OAuth client {{id}}", { id: subject.oauth_client_id });
-  return translateUi("Parent Key {{id}}", { id: subject.api_key_id }) + (subject.api_key_credential_id ? translateUi(" · Child {{id}}", { id: subject.api_key_credential_id }) : "");
+  return `Parent Key ${subject.api_key_id}${subject.api_key_credential_id ? translateUi(" · Child {{id}}", { id: subject.api_key_credential_id }) : ""}`;
 }
 const when = (value: string | null) =>
-  value ? new Date(value).toLocaleString(getFormattingLocale()) : translateUi("Not reported");
+  value ? new Date(value).toLocaleString(getFormattingLocale()) : "Not reported";
 const active = (job: RemoteMachineJob) =>
   ["accepted", "queued", "running", "starting"].includes(job.status);
 
@@ -89,7 +92,7 @@ export function RemoteMachineJobs({
 }: {
   readonly machineId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const form = useAppForm<z.infer<typeof filtersSchema>>({
     resolver: zodResolver(filtersSchema),
@@ -136,93 +139,109 @@ export function RemoteMachineJobs({
     });
     setCursors([]);
     setSelectedId(null);
+    form.reset(value);
   });
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">{t("Find jobs by status and creation time without a known job ID. Metadata remains for 30 days after termination. Commands, input, environment values and full output are not stored in this history.")}</p>
+      <p className="text-14 text-muted-foreground">{translateUi("Find jobs by status and creation time without a known job ID. Metadata remains for 30 days after termination. Commands, input, environment values and full output are not stored in this history.")}</p>
       <Form {...form}>
-        <form onSubmit={apply} className="grid gap-3 sm:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="status"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t("Status")}</FormLabel>
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {[
-                      "all",
-                      "running",
-                      "finished",
-                      "cancelled",
-                      "interrupted",
-                      "revoked",
-                      "expired",
-                    ].map((status) => (
-                      <SelectItem key={status} value={status}>
-                        {status === "all"
-                          ? t("All statuses")
-                          : status.replaceAll("_", " ")}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          {(["from", "to"] as const).map((name) => (
+        <form onSubmit={apply} className="space-y-6">
+          <GroupedList
+            title={translateUi("Filter jobs")}
+            footer={translateUi("Date filters use your local timezone and are sent as absolute timestamps. Finished includes all recorded exit results, including nonzero exit codes. A cancelled record alone does not confirm a physical stop.")}
+          >
             <FormField
-              key={name}
               control={form.control}
-              name={name}
+              name="status"
               render={({ field }) => (
-                <FormItem>
-                  <FormLabel>
-                    {name === "from" ? t("Created from") : t("Created to")}
-                  </FormLabel>
-                  <FormControl>
-                    <Input type="datetime-local" {...field} />
-                  </FormControl>
+                <FormItem inline>
+                  <FormLabel>{translateUi("Status")}</FormLabel>
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {[
+                        "all",
+                        "running",
+                        "finished",
+                        "cancelled",
+                        "interrupted",
+                        "revoked",
+                        "expired",
+                      ].map((status) => (
+                        <SelectItem key={status} value={status}>
+                          {status === "all"
+                            ? translateUi("All statuses")
+                            : status.replaceAll("_", " ")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <FormMessage />
                 </FormItem>
               )}
             />
-          ))}
-          <div className="flex items-end gap-2">
-            <Button type="submit" disabled={!form.formState.isDirty}>{t("Apply filters")}</Button>
-            <Button type="button" onClick={() => void query.refetch()}>{t("Refresh")}</Button>
-          </div>
+            {(["from", "to"] as const).map((name) => (
+              <FormField
+                key={name}
+                control={form.control}
+                name={name}
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {name === "from" ? translateUi("Created from") : translateUi("Created to")}
+                    </FormLabel>
+                    <FormControl>
+                      <Input type="datetime-local" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            ))}
+            <GroupedRow asChild interactive>
+              <button type="button" onClick={() => void query.refetch()}>{translateUi("Refresh")}</button>
+            </GroupedRow>
+          </GroupedList>
+          <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "status", label: "Status", format: (value) => String(value).replace(/^./, (letter) => letter.toUpperCase()) }, { key: "from", label: "From" }, { key: "to", label: "To" }])}
+            label={translateUi("job filters")}
+            dirty={form.formState.isDirty}
+            pending={query.isFetching}
+            save={apply}
+            discard={() => form.reset()}
+            saveLabel={translateUi("Apply filters")}
+          />
         </form>
       </Form>
-      <p className="text-12 text-muted-foreground">{t("Date filters use your local timezone and are sent as absolute timestamps.")}</p>
       {cancelNotice && (
-        <p role="status" className="text-12 text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           {cancelNotice}
         </p>
       )}
       {query.isPending && (
-        <p role="status" className="text-12">{t("Loading jobs…")}</p>
+        <p role="status" className="text-14">{translateUi("Loading jobs…")}</p>
       )}
       {query.error &&
         (missing ? (
           <p
             role="status"
-            className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground"
-          >{t("Job history is unavailable on this server. This does not mean the machine has no jobs. The owner job-list API must be connected before status, cancellation, and output can be reviewed here.")}</p>
+            className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground"
+          >{translateUi("Job history is unavailable on this server. This does not mean the machine has no jobs. The owner job-list API must be connected before status, cancellation, and output can be reviewed here.")}</p>
         ) : (
           <ErrorBanner
-            message={t("Job history could not be loaded. {{message}}", { message: translateErrorMessage(query.error.message) })}
+            message={translateUi("Job history could not be loaded. {{value1}}", { value1: query.error.message })}
             onRetry={() => void query.refetch()}
           />
         ))}
       {!query.isPending && !query.error && !jobs.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("No jobs match these filters.")}</p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("No jobs match these filters.")}</p>
+      )}
+      {!query.isPending && !query.error && (
+        <p className="text-14 text-muted-foreground">{translateUi("Loaded ")}{jobs.length} {jobs.length === 1 ? translateUi("job") : translateUi("jobs")}{translateUi(" on this page.")}</p>
       )}
       <div className="flex flex-col gap-3 md:hidden">
         {jobs.map((job) => (
@@ -230,24 +249,31 @@ export function RemoteMachineJobs({
             key={job.id}
             className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
           >
-            <p className="break-all font-mono text-13 font-semibold">
+            <p className="break-all font-mono type-card-title">
               {job.id}
             </p>
             <div className="flex flex-wrap gap-2">
               <Badge variant={active(job) ? "warning" : "secondary"}>
                 {job.status}
               </Badge>
-              <Badge variant="secondary">{t("Output ")}{job.output_availability}
+              <Badge variant="secondary">{translateUi("Output ")}{job.output_availability}
               </Badge>
             </div>
-            <p className="break-all text-11 text-muted-foreground">
+            <p className="break-all text-13 text-muted-foreground">
               {subjectText(job.subject)}
             </p>
-            <p className="text-11 text-text-tertiary">
-              {when(job.started_at ?? job.created_at)}{t(" · Generation")}{" "}
-              {job.runtime_generation ?? t("Not reported")}
+            <p className="text-13 text-text-tertiary">
+              {when(job.started_at ?? job.created_at)}{translateUi(" · Generation")}{" "}
+              {job.runtime_generation ?? translateUi("Not reported")}
             </p>
-            <Button onClick={() => setSelectedId(job.id)}>{t("View job")}</Button>
+            {job.status === "finished" && (
+              <p className="text-13 text-muted-foreground">
+                {job.exit_code === null
+                  ? translateUi("Exit result not reported")
+                  : translateUi("Exit code {{value1}}", { value1: job.exit_code })}
+              </p>
+            )}
+            <Button onClick={() => setSelectedId(job.id)}>{translateUi("View job")}</Button>
           </article>
         ))}
       </div>
@@ -256,26 +282,26 @@ export function RemoteMachineJobs({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("Job / principal")}</TableHead>
-                <TableHead>{t("Status / generation")}</TableHead>
-                <TableHead>{t("Time")}</TableHead>
-                <TableHead>{t("Output")}</TableHead>
-                <TableHead>{t("Details")}</TableHead>
+                <TableHead>{translateUi("Job / principal")}</TableHead>
+                <TableHead>{translateUi("Status / generation")}</TableHead>
+                <TableHead>{translateUi("Time")}</TableHead>
+                <TableHead>{translateUi("Output")}</TableHead>
+                <TableHead>{translateUi("Details")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {jobs.map((job) => (
                 <TableRow key={job.id}>
                   <TableCell>
-                    <p className="break-all font-mono text-11">{job.id}</p>
-                    <p className="break-all text-11 text-muted-foreground">
+                    <p className="break-all font-mono text-13">{job.id}</p>
+                    <p className="break-all text-13 text-muted-foreground">
                       {subjectText(job.subject)}
                     </p>
                   </TableCell>
                   <TableCell>
                     {job.status}
-                    <p className="text-11 text-text-tertiary">{t("Generation ")}{job.runtime_generation ?? t("Not reported")}
-                      {job.exit_code !== null ? t(" · Exit {{exit_code}}", { exit_code: job.exit_code }) : ""}
+                    <p className="text-13 text-text-tertiary">{translateUi("Generation ")}{job.runtime_generation ?? translateUi("Not reported")}
+                      {job.exit_code !== null ? translateUi(" · Exit {{value1}}", { value1: job.exit_code }) : ""}
                     </p>
                   </TableCell>
                   <TableCell>
@@ -283,7 +309,7 @@ export function RemoteMachineJobs({
                   </TableCell>
                   <TableCell>{job.output_availability}</TableCell>
                   <TableCell>
-                    <Button onClick={() => setSelectedId(job.id)}>{t("View job")}</Button>
+                    <Button onClick={() => setSelectedId(job.id)}>{translateUi("View job")}</Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -298,7 +324,7 @@ export function RemoteMachineJobs({
             setCursors((values) => values.slice(0, -1));
             setSelectedId(null);
           }}
-        >{t("Previous jobs")}</Button>
+        >{translateUi("Previous jobs")}</Button>
         <Button
           disabled={!query.data?.next_cursor || query.isFetching}
           onClick={() => {
@@ -306,37 +332,37 @@ export function RemoteMachineJobs({
             if (next) setCursors((values) => [...values, next]);
             setSelectedId(null);
           }}
-        >{t("Next jobs")}</Button>
+        >{translateUi("Next jobs")}</Button>
       </div>
       {selected && !query.error && (
         <div className="space-y-4">
           <DetailSection
-            title={t("Selected job")}
+            title={translateUi("Selected job")}
             action={
-              <Button variant="ghost" onClick={() => setSelectedId(null)}>{t("Close job")}</Button>
+              <Button variant="ghost" onClick={() => setSelectedId(null)}>{translateUi("Close job")}</Button>
             }
           >
-            <DetailRow label={t("Job ID")} value={selected.id} mono copyable />
+            <DetailRow label={translateUi("Job ID")} value={selected.id} mono copyable />
             <DetailRow
-              label={t("Principal")}
+              label={translateUi("Principal")}
               value={subjectText(selected.subject)}
               mono
             />
             <DetailRow
-              label={t("Acting person")}
+              label={translateUi("Acting person")}
               value={selected.subject.user_id}
               mono
             />
             <DetailRow
-              label={t("Grant")}
+              label={translateUi("Grant")}
               value={selected.grant_id ?? "Assistant assignment"}
               mono
             />
-            <DetailRow label={t("Status")} value={selected.status} />
-            <DetailRow label={t("Created")} value={when(selected.created_at)} />
-            <DetailRow label={t("Started")} value={when(selected.started_at)} />
+            <DetailRow label={translateUi("Status")} value={selected.status} />
+            <DetailRow label={translateUi("Created")} value={when(selected.created_at)} />
+            <DetailRow label={translateUi("Started")} value={when(selected.started_at)} />
             <DetailRow
-              label={t("Duration")}
+              label={translateUi("Duration")}
               value={
                 selected.duration_ms == null
                   ? "Not reported"
@@ -344,15 +370,15 @@ export function RemoteMachineJobs({
               }
             />
             <DetailRow
-              label={t("History retained until")}
+              label={translateUi("History retained until")}
               value={when(selected.retain_until ?? null)}
             />
             <DetailRow
-              label={t("Cancellation requested")}
+              label={translateUi("Cancellation requested")}
               value={when(selected.cancellation_requested_at ?? null)}
             />
             <DetailRow
-              label={t("Cancellation requester")}
+              label={translateUi("Cancellation requester")}
               value={
                 selected.cancellation_requested_by?.kind === "human_owner"
                   ? `Human owner ${selected.cancellation_requested_by.user_id}`
@@ -363,13 +389,13 @@ export function RemoteMachineJobs({
                       : "Not reported"
               }
             />
-            <DetailRow label={t("Finished")} value={when(selected.finished_at)} />
+            <DetailRow label={translateUi("Finished")} value={when(selected.finished_at)} />
             <DetailRow
-              label={t("Authority expires")}
+              label={translateUi("Authority expires")}
               value={when(selected.expires_at)}
             />
             <DetailRow
-              label={t("Exit code")}
+              label={translateUi("Exit code")}
               value={
                 selected.exit_code === null
                   ? "Not reported"
@@ -377,11 +403,11 @@ export function RemoteMachineJobs({
               }
             />
             <DetailRow
-              label={t("Stop / cancellation reason")}
+              label={translateUi("Stop / cancellation reason")}
               value={selected.stop_reason ?? "Not reported"}
             />
             <DetailRow
-              label={t("Runtime generation")}
+              label={translateUi("Runtime generation")}
               value={
                 selected.runtime_generation === null
                   ? "Not reported"
@@ -389,22 +415,22 @@ export function RemoteMachineJobs({
               }
             />
             <DetailRow
-              label={t("Declared services")}
+              label={translateUi("Declared services")}
               value={
                 selected.services.map((service) => service.slug).join(", ") ||
                 "None"
               }
             />
             <DetailRow
-              label={t("Output availability")}
+              label={translateUi("Output availability")}
               value={selected.output_availability}
             />
             <DetailRow
-              label={t("Output deadline")}
+              label={translateUi("Output deadline")}
               value={when(selected.output_expires_at)}
             />
             {selected.output_reason && (
-              <p className="px-4 py-3 text-12 text-muted-foreground">
+              <p className="px-4 py-3 text-14 text-muted-foreground">
                 {selected.output_reason}
               </p>
             )}
@@ -415,14 +441,14 @@ export function RemoteMachineJobs({
             job={selected}
           />
           {active(selected) && selected.cancellation_available !== true && (
-            <p className="text-12 text-muted-foreground">{t("Owner cancellation is not exposed by this server. No cancellation request can be sent here.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Owner cancellation is not exposed by this server. No cancellation request can be sent here.")}</p>
           )}
           {active(selected) && (
             <Button
               disabled={selected.cancellation_available !== true}
               variant="destructive"
               onClick={() => setCancelTarget(selected)}
-            >{t("Cancel job")}</Button>
+            >{translateUi("Cancel job")}</Button>
           )}
         </div>
       )}
@@ -437,15 +463,15 @@ export function RemoteMachineJobs({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Cancel job")}</DialogTitle>
-            <DialogDescription>{t("Request cancellation of this job’s process group. Cancellation does not resume the machine or extend execution authority.")}</DialogDescription>
+            <DialogTitle>{translateUi("Cancel job")}</DialogTitle>
+            <DialogDescription>{translateUi("Request cancellation of this job’s process group. Cancellation does not resume the machine or extend execution authority.")}</DialogDescription>
           </DialogHeader>
           {cancelError && <ErrorBanner message={cancelError} />}
           <DialogFooter>
             <Button
               onClick={() => setCancelTarget(null)}
               disabled={cancel.isPending}
-            >{t("Keep running")}</Button>
+            >{translateUi("Keep running")}</Button>
             <Button
               variant="destructive"
               isLoading={cancel.isPending}
@@ -478,7 +504,7 @@ export function RemoteMachineJobs({
                   );
                 }
               }}
-            >{t("Confirm cancellation")}</Button>
+            >{translateUi("Confirm cancellation")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -493,7 +519,7 @@ export function MachineOutput({
   readonly machineId: string;
   readonly job: RemoteMachineJob;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const [output, setOutput] = useState<RemoteMachineJobOutput | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -569,18 +595,20 @@ export function MachineOutput({
     }
   }
   return (
-    <DetailSection title={t("Live job output")}>
-      <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
-        <p>{t("Output is fetched on demand from the live authorized node and held only in this open view. It is never copied into Query caches, browser storage, or history. It may disappear before the one-hour maximum after job completion.")}</p>
+    <DetailSection title={translateUi("Live job output")}>
+      <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
+        <p>{translateUi("Output is fetched on demand from the live authorized node and held only in this open view. It is never copied into Query caches, browser storage, or history. It may disappear before the one-hour maximum after job completion.")}</p>
         {!available && (
-          <p role="status">{t("Output ")}{expired ? t("expired") : job.output_availability}{t(". Lost or expired output cannot be recovered from job history.")}</p>
+          <p role="status">{translateUi("Output ")}{expired ? translateUi("expired") : job.output_availability}. Lost or
+            expired output cannot be recovered from job history.
+          </p>
         )}
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={!available || loading}
             isLoading={loading}
             onClick={() => void load()}
-          >{t("Read live output")}</Button>
+          >{translateUi("Read live output")}</Button>
           {output && output.output_available !== false && (
             <>
               <Button
@@ -588,7 +616,7 @@ export function MachineOutput({
                   request.current?.abort();
                   setOutput(null);
                 }}
-              >{t("Clear output")}</Button>
+              >{translateUi("Clear output")}</Button>
               <Button
                 disabled={
                   loading ||
@@ -597,16 +625,18 @@ export function MachineOutput({
                   (!output.truncated && !active(job))
                 }
                 onClick={() => void load(true)}
-              >{t("Next output page")}</Button>
+              >{translateUi("Next output page")}</Button>
             </>
           )}
         </div>
         {output?.output_available === false && (
-          <p role="status">{t("Output unavailable:")}{" "}
-            {(output.output_unavailable_reason ?? t("not reported")).replaceAll(
+          <p role="status">{translateUi("Output unavailable:")}{" "}
+            {(output.output_unavailable_reason ?? "not reported").replaceAll(
               "_",
               " ",
-            )}{t(". Expired or evicted bytes cannot be recovered from history.")}</p>
+            )}
+            . Expired or evicted bytes cannot be recovered from history.
+          </p>
         )}
         {error && (
           <div role="alert">
@@ -615,23 +645,23 @@ export function MachineOutput({
         )}
         {output && output.output_available !== false && (
           <>
-            <p className="text-11">{t("Status ")}{output.status}{t(" · Duration")}{" "}
+            <p className="text-13">{translateUi("Status ")}{output.status}{translateUi(" · Duration")}{" "}
               {output.duration_ms === undefined
-                ? t("not reported")
-                : t("{{duration_ms}} ms", { duration_ms: output.duration_ms })}{" "}{t("· Exit ")}{output.exit_code ?? t("pending")}
-              {output.timed_out ? t(" · Timed out") : ""}
+                ? translateUi("not reported")
+                : translateUi("{{value1}} ms", { value1: output.duration_ms })}{" "}{translateUi("· Exit ")}{output.exit_code ?? translateUi("pending")}
+              {output.timed_out ? translateUi(" · Timed out") : ""}
               {output.truncated
-                ? t(" · Output was truncated; earlier bytes may have been discarded")
+                ? translateUi(" · Output was truncated; earlier bytes may have been discarded")
                 : ""}
             </p>
-            <h4 className="font-medium text-foreground">{t("Standard output")}</h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-11">
+            <h4 className="font-medium text-foreground">{translateUi("Standard output")}</h4>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-14">
               {output.stdout === undefined
                 ? "(not reported)"
                 : output.stdout || "(empty)"}
             </pre>
-            <h4 className="font-medium text-foreground">{t("Standard error")}</h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-11">
+            <h4 className="font-medium text-foreground">{translateUi("Standard error")}</h4>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-14">
               {output.stderr === undefined
                 ? "(not reported)"
                 : output.stderr || "(empty)"}

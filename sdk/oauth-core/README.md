@@ -22,6 +22,32 @@ const client = new NyxIDClient({
 await client.loginWithRedirect();
 ```
 
+After exchanging the callback, use the expiry-aware accessor for API calls.
+It refreshes shortly before expiry, persists a rotated refresh token in one
+storage write, and shares concurrent refreshes in a tab:
+
+```ts
+const accessToken = await client.getAccessToken();
+const response = await fetch("https://api.example.com/data", {
+  headers: { Authorization: `Bearer ${accessToken}` },
+});
+```
+
+`refreshToken()` exposes the same operation explicitly. `invalid_grant` clears
+the local token set and requires a new login. Network errors, HTTP 503, and
+`temporarily_unavailable` retain the current tokens and retry with bounded
+backoff (up to three attempts, respecting numeric or HTTP-date `Retry-After`).
+The React provider exposes both methods and refreshes while mounted.
+
+Persistent browser tokens use Web Locks to serialize refreshes across tabs.
+If Web Locks is unavailable, shared localStorage fails closed with retryable
+`refresh_coordination_unavailable` and retains the token set. Use tab-local
+`storage: window.sessionStorage` in those browsers. In-memory and tab-local
+stores use a shared in-tab single-flight. Custom storage adapters must be
+tab-local when Web Locks is unavailable; a read/write storage lease cannot
+safely serialize token rotation. A logout or replacement login during a refresh
+cannot be overwritten by its late response.
+
 To request more access after an existing NyxID grant, use the same redirect
 and callback flow. `scope` contains only the new OAuth permissions; omit it
 when only adding services. The new scope must be allowed for the client, and

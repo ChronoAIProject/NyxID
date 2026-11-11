@@ -48,8 +48,10 @@ describe("ScheduleDialog", () => {
   it("defaults to period expiry and reveals days only for fixed expiry", () => {
     render(<Harness />);
 
-    expect(screen.getByText("Wallet credits per owner")).toBeInTheDocument();
-    expect(screen.getByText(/Credits are wallet currency/)).toBeInTheDocument();
+    expect(screen.getByText("Credits per recipient")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Issued as a separate credit allocation/),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("End of each period")).toBeChecked();
     expect(
       screen.queryByLabelText("Days until expiry"),

@@ -1,0 +1,56 @@
+{
+  "id": "00000000-0000-4000-8000-000000000009",
+  "slug": "api-telnyx",
+  "name": "Telnyx",
+  "is_active": true,
+  "effective_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "effective": {
+    "fallback_metric": "requests",
+    "classes": [
+      {
+        "credential_classes": [
+          "nyxid_managed_master"
+        ],
+        "lane": "platform_key",
+        "platform_charged": false,
+        "source": "free",
+        "reason": "not_billable",
+        "prices": [],
+        "pending": []
+      },
+      {
+        "credential_classes": [
+          "nyxid_platform_oauth_app",
+          "user_owned",
+          "agent_override_user_owned",
+          "node_managed"
+        ],
+        "lane": "byok",
+        "platform_charged": false,
+        "source": "free",
+        "reason": "not_billable",
+        "prices": [],
+        "pending": []
+      },
+      {
+        "credential_classes": [
+          "no_auth"
+        ],
+        "lane": null,
+        "platform_charged": false,
+        "source": "free",
+        "reason": "not_billable",
+        "prices": [],
+        "pending": []
+      }
+    ],
+    "resale": {
+      "configured": false,
+      "applied": false,
+      "source": "free"
+    }
+  }
+}

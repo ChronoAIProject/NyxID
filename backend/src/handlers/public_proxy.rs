@@ -57,9 +57,9 @@ async fn execute_public_proxy(
     )
     .await?;
 
-    if is_ws_upgrade_request(&request) {
+    if is_ws_upgrade_request(&request) || request.method() == axum::http::Method::CONNECT {
         return Err(AppError::BadRequest(
-            "WebSocket upgrades are not supported on public proxy routes".to_string(),
+            "WebSocket upgrades and CONNECT are not supported on public proxy routes".to_string(),
         ));
     }
 
@@ -164,12 +164,16 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        catalog_slug: Some(service.slug.clone()),
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,
         base_url: service.base_url.clone(),
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
-        credential: String::new(),
+        credential: Default::default(),
         catalog_default_headers: Vec::new(),
         user_service_default_headers: Vec::new(),
         ws_frame_injections: Vec::new(),
@@ -292,6 +296,7 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -353,6 +358,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: vec![AnonymousEndpointRule {
                 id: "rule".to_string(),
@@ -372,7 +378,7 @@ mod tests {
         let target = public_proxy_target(service());
         assert_eq!(target.auth_method, "none");
         assert_eq!(target.auth_key_name, "");
-        assert_eq!(target.credential, "");
+        assert_eq!(target.credential.as_str(), "");
         assert!(target.catalog_default_headers.is_empty());
         assert_eq!(target.service.identity_propagation_mode, "none");
         assert!(!target.service.forward_access_token);
@@ -440,6 +446,7 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,
@@ -501,6 +508,7 @@ mod tests {
                 default_request_headers: None,
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
+                introspection_client_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: vec![AnonymousEndpointRule {
                     id: Uuid::new_v4().to_string(),
@@ -800,42 +808,41 @@ mod tests {
             );
         }
 
-        /// A WebSocket upgrade request to a public proxy route is rejected
-        /// (public routes are HTTP-only).
+        /// Public entrances never open opaque streams, even with a bearer.
         #[tokio::test]
-        async fn websocket_upgrade_is_rejected() {
-            let Some(db) = connect_test_database("pproxy_ws_reject").await else {
+        async fn shared_transports_security_public_websocket_and_connect_are_rejected() {
+            let Some(db) = connect_test_database("pproxy_stream_reject").await else {
                 return;
             };
-            // Service presence is irrelevant: WS rejection happens before
-            // rule matching, but insert one so the route is otherwise valid.
             let service = public_service("pub", "https://example.test", 100);
             db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
                 .insert_one(&service)
                 .await
                 .expect("insert service");
             let state = test_app_state(db);
-
-            let request = classified_public_request(
-                Request::builder()
-                    .method("GET")
+            for method in ["GET", "CONNECT"] {
+                let mut builder = Request::builder()
+                    .method(method)
                     .uri("/public/s/pub/public/echo")
-                    .header(axum::http::header::CONNECTION, "Upgrade")
-                    .header(axum::http::header::UPGRADE, "websocket")
-                    .body(Body::empty())
-                    .unwrap(),
-            );
-
-            let err = execute_public_proxy(
-                state,
-                Some(peer()),
-                "pub".to_string(),
-                "public/echo".to_string(),
-                request,
-            )
-            .await
-            .expect_err("websocket upgrade must be rejected");
-            assert!(matches!(err, AppError::BadRequest(_)));
+                    .header("authorization", "Bearer ignored-key");
+                if method == "GET" {
+                    builder = builder
+                        .header(axum::http::header::CONNECTION, "Upgrade")
+                        .header(axum::http::header::UPGRADE, "websocket");
+                }
+                let request = classified_public_request(builder.body(Body::empty()).unwrap());
+                let err = execute_public_proxy(
+                    state.clone(),
+                    Some(peer()),
+                    "pub".into(),
+                    "public/echo".into(),
+                    request,
+                )
+                .await
+                .expect_err("public stream must be rejected before resolution");
+                assert!(matches!(err, AppError::BadRequest(_)));
+            }
+            state.db.drop().await.unwrap();
         }
 
         /// A request whose method/path does not match any enabled rule returns

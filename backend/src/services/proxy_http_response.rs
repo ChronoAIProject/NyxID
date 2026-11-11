@@ -35,7 +35,39 @@ pub(crate) struct HttpResponseContext {
     pub exchange_diagnostics: ProxyExchangeDiagnostics,
 }
 
-pub(crate) async fn relay_response(
+/// Construct the response relay behind a heap boundary so dispatch callers do
+/// not embed its streaming and settlement state in their own poll frames.
+pub(crate) fn relay_response<'a>(
+    state: &'a AppState,
+    context: HttpResponseContext,
+    downstream_response: reqwest::Response,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    if context
+        .model_request
+        .as_ref()
+        .is_some_and(|request| request.is_setup())
+    {
+        // Publishing acceptance lets hidden setup stop its engine request. Give
+        // this relay an owner first so that stop cannot drop settlement work.
+        // Its own client token still cancels response IO, followed by settlement.
+        let state = state.clone();
+        let mut context = context;
+        // Setup requests have a server-enforced 16-token output bound. Buffer
+        // non-SSE bodies with an explicit cap/deadline, including chunked JSON.
+        context.should_stream = context.is_sse;
+        Box::pin(async move {
+            crate::turn_trace::spawn(async move {
+                Box::pin(relay_response_inner(&state, context, downstream_response)).await
+            })
+            .await
+            .map_err(|_| AppError::Internal("Assistant setup response task failed".into()))?
+        })
+    } else {
+        Box::pin(relay_response_inner(state, context, downstream_response))
+    }
+}
+
+async fn relay_response_inner(
     state: &AppState,
     context: HttpResponseContext,
     downstream_response: reqwest::Response,
@@ -58,6 +90,9 @@ pub(crate) async fn relay_response(
     } = context;
     let service_id = service_id.as_str();
     let path = path.as_str();
+    let setup_model = model_request
+        .as_ref()
+        .is_some_and(|request| request.is_setup());
     let bounded_admission_body = nyxagent_admission && matches!(status.as_u16(), 409 | 503);
     if status.is_success()
         && let Some(request) = &model_request
@@ -82,7 +117,7 @@ pub(crate) async fn relay_response(
             let model_protocol = crate::services::assistant_model_observer::protocol(path);
             let model_request = model_request.clone().filter(|_| status.is_success());
 
-            tokio::spawn(async move {
+            crate::turn_trace::spawn(async move {
                 let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
@@ -157,6 +192,9 @@ pub(crate) async fn relay_response(
                             {
                                 for &byte in &bytes {
                                     let _ = observer.push_byte(byte);
+                                }
+                                if observer.take_first_output() {
+                                    let _ = request.first_output().await;
                                 }
                                 if observer.framing_invalid() && !framing_fault_recorded {
                                     let _ = request.fault("unknown", false).await;
@@ -441,47 +479,64 @@ pub(crate) async fn relay_response(
             .and_then(|value| value.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
-        let mut admission_response_len = 0_i64;
+        let mut observed_response_len = 0_i64;
         let response_body = match until_client_disconnect(&downstream_cancellation, async {
-            if bounded_admission_body {
-                let mut stream = downstream_response.bytes_stream();
-                let mut captured = bytes::BytesMut::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|_| {
-                        AppError::Internal("Invalid assistant admission response".into())
-                    })?;
-                    admission_response_len =
-                        admission_response_len.saturating_add(chunk.len() as i64);
-                    if captured.len().saturating_add(chunk.len())
-                        > crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES
-                    {
-                        return Err(AppError::Internal(
-                            "Assistant admission response too large".into(),
-                        ));
+            let read_body = async {
+                if bounded_admission_body || setup_model {
+                    let limit = if bounded_admission_body {
+                        crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES
+                    } else {
+                        USAGE_CAPTURE_MAX_BYTES
+                    };
+                    let mut stream = downstream_response.bytes_stream();
+                    let mut captured = bytes::BytesMut::new();
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.map_err(|_| {
+                            AppError::Internal("Invalid assistant response body".into())
+                        })?;
+                        observed_response_len =
+                            observed_response_len.saturating_add(chunk.len() as i64);
+                        if captured.len().saturating_add(chunk.len()) > limit {
+                            return Err(AppError::Internal(
+                                "Assistant response body too large".into(),
+                            ));
+                        }
+                        captured.extend_from_slice(&chunk);
                     }
-                    captured.extend_from_slice(&chunk);
+                    Ok(captured.freeze())
+                } else {
+                    downstream_response.bytes().await.map_err(|e| {
+                        AppError::Internal(format!("Failed to read downstream response: {e}"))
+                    })
                 }
-                Ok(captured.freeze())
+            };
+            if setup_model {
+                // Bound only IO: settlement and cleanup run after timeout or
+                // disconnect, outside the cancellable/deadline-bound future.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs),
+                    read_body,
+                )
+                .await
+                .map_err(|_| AppError::Internal("Assistant setup response timed out".into()))?
             } else {
-                downstream_response.bytes().await.map_err(|e| {
-                    AppError::Internal(format!("Failed to read downstream response: {e}"))
-                })
+                read_body.await
             }
         })
         .await
         {
             Err(_) => {
                 exchange_diagnostics.emit("client_disconnect");
-                if bounded_admission_body {
+                if bounded_admission_body || setup_model {
                     settle_meter_async(
                         state.billing.clone(),
                         metered,
-                        llm_platform_usage(None, request_body_len + admission_response_len),
+                        llm_platform_usage(None, request_body_len + observed_response_len),
                         resale_metric.and_then(|metric| {
                             resale_usage_from_optional_reported(
                                 metric,
                                 None,
-                                request_body_len + admission_response_len,
+                                request_body_len + observed_response_len,
                             )
                         }),
                         None,
@@ -492,16 +547,16 @@ pub(crate) async fn relay_response(
             }
             Ok(Err(e)) => {
                 exchange_diagnostics.emit("body_error");
-                if bounded_admission_body {
+                if bounded_admission_body || setup_model {
                     settle_meter_async(
                         state.billing.clone(),
                         metered,
-                        llm_platform_usage(None, request_body_len + admission_response_len),
+                        llm_platform_usage(None, request_body_len + observed_response_len),
                         resale_metric.and_then(|metric| {
                             resale_usage_from_optional_reported(
                                 metric,
                                 None,
-                                request_body_len + admission_response_len,
+                                request_body_len + observed_response_len,
                             )
                         }),
                         None,
@@ -553,9 +608,11 @@ pub(crate) async fn relay_response(
             proven_nyxagent_refusal(nyxagent_admission, status.as_u16(), &response_body);
         if rejected_admission {
             // Returning the refusal admits a retry. Its funding must be free first.
-            if let Err(error) = state
-                .billing
-                .settle(
+            // Poll funding separately from the deep proxy stack, and await its
+            // durable release before allowing the provider retry.
+            let billing = state.billing.clone();
+            let settlement = crate::turn_trace::spawn(async move {
+                Box::pin(billing.settle(
                     &metered,
                     PlatformUsage::default(),
                     resale.map(|mut usage| {
@@ -563,9 +620,17 @@ pub(crate) async fn relay_response(
                         usage
                     }),
                     model,
-                )
+                ))
                 .await
-            {
+            })
+            .await;
+            let settlement = match settlement {
+                Ok(result) => result,
+                Err(_) => Err(AppError::Internal(
+                    "Assistant admission funding release failed".into(),
+                )),
+            };
+            if let Err(error) = settlement {
                 tracing::error!(
                     code = error.error_code(),
                     "Assistant admission funding release failed"
@@ -635,7 +700,7 @@ pub(crate) async fn observe_model_response(
     let protocol = crate::services::assistant_model_observer::protocol(path);
     let (parts, body) = response.into_parts();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         let mut body = body.into_data_stream();
         let mut observer = crate::services::assistant_model_observer::StreamObserver::new(protocol);
         let mut provider_fault_recorded = false;
@@ -650,6 +715,9 @@ pub(crate) async fn observe_model_response(
                 Some(Ok(bytes)) => {
                     for &byte in &bytes {
                         let _ = observer.push_byte(byte);
+                    }
+                    if observer.take_first_output() {
+                        let _ = request.first_output().await;
                     }
                     if observer.framing_invalid() && !framing_fault_recorded {
                         let _ = request.fault("unknown", false).await;
@@ -752,6 +820,7 @@ pub(crate) struct ProxyExchangeDiagnostics {
     response_mode: &'static str,
     trace_id: String,
     request_id: String,
+    turn_context: Option<crate::turn_trace::TurnContext>,
 }
 
 impl ProxyExchangeDiagnostics {
@@ -775,11 +844,26 @@ impl ProxyExchangeDiagnostics {
             response_mode,
             trace_id: sanitized_trace_id(headers).unwrap_or_default(),
             request_id: sanitized_request_id(headers).unwrap_or_default(),
+            turn_context: crate::turn_trace::TurnContext::current(),
         }
     }
 
     pub(crate) fn emit(&self, termination: &'static str) {
         let body_ms = elapsed_ms(self.headers_at);
+        if let Some(context) = self.turn_context {
+            crate::turn_trace::milestone(
+                &context.turn_id(),
+                crate::turn_trace::Stage::ProxyBody,
+                Some(body_ms),
+                Some(match termination {
+                    "complete" | "completed" | "eof" if self.status < 400 => {
+                        crate::turn_trace::Outcome::Completed
+                    }
+                    "client_disconnect" => crate::turn_trace::Outcome::Cancelled,
+                    _ => crate::turn_trace::Outcome::Failed,
+                }),
+            );
+        }
         let downstream_headers_available = self.downstream_headers_ms.is_some();
         let downstream_headers_ms = self.downstream_headers_ms.unwrap_or(0);
         tracing::info!(

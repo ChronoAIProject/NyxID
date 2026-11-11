@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -26,7 +26,7 @@ export function ServiceSavedViews({
   readonly view: ReturnType<typeof useServiceView>;
   readonly onRestore: (filters?: ServiceViewFilters, viewId?: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const form = useAppForm<{ name: string }>({
     resolver: zodResolver(serviceViewNameFormSchema),
@@ -52,9 +52,9 @@ export function ServiceSavedViews({
           <Button
             variant="outline"
             className="rounded-full"
-            aria-label={t("Saved views")}
+            aria-label={translateUi("Saved views")}
           >
-            <Bookmark className="size-3.5" aria-hidden="true" />{t("Saved views")}<span className="rounded-full bg-muted px-1.5 text-10 tabular-nums">
+            <Bookmark className="size-3.5" aria-hidden="true" />{translateUi("Saved views")}<span className="rounded-full bg-muted px-1.5 text-12 tabular-nums">
               {view.workspace.views.length}
             </span>
             <ChevronDown className="size-3" aria-hidden="true" />
@@ -65,8 +65,8 @@ export function ServiceSavedViews({
           className="w-96 max-w-[calc(100vw-2rem)] space-y-3"
         >
           <div>
-            <h3 className="text-13 font-semibold">{t("Saved views")}</h3>
-            <p className="mt-1 text-xs text-muted-foreground">{t("Save named filter combinations. The default opens when you return to AI Services.")}</p>
+            <h3 className="type-card-title">{translateUi("Saved views")}</h3>
+            <p className="mt-1 text-13 text-muted-foreground">{translateUi("Save named filter combinations. The default opens when you return to AI Services.")}</p>
           </div>
           <div className="max-h-64 space-y-2 overflow-y-auto">
             {view.workspace.views.map((saved) => (
@@ -77,7 +77,7 @@ export function ServiceSavedViews({
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    className="min-w-0 flex-1 rounded p-1 text-left text-xs font-medium hover:bg-accent"
+                    className="min-w-0 flex-1 rounded p-1 text-left type-row-title hover:bg-accent"
                     onClick={() => {
                       onRestore(saved.filters, saved.id);
                       setOpen(false);
@@ -88,13 +88,13 @@ export function ServiceSavedViews({
                       {active?.id === saved.id && (
                         <Check
                           className="size-3 text-success"
-                          aria-label={t("Active")}
+                          aria-label={translateUi("Active")}
                         />
                       )}
                     </span>
-                    <span className="mt-1 block text-11 font-normal text-muted-foreground">
+                    <span className="mt-1 block type-secondary text-muted-foreground">
                       {view.workspace.default_id === saved.id
-                        ? t("Default · ")
+                        ? translateUi("Default · ")
                         : ""}
                       {
                         {
@@ -105,7 +105,7 @@ export function ServiceSavedViews({
                         }[saved.filters.source]
                       }
                       {saved.filters.search
-                        ? t(" · “{{search}}”", { search: saved.filters.search })
+                        ? translateUi(" · “{{search}}”", { search: saved.filters.search })
                         : ""}
                     </span>
                   </button>
@@ -114,13 +114,13 @@ export function ServiceSavedViews({
                     size="sm"
                     aria-label={
                       view.workspace.default_id === saved.id
-                        ? t("Remove default: {{name}}", { name: saved.name })
-                        : t("Set as default: {{name}}", { name: saved.name })
+                        ? translateUi("Remove default: {{value1}}", { value1: saved.name })
+                        : translateUi("Set as default: {{value1}}", { value1: saved.name })
                     }
                     title={
                       view.workspace.default_id === saved.id
-                        ? t("Remove default")
-                        : t("Set as default")
+                        ? translateUi("Remove default")
+                        : translateUi("Set as default")
                     }
                     disabled={disabled}
                     onClick={() =>
@@ -143,7 +143,7 @@ export function ServiceSavedViews({
                   <Button
                     variant="ghost"
                     size="sm"
-                    aria-label={t("Delete view: {{name}}", { name: saved.name })}
+                    aria-label={translateUi("Delete view: {{value1}}", { value1: saved.name })}
                     disabled={disabled}
                     onClick={() => setPendingDelete(saved.id)}
                   >
@@ -151,8 +151,8 @@ export function ServiceSavedViews({
                   </Button>
                 </div>
                 {pendingDelete === saved.id && (
-                  <div className="mt-2 flex items-center gap-2 text-xs">
-                    <span>{t("Delete this view?")}</span>
+                  <div className="mt-2 flex items-center gap-2 text-13">
+                    <span>{translateUi("Delete this view?")}</span>
                     <Button
                       size="sm"
                       variant="destructive"
@@ -161,19 +161,19 @@ export function ServiceSavedViews({
                         view.deleteSavedView(saved.id);
                         setPendingDelete(null);
                       }}
-                    >{t("Delete")}</Button>
+                    >{translateUi("Delete")}</Button>
                     <Button
                       size="sm"
                       variant="ghost"
                       onClick={() => setPendingDelete(null)}
-                    >{t("Cancel")}</Button>
+                    >{translateUi("Cancel")}</Button>
                   </div>
                 )}
               </div>
             ))}
           </div>
           {view.workspace.views.length === 0 && (
-            <p className="text-xs text-muted-foreground">{t("No saved views yet. Set your filters, then save a view below.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("No saved views yet. Set your filters, then save a view below.")}</p>
           )}
           {selected && (
             <Button
@@ -184,7 +184,7 @@ export function ServiceSavedViews({
               }
               onClick={() => view.updateSavedView(selected.id)}
             >
-              <Save className="size-3.5" />{t("Update “")}{selected.name}{t("” with current filters")}</Button>
+              <Save className="size-3.5" />{translateUi("Update “")}{selected.name}{translateUi("” with current filters")}</Button>
           )}
           <form
             className="space-y-2 border-t border-border pt-3"
@@ -194,7 +194,7 @@ export function ServiceSavedViews({
               }
             })}
           >
-            <Label htmlFor="service-view-name">{t("Save as a new view")}</Label>
+            <Label htmlFor="service-view-name">{translateUi("Save as a new view")}</Label>
             <Input
               id="service-view-name"
               {...form.register("name")}
@@ -205,14 +205,14 @@ export function ServiceSavedViews({
                   ? "service-view-name-error"
                   : undefined
               }
-              placeholder={t("e.g. Team AI services")}
+              placeholder={translateUi("e.g. Team AI services")}
             />
             {form.formState.errors.name && (
               <p
                 id="service-view-name-error"
-                className="text-xs text-destructive"
+                className="text-13 text-destructive"
               >
-                {translateUi(form.formState.errors.name.message ?? "")}
+                {form.formState.errors.name.message}
               </p>
             )}
             <Button
@@ -224,16 +224,16 @@ export function ServiceSavedViews({
                 view.workspace.views.length >= 20
               }
               isLoading={view.isSaving}
-            >{t("Save new view")}</Button>
+            >{translateUi("Save new view")}</Button>
             {view.workspace.views.length >= 20 && (
-              <p className="text-xs text-muted-foreground">{t("You can save up to 20 views.")}</p>
+              <p className="text-13 text-muted-foreground">{translateUi("You can save up to 20 views.")}</p>
             )}
           </form>
           {!view.canSaveViews && (
-            <p className="text-11 text-muted-foreground">{t("Saving named views requires the updated server.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Saving named views requires the updated server.")}</p>
           )}
           {view.saveError && (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               {view.saveError}
             </p>
           )}
@@ -242,11 +242,11 @@ export function ServiceSavedViews({
       {active && (
         <span
           role="status"
-          className="inline-flex items-center gap-1.5 text-11 text-muted-foreground"
+          className="inline-flex items-center gap-1.5 text-13 text-muted-foreground"
         >
           <Check className="size-3 text-success" />
           {active.name}
-          {active.id === view.workspace.default_id ? t(" · Default") : ""}
+          {active.id === view.workspace.default_id ? translateUi(" · Default") : ""}
         </span>
       )}
     </div>

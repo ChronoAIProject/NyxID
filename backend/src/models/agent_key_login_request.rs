@@ -7,6 +7,11 @@ pub const COLLECTION_NAME: &str = "agent_key_login_requests";
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct AgentKeyLoginRequest {
+    /// Present only when an explicit approved-sign-in MFA exception was used.
+    #[serde(default)]
+    pub mfa_policy_revision: Option<String>,
+    #[serde(default)]
+    pub delivery_context_version: Option<u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub device_code_hmac: String,

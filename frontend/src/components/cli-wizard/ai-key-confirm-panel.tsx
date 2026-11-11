@@ -1,5 +1,12 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
+import {
+  OAuthClientSourceChoice,
+  type OAuthClientSource,
+} from "@/components/shared/oauth-client-source-choice";
 import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
 //
@@ -12,19 +19,27 @@ import type { LanePricingView } from "@/schemas/platform-keys";
 // OAuth/device-code sub-flows live in `./ai-key-auth-flows.tsx` to
 // keep this file focused on catalog lookup + dispatch.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
+import { cn } from "@/lib/utils";
 import type { ScopeCatalogEntry } from "@/types/keys";
-import { Building2, ExternalLink } from "lucide-react";
+import { ArrowRight, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -32,6 +47,8 @@ import {
   withRewindOnError,
 } from "@/pages/cli-pair/reserve-action";
 import { CatalogGrid } from "./catalog-grid";
+import { WizardBackFab } from "./wizard-back-fab";
+import { WizardHeading } from "./wizard-heading";
 
 /**
  * Catalog response shape we care about. Fields beyond these are
@@ -78,10 +95,19 @@ interface CatalogEntryShape {
   /**
    * `system` / `user` / `both` — whether this provider uses the
    * NyxID-admin-registered OAuth app, the user's own OAuth app, or
-   * accepts both. When `user` or `both`, the OAuth pre-step collects
-   * client_id / client_secret before the popup.
+   * accepts both. The OAuth pre-step collects client_id / client_secret
+   * for `user`, and for `both` when the user picks their own app or
+   * NyxID has none (see `requiresOwnOAuthApp`).
    */
   readonly credential_mode?: string;
+  /**
+   * NyxID has its own OAuth app for this provider, so `both`-mode sign-in
+   * can go through it (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md). Absent on
+   * older servers, which keeps the own-app form.
+   */
+  readonly has_platform_oauth_credentials?: boolean;
+  /** Scopes NyxID's OAuth app may request; `null`/absent = ungated. */
+  readonly platform_scope_allowlist?: readonly string[] | null;
   /** Admin-provided docs URL shown inside the user-OAuth-app step. */
   readonly documentation_url?: string;
   /**
@@ -193,7 +219,7 @@ export function AiKeyConfirm({
   onSuccess,
   onSlugPicked,
 }: AiKeyConfirmProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   // Issue #414: when the CLI passes `--custom`, drop straight onto
   // the `__custom__` step so the user lands on the custom-service
   // form (skipping the catalog grid). The form pre-populates from
@@ -240,7 +266,7 @@ export function AiKeyConfirm({
   const entryErrorMessage = (() => {
     if (!entryError) return null;
     if (entryError instanceof ApiError) return entryError.message;
-    return t('Couldn\'t load catalog entry "{{slug}}".', { slug: trimmedSlug });
+    return translateUi('Couldn\'t load catalog entry "{{slug}}".', { slug: trimmedSlug });
   })();
 
   // Manage-scopes mode (NyxID#917 follow-up): `nyxid service scopes <slug>`
@@ -272,17 +298,48 @@ export function AiKeyConfirm({
       ? "Custom / self-hosted service"
       : "Connect service";
   const subtitle = onCatalogStep
-    ? "Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic, Gemini) land in the guided form. Anything else — self-hosted, OAuth, device code, custom endpoint — goes to the power-user form."
+    ? "Pick a service to connect to NyxID."
     : onCustomStep
       ? "For services not in the catalog — paste your own endpoint URL and credential."
-      : t("Your CLI wants to add {{service}} to NyxID. Confirm the details here.", { service: trimmedSlug || t("a service") });
+      : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
+
+  // A resolved catalog service gets the hosted connector's identity heading.
+  const serviceStep = !onCatalogStep && !onCustomStep && !entryErrorMessage;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t(title)}</h2>
-        <p className="text-12 text-muted-foreground">{t(subtitle)}</p>
-      </div>
+    <div>
+      {serviceStep || onCustomStep ? (
+        <WizardBackFab
+          onBack={() => {
+            setSlug("");
+          }}
+        />
+      ) : null}
+    <div
+      className={cn(
+        "flex flex-col gap-4",
+        // Same reading column as the hosted connector and OAuth consent pages.
+        serviceStep && "mx-auto w-full max-w-[560px] gap-5",
+      )}
+    >
+      {serviceStep && entry ? (
+        <>
+          <ConnectionIdentityHeading
+            serviceSlug={entry.slug}
+            serviceName={entry.name}
+            iconUrl={entry.icon_url}
+            title={translateUi("Connect {{value1}} to NyxID", { value1: entry.name })}
+            subtitle={translateUi("Your CLI asked to add this service. Review the details, then continue.")}
+          />
+          <div className="space-y-1 border-y border-border py-4">
+            <ConnectLinkDetailRow label={translateUi("Requested by")} value="Your NyxID CLI" />
+          </div>
+        </>
+      ) : (
+        <WizardHeading title={translateUi(title)}>
+          {translateUi(subtitle)}
+        </WizardHeading>
+      )}
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
 
@@ -300,9 +357,6 @@ export function AiKeyConfirm({
           targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
-          onBack={() => {
-            setSlug("");
-          }}
         />
       ) : entryLoading ? (
         <Skeleton className="h-24 w-full" />
@@ -324,6 +378,7 @@ export function AiKeyConfirm({
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
     </div>
   );
 }
@@ -364,7 +419,7 @@ function ManageScopesPanel({
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const {
     data: key,
     isLoading: keyLoading,
@@ -439,7 +494,7 @@ function ManageScopesPanel({
     return <ErrorLine message={errMsg} />;
   }
   if (!key || !entry) {
-    return <ErrorLine message={t("Connection not found.")} />;
+    return <ErrorLine message={translateUi("Connection not found.")} />;
   }
 
   const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
@@ -447,10 +502,10 @@ function ManageScopesPanel({
   // provider, openai-codex, has fixed scopes — nothing to manage.)
   if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Manage permissions")}</h2>
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
-          {entry.name}{t(" doesn't support managing scopes here — its permissions are fixed by the provider.")}</p>
+      <div className="flex flex-col gap-4">
+        <WizardHeading title={translateUi("Manage permissions")} />
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
+          {entry.name}{translateUi(" doesn't support managing scopes here — its permissions are fixed by the provider.")}</p>
       </div>
     );
   }
@@ -467,7 +522,6 @@ function ManageScopesPanel({
         slug={key.slug}
         label={key.label}
         pairingId={pairingId}
-        credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
         scopeOverride={scopeOverride}
         reconnectKeyId={keyId}
@@ -481,20 +535,17 @@ function ManageScopesPanel({
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Manage permissions")}</h2>
-        <p className="text-12 text-muted-foreground">{t("Adjust what ")}{key.label}{t(" can do, then re-authorize at the provider. Your CLI is waiting for you to finish here.")}</p>
-      </div>
-
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img src={entry.icon_url} alt="" className="h-8 w-8 rounded" loading="lazy" />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          <p className="text-xs text-muted-foreground">{key.slug}</p>
-        </div>
+    <div className="flex flex-col gap-5">
+      <ConnectionIdentityHeading
+        serviceSlug={entry.slug}
+        serviceName={entry.name}
+        iconUrl={entry.icon_url}
+        title={translateUi("Manage permissions")}
+        subtitle={translateUi("Adjust what {{value1}} can do, then re-authorize at the provider. Your CLI is waiting for you to finish here.", { value1: key.label })}
+      />
+      <div className="space-y-1 border-y border-border py-4">
+        <ConnectLinkDetailRow label={translateUi("Requested by")} value="Your NyxID CLI" />
+        <ConnectLinkDetailRow label={translateUi("Connection")} value={key.label} />
       </div>
 
       <UpstreamScopePicker
@@ -508,7 +559,15 @@ function ManageScopesPanel({
         idPrefix="pair-manage-scope"
       />
 
-      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>{t("Re-authorize with these permissions")}</Button>
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={() => setAuthFlowActive(true)}
+      >{translateUi("Re-authorize with these permissions")}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
+      </Button>
     </div>
   );
 }
@@ -520,20 +579,23 @@ function OwnerPicker({
   readonly value: string | null;
   readonly onChange: (orgId: string | null) => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const { data: orgs } = useOrgs();
+  const id = useId();
   const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
   if (!hasAdminOrg) return null;
+  // Same label / control / hint shape as every other wizard field.
   return (
-    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Building2 className="h-3.5 w-3.5" />{t("Owner")}</div>
-        <div className="w-[220px]">
-          <OrgScopeSelect value={value} onChange={onChange} label={t("Owner")} />
-        </div>
-      </div>
-      <p className="mt-1 text-11 text-muted-foreground">{t("Org-owned services are shared with every admin of that organization and can be proxied by its members.")}</p>
+    <div className="flex flex-col gap-1.5">
+      <FieldLabel htmlFor={id}>{translateUi("Owner")}</FieldLabel>
+      <OrgScopeSelect
+        id={id}
+        aria-describedby={`${id}-hint`}
+        value={value}
+        onChange={onChange}
+        label={translateUi("Owner")}
+      />
+      <p id={`${id}-hint`} className="text-13 text-muted-foreground">{translateUi("Org-owned services are shared with every admin of that organization and can be proxied by its members.")}</p>
     </div>
   );
 }
@@ -555,6 +617,21 @@ type CustomAuthMethod =
   | "bot_bearer"
   | "ifttt_webhook"
   | "none";
+
+const AUTH_METHOD_OPTIONS: readonly {
+  readonly value: CustomAuthMethod;
+  readonly label: string;
+}[] = [
+  { value: "bearer", label: "bearer (Authorization: Bearer …)" },
+  { value: "bot_bearer", label: "bot_bearer (Authorization: Bot …)" },
+  { value: "header", label: "header (custom header)" },
+  { value: "query", label: "query (?key=…)" },
+  { value: "path", label: "path (path-prefix injection)" },
+  { value: "ifttt_webhook", label: "IFTTT Webhooks (raw key)" },
+  { value: "basic", label: "basic (Authorization: Basic …)" },
+  { value: "body", label: "body (JSON-body field injection)" },
+  { value: "none", label: "none (no auth injection)" },
+];
 
 /** Sensible default auth-key-name per method. Mirrors the CLI's
  *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
@@ -615,11 +692,35 @@ interface CustomServiceFormProps {
   readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
-  readonly onBack: () => void;
 }
 
 function RequiredMarker() {
-  return <span aria-hidden="true" className="text-destructive ml-0.5">*</span>;
+  useUiTranslation();
+  return <span aria-hidden="true" className="ml-0.5 text-destructive">*</span>;
+}
+
+/**
+ * A wizard field's label row. The fixed height gives every field the same
+ * label-to-control gap whether or not it carries the required marker, and
+ * the wrapper keeps the control from being the label's adjacent sibling,
+ * which app.css's global `label + input` rule would push 0.75rem down.
+ */
+function FieldLabel({
+  htmlFor,
+  required = false,
+  children,
+}: {
+  readonly htmlFor: string;
+  readonly required?: boolean;
+  readonly children: React.ReactNode;
+}) {
+  useUiTranslation();
+  return (
+    <div className="flex h-4 items-center">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      {required ? <RequiredMarker /> : null}
+    </div>
+  );
 }
 
 function CustomServiceForm({
@@ -627,9 +728,8 @@ function CustomServiceForm({
   targetOrgId,
   pairingId,
   onSuccess,
-  onBack,
 }: CustomServiceFormProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   // Issue #414: when the CLI passed `--auth-method`, `--auth-key-name`,
   // `--slug`, `--via-node`, etc. alongside `--custom`, those values
   // pre-populate the form and let the user submit with just the
@@ -668,12 +768,12 @@ function CustomServiceForm({
     (needsCredential && !trimmedCredential);
   const credentialLabel =
     authMethod === "bot_bearer"
-      ? t("Bot token")
+      ? "Bot token"
       : authMethod === "basic"
         ? "user:pass"
         : authMethod === "body"
-          ? t("{{field}} value", { field: authKeyName.trim() || defaultAuthKeyName(authMethod) })
-          : t("API key / credential");
+          ? translateUi("{{field}} value", { field: authKeyName.trim() || defaultAuthKeyName(authMethod) })
+          : "API key / credential";
 
   async function submit() {
     setLoading(true);
@@ -731,28 +831,22 @@ function CustomServiceForm({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-label">{t("Label")}</Label>
-            <RequiredMarker />
-          </div>
+          <FieldLabel htmlFor="pair-custom-label" required>{translateUi("Label")}</FieldLabel>
           <Input
             id="pair-custom-label"
             value={label}
             onChange={(e) => {
               setLabel(e.target.value);
             }}
-            placeholder={t("e.g. My Self-hosted OpenAI Proxy")}
+            placeholder={translateUi("e.g. My Self-hosted OpenAI Proxy")}
             autoFocus
             aria-required="true"
           />
-          <p className="text-xs text-muted-foreground">{t("Shown everywhere in the CLI and web UI.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Shown everywhere in the CLI and web UI.")}</p>
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-endpoint">{t("Endpoint URL")}</Label>
-            <RequiredMarker />
-          </div>
+          <FieldLabel htmlFor="pair-custom-endpoint" required>{translateUi("Endpoint URL")}</FieldLabel>
           <Input
             id="pair-custom-endpoint"
             value={endpointUrl}
@@ -762,19 +856,15 @@ function CustomServiceForm({
             placeholder="https://api.example.com"
             aria-required="true"
           />
-          <p className="text-xs text-muted-foreground">{t("The base URL NyxID proxies requests to.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("The base URL NyxID proxies requests to.")}</p>
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center">
-            <Label htmlFor="pair-custom-auth-method">{t("Auth method")}</Label>
-            <RequiredMarker />
-          </div>
-          <select
-            id="pair-custom-auth-method"
+          <FieldLabel htmlFor="pair-custom-auth-method" required>{translateUi("Auth method")}</FieldLabel>
+          <Select
             value={authMethod}
-            onChange={(e) => {
-              const next = e.target.value as CustomAuthMethod;
+            onValueChange={(value) => {
+              const next = value as CustomAuthMethod;
               setAuthMethod(next);
               // Reset the key-name to the new method's default if the
               // user hadn't customized it yet — saves them re-typing
@@ -792,28 +882,24 @@ function CustomServiceForm({
                 setAuthKeyName(defaultAuthKeyName(next));
               }
             }}
-            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-13 text-foreground focus-visible:outline-none focus-visible:border-input-focus"
-            aria-required="true"
           >
-            <option value="bearer">{t("bearer (Authorization: Bearer …)")}</option>
-            <option value="bot_bearer">{t("bot_bearer (Authorization: Bot …)")}</option>
-            <option value="header">{t("header (custom header)")}</option>
-            <option value="query">{t("query (?key=…)")}</option>
-            <option value="path">{t("path (path-prefix injection)")}</option>
-            <option value="ifttt_webhook">{t("IFTTT Webhooks (raw key)")}</option>
-            <option value="basic">{t("basic (Authorization: Basic …)")}</option>
-            <option value="body">{t("body (JSON-body field injection)")}</option>
-            <option value="none">{t("none (no auth injection)")}</option>
-          </select>
-          <p className="text-xs text-muted-foreground">{t("How NyxID attaches the credential to outgoing requests.")}</p>
+            <SelectTrigger id="pair-custom-auth-method" aria-required="true">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AUTH_METHOD_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-13 text-muted-foreground">{translateUi("How NyxID attaches the credential to outgoing requests.")}</p>
         </div>
 
         {needsCredential ? (
           <div className="flex flex-col gap-1.5">
-            <div className="flex items-center">
-              <Label htmlFor="pair-custom-credential">{credentialLabel}</Label>
-              <RequiredMarker />
-            </div>
+            <FieldLabel htmlFor="pair-custom-credential" required>{credentialLabel}</FieldLabel>
             <Input
               id="pair-custom-credential"
               type="password"
@@ -827,22 +913,22 @@ function CustomServiceForm({
               autoFocus={Boolean(prefill.custom)}
               aria-required="true"
             />
-            <p className="text-xs text-muted-foreground">{t("Pasted once, encrypted at rest.")}{authMethod === "basic" ? t(" Format: user:pass.") : ""}
+            <p className="text-13 text-muted-foreground">{translateUi("Pasted once, encrypted at rest.")}{authMethod === "basic" ? translateUi(" Format: user:pass.") : ""}
             </p>
           </div>
         ) : null}
 
         {needsKeyName ? (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-custom-auth-key-name">
+            <FieldLabel htmlFor="pair-custom-auth-key-name">
               {authMethod === "header"
-                ? t("Header name")
+                ? translateUi("Header name")
                 : authMethod === "query"
-                  ? t("Query parameter name")
+                  ? translateUi("Query parameter name")
                   : authMethod === "path"
-                    ? t("Path prefix segment")
-                    : t("Body field name")}
-            </Label>
+                    ? translateUi("Path prefix segment")
+                    : translateUi("Body field name")}
+            </FieldLabel>
             <Input
               id="pair-custom-auth-key-name"
               value={authKeyName}
@@ -860,36 +946,43 @@ function CustomServiceForm({
           // id is locked at this point — to change it the user
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-xs font-medium text-foreground">{t("Routed via node")}</p>
-            <code className="font-mono text-11 text-muted-foreground">
+            <p className="type-secondary-emphasis text-foreground">{translateUi("Routed via node")}</p>
+            <code className="font-mono text-14 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">{t("Credential will be encrypted and pushed to this node over the existing WebSocket channel. NyxID never logs it.")}</p>
+            <p className="text-13 text-muted-foreground mt-1">{translateUi("Credential will be encrypted and pushed to this node over the existing WebSocket channel. NyxID never logs it.")}</p>
           </div>
         ) : null}
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-slug">{t("Custom slug (optional)")}</Label>
+          <FieldLabel htmlFor="pair-custom-slug">{translateUi("Custom slug (optional)")}</FieldLabel>
           <Input
             id="pair-custom-slug"
             value={slug}
             onChange={(e) => {
               setSlug(e.target.value);
             }}
-            placeholder={t("auto-generated from label")}
+            placeholder={translateUi("auto-generated from label")}
           />
-          <p className="text-xs text-muted-foreground">{t("URL segment at ")}<code>/proxy/s/&lt;slug&gt;/…</code>{t(". Leave blank to let NyxID derive it from the label.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("URL segment at ")}<code>/proxy/s/&lt;slug&gt;/…</code>. Leave
+            blank to let NyxID derive it from the label.
+          </p>
         </div>
       </div>
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <div className="flex items-center justify-between gap-2">
-        <Button variant="outline" onClick={onBack} disabled={loading}>{t("← Back")}</Button>
-        <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-          {loading ? t("Connecting…") : t("Connect service")}
-        </Button>
-      </div>
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={() => void submit()}
+        disabled={submitDisabled}
+      >
+        {loading ? translateUi("Connecting…") : translateUi("Connect service")}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
+      </Button>
     </div>
   );
 }
@@ -911,10 +1004,23 @@ function CatalogConfirmForm({
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [platformChoice, setPlatformChoice] = useState(true);
   const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
   const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
+  // Which OAuth app authorizes the connection. NyxID's app is the
+  // one-click default whenever it exists; the user's own app stays
+  // available for `both`-mode providers.
+  const [oauthClientSource, setOAuthClientSource] =
+    useState<OAuthClientSource>("managed");
+  const oauthClientChoice = shape === "oauth" && offersOAuthClientChoice(entry);
+  const ownOAuthApp =
+    requiresOwnOAuthApp(entry) ||
+    (oauthClientChoice && oauthClientSource === "self");
+  const platformScopeAllowlist =
+    shape === "oauth" && !ownOAuthApp
+      ? (entry.platform_scope_allowlist ?? null)
+      : null;
   const [label, setLabel] = useState(prefill.label ?? entry.name);
   const [credential, setCredential] = useState("");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
@@ -936,8 +1042,19 @@ function CatalogConfirmForm({
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [missingField, setMissingField] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
+
+  function chooseOAuthClient(source: OAuthClientSource) {
+    setOAuthClientSource(source);
+    // NyxID's app can only request its allowlist; drop anything picked for
+    // the user's own app so initiation isn't rejected.
+    const allowlist = entry.platform_scope_allowlist;
+    if (source === "managed" && allowlist) {
+      setSelectedScopes((current) =>
+        current.filter((scope) => allowlist.includes(scope)),
+      );
+    }
+  }
   // Set once the user clicks "Continue" for an OAuth / device-code
   // flow; drops the confirm UI and mounts the sub-flow panel. Reset
   // to `null` if the sub-flow reports cancel so the user can edit
@@ -947,7 +1064,6 @@ function CatalogConfirmForm({
   async function submit() {
     setLoading(true);
     setError(null);
-    setMissingField(null);
     try {
       const body: Record<string, unknown> = {
         service_slug: entry.slug,
@@ -962,7 +1078,7 @@ function CatalogConfirmForm({
         for (const f of fields) {
           const val = tokenFields[f.name]?.trim();
           if (!val) {
-            setMissingField(f.label || f.name);
+            setError(`${f.label || f.name} is required.`);
             setLoading(false);
             return;
           }
@@ -1048,7 +1164,10 @@ function CatalogConfirmForm({
       // has already been cancelled.
       if (window.__WIZARD_BOOTSTRAP__?.context === "local") {
         alert(
-          t("This authentication method is not supported in the CLI wizard. Open your NyxID dashboard and finish setup on the Keys page (External Services tab). You can close this tab now."),
+          "This auth shape isn't supported in the CLI wizard. " +
+            "Open your NyxID dashboard and complete setup on the " +
+            "Keys page (tab: External Services). " +
+            "You can close this tab now.",
         );
         return;
       }
@@ -1064,13 +1183,13 @@ function CatalogConfirmForm({
   if (entry.service_type === "ssh") {
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
-          {entry.name}{t(" is an SSH service. Use")}{" "}
-          <code>nyxid service add-ssh</code>{t(" from your CLI instead (certificate-based auth, not a credential binding).")}</p>
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
+          {entry.name}{translateUi(" is an SSH service. Use")}{" "}
+          <code>nyxid service add-ssh</code>{translateUi(" from your CLI instead (certificate-based auth, not a credential binding).")}</p>
         <Button
           variant="outline"
           onClick={() => void cancelThenNavigate(null)}
-        >{t("Go Back")}</Button>
+        >{translateUi("Go Back")}</Button>
       </div>
     );
   }
@@ -1090,13 +1209,13 @@ function CatalogConfirmForm({
       `/keys?tab=services&slug=${encodeURIComponent(entry.slug)}`;
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
-          {entry.name}{t(" uses ")}<code>{entry.auth_method}</code>{t(" auth, which isn't supported via remote pairing. Complete setup on the main Keys page. Your CLI will receive a cancel and print a \"finish in browser\" hint.")}</p>
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
+          {entry.name}{translateUi(" uses ")}<code>{entry.auth_method}</code>{translateUi(" auth, which isn't supported via remote pairing. Complete setup on the main Keys page. Your CLI will receive a cancel and print a \"finish in browser\" hint.")}</p>
         <Button
           variant="primary"
           onClick={() => void cancelThenNavigate(href)}
           className="justify-center gap-2"
-        >{t("Open Keys page")}<ExternalLink className="h-4 w-4" />
+        >{translateUi("Open Keys page")}<ExternalLink className="h-4 w-4" />
         </Button>
       </div>
     );
@@ -1134,7 +1253,7 @@ function CatalogConfirmForm({
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
-        credentialMode={entry.credential_mode}
+        ownOAuthApp={ownOAuthApp}
         documentationUrl={entry.documentation_url}
         scopeOverride={scopeOverride}
         onSuccess={onSuccess}
@@ -1202,28 +1321,17 @@ function CatalogConfirmForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
-        {entry.icon_url ? (
-          <img
-            src={entry.icon_url}
-            alt=""
-            className="h-8 w-8 rounded"
-            loading="lazy"
-          />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          <h3 className="font-medium">{entry.name}</h3>
-          {entry.description ? (
-            <p className="text-xs text-muted-foreground">{entry.description}</p>
-          ) : null}
-          <p className="text-xs text-muted-foreground">{t("Auth: ")}<code>{entry.auth_method}</code>
-          </p>
-        </div>
-      </div>
 
-      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} showPricing={false} />}
+      {oauthClientChoice ? (
+        <OAuthClientSourceChoice
+          value={oauthClientSource}
+          onChange={chooseOAuthClient}
+          disabled={loading}
+        />
+      ) : null}
       <div className="flex flex-col gap-3">
-        <Field label={t("Label")} htmlFor="pair-aikey-label">
+        <Field label={translateUi("Label")} htmlFor="pair-aikey-label">
           <Input
             id="pair-aikey-label"
             value={label}
@@ -1236,7 +1344,7 @@ function CatalogConfirmForm({
 
         {!usePlatformKey && entry.requires_gateway_url ? (
           <Field
-            label={isSupabase ? t("Supabase Project URL") : t("Instance URL")}
+            label={isSupabase ? translateUi("Supabase Project URL") : translateUi("Instance URL")}
             htmlFor="pair-aikey-url"
           >
             <Input
@@ -1256,7 +1364,7 @@ function CatalogConfirmForm({
 
         {needsCredentialInput && !viaNode ? (
           <Field
-            label={isSupabase ? t("Supabase API key") : t("API key")}
+            label={isSupabase ? translateUi("Supabase API key") : translateUi("API key")}
             htmlFor="pair-aikey-credential"
           >
             <Input
@@ -1268,7 +1376,7 @@ function CatalogConfirmForm({
                 setCredential(e.target.value);
               }}
               placeholder={
-                isSupabase ? t("sb_secret_... or sb_publishable_...") : "sk-..."
+                isSupabase ? translateUi("sb_secret_... or sb_publishable_...") : "sk-..."
               }
             />
             {entry.api_key_url ? (
@@ -1276,8 +1384,8 @@ function CatalogConfirmForm({
                 href={entry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
-              >{t("Get an API key")}<ExternalLink className="h-3 w-3" />
+                className="mt-1 inline-flex items-center gap-1 type-row-title text-muted-foreground underline-offset-2 hover:underline"
+              >{translateUi("Get an API key")}<ExternalLink className="h-3 w-3" />
               </a>
             ) : null}
           </Field>
@@ -1312,36 +1420,62 @@ function CatalogConfirmForm({
             value={selectedScopes}
             onChange={setSelectedScopes}
             customPlaceholder={
-              shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
+              shape === "oauth" ? translateUi("e.g. media.write") : translateUi("e.g. repo,read:org")
             }
             idPrefix="pair-aikey-scope"
+            platformAllowlist={platformScopeAllowlist}
           />
         ) : shape === "device-code" ? (
-          <p className="text-xs text-muted-foreground">{t("This provider does not accept additional scopes — they are fixed by the upstream client registration.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("This provider does not accept additional scopes — they are fixed by the upstream client registration.")}</p>
         ) : null}
 
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-xs font-medium text-foreground">{t("Routed via node")}</p>
-            <code className="font-mono text-11 text-muted-foreground">
+            <p className="type-secondary-emphasis text-foreground">{translateUi("Routed via node")}</p>
+            <code className="font-mono text-14 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">{t("Credential will be configured on the node agent. NyxID never sees or stores it.")}</p>
+            <p className="text-13 text-muted-foreground mt-1">{translateUi("Credential will be configured on the node agent. NyxID never sees or stores it.")}</p>
           </div>
         ) : null}
 
-        {shape === "no-auth" ? (
-          <p className="text-xs text-muted-foreground">{t("This service doesn't need a credential. Click Connect to add it to your services.")}</p>
+        {/* With NyxID's key the selected card already says there is nothing to paste. */}
+        {shape === "no-auth" && !usePlatformKey ? (
+          <p className="text-13 text-muted-foreground">{translateUi("This service doesn't need a credential. Click Connect to add it to your services.")}</p>
         ) : null}
       </div>
 
-      {missingField ? <ErrorLine message={t("{{field}} is required.", { field: missingField })} /> : null}
       {error ? <ErrorLine message={error} /> : null}
 
-      <Button variant="primary" onClick={handleSubmit} disabled={submitDisabled}>
-        {t(submitLabel)}
+      <Button
+        variant="primary"
+        className="w-full"
+        onClick={handleSubmit}
+        disabled={submitDisabled}
+      >
+        {translateUi(submitLabel)}{" "}
+        <ButtonIcon variant="primary">
+          <ArrowRight />
+        </ButtonIcon>
       </Button>
     </div>
+  );
+}
+
+/** `both`-mode providers NyxID also has an OAuth app for offer a choice of app. */
+function offersOAuthClientChoice(entry: CatalogEntryShape): boolean {
+  return (
+    entry.credential_mode === "both" &&
+    entry.has_platform_oauth_credentials === true
+  );
+}
+
+/** Sign-in needs the user's own OAuth app because NyxID has none to offer. */
+function requiresOwnOAuthApp(entry: CatalogEntryShape): boolean {
+  return (
+    entry.credential_mode === "user" ||
+    (entry.credential_mode === "both" &&
+      entry.has_platform_oauth_credentials !== true)
   );
 }
 
@@ -1354,19 +1488,20 @@ function Field({
   readonly htmlFor: string;
   readonly children: React.ReactNode;
 }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-1.5">
-      <Label htmlFor={htmlFor}>{label}</Label>
+      <FieldLabel htmlFor={htmlFor}>{label}</FieldLabel>
       {children}
     </div>
   );
 }
 
 function ErrorLine({ message }: { readonly message: string }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
-      {t(message)}
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
+      {translateUi(message)}
     </p>
   );
 }

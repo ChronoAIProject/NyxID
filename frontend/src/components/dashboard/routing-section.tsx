@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import { Router } from "lucide-react";
 import { toast } from "sonner";
@@ -54,12 +54,10 @@ export function RoutingSection({
   nodeId,
   serviceId,
   readOnly = false,
-  title: titleLocaleDefault,
-  description: descriptionLocaleDefault,
+  title = "Routing",
+  description = "How requests reach the endpoint",
 }: RoutingSectionProps) {
-  const title = titleLocaleDefault === undefined ? translateUi("Routing") : titleLocaleDefault;
-  const description = descriptionLocaleDefault === undefined ? translateUi("How requests reach the endpoint") : descriptionLocaleDefault;
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [picking, setPicking] = useState(false);
   const { data: nodes } = useNodes();
   const updateService = useUpdateUserService();
@@ -70,7 +68,7 @@ export function RoutingSection({
       { serviceId, node_id: id },
       {
         onSuccess: () => {
-          toast.success(id ? "Route updated" : "Switched to direct routing");
+          toast.success(translateUi(id ? "Route updated" : "Switched to direct routing"));
           setPicking(false);
         },
         onError: (err) => {
@@ -98,7 +96,7 @@ export function RoutingSection({
           {!readOnly && !picking && (
             <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setPicking(true)}>
               <ButtonIcon><Router className="h-3 w-3" /></ButtonIcon>
-              {nodeId ? t("Change Route") : t("Route via Node")}
+              {nodeId ? translateUi("Change Route") : translateUi("Route via Node")}
             </Button>
           )}
         </div>
@@ -107,22 +105,22 @@ export function RoutingSection({
       <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
           <Badge variant={nodeId ? "default" : "secondary"}>
-            {nodeId ? t("Via node: {{currentNodeName}}", { currentNodeName: currentNodeName }) : t("Direct")}
+            {nodeId ? translateUi("Via node: {{value1}}", { value1: currentNodeName }) : translateUi("Direct")}
           </Badge>
         </div>
 
         {!readOnly && picking && (
           <div className="space-y-2">
-            <Label className="text-xs">{t("Select routing")}</Label>
+            <Label>{translateUi("Select routing")}</Label>
             <Select
               onValueChange={handleSelectNode}
               defaultValue={nodeId ?? "direct"}
             >
               <SelectTrigger>
-                <SelectValue placeholder={t("Select routing")} />
+                <SelectValue placeholder={translateUi("Select routing")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="direct">{t("Direct (no node)")}</SelectItem>
+                <SelectItem value="direct">{translateUi("Direct (no node)")}</SelectItem>
                 {allNodes.map((n) => (
                   <SelectItem
                     key={n.id}
@@ -135,13 +133,13 @@ export function RoutingSection({
               </SelectContent>
             </Select>
             {allNodes.length === 0 && (
-              <p className="text-xs text-muted-foreground">{t("No nodes registered. Register a node first.")}</p>
+              <p className="text-13 text-muted-foreground">{translateUi("No nodes registered. Register a node first.")}</p>
             )}
             <div className="flex justify-end">
               <Button
                 variant="outline"
                 onClick={() => setPicking(false)}
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
             </div>
           </div>
         )}

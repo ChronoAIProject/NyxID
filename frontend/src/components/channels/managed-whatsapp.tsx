@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { Label } from "@/components/ui/label";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -31,17 +32,17 @@ const stageLabels: Record<string, string> = {
 };
 
 export function ManagedWhatsAppDetail({ bot }: { readonly bot: ChannelBotDetail }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const reregister = useReregisterChannelBot();
   const repair = useRepairChannelBot();
-  return <DetailSection title={t("Managed setup")}>
-    <DetailRow label={t("Subscription")} value={bot.managed_setup?.subscription ?? "pending"} />
-    <DetailRow label={t("Webhook override")} value={bot.managed_setup?.webhook_override ?? "pending"} />
-    <DetailRow label={t("Number registration")} value={bot.managed_setup?.registration ?? "pending"} />
-    {Object.entries(bot.managed_setup?.coexistence_sync ?? {}).map(([name, status]) => <DetailRow key={name} label={name === "history" ? t("History sync") : t("Contact sync")} value={status} />)}
+  return <DetailSection title={translateUi("Managed setup")}>
+    <DetailRow label={translateUi("Subscription")} value={bot.managed_setup?.subscription ?? "pending"} />
+    <DetailRow label={translateUi("Webhook override")} value={bot.managed_setup?.webhook_override ?? "pending"} />
+    <DetailRow label={translateUi("Number registration")} value={bot.managed_setup?.registration ?? "pending"} />
+    {Object.entries(bot.managed_setup?.coexistence_sync ?? {}).map(([name, status]) => <DetailRow key={name} label={name === "history" ? translateUi("History sync") : translateUi("Contact sync")} value={status} />)}
     <div className="flex flex-wrap gap-2 p-4">
-      <Button variant="outline" disabled={repair.isPending} isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success(translateUi("Number registration checked")), onError: (error) => toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Unable to re-register number")) })}><ShieldCheck className="size-3" />{t("Re-register number")}</Button>
-      <Button variant="outline" disabled={reregister.isPending} isLoading={repair.isPending} onClick={() => repair.mutate(bot.id, { onSuccess: () => toast.success(translateUi("Setup checked")), onError: (error) => toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Unable to repair setup")) })}><ShieldCheck className="size-3" />{t("Repair setup")}</Button>
+      <Button variant="outline" disabled={repair.isPending} isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success(translateUi("Number registration checked")), onError: (error) => toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Unable to re-register number")) })}><ShieldCheck className="size-3" />{translateUi("Re-register number")}</Button>
+      <Button variant="outline" disabled={reregister.isPending} isLoading={repair.isPending} onClick={() => repair.mutate(bot.id, { onSuccess: () => toast.success(translateUi("Setup checked")), onError: (error) => toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Unable to repair setup")) })}><ShieldCheck className="size-3" />{translateUi("Repair setup")}</Button>
     </div>
   </DetailSection>;
 }
@@ -59,7 +60,7 @@ export function ManagedWhatsApp({
   readonly onConnected: (bot: CreateChannelBotResponse) => void;
   readonly fullPage?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const link = useChannelConnectLinkContext();
   const [sdk, setSdk] = useState<FacebookSdk | null>(null);
   const [sdkAttempt, setSdkAttempt] = useState(0);
@@ -261,7 +262,7 @@ export function ManagedWhatsApp({
     <div className="space-y-4">
       {error && <ErrorBanner message={error} />}
       {runtimeError && (
-        <ErrorBanner message={t("Unable to load API configuration. Refresh and retry.")} />
+        <ErrorBanner message={translateUi("Unable to load API configuration. Refresh and retry.")} />
       )}
       {error && !sdk && (
         <Button
@@ -272,10 +273,10 @@ export function ManagedWhatsApp({
             setSdkAttempt((attempt) => attempt + 1);
           }}
         >
-          <RefreshCw className="size-3" />{t("Retry Meta sign-in")}</Button>
+          <RefreshCw className="size-3" />{translateUi("Retry Meta sign-in")}</Button>
       )}
       <fieldset className="space-y-3" disabled={stage !== null}>
-        <legend className="mb-3 text-xs font-medium">{t("WhatsApp number")}</legend>
+        <Label asChild><legend className="mb-3">{translateUi("WhatsApp number")}</legend></Label>
         {[
           { value: "", label: "New or existing Cloud API number" },
           {
@@ -285,9 +286,9 @@ export function ManagedWhatsApp({
         ]
           .filter((choice) => bootstrap.feature_types.includes(choice.value))
           .map((choice) => (
-            <label
+            <Label
               key={choice.value}
-              className="flex items-start gap-2 text-xs"
+              className="flex items-start gap-2"
             >
               <input
                 type="radio"
@@ -298,20 +299,20 @@ export function ManagedWhatsApp({
                 className="mt-0.5 accent-primary"
               />
               <span>{choice.label}</span>
-            </label>
+            </Label>
           ))}
       </fieldset>
       {stage && (
         <div
           role="status"
-          className="flex items-center gap-2 text-xs text-muted-foreground"
+          className="flex items-center gap-2 text-13 text-muted-foreground"
         >
           <Loader2 className="size-3 animate-spin" />
-          {stageLabels[stage] ?? t("Waiting for Meta...")}
+          {stageLabels[stage] ?? translateUi("Waiting for Meta...")}
         </div>
       )}
       {popupHint && stage === "popup" && (
-        <p className="text-xs text-muted-foreground">{t("Complete signup in the Meta window. If no window opened, allow popups for this site.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Complete signup in the Meta window. If no window opened, allow popups for this site.")}</p>
       )}
       <Button
         type="button"
@@ -327,7 +328,7 @@ export function ManagedWhatsApp({
         onClick={connect}
       >
         <ExternalLink className="size-3" />
-        {!sdk && !error ? t("Loading Meta...") : t("Connect with Meta")}
+        {!sdk && !error ? translateUi("Loading Meta...") : translateUi("Connect with Meta")}
       </Button>
       {stage === "popup" && !fullPage && (
         <Button
@@ -337,7 +338,7 @@ export function ManagedWhatsApp({
             cleanupRef.current?.();
             setStage(null);
           }}
-        >{t("Cancel")}</Button>
+        >{translateUi("Cancel")}</Button>
       )}
     </div>
   );

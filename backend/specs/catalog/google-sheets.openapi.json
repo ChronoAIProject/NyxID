@@ -417,6 +417,8 @@
     "/v4/spreadsheets/{spreadsheetId}/values/{range}:append": {
       "post": {
         "operationId": "sheets_append_values",
+        "x-nyxid-append-only": true,
+        "x-nyxid-append-only-query": {"insertDataOption": "INSERT_ROWS"},
         "summary": "Append values after the last row of the logical table found within the supplied range.",
         "x-aevatar-tool": {
           "name": "sheets_append_values",

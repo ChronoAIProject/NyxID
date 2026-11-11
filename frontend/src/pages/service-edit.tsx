@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { SandboxBillingSettings } from "@/components/services/sandbox-billing-settings";
 import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
 import { canManageCatalog, canWriteTool } from "@/types/api";
 import { ServiceToolFields } from "@/components/services/service-tool-fields";
@@ -80,7 +81,7 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 
 export function ServiceEditPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const { data: service, isLoading, error, refetch } = useService(serviceId);
   useBreadcrumbLabel(service?.name);
@@ -90,7 +91,7 @@ export function ServiceEditPage() {
     return (
       <ErrorBanner
         message={
-          error instanceof ApiError ? error.message : t("Unable to load service")
+          error instanceof ApiError ? error.message : translateUi("Unable to load service")
         }
         onRetry={refetch}
       />
@@ -99,16 +100,16 @@ export function ServiceEditPage() {
     return canWriteTool(user, service) ? (
       <ToolManagerEditor service={service} />
     ) : (
-      <ErrorBanner message={t("Tool write authority required")} />
+      <ErrorBanner message={translateUi("Tool write authority required")} />
     );
   }
   if (!canManageCatalog(user))
-    return <ErrorBanner message={t("Catalog write authority required")} />;
+    return <ErrorBanner message={translateUi("Catalog write authority required")} />;
   return <ServiceEditForm key={serviceId} source={service} />;
 }
 
 function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [service, setService] = useState(source);
   const serviceId = service.id;
   const requestIdentity = useRef<SkillRequestIdentity | undefined>(undefined);
@@ -217,7 +218,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
         form.setError("root", { message: err.message });
         toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error(translateUi("Failed to update service"));
+        toast.error(translateErrorMessage("Failed to update service"));
       }
       throw err;
     }
@@ -236,7 +237,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
   return (
     <div className="space-y-8">
-      <PageHeader title={t("Edit {{name}}", { name: service.name })} />
+      <PageHeader title={translateUi("Edit {{value1}}", { value1: service.name })} />
 
       {stale && (
         <StaleFormNotice
@@ -256,13 +257,13 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
             disabled={service.offering_kind === "tool" && !user?.is_admin}
             title={
               service.offering_kind === "tool" && !user?.is_admin
-                ? t("Tool settings require platform admin authority.")
+                ? translateUi("Tool settings require platform admin authority.")
                 : undefined
             }
           >
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                {translateUi(form.formState.errors.root.message ?? "")}
+              <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
+                {form.formState.errors.root.message}
               </div>
             )}
 
@@ -286,7 +287,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Service Name")}</FormLabel>
+                  <FormLabel>{translateUi("Service Name")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -300,11 +301,11 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               name="description"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Description")}</FormLabel>
+                  <FormLabel>{translateUi("Description")}</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder={t("Optional description")}
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      placeholder={translateUi("Optional description")}
                       {...field}
                     />
                   </FormControl>
@@ -318,14 +319,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               name="visibility"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("Visibility")}</FormLabel>
+                  <FormLabel>{translateUi("Visibility")}</FormLabel>
                   <Select
                     value={field.value ?? "public"}
                     onValueChange={field.onChange}
                   >
                     <FormControl>
                       <SelectTrigger>
-                        <SelectValue placeholder={t("Select visibility")} />
+                        <SelectValue placeholder={translateUi("Select visibility")} />
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
@@ -336,7 +337,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">{t("Private services are only visible to you.")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Private services are only visible to you.")}</p>
                   <FormMessage />
                 </FormItem>
               )}
@@ -347,8 +348,8 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               user?.is_admin &&
               (developerApps.length > 0 || unavailableAppIds.length > 0) && (
                 <div className="space-y-2">
-                  <p className="text-12 font-medium">{t("Developer App Scoping")}</p>
-                  <p className="text-xs text-muted-foreground">{t("Select which developer apps grant access to this service. Users who log in through a selected app will have this service auto-provisioned in their AI Services. Remove inactive applications before saving changes to this selection.")}</p>
+                  <p className="type-row-title">{translateUi("Developer App Scoping")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Select which developer apps grant access to this service. Users who log in through a selected app will have this service auto-provisioned in their AI Services. Remove inactive applications before saving changes to this selection.")}</p>
                   <div className="space-y-2">
                     {unavailableAppIds.map((id) => (
                       <div key={id} className="flex items-center gap-2">
@@ -368,7 +369,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             );
                           }}
                         />
-                        <Label htmlFor={`app-${id}`}>{t("Selected app: ")}{id}{t(" (details unavailable)")}</Label>
+                        <Label htmlFor={`app-${id}`}>{translateUi("Selected app: ")}{id}{translateUi(" (details unavailable)")}</Label>
                       </div>
                     ))}
                     {developerApps.map((app) => {
@@ -396,14 +397,13 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           />
                           <Label
                             htmlFor={`app-${app.id}`}
-                            className="text-12 font-normal"
                           >
                             {app.client_name}
-                            {!app.is_active ? t(" (inactive)") : ""}
+                            {!app.is_active ? translateUi(" (inactive)") : ""}
                           </Label>
                           <Badge
                             variant="secondary"
-                            className="ml-auto text-xs"
+                            className="ml-auto text-12"
                           >
                             {app.client_type}
                           </Badge>
@@ -422,10 +422,10 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     name="host"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("SSH Host")}</FormLabel>
+                        <FormLabel>{translateUi("SSH Host")}</FormLabel>
                         <FormControl>
                           <Input
-                            placeholder={"ssh.internal.example"}
+                            placeholder="ssh.internal.example"
                             {...field}
                           />
                         </FormControl>
@@ -439,7 +439,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     name="port"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("SSH Port")}</FormLabel>
+                        <FormLabel>{translateUi("SSH Port")}</FormLabel>
                         <FormControl>
                           <Input type="number" min={1} max={65535} {...field} />
                         </FormControl>
@@ -454,7 +454,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   name="ssh_auth_mode"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("SSH Authentication Mode")}</FormLabel>
+                      <FormLabel>{translateUi("SSH Authentication Mode")}</FormLabel>
                       <Select
                         value={field.value}
                         onValueChange={field.onChange}
@@ -484,7 +484,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       name="certificate_ttl_minutes"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>{t("Certificate TTL (minutes)")}</FormLabel>
+                          <FormLabel>{translateUi("Certificate TTL (minutes)")}</FormLabel>
                           <FormControl>
                             <Input type="number" min={15} max={60} {...field} />
                           </FormControl>
@@ -498,11 +498,11 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     name="allowed_principals"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Allowed Principals")}</FormLabel>
+                        <FormLabel>{translateUi("Allowed Principals")}</FormLabel>
                         <FormControl>
-                          <Input placeholder={t("ubuntu, deploy")} {...field} />
+                          <Input placeholder={translateUi("ubuntu, deploy")} {...field} />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">{t("Comma-separated SSH usernames allowed for this service.")}</p>
+                        <p className="text-13 text-muted-foreground">{translateUi("Comma-separated SSH usernames allowed for this service.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -516,7 +516,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   name="base_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Base URL")}</FormLabel>
+                      <FormLabel>{translateUi("Base URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://api.example.com"
@@ -533,14 +533,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   name="openapi_spec_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("OpenAPI Spec URL")}</FormLabel>
+                      <FormLabel>{translateUi("OpenAPI Spec URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://api.example.com/openapi.json"
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">{t("Optional. Used to auto-discover API endpoints.")}</p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Optional. Used to auto-discover API endpoints.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -551,14 +551,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   name="asyncapi_spec_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("AsyncAPI Spec URL")}</FormLabel>
+                      <FormLabel>{translateUi("AsyncAPI Spec URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://api.example.com/asyncapi.json"
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">{t("Optional. Used to document WebSocket and streaming protocols.")}</p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Optional. Used to document WebSocket and streaming protocols.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -579,17 +579,17 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                 />
 
                 <div>
-                  <p className="mb-1 text-12 font-medium">{t("Auth Type")}</p>
+                  <p className="mb-1 type-row-title">{translateUi("Auth Type")}</p>
                   <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
-                  <p className="mt-1 text-xs text-muted-foreground">{t("Auth type cannot be changed after creation.")}</p>
+                  <p className="mt-1 text-13 text-muted-foreground">{translateUi("Auth type cannot be changed after creation.")}</p>
                 </div>
 
                 {user && (
                   <>
                     <Separator className="my-2" />
                     <div className="space-y-2">
-                      <h3 className="text-13 font-semibold">{t("Identity Propagation")}</h3>
-                      <p className="text-xs text-muted-foreground">{t("Configure how user identity is forwarded to this downstream service during proxy requests.")}</p>
+                      <h3 className="type-card-title">{translateUi("Identity Propagation")}</h3>
+                      <p className="text-13 text-muted-foreground">{translateUi("Configure how user identity is forwarded to this downstream service during proxy requests.")}</p>
                       <IdentityPropagationConfig
                         mode={form.watch("identity_propagation_mode") ?? "none"}
                         includeUserId={
@@ -631,16 +631,16 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           name="auth_scheme"
                           render={({ field }) => (
                             <FormItem>
-                              <FormLabel>{t("Authorization scheme")}</FormLabel>
+                              <FormLabel>{translateUi("Authorization scheme")}</FormLabel>
                               <FormControl>
                                 <Input
                                   {...field}
                                   value={field.value ?? ""}
-                                  placeholder={t("Bearer")}
+                                  placeholder={translateUi("Bearer")}
                                   maxLength={64}
                                 />
                               </FormControl>
-                              <p className="text-12 text-muted-foreground">{t("Leave blank for Bearer. Use the scheme documented by the vendor.")}</p>
+                              <p className="text-14 text-muted-foreground">{translateUi("Leave blank for Bearer. Use the scheme documented by the vendor.")}</p>
                               <FormMessage />
                             </FormItem>
                           )}
@@ -648,8 +648,8 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       )}
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">{t("Service Metadata")}</h3>
-                        <p className="text-xs text-muted-foreground">{t("Rich metadata for AI agent discovery. Helps agents understand what this service is, where to find docs, and what it supports.")}</p>
+                        <h3 className="type-card-title">{translateUi("Service Metadata")}</h3>
+                        <p className="text-13 text-muted-foreground">{translateUi("Rich metadata for AI agent discovery. Helps agents understand what this service is, where to find docs, and what it supports.")}</p>
                       </div>
 
                       <div className="grid gap-4 sm:grid-cols-2">
@@ -658,7 +658,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           name="homepage_url"
                           render={({ field }) => (
                             <FormItem>
-                              <FormLabel>{t("Homepage URL")}</FormLabel>
+                              <FormLabel>{translateUi("Homepage URL")}</FormLabel>
                               <FormControl>
                                 <Input
                                   placeholder="https://docs.example.com"
@@ -674,7 +674,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           name="repository_url"
                           render={({ field }) => (
                             <FormItem>
-                              <FormLabel>{t("Repository URL")}</FormLabel>
+                              <FormLabel>{translateUi("Repository URL")}</FormLabel>
                               <FormControl>
                                 <Input
                                   placeholder="https://github.com/org/repo"
@@ -690,7 +690,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           name="issues_url"
                           render={({ field }) => (
                             <FormItem>
-                              <FormLabel>{t("Issues URL")}</FormLabel>
+                              <FormLabel>{translateUi("Issues URL")}</FormLabel>
                               <FormControl>
                                 <Input
                                   placeholder="https://github.com/org/repo/issues"
@@ -706,7 +706,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           name="examples_url"
                           render={({ field }) => (
                             <FormItem>
-                              <FormLabel>{t("Skills & Examples URL")}</FormLabel>
+                              <FormLabel>{translateUi("Skills & Examples URL")}</FormLabel>
                               <FormControl>
                                 <Input
                                   placeholder="https://github.com/org/repo/tree/main/examples"
@@ -724,10 +724,10 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         name="auth_notes"
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{t("Auth Notes")}</FormLabel>
+                            <FormLabel>{translateUi("Auth Notes")}</FormLabel>
                             <FormControl>
                               <Input
-                                placeholder={t("Notes on downstream auth expectations...")}
+                                placeholder={translateUi("Notes on downstream auth expectations...")}
                                 {...field}
                               />
                             </FormControl>
@@ -741,10 +741,10 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         name="known_limitations"
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{t("Known Limitations")}</FormLabel>
+                            <FormLabel>{translateUi("Known Limitations")}</FormLabel>
                             <FormControl>
                               <Input
-                                placeholder={t("Important caveats for agents and users...")}
+                                placeholder={translateUi("Important caveats for agents and users...")}
                                 {...field}
                               />
                             </FormControl>
@@ -758,14 +758,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         name="required_permissions"
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{t("Required Permissions")}</FormLabel>
+                            <FormLabel>{translateUi("Required Permissions")}</FormLabel>
                             <FormControl>
                               <Input
-                                placeholder={t("read:api, write:data")}
+                                placeholder={translateUi("read:api, write:data")}
                                 {...field}
                               />
                             </FormControl>
-                            <p className="text-xs text-muted-foreground">{t("Comma-separated downstream permissions required for key actions.")}</p>
+                            <p className="text-13 text-muted-foreground">{translateUi("Comma-separated downstream permissions required for key actions.")}</p>
                             <FormMessage />
                           </FormItem>
                         )}
@@ -776,22 +776,22 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         name="recommended_skills"
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{t("Recommended Skills")}</FormLabel>
+                            <FormLabel>{translateUi("Recommended Skills")}</FormLabel>
                             <FormControl>
                               <Input
-                                placeholder={t("nyxid/ornn, ornn/authoring")}
+                                placeholder={translateUi("nyxid/ornn, ornn/authoring")}
                                 {...field}
                               />
                             </FormControl>
-                            <p className="text-xs text-muted-foreground">{t("Comma-separated skill names/paths relevant for AI tools.")}</p>
+                            <p className="text-13 text-muted-foreground">{translateUi("Comma-separated skill names/paths relevant for AI tools.")}</p>
                             <FormMessage />
                           </FormItem>
                         )}
                       />
 
                       {service.recommended_skill_refs != null && (
-                        <div className="space-y-2 text-12">
-                          <p className="text-muted-foreground">{t("Revision ")}{service.skills_revision ?? 0}:{" "}
+                        <div className="space-y-2 text-14">
+                          <p className="text-muted-foreground">{translateUi("Revision ")}{service.skills_revision ?? 0}:{" "}
                             {service.recommended_skill_refs
                               .map((ref) => `${ref.name}@${ref.version}`)
                               .join(", ")}
@@ -809,7 +809,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                                     }
                                   />
                                 </FormControl>
-                                <FormLabel>{t("Clear pinned references and use advisory names")}</FormLabel>
+                                <FormLabel>{translateUi("Clear pinned references and use advisory names")}</FormLabel>
                               </FormItem>
                             )}
                           />
@@ -819,8 +819,8 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <Separator className="my-2" />
                       <div className="space-y-2">
                         <div className="space-y-1">
-                          <p className="text-12 font-medium">{t("Default request headers")}</p>
-                          <p className="text-xs text-muted-foreground">{t("Headers NyxID injects on every proxied request for this service. Non-overridable headers replace caller-supplied values; overridable ones yield to them. Sensitive is a UI redaction flag only — values are stored plaintext in v1, so do not place real secrets here (use the service auth method instead).")}</p>
+                          <p className="type-row-title">{translateUi("Default request headers")}</p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Headers NyxID injects on every proxied request for this service. Non-overridable headers replace caller-supplied values; overridable ones yield to them. Sensitive is a UI redaction flag only — values are stored plaintext in v1, so do not place real secrets here (use the service auth method instead).")}</p>
                         </div>
                         <FormField
                           control={form.control}
@@ -849,8 +849,8 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       </div>
 
                       <div className="space-y-2">
-                        <p className="text-12 font-medium">{t("Capabilities")}</p>
-                        <p className="text-xs text-muted-foreground">{t("Flags describing what this service supports through NyxID proxy.")}</p>
+                        <p className="type-row-title">{translateUi("Capabilities")}</p>
+                        <p className="text-13 text-muted-foreground">{translateUi("Flags describing what this service supports through NyxID proxy.")}</p>
                         <div className="grid gap-2 sm:grid-cols-2">
                           {(
                             [
@@ -875,7 +875,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             >
                               <Label
                                 htmlFor={`cap-${key}`}
-                                className="text-xs font-normal"
                               >
                                 {label}
                               </Label>
@@ -893,15 +892,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">{t("Forward Access Token")}</h3>
-                        <p className="text-xs text-muted-foreground">{t("Forward the caller's NyxID access token as Authorization: Bearer to this service.")}</p>
+                        <h3 className="type-card-title">{translateUi("Forward Access Token")}</h3>
+                        <p className="text-13 text-muted-foreground">{translateUi("Forward the caller's NyxID access token as Authorization: Bearer to this service.")}</p>
                       </div>
 
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="forward-access-token"
-                          className="text-12 font-normal"
-                        >{t("Forward Access Token")}</Label>
+                        >{translateUi("Forward Access Token")}</Label>
                         <Switch
                           id="forward-access-token"
                           checked={form.watch("forward_access_token") ?? false}
@@ -925,15 +923,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     )}
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">{t("Billing")}</h3>
-                        <p className="text-xs text-muted-foreground">{t("Services are free by default: usage is metered for observability but never charged. Enable platform billing to reserve and charge wallet credits for requests to this service at the plan's platform rates.")}</p>
+                        <h3 className="type-card-title">{translateUi("Billing")}</h3>
+                        <p className="text-13 text-muted-foreground">{translateUi("Services are free by default: usage is metered for observability but never charged. Enable platform billing to reserve and charge wallet credits for requests to this service at the plan's platform rates.")}</p>
                       </div>
 
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="platform-billable"
-                          className="text-12 font-normal"
-                        >{t("Charge wallet credits (platform billing)")}</Label>
+                        >{translateUi("Charge wallet credits (platform billing)")}</Label>
                         <Switch
                           id="platform-billable"
                           checked={form.watch("platform_billable") ?? false}
@@ -947,9 +944,8 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <div className="space-y-1">
                           <Label
                             htmlFor="platform-charge-nyxid-credentials-only"
-                            className="text-12 font-normal"
-                          >{t("Charge only NyxID-provided credentials")}</Label>
-                          <p className="text-xs text-muted-foreground">{t("Charge NyxID master keys and shared OAuth apps. Users bringing their own credentials are metered for observability without platform charges.")}</p>
+                          >{translateUi("Charge only NyxID-provided credentials")}</Label>
+                          <p className="text-13 text-muted-foreground">{translateUi("Charge NyxID master keys and shared OAuth apps. Users bringing their own credentials are metered for observability without platform charges.")}</p>
                         </div>
                         <Switch
                           id="platform-charge-nyxid-credentials-only"
@@ -969,7 +965,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="space-y-2">
-                          <Label className="text-12 font-normal">{t("Charge by")}</Label>
+                          <Label>{translateUi("Charge by")}</Label>
                           <Select
                             value={form.watch("platform_metric") ?? "auto"}
                             onValueChange={(v) =>
@@ -980,13 +976,13 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             }
                           >
                             <SelectTrigger>
-                              <SelectValue placeholder={t("Auto (derived from service)")} />
+                              <SelectValue placeholder={translateUi("Auto (derived from service)")} />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="auto">{t("Auto (derived from service)")}</SelectItem>
-                              <SelectItem value="tokens">{t("Tokens")}</SelectItem>
-                              <SelectItem value="requests">{t("Requests")}</SelectItem>
-                              <SelectItem value="bytes">{t("Bytes")}</SelectItem>
+                              <SelectItem value="auto">{translateUi("Auto (derived from service)")}</SelectItem>
+                              <SelectItem value="tokens">{translateUi("Tokens")}</SelectItem>
+                              <SelectItem value="requests">{translateUi("Requests")}</SelectItem>
+                              <SelectItem value="bytes">{translateUi("Bytes")}</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
@@ -998,7 +994,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             render={({ field }) => (
                               <FormItem>
                                 <div className="flex min-h-5 items-center justify-between gap-2">
-                                  <FormLabel>{t("Credits per unit")}</FormLabel>
+                                  <FormLabel>{translateUi("Credits per unit")}</FormLabel>
                                   {service.billing?.platform_pricing && (
                                     <Badge
                                       variant={
@@ -1012,7 +1008,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                                       }
                                     >
                                       {service.billing.platform_pricing
-                                        .sync_status ?? t("pending")}
+                                        .sync_status ?? translateUi("pending")}
                                     </Badge>
                                   )}
                                 </div>
@@ -1020,7 +1016,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                                   <Input
                                     {...field}
                                     inputMode="decimal"
-                                    placeholder={t("Uses Lago plan rate")}
+                                    placeholder={translateUi("Uses Lago plan rate")}
                                   />
                                 </FormControl>
                                 <FormMessage />
@@ -1030,25 +1026,24 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         )}
                       </div>
                       {service.billing?.platform_pricing?.sync_error && (
-                        <p className="text-xs text-destructive">
+                        <p className="text-13 text-destructive">
                           {service.billing.platform_pricing.sync_error}
                         </p>
                       )}
-                      <p className="text-xs text-muted-foreground">{t("Auto meters tokens for llm- services, bytes for SSH and WebSocket connections, and requests otherwise. An empty price keeps the Lago-authored plan rate.")}</p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Auto meters tokens for llm- services, bytes for SSH and WebSocket connections, and requests otherwise. An empty price keeps the Lago-authored plan rate.")}</p>
                     </div>
 
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">{t("Delegation Token Injection")}</h3>
-                        <p className="text-xs text-muted-foreground">{t("When enabled, NyxID injects a short-lived delegation token (X-NyxID-Delegation-Token) when proxying requests to this service. The downstream service can use this token to call NyxID APIs (e.g., LLM gateway) on behalf of the user.")}</p>
+                        <h3 className="type-card-title">{translateUi("Delegation Token Injection")}</h3>
+                        <p className="text-13 text-muted-foreground">{translateUi("When enabled, NyxID injects a short-lived delegation token (X-NyxID-Delegation-Token) when proxying requests to this service. The downstream service can use this token to call NyxID APIs (e.g., LLM gateway) on behalf of the user.")}</p>
                       </div>
 
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="inject-delegation-token"
-                          className="text-12 font-normal"
-                        >{t("Inject delegation token")}</Label>
+                        >{translateUi("Inject delegation token")}</Label>
                         <Switch
                           id="inject-delegation-token"
                           checked={
@@ -1066,11 +1061,11 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           name="delegation_token_scope"
                           render={({ field }) => (
                             <FormItem>
-                              <FormLabel>{t("Delegation Token Scope")}</FormLabel>
+                              <FormLabel>{translateUi("Delegation Token Scope")}</FormLabel>
                               <FormControl>
-                                <Input placeholder={"llm:proxy"} {...field} />
+                                <Input placeholder="llm:proxy" {...field} />
                               </FormControl>
-                              <p className="text-xs text-muted-foreground">{t("Space-separated scopes for the delegation token. Defaults to \"llm:proxy\" if left empty. Available scopes:")}{" "}
+                              <p className="text-13 text-muted-foreground">{translateUi("Space-separated scopes for the delegation token. Defaults to \"llm:proxy\" if left empty. Available scopes:")}{" "}
                                 {DELEGATION_TOKEN_SCOPES.join(", ")}
                               </p>
                               <FormMessage />
@@ -1091,7 +1086,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                 type="submit"
                 isLoading={updateMutation.isPending}
                 disabled={stale || !form.formState.isDirty}
-              >{t("Save Changes")}</Button>
+              >{translateUi("Save Changes")}</Button>
               <Button
                 type="button"
                 variant="outline"
@@ -1101,11 +1096,12 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     params: { serviceId },
                   })
                 }
-              >{t("Cancel")}</Button>
+              >{translateUi("Cancel")}</Button>
             </div>
           </fieldset>
           </form>
         </Form>
+        {user?.is_admin && service.slug === "cma" && <SandboxBillingSettings key={serviceId} serviceId={serviceId} />}
         {user?.is_admin && <ServiceConcurrency key={serviceId} serviceId={serviceId} />}
       </div>
     </div>

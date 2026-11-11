@@ -196,7 +196,27 @@ pub async fn issue_observation_ticket(
     db: &mongodb::Database,
     scope: HealthScope,
 ) -> AppResult<ObservationTicket> {
-    let now = Utc::now();
+    #[cfg(test)]
+    if let Ok(pause) = TICKET_ADMISSION_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+    let context = (
+        db.clone(),
+        scope,
+        Utc::now(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    super::transaction_service::run_db_only(db, &context, |tx, (db, scope, now, observation_id, health_id)| {
+        Box::pin(async move {
+    super::erasure_admission::fence_in_session(db, &scope.owner_id, tx).await?;
+    if db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&scope.owner_id,"is_active":true,"platform_personal_deleting":{"$ne":true}})
+        .session(&mut *tx).await?.is_none() {
+        return Err(AppError::Conflict("Pool owner is unavailable".into()));
+    }
+    let now = *now;
     let pools = db.collection::<ServicePool>(SERVICE_POOLS);
     let pool = pools
         .find_one_and_update(
@@ -219,20 +239,19 @@ pub async fn issue_observation_ticket(
                 .return_document(mongodb::options::ReturnDocument::After)
                 .build(),
         )
-        .await?
+        .session(&mut *tx).await?
         .ok_or_else(|| AppError::Conflict("pool membership changed before dispatch".to_string()))?;
     let member_reset_generation = member_reset_generation(&pool, &scope.user_service_id)
         .ok_or_else(|| AppError::Conflict("pool membership changed before dispatch".to_string()))?;
     let pool_reset_generation = pool.health_reset_generation;
     let observation_sequence = pool.health_observation_sequence;
-    let observation_id = Uuid::new_v4().to_string();
     let health = db
         .collection::<ServicePoolMemberHealth>(HEALTH)
         .find_one_and_update(
-            scope_filter(&scope, pool_reset_generation, member_reset_generation),
+            scope_filter(scope, pool_reset_generation, member_reset_generation),
             doc! {
                 "$setOnInsert": {
-                    "_id": Uuid::new_v4().to_string(),
+                    "_id": health_id,
                     "pool_id": &scope.pool_id,
                     "user_service_id": &scope.user_service_id,
                     "owner_id": &scope.owner_id,
@@ -266,7 +285,7 @@ pub async fn issue_observation_ticket(
                 .return_document(mongodb::options::ReturnDocument::After)
                 .build(),
         )
-        .await?
+        .session(&mut *tx).await?
         .ok_or_else(|| AppError::Internal("health row was not created".to_string()))?;
     db.collection::<ServicePoolHealthObservation>(OBSERVATIONS)
         .insert_one(ServicePoolHealthObservation {
@@ -284,15 +303,17 @@ pub async fn issue_observation_ticket(
             status: None,
             expires_at: now + HEALTH_RETENTION,
         })
-        .await?;
+        .session(&mut *tx).await?;
     Ok(ObservationTicket {
-        observation_id,
+        observation_id: observation_id.clone(),
         observation_sequence,
-        scope,
+        scope: scope.clone(),
         pool_reset_generation,
         member_reset_generation,
         health_instance_id: health.id,
     })
+        })
+    }).await
 }
 
 pub async fn load_for_scope(
@@ -578,3 +599,12 @@ mod tests {
         assert!(debug.contains("REDACTED"));
     }
 }
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TicketAdmissionPause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TICKET_ADMISSION_PAUSE: std::sync::Arc<TicketAdmissionPause>; }

@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useQuery } from "@tanstack/react-query";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { authoredSkillPreviewSchema } from "@/schemas/agent-skills";
@@ -9,7 +10,7 @@ export function AuthoredSkillScopePreview({ agentId, proposalId }: {
   readonly agentId: string;
   readonly proposalId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const owner = useAuthStore((state) => state.user?.id);
   const preview = useQuery({
     queryKey: ["authored-skill-scope", owner, agentId, proposalId],
@@ -21,14 +22,14 @@ export function AuthoredSkillScopePreview({ agentId, proposalId }: {
     throwOnError: false,
   });
   if (preview.isError || preview.data?.scope_unavailable) {
-    return <p className="text-11 text-muted-foreground">{t("Scope unavailable.")}</p>;
+    return <p className="text-13 text-muted-foreground">{translateUi("Scope unavailable.")}</p>;
   }
   const scope = preview.data?.scope;
   if (!scope?.omissions.length) return null;
   return (
-    <div className="space-y-1 text-11 text-muted-foreground">
-      <p>{t("Declared omissions")}</p>
-      <ul aria-label={t("Declared omissions")} className="list-disc pl-5">
+    <div className="space-y-1 text-13 text-muted-foreground">
+      <p>{translateUi("Declared omissions")}</p>
+      <ul aria-label={translateUi("Declared omissions")} className="list-disc pl-5">
         {scope.omissions.map((omission, index) => <li key={index}>{omission}</li>)}
       </ul>
     </div>

@@ -13,10 +13,11 @@
 //! `overridable: false`, so admin-set headers win unless explicitly
 //! marked overridable.
 //!
-//! `sensitive` is metadata for UI redaction only in v1; values are stored
-//! plaintext. Headers that legitimately carry secrets (`authorization`,
-//! `cookie`, etc.) are blocked by the denylist — use the service's
-//! `auth_method` / `credential` for those.
+//! All default values use server-owned contextual ciphertext at rest. The API
+//! accepts plaintext replacements or exact masked edits. The sensitive flag
+//! controls management masking; explicitly public values remain visible after
+//! authenticated decoding. Legacy plaintext reads exist only during migration.
+//! Reserved authentication/hop-by-hop headers remain blocked by the denylist.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -85,24 +86,234 @@ const DENYLISTED_HEADER_PREFIXES: &[&str] = &[
 const DENYLISTED_EXTRA: &[&str] = &["x-real-ip"];
 
 /// A single default request header attached to a service.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DefaultRequestHeader {
     /// Case-insensitive HTTP header name. Stored as the admin typed it,
     /// but compared case-insensitively at proxy time.
     pub name: String,
-    /// Literal header value. Plaintext at rest in v1; see module docs.
-    pub value: String,
+    /// API plaintext replacement or the exact management mask.
+    #[schema(value_type = String)]
+    pub value: zeroize::Zeroizing<String>,
     /// When true, a value set by a lower-precedence layer (or supplied by
     /// the caller) wins and this default is skipped. Default false:
     /// admin-set values are authoritative.
     #[serde(default)]
     pub overridable: bool,
-    /// UI / audit flag. Sensitive values are redacted when returning the
-    /// service record to clients and when writing the audit log. v1 does
-    /// not encrypt the value at rest — callers should not use this for
-    /// true secrets yet.
+    /// All values use contextual encryption in storage. Sensitive values are masked
+    /// in management responses. The ciphertext/version fields are storage-only.
     #[serde(default)]
     pub sensitive: bool,
+}
+
+/// In-process execution/authority representation; distinct from API DTOs and
+/// persisted fields. Every owned decoded value clears on drop, including clones.
+#[derive(Clone, Serialize, PartialEq, Eq)]
+pub struct ResolvedDefaultRequestHeader {
+    pub name: String,
+    pub value: zeroize::Zeroizing<String>,
+    pub overridable: bool,
+    pub sensitive: bool,
+}
+impl std::fmt::Debug for ResolvedDefaultRequestHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedDefaultRequestHeader")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("sensitive", &self.sensitive)
+            .field("overridable", &self.overridable)
+            .finish()
+    }
+}
+
+/// Owned transport header values, including superseded entries, clear before
+/// release. Protocol serialization remains the existing array of name/value pairs.
+#[derive(Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct SecretHeaders(Vec<(String, String)>);
+impl<'de> Deserialize<'de> for SecretHeaders {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Headers;
+        impl<'de> serde::de::Visitor<'de> for Headers {
+            type Value = SecretHeaders;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a sequence of header pairs")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut headers = SecretHeaders::default();
+                while let Some((mut name, mut value)) =
+                    seq.next_element::<(zeroize::Zeroizing<String>, zeroize::Zeroizing<String>)>()?
+                {
+                    headers
+                        .0
+                        .push((std::mem::take(&mut *name), std::mem::take(&mut *value)));
+                }
+                Ok(headers)
+            }
+        }
+        deserializer.deserialize_seq(Headers)
+    }
+}
+impl From<Vec<(String, String)>> for SecretHeaders {
+    fn from(values: Vec<(String, String)>) -> Self {
+        Self(values)
+    }
+}
+impl std::ops::Deref for SecretHeaders {
+    type Target = [(String, String)];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<'a> IntoIterator for &'a SecretHeaders {
+    type Item = &'a (String, String);
+    type IntoIter = std::slice::Iter<'a, (String, String)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+impl SecretHeaders {
+    pub fn push(&mut self, entry: (String, String)) {
+        self.0.push(entry);
+    }
+    pub fn extend(&mut self, values: impl IntoIterator<Item = (String, String)>) {
+        self.0.extend(values);
+    }
+    pub fn retain(&mut self, mut keep: impl FnMut(&(String, String)) -> bool) {
+        use zeroize::Zeroize;
+        self.0.retain_mut(|entry| {
+            if keep(entry) {
+                true
+            } else {
+                entry.zeroize();
+                false
+            }
+        });
+    }
+}
+impl Drop for SecretHeaders {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+impl std::fmt::Debug for SecretHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretHeaders")
+            .field("count", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq<Vec<(String, String)>> for SecretHeaders {
+    fn eq(&self, other: &Vec<(String, String)>) -> bool {
+        &self.0 == other
+    }
+}
+
+pub trait HeaderEntry {
+    fn name(&self) -> &str;
+    fn value(&self) -> &str;
+    fn overridable(&self) -> bool;
+}
+macro_rules! header_entry {
+    ($header:ty) => {
+        impl HeaderEntry for $header {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn value(&self) -> &str {
+                &self.value
+            }
+            fn overridable(&self) -> bool {
+                self.overridable
+            }
+        }
+    };
+}
+header_entry!(DefaultRequestHeader);
+header_entry!(ResolvedDefaultRequestHeader);
+
+/// Storage-only representation. Never accepted from API callers or serialized
+/// into a management response. Missing format fields select the explicit legacy
+/// plaintext contract during the configured migration window.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredDefaultRequestHeader {
+    pub name: String,
+    #[serde(default)]
+    pub value: zeroize::Zeroizing<String>,
+    #[serde(default)]
+    pub overridable: bool,
+    #[serde(default)]
+    pub sensitive: bool,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub value_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub value_context_version: Option<u32>,
+}
+
+impl std::fmt::Debug for StoredDefaultRequestHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredDefaultRequestHeader")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("sensitive", &self.sensitive)
+            .field("overridable", &self.overridable)
+            .finish()
+    }
+}
+
+/// Dedicated management conversion. Ciphertext is never decrypted for display.
+/// Even malformed downgraded flags cannot make stored secret bytes public.
+pub fn stored_list_for_response(
+    list: Option<Vec<StoredDefaultRequestHeader>>,
+) -> Option<Vec<DefaultRequestHeader>> {
+    list.map(|list| {
+        list.into_iter()
+            .map(|header| {
+                let sensitive = header.sensitive
+                    || header.value_encrypted.is_some()
+                    || header.value_context_version.is_some();
+                DefaultRequestHeader {
+                    name: header.name,
+                    value: if sensitive {
+                        REDACTED_PLACEHOLDER.to_owned().into()
+                    } else {
+                        header.value
+                    },
+                    sensitive,
+                    overridable: header.overridable,
+                }
+            })
+            .collect()
+    })
+}
+
+#[cfg(test)]
+impl From<DefaultRequestHeader> for StoredDefaultRequestHeader {
+    fn from(header: DefaultRequestHeader) -> Self {
+        Self {
+            name: header.name,
+            value: header.value,
+            overridable: header.overridable,
+            sensitive: header.sensitive,
+            value_encrypted: None,
+            value_context_version: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for DefaultRequestHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultRequestHeader")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("overridable", &self.overridable)
+            .field("sensitive", &self.sensitive)
+            .finish()
+    }
 }
 
 /// Returns true when `name` is denylisted as a default request header.
@@ -161,85 +372,46 @@ fn is_valid_header_value(value: &str) -> bool {
         .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
 }
 
-/// Validate and normalize a full list of default headers for storage.
-///
-/// - Enforces the count cap (`MAX_DEFAULT_HEADERS`).
-/// - Rejects empty lists by returning `Ok(None)` — callers use `None` to
-///   mean "no defaults".
-/// - Rejects denylisted names, invalid characters, duplicates
-///   (case-insensitive), and over-length fields.
-/// - Trims surrounding whitespace from names and values.
-pub fn validate_headers(
-    input: Vec<DefaultRequestHeader>,
-) -> AppResult<Option<Vec<DefaultRequestHeader>>> {
-    if input.is_empty() {
-        return Ok(None);
+/// Validate one normalized name/value before encryption or transport.
+/// The storage service separately enforces list bounds, duplicates and masking.
+pub(crate) fn validate_header_parts(name: &str, value: &str) -> AppResult<()> {
+    if name.is_empty() {
+        return Err(AppError::ValidationError(
+            "default_request_headers: header name must not be empty".to_string(),
+        ));
     }
-    if input.len() > MAX_DEFAULT_HEADERS {
+    if name.len() > MAX_HEADER_NAME_LEN {
         return Err(AppError::ValidationError(format!(
-            "default_request_headers: too many entries (max {MAX_DEFAULT_HEADERS})"
+            "default_request_headers: header name exceeds {MAX_HEADER_NAME_LEN} chars"
+        )));
+    }
+    if !is_valid_header_name(name) {
+        return Err(AppError::ValidationError(format!(
+            "default_request_headers: invalid characters in header name '{}'",
+            name
+        )));
+    }
+    if is_denylisted_header_name(name) {
+        return Err(AppError::ValidationError(format!(
+            "default_request_headers: header '{}' is reserved and cannot be set as a default (use the service's auth_method for secrets, or remove it)",
+            name
         )));
     }
 
-    let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(input.len());
-    for h in input {
-        let name = h.name.trim().to_string();
-        let value = h.value.trim().to_string();
-
-        if name.is_empty() {
-            return Err(AppError::ValidationError(
-                "default_request_headers: header name must not be empty".to_string(),
-            ));
-        }
-        if name.len() > MAX_HEADER_NAME_LEN {
-            return Err(AppError::ValidationError(format!(
-                "default_request_headers: header name exceeds {MAX_HEADER_NAME_LEN} chars"
-            )));
-        }
-        if !is_valid_header_name(&name) {
-            return Err(AppError::ValidationError(format!(
-                "default_request_headers: invalid characters in header name '{}'",
-                name
-            )));
-        }
-        if is_denylisted_header_name(&name) {
-            return Err(AppError::ValidationError(format!(
-                "default_request_headers: header '{}' is reserved and cannot be set as a default (use the service's auth_method for secrets, or remove it)",
-                name
-            )));
-        }
-
-        if value.len() > MAX_HEADER_VALUE_LEN {
-            return Err(AppError::ValidationError(format!(
-                "default_request_headers: value for '{}' exceeds {MAX_HEADER_VALUE_LEN} chars",
-                name
-            )));
-        }
-        if !is_valid_header_value(&value) {
-            return Err(AppError::ValidationError(format!(
-                "default_request_headers: invalid characters in value for '{}' (CR / LF / NUL are not allowed)",
-                name
-            )));
-        }
-
-        let lower = name.to_ascii_lowercase();
-        if !seen_lower.insert(lower) {
-            return Err(AppError::ValidationError(format!(
-                "default_request_headers: duplicate header '{}' (names are compared case-insensitively)",
-                name
-            )));
-        }
-
-        out.push(DefaultRequestHeader {
-            name,
-            value,
-            overridable: h.overridable,
-            sensitive: h.sensitive,
-        });
+    if value.len() > MAX_HEADER_VALUE_LEN {
+        return Err(AppError::ValidationError(format!(
+            "default_request_headers: value for '{}' exceeds {MAX_HEADER_VALUE_LEN} chars",
+            name
+        )));
+    }
+    if !is_valid_header_value(value) {
+        return Err(AppError::ValidationError(format!(
+            "default_request_headers: invalid characters in value for '{}' (CR / LF / NUL are not allowed)",
+            name
+        )));
     }
 
-    Ok(Some(out))
+    Ok(())
 }
 
 /// Merge a list of caller-supplied / identity / delegated headers with default
@@ -261,18 +433,19 @@ pub fn validate_headers(
 /// is preserved. The returned list is suitable for both the direct HTTP path
 /// (attached with `RequestBuilder::header` which appends) and the node path
 /// (`Vec<(String, String)>` serialized into the node-proxy frame).
-pub fn merge_into_header_list(
-    mut existing: Vec<(String, String)>,
-    layers: &[&[DefaultRequestHeader]],
-) -> Vec<(String, String)> {
+pub fn merge_into_header_list<H: HeaderEntry>(
+    existing: impl Into<SecretHeaders>,
+    layers: &[&[H]],
+) -> SecretHeaders {
+    let mut existing = existing.into();
     for layer in layers {
         for h in *layer {
             let has_any = existing
                 .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case(&h.name));
-            if h.overridable {
+                .any(|(n, _)| n.eq_ignore_ascii_case(h.name()));
+            if h.overridable() {
                 if !has_any {
-                    existing.push((h.name.clone(), h.value.clone()));
+                    existing.push((h.name().to_owned(), h.value().to_owned()));
                 }
                 // else: caller / lower-layer value wins; leave untouched.
             } else {
@@ -280,8 +453,8 @@ pub fn merge_into_header_list(
                 // matches, then append exactly one default. Without the
                 // retain, a duplicate caller header would survive and
                 // reqwest / the node agent would emit both on the wire.
-                existing.retain(|(n, _)| !n.eq_ignore_ascii_case(&h.name));
-                existing.push((h.name.clone(), h.value.clone()));
+                existing.retain(|(n, _)| !n.eq_ignore_ascii_case(h.name()));
+                existing.push((h.name().to_owned(), h.value().to_owned()));
             }
         }
     }
@@ -292,44 +465,6 @@ pub fn merge_into_header_list(
 /// Kept as a constant so callers (tests, clients) can recognize it.
 pub const REDACTED_PLACEHOLDER: &str = "•••••";
 
-/// Substitute the redaction placeholder in `submitted` entries with the
-/// corresponding stored plaintext value from `existing`.
-///
-/// Callers (admin service update, user-service update, any future
-/// surface that accepts a whole-list replacement) must run this BEFORE
-/// `validate_headers`. Otherwise a client that round-trips a GET →
-/// editor → PUT without retyping sensitive values would overwrite the
-/// stored secret with the literal string `•••••`, which the transport
-/// layer would then silently reject at send time.
-///
-/// Matching rules:
-/// - Only applies when `submitted.sensitive == true` AND
-///   `submitted.value == REDACTED_PLACEHOLDER`.
-/// - Matches `existing` by case-insensitive name. If no match exists,
-///   the placeholder is left in place so downstream validation can
-///   reject it (this catches the case where a user added a new sensitive
-///   row and left the UI placeholder in the field).
-/// - Non-sensitive entries and any value other than the placeholder are
-///   passed through unchanged.
-pub fn reconcile_with_stored(
-    submitted: Vec<DefaultRequestHeader>,
-    existing: Option<&[DefaultRequestHeader]>,
-) -> Vec<DefaultRequestHeader> {
-    submitted
-        .into_iter()
-        .map(|mut h| {
-            if h.sensitive
-                && h.value == REDACTED_PLACEHOLDER
-                && let Some(stored) = existing
-                    .and_then(|rows| rows.iter().find(|r| r.name.eq_ignore_ascii_case(&h.name)))
-            {
-                h.value = stored.value.clone();
-            }
-            h
-        })
-        .collect()
-}
-
 /// Produce an API-safe copy of a stored header list: entries with
 /// `sensitive: true` have their `value` replaced with
 /// [`REDACTED_PLACEHOLDER`]. The `name`, `overridable`, and `sensitive`
@@ -339,8 +474,7 @@ pub fn reconcile_with_stored(
 /// This is the canonical transformation applied at every outbound
 /// boundary — `/services`, `/user-services`, `/keys`, `/catalog` — so
 /// that the "Sensitive" UI affordance is honoured by the API. It does
-/// NOT affect storage or proxy injection; the plaintext value is still
-/// what reaches the downstream.
+/// NOT change proxy injection; the authenticated resolved value reaches the downstream.
 pub fn redact_list_for_response(
     list: Option<Vec<DefaultRequestHeader>>,
 ) -> Option<Vec<DefaultRequestHeader>> {
@@ -350,9 +484,9 @@ pub fn redact_list_for_response(
             .map(|h| DefaultRequestHeader {
                 value: if h.sensitive {
                     if h.value.is_empty() {
-                        String::new()
+                        String::new().into()
                     } else {
-                        REDACTED_PLACEHOLDER.to_string()
+                        REDACTED_PLACEHOLDER.to_string().into()
                     }
                 } else {
                     h.value
@@ -365,12 +499,69 @@ pub fn redact_list_for_response(
 
 #[cfg(test)]
 mod tests {
+    fn validate_headers(
+        input: Vec<DefaultRequestHeader>,
+    ) -> AppResult<Option<Vec<DefaultRequestHeader>>> {
+        if input.is_empty() {
+            return Ok(None);
+        }
+        if input.len() > MAX_DEFAULT_HEADERS {
+            return Err(AppError::ValidationError(format!(
+                "default_request_headers: too many entries (max {MAX_DEFAULT_HEADERS})"
+            )));
+        }
+
+        let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(input.len());
+        for h in input {
+            let name = h.name.trim().to_string();
+            let value = h.value.trim().to_string();
+
+            validate_header_parts(&name, &value)?;
+
+            let lower = name.to_ascii_lowercase();
+            if !seen_lower.insert(lower) {
+                return Err(AppError::ValidationError(format!(
+                    "default_request_headers: duplicate header '{}' (names are compared case-insensitively)",
+                    name
+                )));
+            }
+
+            out.push(DefaultRequestHeader {
+                name,
+                value: value.into(),
+                overridable: h.overridable,
+                sensitive: h.sensitive,
+            });
+        }
+
+        Ok(Some(out))
+    }
+
+    fn reconcile_with_stored(
+        submitted: Vec<DefaultRequestHeader>,
+        existing: Option<&[DefaultRequestHeader]>,
+    ) -> Vec<DefaultRequestHeader> {
+        submitted
+            .into_iter()
+            .map(|mut h| {
+                if h.sensitive
+                    && h.value.as_str() == REDACTED_PLACEHOLDER
+                    && let Some(stored) = existing
+                        .and_then(|rows| rows.iter().find(|r| r.name.eq_ignore_ascii_case(&h.name)))
+                {
+                    h.value = stored.value.clone();
+                }
+                h
+            })
+            .collect()
+    }
     use super::*;
 
     fn h(name: &str, value: &str) -> DefaultRequestHeader {
         DefaultRequestHeader {
             name: name.to_string(),
-            value: value.to_string(),
+            value: value.to_string().into(),
             overridable: false,
             sensitive: false,
         }
@@ -379,7 +570,7 @@ mod tests {
     fn h_overridable(name: &str, value: &str) -> DefaultRequestHeader {
         DefaultRequestHeader {
             name: name.to_string(),
-            value: value.to_string(),
+            value: value.to_string().into(),
             overridable: true,
             sensitive: false,
         }
@@ -397,7 +588,7 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].name, "x-openclaw-scopes");
-        assert_eq!(got[0].value, "operator.read,operator.write");
+        assert_eq!(got[0].value.as_str(), "operator.read,operator.write");
         assert!(!got[0].overridable);
     }
 
@@ -407,7 +598,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got[0].name, "X-Api-Version");
-        assert_eq!(got[0].value, "v2");
+        assert_eq!(got[0].value.as_str(), "v2");
     }
 
     #[test]
@@ -417,7 +608,7 @@ mod tests {
             many.push(h(&format!("x-h-{i}"), "v"));
         }
         let err = validate_headers(many).unwrap_err();
-        assert!(format!("{err:?}").contains("too many"));
+        assert!(err.to_string().contains("too many"));
     }
 
     #[test]
@@ -436,7 +627,7 @@ mod tests {
             "FORWARDED",
         ] {
             let err = validate_headers(vec![h(name, "v")]).unwrap_err();
-            let msg = format!("{err:?}");
+            let msg = err.to_string();
             assert!(
                 msg.contains("reserved"),
                 "expected reserved error for {name}, got {msg}"
@@ -460,7 +651,7 @@ mod tests {
             "SEC-WEBSOCKET-ACCEPT",
         ] {
             let err = validate_headers(vec![h(name, "v")]).unwrap_err();
-            let msg = format!("{err:?}");
+            let msg = err.to_string();
             assert!(
                 msg.contains("reserved"),
                 "expected reserved error for {name}, got {msg}"
@@ -472,7 +663,7 @@ mod tests {
     fn rejects_invalid_name_chars() {
         for name in ["bad header", "bad:header", "bad/header", "bad(header)", ""] {
             let err = validate_headers(vec![h(name, "v")]).unwrap_err();
-            let msg = format!("{err:?}");
+            let msg = err.to_string();
             assert!(
                 msg.contains("invalid") || msg.contains("empty"),
                 "expected validation error for {name}, got {msg}"
@@ -484,7 +675,7 @@ mod tests {
     fn rejects_crlf_in_value() {
         for value in ["a\r\nX-Inject: bad", "line\none", "with\0nul"] {
             let err = validate_headers(vec![h("x-test", value)]).unwrap_err();
-            assert!(format!("{err:?}").contains("invalid characters"));
+            assert!(err.to_string().contains("invalid characters"));
         }
     }
 
@@ -499,7 +690,7 @@ mod tests {
         for value in non_ascii_cases {
             let err = validate_headers(vec![h("x-test", value)]).unwrap_err();
             assert!(
-                format!("{err:?}").contains("invalid characters"),
+                err.to_string().contains("invalid characters"),
                 "expected rejection for {value:?}"
             );
         }
@@ -528,18 +719,18 @@ mod tests {
     fn rejects_duplicates_case_insensitive() {
         let err =
             validate_headers(vec![h("X-API-Version", "v1"), h("x-api-version", "v2")]).unwrap_err();
-        assert!(format!("{err:?}").contains("duplicate"));
+        assert!(err.to_string().contains("duplicate"));
     }
 
     #[test]
     fn rejects_over_length() {
         let long_value = "v".repeat(MAX_HEADER_VALUE_LEN + 1);
         let err = validate_headers(vec![h("x-test", &long_value)]).unwrap_err();
-        assert!(format!("{err:?}").contains("exceeds"));
+        assert!(err.to_string().contains("exceeds"));
 
         let long_name = format!("x-{}", "a".repeat(MAX_HEADER_NAME_LEN));
         let err = validate_headers(vec![h(&long_name, "v")]).unwrap_err();
-        assert!(format!("{err:?}").contains("exceeds"));
+        assert!(err.to_string().contains("exceeds"));
     }
 
     #[test]
@@ -664,33 +855,33 @@ mod tests {
         let input = Some(vec![
             DefaultRequestHeader {
                 name: "X-Public".to_string(),
-                value: "anyone-can-read".to_string(),
+                value: "anyone-can-read".to_string().into(),
                 overridable: false,
                 sensitive: false,
             },
             DefaultRequestHeader {
                 name: "X-Gateway-Token".to_string(),
-                value: "super-secret-token".to_string(),
+                value: "super-secret-token".to_string().into(),
                 overridable: false,
                 sensitive: true,
             },
             DefaultRequestHeader {
                 name: "X-Empty-Sensitive".to_string(),
-                value: String::new(),
+                value: String::new().into(),
                 overridable: true,
                 sensitive: true,
             },
         ]);
         let redacted = redact_list_for_response(input).unwrap();
-        assert_eq!(redacted[0].value, "anyone-can-read");
-        assert_eq!(redacted[1].value, REDACTED_PLACEHOLDER);
+        assert_eq!(redacted[0].value.as_str(), "anyone-can-read");
+        assert_eq!(redacted[1].value.as_str(), REDACTED_PLACEHOLDER);
         // name / overridable / sensitive flags preserved so the editor UI
         // can still render the row.
         assert_eq!(redacted[1].name, "X-Gateway-Token");
         assert!(redacted[1].sensitive);
         assert!(!redacted[1].overridable);
         // Empty sensitive stays empty (nothing to mask).
-        assert_eq!(redacted[2].value, "");
+        assert_eq!(redacted[2].value.as_str(), "");
     }
 
     #[test]
@@ -701,7 +892,7 @@ mod tests {
     fn sensitive_h(name: &str, value: &str) -> DefaultRequestHeader {
         DefaultRequestHeader {
             name: name.to_string(),
-            value: value.to_string(),
+            value: value.to_string().into(),
             overridable: false,
             sensitive: true,
         }
@@ -717,7 +908,7 @@ mod tests {
         let existing = vec![sensitive_h("X-Gateway-Token", "real-secret-123")];
         let submitted = vec![sensitive_h("X-Gateway-Token", REDACTED_PLACEHOLDER)];
         let out = reconcile_with_stored(submitted, Some(&existing));
-        assert_eq!(out[0].value, "real-secret-123");
+        assert_eq!(out[0].value.as_str(), "real-secret-123");
         assert!(out[0].sensitive);
     }
 
@@ -730,10 +921,10 @@ mod tests {
         ];
         let out = reconcile_with_stored(submitted, Some(&existing));
         // Sensitive row with a new (non-placeholder) value: passes through.
-        assert_eq!(out[0].value, "new-secret");
+        assert_eq!(out[0].value.as_str(), "new-secret");
         // Non-sensitive entries are never reconciled, even if their value
         // happens to equal the placeholder string.
-        assert_eq!(out[1].value, REDACTED_PLACEHOLDER);
+        assert_eq!(out[1].value.as_str(), REDACTED_PLACEHOLDER);
         assert!(!out[1].sensitive);
     }
 
@@ -747,7 +938,7 @@ mod tests {
         let existing: Vec<DefaultRequestHeader> = Vec::new();
         let submitted = vec![sensitive_h("X-Brand-New", REDACTED_PLACEHOLDER)];
         let out = reconcile_with_stored(submitted, Some(&existing));
-        assert_eq!(out[0].value, REDACTED_PLACEHOLDER);
+        assert_eq!(out[0].value.as_str(), REDACTED_PLACEHOLDER);
     }
 
     #[test]
@@ -756,7 +947,7 @@ mod tests {
         // the caller can decide how to treat it.
         let submitted = vec![sensitive_h("X-Gateway-Token", REDACTED_PLACEHOLDER)];
         let out = reconcile_with_stored(submitted, None);
-        assert_eq!(out[0].value, REDACTED_PLACEHOLDER);
+        assert_eq!(out[0].value.as_str(), REDACTED_PLACEHOLDER);
     }
 
     #[test]
@@ -764,9 +955,25 @@ mod tests {
         let existing = vec![sensitive_h("x-gateway-token", "stored")];
         let submitted = vec![sensitive_h("X-GATEWAY-TOKEN", REDACTED_PLACEHOLDER)];
         let out = reconcile_with_stored(submitted, Some(&existing));
-        assert_eq!(out[0].value, "stored");
+        assert_eq!(out[0].value.as_str(), "stored");
         // Casing from the submitted entry is preserved so renames
         // survive.
         assert_eq!(out[0].name, "X-GATEWAY-TOKEN");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn default_header_debug_redacts_values_even_when_not_marked_sensitive() {
+    let secret = "distinctive-default-header-d26a";
+    for sensitive in [false, true] {
+        let header = DefaultRequestHeader {
+            name: "X-Test".into(),
+            value: secret.to_owned().into(),
+            overridable: false,
+            sensitive,
+        };
+        assert!(!format!("{header:?}").contains(secret));
+        assert_eq!(serde_json::to_value(header).unwrap()["value"], secret);
     }
 }

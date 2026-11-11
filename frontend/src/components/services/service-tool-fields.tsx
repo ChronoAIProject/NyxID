@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { UseFormReturn } from "react-hook-form";
 import type { UpdateServiceFormData } from "@/schemas/services";
 import type { DownstreamService } from "@/types/api";
@@ -27,25 +28,25 @@ export function ServiceToolFields({
   form: UseFormReturn<UpdateServiceFormData>;
   service: DownstreamService;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: topics = [] } = useToolTopics();
   const selected = form.watch("topics") ?? [];
   return (
     <div className="space-y-4">
       <FormItem>
-        <FormLabel>{t("Offering kind")}</FormLabel>
+        <FormLabel>{translateUi("Offering kind")}</FormLabel>
         <Select
           value={form.watch("offering_kind")}
           onValueChange={(value) =>
             form.setValue("offering_kind", value as "ai_service" | "tool")
           }
         >
-          <SelectTrigger aria-label={t("Offering kind")}>
+          <SelectTrigger aria-label={translateUi("Offering kind")}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="ai_service">{t("AI Service")}</SelectItem>
-            <SelectItem value="tool">{t("Tool")}</SelectItem>
+            <SelectItem value="ai_service">{translateUi("AI Service")}</SelectItem>
+            <SelectItem value="tool">{translateUi("Tool")}</SelectItem>
           </SelectContent>
         </Select>
       </FormItem>
@@ -54,7 +55,7 @@ export function ServiceToolFields({
         name="supplier"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>{t("Supplier")}</FormLabel>
+            <FormLabel>{translateUi("Supplier")}</FormLabel>
             <FormControl>
               <Input {...field} />
             </FormControl>
@@ -63,8 +64,8 @@ export function ServiceToolFields({
         )}
       />
       <FormItem>
-        <FormLabel>{t("Topics")}</FormLabel>
-        <div className="flex flex-wrap gap-2" role="group" aria-label={t("Topics")}>
+        <FormLabel>{translateUi("Topics")}</FormLabel>
+        <div className="flex flex-wrap gap-2" role="group" aria-label={translateUi("Topics")}>
           {topics.map((topic) => (
             <Button
               key={topic.slug}
@@ -86,10 +87,10 @@ export function ServiceToolFields({
         </div>
       </FormItem>
       {service.import_source && (
-        <p className="text-11 text-text-tertiary">{t("Import source: ")}{service.import_source.kind} ·{" "}
+        <p className="text-13 text-text-tertiary">{translateUi("Import source: ")}{service.import_source.kind} ·{" "}
           {service.import_source.reference} ·{" "}
-          {service.import_source.version ?? t("Unversioned")} ·{" "}
-          {service.import_source.imported_at ?? t("Unknown date")}
+          {service.import_source.version ?? translateUi("Unversioned")} ·{" "}
+          {service.import_source.imported_at ?? translateUi("Unknown date")}
         </p>
       )}
     </div>

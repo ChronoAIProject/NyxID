@@ -176,7 +176,9 @@ pub async fn claim(
         renewed_at: now,
         expires_at,
         credential_ack_correlation: false,
+        credential_target_update_v1: false,
         remote_credential_crypto_v1: false,
+        machine_execution_approval_v1: false,
         proxy_max_body_size: None,
         capabilities_resolved: false,
     };
@@ -270,7 +272,9 @@ pub async fn record_capabilities(
                     "connection_owner.proxy_upload_v1": capabilities.proxy_upload_v1,
                     "connection_owner.http_cancellation": capabilities.http_cancellation,
                     "connection_owner.credential_ack_correlation": capabilities.credential_ack_correlation,
+                    "connection_owner.credential_target_update_v1": capabilities.credential_target_update_v1,
                     "connection_owner.remote_credential_crypto_v1": capabilities.remote_credential_crypto_v1,
+                    "connection_owner.machine_execution_approval_v1": capabilities.machine_execution_approval_v1,
                     "connection_owner.proxy_max_body_size": capabilities.proxy_max_body_size.map(|value| value as i64),
                     "connection_owner.capabilities_resolved": resolved,
                     "updated_at": now,
@@ -337,6 +341,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -454,6 +459,45 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+
+        let negotiated = NodeCapabilitiesFlags {
+            machine_execution_approval_v1: true,
+            ..Default::default()
+        };
+        assert!(
+            !record_capabilities(
+                &db,
+                &NodeOwnerFence::from_owner(&node_id, &first),
+                negotiated,
+                true,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            record_capabilities(
+                &db,
+                &NodeOwnerFence::from_owner(&node_id, &second),
+                negotiated,
+                true,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        let current = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            current
+                .connection_owner
+                .unwrap()
+                .machine_execution_approval_v1
+        );
 
         assert!(
             !renew(

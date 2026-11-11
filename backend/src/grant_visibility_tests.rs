@@ -82,6 +82,9 @@ async fn setup_benefits(prefix: &str) -> Option<BenefitFixture> {
 fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> CreditGrant {
     let now = Utc::now();
     CreditGrant {
+        service_limits: Vec::new(),
+        revoke_requested_at: None,
+        revoke_requested_by: None,
         id: Uuid::new_v4().to_string(),
         batch_id: Uuid::new_v4().to_string(),
         schedule_origin: None,
@@ -161,6 +164,19 @@ async fn assert_benefits_visible(state: &AppState, actor_id: &str, owner_id: Opt
     assert_eq!(grants.per_page, 1);
     assert_eq!(grants.total, 1);
     assert_eq!(allowances.allowances.len(), 1);
+    let Json(preview) = crate::handlers::billing_benefits::get(
+        State(state.clone()),
+        test_auth_user(actor_id),
+        Query(crate::handlers::billing_benefits::BenefitsQuery {
+            owner_id: owner_id.map(str::to_owned),
+            page: Some(1),
+        }),
+    )
+    .await
+    .expect("authorized benefit preview");
+    assert_eq!(preview.summary.unreserved.to_string(), "5");
+    assert_eq!(preview.grants.len(), 1);
+    assert_eq!(preview.allowances.len(), 1);
 }
 
 #[tokio::test]
@@ -195,6 +211,18 @@ async fn benefit_reads_allow_personal_org_admin_and_org_member_but_reject_non_me
     .await;
     assert_benefits_visible(&fixture.state, &fixture.personal_id, None).await;
 
+    let preview_error = crate::handlers::billing_benefits::get(
+        State(fixture.state.clone()),
+        test_auth_user(&fixture.non_member_id),
+        Query(crate::handlers::billing_benefits::BenefitsQuery {
+            owner_id: Some(fixture.org_id.clone()),
+            page: Some(1),
+        }),
+    )
+    .await
+    .err()
+    .expect("non-member preview must fail");
+    assert!(matches!(preview_error, AppError::Forbidden(_)));
     let grant_error = billing_credits::user_list_grants(
         State(fixture.state.clone()),
         test_auth_user(&fixture.non_member_id),
@@ -240,6 +268,9 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
         State(fixture.state.clone()),
         test_auth_user(&fixture.platform_admin_id),
         Json(IssueGrantRequest {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 10,
             target_kind: BillingTargetKind::SelectedUsers,
             target_user_ids: vec![fixture.personal_id.clone(), fixture.non_member_id.clone()],

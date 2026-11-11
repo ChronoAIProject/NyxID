@@ -4,7 +4,11 @@ import { useTranslation } from "react-i18next";
 import { appI18n, translate } from ".";
 
 export function useAppTranslation() {
-  const { i18n } = useTranslation("app", { i18n: appI18n });
+  const { i18n } = useTranslation("app", {
+    i18n: appI18n,
+    useSuspense: false,
+    bindI18n: "languageChanged loaded",
+  });
   const language = i18n.resolvedLanguage;
   const t = useCallback(
     (key: string, options?: TOptions) =>

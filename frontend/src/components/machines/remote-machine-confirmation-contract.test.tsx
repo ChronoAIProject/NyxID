@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -95,7 +102,7 @@ it("shows the actual safe summary and keeps absent pagination explicitly unknown
     }),
   ).not.toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),
@@ -234,4 +241,82 @@ it("follows global confirmation cursors and clears an old review before changing
     screen.getByRole("button", { name: "Newer confirmations" }),
   );
   expect(await screen.findByText("newer-confirmation")).toBeInTheDocument();
+});
+
+it("displays the exact reviewed authority and expiry inside the decision dialog", async () => {
+  http.get.mockResolvedValue({ confirmations: [payload()] });
+  mount();
+  await openReview();
+  const dialog = within(screen.getByRole("dialog"));
+  expect(
+    dialog
+      .getByText("Grant / assignment revision")
+      .closest("[data-grouped-row]"),
+  ).toHaveTextContent("7 / 3");
+  expect(
+    dialog.getByText("Runtime generation").closest("[data-grouped-row]"),
+  ).toHaveTextContent("2");
+  expect(
+    dialog.getByText("Parameter digest").closest("[data-grouped-row]"),
+  ).toHaveTextContent("parameter-digest");
+  expect(
+    dialog.getByText("Waiting approval expires").closest("[data-grouped-row]"),
+  ).toHaveTextContent(new Date(payload().expires_at).toLocaleString());
+  expect(
+    dialog.getByText(/Full request content is unavailable/),
+  ).toBeInTheDocument();
+});
+
+it("reports approval as waiting for the original caller even before the next read completes", async () => {
+  const row = payload();
+  http.get.mockResolvedValue({ confirmations: [row] });
+  http.read.mockResolvedValue({
+    confirmation: {
+      ...row,
+      subject: row.principal,
+      status: "approved",
+      approved_at: row.created_at,
+      approved_until: row.expires_at,
+    },
+  });
+  mount();
+  await openReview();
+  // Keep the post-decision live read pending: the notice must describe the
+  // accepted approval, never infer that the caller's operation executed.
+  http.get.mockImplementation(() => new Promise(() => {}));
+  await userEvent.click(
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Approve one retry" }),
+  );
+  expect(
+    await screen.findByText(
+      /Approval recorded\. Waiting for the original caller to retry/,
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("labels approved rows as awaiting caller retry and keeps Assistant decisions in the original conversation", async () => {
+  http.get.mockResolvedValue({
+    confirmations: [
+      { ...payload(), state: "approved", decided_at: payload().created_at },
+    ],
+  });
+  mount();
+  expect(
+    await screen.findByText(
+      /Approved — waiting for the original caller to retry/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /Assistant action confirmations stay in the original conversation/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Review decision" }),
+  ).toBeDisabled();
+  expect(http.read).not.toHaveBeenCalled();
 });

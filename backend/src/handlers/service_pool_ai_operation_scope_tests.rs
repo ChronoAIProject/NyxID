@@ -31,45 +31,77 @@ async fn restrict(fixture: &mut Fixture, primary: Option<&str>, backup: Option<&
     .await;
 }
 
-#[tokio::test]
-async fn service_pool_operation_scope_checks_translated_backup_on_every_entry() {
-    for entry in [Entry::Slug, Entry::Gateway, Entry::Machine] {
-        for allowed in [false, true] {
-            let mut fixture = fixture(
-                "pool_scoped_translation",
-                ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
-            )
-            .await;
-            // The public pool route is NOT the Anthropic member operation.
-            restrict(
-                &mut fixture,
-                Some("/chat/completions"),
-                Some(if allowed {
-                    "/messages"
-                } else {
-                    "/chat/completions"
-                }),
-            )
-            .await;
-            let response = call(&fixture, entry, "chat/completions", basic_request()).await;
-            if allowed {
-                let response = response.unwrap();
-                assert_eq!(response.status(), StatusCode::OK);
-                to_bytes(response.into_body(), 16 * 1024).await.unwrap();
-            } else {
-                assert!(
-                    matches!(response, Err(crate::errors::AppError::ApiKeyScopeForbidden(ref message)) if message.contains("Allowed operations"))
-                );
-            }
-            assert_eq!(fixture.first.received_requests().await.unwrap().len(), 1);
-            let backup = fixture.second.received_requests().await.unwrap();
-            assert_eq!(backup.len(), usize::from(allowed));
-            if allowed {
-                assert_eq!(backup[0].url.path(), "/v1/messages");
-            }
-            fixture.state.db.drop().await.unwrap();
-        }
+async fn assert_service_pool_operation_scope_checks_translated_backup(entry: Entry, allowed: bool) {
+    let mut fixture = fixture(
+        "pool_scoped_translation",
+        ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
+    )
+    .await;
+
+    crate::test_utils::set_test_approval_preference(
+        &fixture.state.db,
+        &fixture.auth.user_id.to_string(),
+        false,
+    )
+    .await;
+    // The public pool route is NOT the Anthropic member operation.
+    restrict(
+        &mut fixture,
+        Some("/chat/completions"),
+        Some(if allowed {
+            "/messages"
+        } else {
+            "/chat/completions"
+        }),
+    )
+    .await;
+    let response = call(&fixture, entry, "chat/completions", basic_request()).await;
+    if allowed {
+        let response = response.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+    } else {
+        assert!(
+            matches!(response, Err(crate::errors::AppError::ApiKeyScopeForbidden(ref message)) if message.contains("Allowed operations"))
+        );
     }
+    assert_eq!(fixture.first.received_requests().await.unwrap().len(), 1);
+    let backup = fixture.second.received_requests().await.unwrap();
+    assert_eq!(backup.len(), usize::from(allowed));
+    if allowed {
+        assert_eq!(backup[0].url.path(), "/v1/messages");
+    }
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn service_pool_operation_scope_slug_denied_checks_translated_backup() {
+    assert_service_pool_operation_scope_checks_translated_backup(Entry::Slug, false).await;
+}
+
+#[tokio::test]
+async fn service_pool_operation_scope_slug_allowed_checks_translated_backup() {
+    assert_service_pool_operation_scope_checks_translated_backup(Entry::Slug, true).await;
+}
+
+#[tokio::test]
+async fn service_pool_operation_scope_gateway_denied_checks_translated_backup() {
+    assert_service_pool_operation_scope_checks_translated_backup(Entry::Gateway, false).await;
+}
+
+#[tokio::test]
+async fn service_pool_operation_scope_gateway_allowed_checks_translated_backup() {
+    assert_service_pool_operation_scope_checks_translated_backup(Entry::Gateway, true).await;
+}
+
+#[tokio::test]
+async fn service_pool_operation_scope_machine_denied_checks_translated_backup() {
+    assert_service_pool_operation_scope_checks_translated_backup(Entry::Machine, false).await;
+}
+
+#[tokio::test]
+async fn service_pool_operation_scope_machine_allowed_checks_translated_backup() {
+    assert_service_pool_operation_scope_checks_translated_backup(Entry::Machine, true).await;
 }
 
 #[tokio::test]

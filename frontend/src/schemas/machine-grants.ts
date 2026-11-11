@@ -23,11 +23,17 @@ export const machineGrantAssignmentSchema = z.object({
   path: ["service_ids"],
 });
 export const machineGrantSelectionSchema = z.object({
+  separation: z.enum(["automatic", "require_separated", "shared_legacy"]).optional(),
+  legacy_warning_acknowledged: z.boolean().optional(),
   assignments: z.record(z.uuid(), machineGrantAssignmentSchema).refine(
     (rows) => Object.keys(rows).length > 0 && Object.keys(rows).length <= 100,
     "Choose between one and 100 Machines",
   ),
   expires_at: z.iso.datetime().refine((value) => new Date(value).getTime() > Date.now(), "Grant expiry must be in the future").nullable().optional(),
+}).superRefine((selection, ctx) => {
+  if (selection.separation !== "shared_legacy" || selection.legacy_warning_acknowledged !== true) {
+    ctx.addIssue({ code: "custom", path: ["legacy_warning_acknowledged"], message: "External Machine access requires explicit shared legacy consent. Separated contexts are not supported for OAuth clients or API keys." });
+  }
 });
 export type MachineGrantSelection = z.infer<typeof machineGrantSelectionSchema>;
 export const machineGrantSchema = z.object({

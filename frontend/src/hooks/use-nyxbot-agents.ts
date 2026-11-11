@@ -11,6 +11,10 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import { useAuthStore } from "@/stores/auth-store";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import type { NyxAgentModel } from "@/schemas/assistant-nyxagent";
+import { componentLabel } from "@/schemas/platform-models";
 import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 
 export const nyxBotQueryKeys = {
@@ -19,6 +23,10 @@ export const nyxBotQueryKeys = {
   agents: (userId: string | undefined) => ["assistant", "nyxagent", userId, "agents"] as const,
   agent: (userId: string | undefined, agentId: string | undefined) =>
     ["assistant", "nyxagent", userId, "agents", "detail", agentId] as const,
+  guestReadiness: (userId: string | undefined, agentId?: string, conversationId?: string) =>
+    agentId === undefined
+      ? ["assistant", "nyxagent", userId, "guest-readiness"] as const
+      : ["assistant", "nyxagent", userId, "guest-readiness", agentId, conversationId ?? null] as const,
   /** Prefix of every agent's thread list. */
   threads: (userId: string | undefined, agentId?: string) =>
     agentId === undefined
@@ -27,6 +35,8 @@ export const nyxBotQueryKeys = {
   settings: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "settings"] as const,
   models: (userId: string | undefined) => ["assistant", "nyxagent", userId, "models"] as const,
+  onboarding: (userId: string | undefined) =>
+    ["assistant", "nyxagent", userId, "onboarding"] as const,
   /** Prefix of the channel list and every channel's chats. */
   channels: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "channels"] as const,
@@ -71,6 +81,19 @@ export function useNyxBotAgent(agentId: string | undefined, enabled = true) {
   });
 }
 
+/** Settings-only; visible rows share one agent query unless their route differs. */
+export function useGuestReadiness(agentId: string | undefined, enabled: boolean, conversationId?: string) {
+  const userId = useAuthStore((state) => state.user?.id);
+  return useQuery({
+    queryKey: nyxBotQueryKeys.guestReadiness(userId, agentId, conversationId),
+    queryFn: () => nyxBotApi.guestReadiness(agentId!, conversationId),
+    refetchInterval: (query) => query.state.data?.status === "setting_up" ? 2_000 : false,
+    enabled: enabled && Boolean(userId && agentId),
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
 function useAgentsMutation<TVariables, TResult>(
   mutationFn: (variables: TVariables) => Promise<TResult>,
   alsoChannels = false,
@@ -82,6 +105,7 @@ function useAgentsMutation<TVariables, TResult>(
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
         ...(alsoChannels
           ? [queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) })]
           : []),
@@ -172,6 +196,13 @@ export function useLinkNyxBotChannel() {
   );
 }
 
+export function useRetryNyxBotChannelGateway() {
+  return useAgentsMutation(
+    ({ channelAgentId }: { channelAgentId: string }) => nyxBotApi.retryChannelGateway(channelAgentId),
+    true,
+  );
+}
+
 export function useSetNyxBotPrivateChats() {
   return useAgentsMutation(
     ({
@@ -181,6 +212,15 @@ export function useSetNyxBotPrivateChats() {
       channelAgentId: string;
       privateChats: "owner" | "everyone";
     }) => nyxBotApi.setPrivateChats(channelAgentId, privateChats),
+    true,
+  );
+}
+
+export function useSetNyxBotPrivateChatPosts() {
+  return useAgentsMutation(
+    ({ channelAgentId, enabled, applyToExisting }: {
+      channelAgentId: string; enabled: boolean; applyToExisting: boolean;
+    }) => nyxBotApi.setPrivateChatPosts(channelAgentId, enabled, applyToExisting),
     true,
   );
 }
@@ -214,6 +254,7 @@ export function useUpdateNyxBotChannelChat() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) }),
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
       ]);
     },
   });
@@ -273,15 +314,49 @@ export function useStopNyxBotChannelThread() {
 }
 
 /** The models NyxAgent offers this owner. */
-export function useNyxAgentModels(enabled = true) {
+export function useNyxAgentModels(enabled = true, context?: { agentId?: string; conversationId?: string }) {
   const userId = useAuthStore((state) => state.user?.id);
-  return useQuery({
+  const platformEnabled = useFeature(FEATURE_FLAG.INFERENCE_PLATFORM_MODELS);
+  const legacy = useQuery({
     queryKey: nyxBotQueryKeys.models(userId),
     queryFn: () => nyxBotApi.models(),
     enabled: enabled && Boolean(userId),
     retry: false,
     staleTime: 60_000,
   });
+  const platform = useQuery({
+    queryKey: [...nyxBotQueryKeys.models(userId), "platform", context?.conversationId ?? null, context?.agentId ?? null],
+    queryFn: async () => {
+      const rows: NyxAgentModel[] = [];
+      const seen = new Set<string>();
+      let after: string | undefined;
+      do {
+        const page = await nyxBotApi.platformModels(context, after);
+        for (const model of page.models) {
+          // The assistant manifest selects the default tariff; other variants
+          // cannot advertise prices or image support for this selection.
+          const prices = model.retail_prices.filter((price) => price.available && Object.keys(price.variant).length === 0);
+          rows.push({
+            id: model.id, label: model.display_name,
+            available: model.availability !== "unavailable" && prices.length > 0,
+            input_modalities: prices.some((price) => price.image_input) ? ["text", "image"] : ["text"],
+            description: ["Model usage billed to you", ...prices.flatMap((price) => price.components.map((part) =>
+              `${componentLabel(part)}: ${part.explicit_free ? "Free" : `${part.credits_per_unit} credits / unit`}`))].join(" · "),
+          });
+        }
+        after = page.next_after ?? undefined;
+        if (after && seen.has(after)) throw new Error("Model pagination did not advance");
+        if (after) seen.add(after);
+      } while (after);
+      return rows;
+    },
+    enabled: enabled && Boolean(userId) && platformEnabled,
+    retry: false,
+    staleTime: 0,
+  });
+  // A platform outage never hides or authorizes legacy profiles. Cached platform
+  // names cannot survive flag-off, actor changes or a failed live refresh.
+  return { ...legacy, data: legacy.data ? [...legacy.data, ...(platformEnabled && !platform.isError ? platform.data ?? [] : [])] : legacy.data };
 }
 
 /** Select a thread's model; refreshes the thread and its agent's thread list. */
@@ -295,6 +370,7 @@ export function useChangeNyxAgentModel() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.history(userId, conversationId) }),
         queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
       ]);
     },
   });

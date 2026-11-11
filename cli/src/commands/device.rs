@@ -56,6 +56,8 @@ struct ApproveDeviceResponse {
     device_label: String,
     hw_id: String,
     api_key_id: String,
+    #[serde(default)]
+    api_key_expires_at: Option<String>,
     node_id: String,
     owner_user_id: String,
     org_id: Option<String>,
@@ -349,6 +351,13 @@ fn print_approval_table(response: &ApproveDeviceResponse) {
         response.org_id.as_deref().unwrap_or("personal"),
     ]);
     eprintln!("{table}");
+    eprintln!(
+        "Key expires: {}",
+        response
+            .api_key_expires_at
+            .as_deref()
+            .unwrap_or("not reported; refresh key details")
+    );
     eprintln!("Device will pick up credentials on its next poll.");
 }
 

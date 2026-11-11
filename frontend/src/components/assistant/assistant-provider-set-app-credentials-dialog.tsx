@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -66,7 +66,7 @@ export function AssistantProviderSetAppCredentialsDialog({
   readonly params: AssistantProviderSetAppCredentialsParams;
   readonly onComplete: (providerId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const form = useAppForm<CredentialFormValues>({
     defaultValues: { clientId: "", clientSecret: "" },
   });
@@ -196,12 +196,12 @@ export function AssistantProviderSetAppCredentialsDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? t("OAuth app credentials saved") : t("Set OAuth app credentials")}
+            {resultId ? translateUi("OAuth app credentials saved") : translateUi("Set OAuth app credentials")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? t("NyxID stored the credentials and returned only the provider reference.")
-              : t("Enter your OAuth app credentials here. They are never returned to the assistant.")}
+              ? translateUi("NyxID stored the credentials and returned only the provider reference.")
+              : translateUi("Enter your OAuth app credentials here. They are never returned to the assistant.")}
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
@@ -211,7 +211,7 @@ export function AssistantProviderSetAppCredentialsDialog({
             onSubmit={form.handleSubmit((values) => void submit(values))}
           >
             <div className="space-y-2">
-              <Label htmlFor="assistant-provider-client-id">{t("Client ID")}</Label>
+              <Label htmlFor="assistant-provider-client-id">{translateUi("Client ID")}</Label>
               <Input
                 id="assistant-provider-client-id"
                 autoComplete="off"
@@ -220,7 +220,7 @@ export function AssistantProviderSetAppCredentialsDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="assistant-provider-client-secret">{t("Client secret")}</Label>
+              <Label htmlFor="assistant-provider-client-secret">{translateUi("Client secret")}</Label>
               <Input
                 id="assistant-provider-client-secret"
                 type="password"
@@ -231,22 +231,22 @@ export function AssistantProviderSetAppCredentialsDialog({
             </div>
           </form>
         ) : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{translateUi(error)}</p> : null}
-        {verified ? <p className="text-11 text-success">{t("Credential evidence verified.")}</p> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{translateUi(error)}</p> : null}
+        {verified ? <p className="text-13 text-success">{translateUi("Credential evidence verified.")}</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
-              <Button type="submit" form="assistant-provider-credentials-form" variant="primary" isLoading={submitting} disabled={submitting}>{t("Save credentials")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
+              <Button type="submit" form="assistant-provider-credentials-form" variant="primary" isLoading={submitting} disabled={submitting}>{translateUi("Save credentials")}</Button>
             </>
           ) : (
             <>
               {!verified && expectedVersionRef.current !== null ? (
                 <Button type="button" variant="outline" isLoading={verifying} onClick={() => void verify(resultId, expectedVersionRef.current!)}>
-                  <RefreshCw />{t("Retry verification")}</Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button type="button" variant="primary" disabled={!verified} onClick={() => { onComplete(resultId); close(); }}>
-                {replayed ? t("Report saved credentials") : t("Done")}
+                {replayed ? translateUi("Report saved credentials") : translateUi("Done")}
               </Button>
             </>
           )}

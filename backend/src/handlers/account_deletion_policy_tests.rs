@@ -46,6 +46,10 @@ impl Fixture {
         // This helper requires a live transaction-capable database; unavailable
         // Mongo is a test failure, never a silently passing skipped test.
         let db = connect_transaction_test_database(label).await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        crate::services::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
         lifecycle::ensure_indexes(&db)
             .await
             .expect("lifecycle indexes");
@@ -217,19 +221,64 @@ impl Fixture {
     }
 
     async fn third_party_tokens(&self) -> [(String, bool); 2] {
-        let oauth = crate::crypto::jwt::generate_oauth_access_token(
+        let client_id = "account-delete-untrusted-client";
+        let now = Utc::now();
+        self.state
+            .db
+            .collection::<crate::models::oauth_client::OauthClient>(
+                crate::models::oauth_client::COLLECTION_NAME,
+            )
+            .insert_one(crate::models::oauth_client::OauthClient {
+                id: client_id.into(),
+                client_name: "Account deletion authority fixture".into(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec![],
+                allowed_scopes: "account:read".into(),
+                scope_provenance: Default::default(),
+                grant_types: "authorization_code".into(),
+                client_type: "public".into(),
+                is_active: true,
+                delegation_scopes: "account:read".into(),
+                default_service_catalog_slugs: vec![],
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                connection_webhook_url: None,
+                connection_webhook_secret_encrypted: None,
+                connection_webhook_key_id: None,
+                connection_webhook_enabled: false,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let consent = crate::services::consent_service::grant_consent(
+            &self.state.db,
+            &self.owner,
+            client_id,
+            "account:read",
+        )
+        .await
+        .unwrap();
+        let reference =
+            crate::services::consent_service::ensure_issuance_reference(&self.state.db, &consent)
+                .await
+                .unwrap();
+        let oauth = crate::crypto::jwt::generate_oauth_access_token_with_consent(
             &self.state.jwt_keys,
             &self.state.config,
-            &Uuid::parse_str(&self.owner).expect("owner UUID"),
+            &Uuid::parse_str(&self.owner).unwrap(),
             "account:read",
             None,
             None,
             None,
             None,
             None,
-            "account-delete-untrusted-client",
+            client_id,
+            Some(&reference),
         )
-        .expect("sign third-party OAuth token");
+        .expect("sign consent-bound third-party OAuth token");
         let key = key_service::create_api_key(
             &self.state.db,
             &self.owner,
@@ -262,9 +311,27 @@ impl Fixture {
                 .collection::<Document>(USERS)
                 .find_one(doc! {"_id":&self.owner})
                 .await
-                .expect("read removed owner")
-                .is_none()
+                .expect("read fenced owner")
+                .is_some_and(|owner| owner.get_bool("is_active") == Ok(false))
         );
+        let job = crate::services::personal_erasure_service::status(&self.state.db, &self.owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(job.completed_at.is_none());
+        assert_ne!(
+            job.status,
+            crate::models::personal_erasure::ErasureStatus::Complete
+        );
+        let replay = crate::services::personal_erasure_service::accept(
+            &self.state.db,
+            &self.owner,
+            &self.owner,
+            Some(POLICY),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.id, job.id);
         let before = self.machine_document().await;
         let basis = before
             .get_document("deletion_basis")
@@ -293,6 +360,64 @@ impl Fixture {
                 .expect("replayed recovery sweep"),
             0
         );
+        // Exercise the same durable worker used in production. Allocated
+        // runtime/volume evidence is still absent: completion must stay pending.
+        for _ in 0..24 {
+            self.state
+                .db
+                .collection::<Document>(crate::models::personal_erasure::COLLECTION_NAME)
+                .update_one(
+                    doc! {"user_id":&self.owner},
+                    vec![doc! {"$set":{"retry_at":"$$NOW"}}],
+                )
+                .await
+                .unwrap();
+            crate::services::personal_erasure_service::process_one(&self.state)
+                .await
+                .unwrap();
+            let current =
+                crate::services::personal_erasure_service::status(&self.state.db, &self.owner)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            if current
+                .domains
+                .iter()
+                .any(|domain| domain.domain == "machine" && domain.reason.is_some())
+            {
+                break;
+            }
+        }
+        let pending =
+            crate::services::personal_erasure_service::status(&self.state.db, &self.owner)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(pending.id, job.id);
+        assert!(pending.completed_at.is_none());
+        assert!(
+            pending
+                .domains
+                .iter()
+                .any(|domain| domain.domain == "machine"
+                    && domain.status != crate::models::personal_erasure::DomainStatus::Complete)
+        );
+        // The account row is removed before Machine cleanup completes; the
+        // durable owner barrier still refuses writes and the Machine record
+        // keeps its own deletion basis below.
+        assert!(
+            self.state
+                .db
+                .collection::<Document>(USERS)
+                .find_one(doc! {"_id":&self.owner})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            crate::services::erasure_admission::begin_write(&self.state.db, &self.owner).await,
+            Err(crate::errors::AppError::Conflict(_))
+        ));
         let after = self.machine_document().await;
         assert_eq!(after.get_document("deletion_basis"), Ok(&basis));
         assert_eq!(after.get_str("resource_state"), Ok("deleting"));
@@ -330,7 +455,12 @@ impl Fixture {
 async fn direct_account_delete_requires_current_disclosure_before_any_effect() {
     let f = Fixture::new("direct_account_policy_denial").await;
     f.assert_authenticated_read(&f.human_token, false).await;
-    for policy in [None, Some("machine-data-v0"), Some("machine-data-v1")] {
+    for policy in [
+        None,
+        Some("machine-data"),
+        Some("machine-data-v0"),
+        Some("machine-data-v1"),
+    ] {
         let response = f
             .request(&f.human_token, false, "DELETE", DIRECT, policy, None)
             .await;
@@ -347,6 +477,7 @@ async fn assistant_account_delete_requires_current_disclosure_before_receipt_res
     for (id, policy) in [
         ("missing-policy", None),
         ("old-policy", Some("machine-data-v0")),
+        ("previous-policy", Some("machine-data")),
         ("obsolete-development-policy", Some("machine-data-v1")),
     ] {
         let response = f
@@ -409,21 +540,24 @@ async fn assistant_account_delete_rejects_valid_oauth_and_api_key_before_receipt
 }
 
 #[tokio::test]
-async fn direct_owner_account_delete_retains_policy_basis_after_owner_removal_and_sweep_replay() {
+async fn direct_owner_account_delete_retains_policy_basis_while_physical_cleanup_is_pending_and_replayed()
+ {
     let f = Fixture::new("direct_account_durable_basis").await;
     let started = bson::DateTime::now();
     let response = f
         .request(&f.human_token, false, "DELETE", DIRECT, Some(POLICY), None)
         .await;
     assert_eq!(response.0, StatusCode::OK, "owner delete: {response:?}");
+    assert_eq!(response.1["status"], "accepted");
+    assert!(response.1["completed_at"].is_null());
     f.assert_durable_owner_basis_and_idempotent_cleanup(started)
         .await;
     f.state.db.drop().await.expect("drop fixture");
 }
 
 #[tokio::test]
-async fn assistant_owner_account_delete_retains_policy_basis_after_owner_removal_and_sweep_replay()
-{
+async fn assistant_owner_account_delete_retains_policy_basis_while_physical_cleanup_is_pending_and_replayed()
+ {
     let f = Fixture::new("assistant_account_durable_basis").await;
     let started = bson::DateTime::now();
     let response = f
@@ -437,6 +571,8 @@ async fn assistant_owner_account_delete_retains_policy_basis_after_owner_removal
         )
         .await;
     assert_eq!(response.0, StatusCode::OK, "owner delete: {response:?}");
+    assert_eq!(response.1["erasure"]["status"], "accepted");
+    assert!(response.1["erasure"]["completed_at"].is_null());
     let receipt = f
         .state
         .db

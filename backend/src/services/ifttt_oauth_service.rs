@@ -146,46 +146,50 @@ async fn ensure_registered_with_client(
     let lease = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
     let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
-    let claimed = collection.update_one(doc! {
-        "_id": &provider.id, "is_active": true,
-        "updated_at": bson::DateTime::from_chrono(provider.updated_at),
-        "client_id_encrypted": bson::Bson::Null, "client_secret_encrypted": bson::Bson::Null,
-        "$or": [
-            {"oauth_registration_until": {"$exists": false}},
-            {"oauth_registration_until": {"$lt": bson::DateTime::from_chrono(now)}}
-        ],
-    }, doc! {"$set": {
-        "oauth_registration_lease": &lease,
-        "oauth_registration_until": bson::DateTime::from_chrono(now + chrono::Duration::seconds(90)),
-    }}).await?;
-    if claimed.modified_count == 0 {
+    let raw_collection = db.collection::<bson::Document>(COLLECTION_NAME);
+    let raw = raw_collection
+        .find_one(doc! {"_id":&provider.id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("IFTTT provider unavailable".into()))?;
+    let current: ProviderConfig = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid provider storage".into()))?;
+    if bson::to_document(&current).map_err(|_| registration_error())?
+        != bson::to_document(&provider).map_err(|_| registration_error())?
+    {
+        return Err(AppError::Conflict(
+            "IFTTT provider changed before registration".into(),
+        ));
+    }
+    let mut claim = super::record_storage::exact_document_predicate(&raw);
+    claim.extend(doc! {"is_active":true,"client_id_encrypted":bson::Bson::Null,"client_secret_encrypted":bson::Bson::Null,
+        "$or":[{"oauth_registration_until":{"$exists":false}},{"oauth_registration_until":{"$lt":bson::DateTime::from_chrono(now)}}]});
+    let claimed=raw_collection.find_one_and_update(claim,doc! {"$set":{
+        "oauth_registration_lease":&lease,"oauth_registration_until":bson::DateTime::from_chrono(now+chrono::Duration::seconds(90))
+    }}).return_document(mongodb::options::ReturnDocument::After).await?;
+    let Some(claimed) = claimed else {
         let latest = collection
-            .find_one(doc! {"_id": &provider.id, "is_active": true})
+            .find_one(doc! {"_id":&provider.id,"is_active":true})
             .await?
             .ok_or_else(|| AppError::NotFound("IFTTT provider unavailable".into()))?;
         if latest.client_id_encrypted.is_some() && latest.client_secret_encrypted.is_some() {
             return Ok(latest);
         }
-        return Err(AppError::Conflict(
-            "IFTTT connection setup is busy or temporarily unavailable. Try connecting again shortly.".into(),
-        ));
-    }
+        return Err(AppError::Conflict("IFTTT connection setup is busy or temporarily unavailable. Try connecting again shortly.".into()));
+    };
     let result = register(client, &callback).await;
     let result = match result {
         Ok((client_id, secret)) => async {
-            let cid = keys.encrypt(client_id.as_bytes()).await?;
-            let sec = keys.encrypt(secret.as_bytes()).await?;
-            let saved = collection.update_one(doc! {
-                "_id": &provider.id, "is_active": true, "oauth_registration_lease": &lease,
-                "updated_at": bson::DateTime::from_chrono(provider.updated_at),
-                "slug": PROVIDER_SLUG, "provider_type": "oauth2", "credential_mode": "admin",
-                "supports_pkce": true, "token_endpoint_auth_method": "client_secret_post",
-                "authorization_url": AUTHORIZE_URL, "token_url": TOKEN_URL,
-                "client_id_encrypted": bson::Bson::Null, "client_secret_encrypted": bson::Bson::Null,
-            }, doc! {"$set": {
-                "client_id_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: cid},
-                "client_secret_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: sec},
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            use super::credential_record_service as records;
+            let cid=records::encrypt(keys,COLLECTION_NAME,&provider.id,records::PLATFORM_OWNER,"client_id_encrypted",client_id.as_bytes()).await?;
+            let sec=records::encrypt(keys,COLLECTION_NAME,&provider.id,records::PLATFORM_OWNER,"client_secret_encrypted",secret.as_bytes()).await?;
+            let mut versions=provider.secret_context_versions.clone();
+            records::mark_version(&mut versions,keys,"client_id_encrypted");
+            records::mark_version(&mut versions,keys,"client_secret_encrypted");
+            let saved=collection.update_one(super::record_storage::exact_document_predicate(&claimed),doc! {"$set":{
+                "client_id_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cid},
+                "client_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sec},
+                "secret_context_versions":bson::to_bson(&versions).map_err(|_|registration_error())?,
+                "updated_at":bson::DateTime::from_chrono(Utc::now())
             }}).await?;
             if saved.modified_count != 1 {
                 return Err(AppError::Conflict("IFTTT provider configuration changed during setup. Connect again.".into()));
@@ -281,6 +285,64 @@ mod tests {
     const CALLBACK: &str = "https://nyxid.example/api/v1/providers/callback";
 
     #[tokio::test]
+    async fn registration_resolves_through_live_credentials_in_staged_and_strict_modes() {
+        for contextual in [false, true] {
+            let db = crate::test_utils::connect_test_database("ifttt_registration_modes")
+                .await
+                .unwrap();
+            let mut keys = crate::test_utils::test_encryption_keys();
+            keys.set_contextual_record_writes(contextual);
+            super::super::provider_service::seed_default_providers(&db, &keys)
+                .await
+                .unwrap();
+            let provider = db
+                .collection::<ProviderConfig>(COLLECTION_NAME)
+                .find_one(doc! {"slug":PROVIDER_SLUG})
+                .await
+                .unwrap()
+                .unwrap();
+            let payload = serde_json::json!({"client_id":"registered-client","client_secret":"registered-secret","redirect_uris":[CALLBACK]}).to_string();
+            let mut fixture = scripted_fixture("ifttt.com", vec![format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",payload.len())]).await;
+            let client = registration_client(fixture.builder.take().unwrap()).unwrap();
+            let registered = ensure_registered_with_client(
+                &db,
+                &keys,
+                "https://nyxid.example",
+                provider,
+                &client,
+            )
+            .await
+            .unwrap();
+            let mut reader = crate::test_utils::test_encryption_keys();
+            if contextual {
+                reader.set_allow_legacy_record_reads(false);
+            }
+            let resolved =
+                super::super::user_credentials_service::resolve_platform_oauth_credentials(
+                    &reader,
+                    &registered,
+                )
+                .await
+                .unwrap();
+            assert_eq!(resolved.client_id.as_str(), "registered-client");
+            assert_eq!(
+                resolved.client_secret.as_ref().unwrap().as_str(),
+                "registered-secret"
+            );
+            assert_eq!(
+                registered
+                    .secret_context_versions
+                    .get("client_id_encrypted")
+                    .copied(),
+                contextual.then_some(3)
+            );
+            fixture.requests.recv().await.unwrap();
+            assert!(fixture.requests.try_recv().is_err());
+            db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn ifttt_registration_is_leased_encrypted_and_preserved_across_seeding() {
         use crate::test_utils::{connect_test_database, test_encryption_keys};
         let db = connect_test_database("ifttt_registration").await.unwrap();
@@ -328,9 +390,20 @@ mod tests {
         let encrypted_id = saved.client_id_encrypted.as_ref().unwrap();
         let encrypted_secret = saved.client_secret_encrypted.as_ref().unwrap();
         assert_ne!(encrypted_secret.as_slice(), b"fixture-secret");
-        assert_eq!(keys.decrypt(encrypted_id).await.unwrap(), b"fixture-client");
         assert_eq!(
-            keys.decrypt(encrypted_secret).await.unwrap(),
+            crate::services::credential_record_service::CredentialRecord::provider(&saved)
+                .decrypt(&keys, "client_id_encrypted", encrypted_id)
+                .await
+                .unwrap()
+                .as_slice(),
+            b"fixture-client"
+        );
+        assert_eq!(
+            crate::services::credential_record_service::CredentialRecord::provider(&saved)
+                .decrypt(&keys, "client_secret_encrypted", encrypted_secret)
+                .await
+                .unwrap()
+                .as_slice(),
             b"fixture-secret"
         );
         let document = db

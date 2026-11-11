@@ -19,7 +19,11 @@ export function restorePanelFocus(opener?: HTMLElement | null) {
   }
   const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]'));
   const activeDialog = dialogs.at(-1);
+  // Prefer the sidebar's account button; on mobile, where it lives in the
+  // closed drawer, fall back to the drawer opener.
   const target = activeDialog?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]') ??
-    document.querySelector<HTMLElement>('[data-assistant-account-fallback]');
+    ["menu", "drawer"].flatMap((kind) =>
+      Array.from(document.querySelectorAll<HTMLElement>(`[data-assistant-account-fallback="${kind}"]`)),
+    ).find(canRestoreFocus);
   if (canRestoreFocus(target)) target.focus();
 }

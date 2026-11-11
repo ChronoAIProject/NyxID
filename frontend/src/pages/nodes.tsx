@@ -1,7 +1,7 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { MachineIsolationBadge } from "@/components/shared/machine-isolation";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -93,7 +93,7 @@ function RegisterNodeDialog({
    */
   readonly onRegistered?: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [createdToken, setCreatedToken] = useState<{
     readonly token: string;
@@ -130,7 +130,7 @@ function RegisterNodeDialog({
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error(translateUi("Failed to create registration token"));
+        toast.error(translateErrorMessage("Failed to create registration token"));
       }
     }
   }
@@ -148,35 +148,35 @@ function RegisterNodeDialog({
     >
       <DialogTrigger asChild>
         <span>
-          <AddCtaButton label={t("Register Node")} onClick={() => setOpen(true)} />
+          <AddCtaButton label={translateUi("Register Node")} onClick={() => setOpen(true)} />
         </span>
       </DialogTrigger>
       <DialogContent>
         {createdToken ? (
           <>
             <DialogHeader>
-              <DialogTitle>{t("Registration Token Created")}</DialogTitle>
-              <DialogDescription>{t("Copy the token and use it to register your node. This token will not be shown again and expires at")}{" "}
+              <DialogTitle>{translateUi("Registration Token Created")}</DialogTitle>
+              <DialogDescription>{translateUi("Copy the token and use it to register your node. This token will not be shown again and expires at")}{" "}
                 {new Date(createdToken.expires_at).toLocaleString(getFormattingLocale())}.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
               <CopyableField
-                label={t("Registration Token")}
+                label={translateUi("Registration Token")}
                 value={createdToken.token}
               />
               <div className="rounded-lg bg-muted p-3 space-y-2">
-                <p className="text-xs font-medium text-text-tertiary">{t("Run on your node")}</p>
+                <p className="type-secondary-emphasis text-text-tertiary">{translateUi("Run on your node")}</p>
                 <div>
-                  <p className="text-10 text-muted-foreground mb-0.5">{t("File-based storage (default, works on servers)")}</p>
-                  <code className="text-xs text-foreground break-all">
+                  <p className="text-12 text-muted-foreground mb-0.5">{translateUi("File-based storage (default, works on servers)")}</p>
+                  <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag}
                   </code>
                 </div>
                 <div>
-                  <p className="text-10 text-muted-foreground mb-0.5">{t("OS keychain storage (macOS Keychain, Windows Credential Manager)")}</p>
-                  <code className="text-xs text-foreground break-all">
+                  <p className="text-12 text-muted-foreground mb-0.5">{translateUi("OS keychain storage (macOS Keychain, Windows Credential Manager)")}</p>
+                  <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag} --keychain
                   </code>
@@ -184,14 +184,14 @@ function RegisterNodeDialog({
               </div>
             </div>
             <DialogFooter>
-              <Button variant="primary" onClick={handleClose}>{t("Done")}</Button>
+              <Button variant="primary" onClick={handleClose}>{translateUi("Done")}</Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
-              <DialogTitle>{t("Register a New Node")}</DialogTitle>
-              <DialogDescription>{t("Create a registration token to connect a new credential node.")}</DialogDescription>
+              <DialogTitle>{translateUi("Register a New Node")}</DialogTitle>
+              <DialogDescription>{translateUi("Create a registration token to connect a new credential node.")}</DialogDescription>
             </DialogHeader>
             <Form {...form}>
               <form
@@ -199,8 +199,8 @@ function RegisterNodeDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                    {translateUi(form.formState.errors.root.message ?? "")}
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
+                    {form.formState.errors.root.message}
                   </div>
                 )}
                 <FormField
@@ -208,9 +208,9 @@ function RegisterNodeDialog({
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Node Name")}</FormLabel>
+                      <FormLabel>{translateUi("Node Name")}</FormLabel>
                       <FormControl>
-                        <Input placeholder={"my-home-server"} {...field} />
+                        <Input placeholder="my-home-server" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -221,12 +221,12 @@ function RegisterNodeDialog({
                   name="owner_user_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Owner")}</FormLabel>
+                      <FormLabel>{translateUi("Owner")}</FormLabel>
                       <FormControl>
                         <OrgScopeSelect
                           value={field.value ?? null}
                           onChange={field.onChange}
-                          label={t("Node owner")}
+                          label={translateUi("Node owner")}
                         />
                       </FormControl>
                       <FormMessage />
@@ -234,8 +234,8 @@ function RegisterNodeDialog({
                   )}
                 />
                 <DialogFooter>
-                  <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
-                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>{t("Create Token")}</Button>
+                  <Button type="button" variant="outline" onClick={handleClose}>{translateUi("Cancel")}</Button>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>{translateUi("Create Token")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -247,7 +247,7 @@ function RegisterNodeDialog({
 }
 
 export function NodesPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   // Set to true when `RegisterNodeDialog` mint succeeds; stays true for
   // up to 60s (enforced by the timeout effect below) so the empty node
@@ -314,7 +314,7 @@ export function NodesPage() {
     if (!deleteTarget) return;
     try {
       await deleteMutation.mutateAsync(deleteTarget.id);
-      toast.success(translateUi("Node \"{{name}}\" deleted", { name: deleteTarget.name }));
+      toast.success(translateUi(`Node "${deleteTarget.name}" deleted`));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete node"),
@@ -327,8 +327,8 @@ export function NodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Nodes")}
-        description={t("Manage credential routing and machines your agents may use.")}
+        title={translateUi("Nodes")}
+        description={translateUi("Manage credential routing and machines your agents may use.")}
         actions={
           <div className="flex items-center gap-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
@@ -344,7 +344,7 @@ export function NodesPage() {
           ))}
         </div>
       ) : error ? (
-        <ErrorBanner message={t("Failed to load nodes. Please try again.")} onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load nodes. Please try again.")} onRetry={refetch} />
       ) : !nodes || nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <WifiRouterIcon className="h-64 w-64 text-muted-foreground" />
@@ -353,14 +353,14 @@ export function NodesPage() {
               <>
                 <div className="flex items-center justify-center gap-2">
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <p className="text-12 font-medium text-foreground">{t("Waiting for your node to connect…")}</p>
+                  <p className="type-row-title text-foreground">{translateUi("Waiting for your node to connect…")}</p>
                 </div>
-                <p className="text-12 text-muted-foreground">{t("Run the registration command on the node. We'll take you to its page automatically.")}</p>
+                <p className="text-14 text-muted-foreground">{translateUi("Run the registration command on the node. We'll take you to its page automatically.")}</p>
               </>
             ) : (
               <>
-                <p className="text-12 font-medium text-foreground">{t("No Credential Nodes")}</p>
-                <p className="text-12 text-muted-foreground">{t("Create a registration token to get started.")}</p>
+                <p className="type-row-title text-foreground">{translateUi("No Credential Nodes")}</p>
+                <p className="text-14 text-muted-foreground">{translateUi("Create a registration token to get started.")}</p>
               </>
             )}
           </div>
@@ -390,10 +390,10 @@ export function NodesPage() {
                     </Button>
                   </div>
                 )}
-                <p className="pr-10 text-13 font-semibold text-foreground truncate">
+                <p data-machine-card-title="" className="pr-10 type-card-title text-foreground truncate">
                   {node.name}
                   {node.metadata?.agent_version && (
-                    <span className="ml-2 text-11 font-normal text-muted-foreground">
+                    <span className="ml-2 type-secondary text-muted-foreground">
                       v{node.metadata.agent_version}
                     </span>
                   )}
@@ -403,9 +403,9 @@ export function NodesPage() {
                   <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
                   {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-                  <span>{formatRelativeTime(node.last_heartbeat_at) ?? t("No heartbeat")}</span>
-                  <span>{t("Created ")}{formatRelativeTime(node.created_at)}</span>
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
+                  <span>{formatRelativeTime(node.last_heartbeat_at) ?? translateUi("No heartbeat")}</span>
+                  <span>{translateUi("Created ")}{formatRelativeTime(node.created_at)}</span>
                 </div>
               </div>
             ))}
@@ -436,10 +436,10 @@ export function NodesPage() {
                       </Button>
                     </div>
                   )}
-                  <p className="pr-10 text-13 font-semibold text-foreground truncate">
+                  <p data-machine-card-title="" className="pr-10 type-card-title text-foreground truncate">
                     {node.name}
                     {node.metadata?.agent_version && (
-                      <span className="ml-2 text-11 font-normal text-muted-foreground">
+                      <span className="ml-2 type-secondary text-muted-foreground">
                         v{node.metadata.agent_version}
                       </span>
                     )}
@@ -449,9 +449,9 @@ export function NodesPage() {
                     <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
                   {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-                    <span>{formatRelativeTime(node.last_heartbeat_at) ?? t("No heartbeat")}</span>
-                    <span>{t("Created ")}{formatRelativeTime(node.created_at)}</span>
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
+                    <span>{formatRelativeTime(node.last_heartbeat_at) ?? translateUi("No heartbeat")}</span>
+                    <span>{translateUi("Created ")}{formatRelativeTime(node.created_at)}</span>
                   </div>
                 </Link>
               ))}
@@ -464,13 +464,13 @@ export function NodesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>{t("Name")}</TableHead>
-                    <TableHead>{t("Owner")}</TableHead>
-                    <TableHead>{t("Status")}</TableHead>
-                    <TableHead>{t("Last Heartbeat")}</TableHead>
-                    <TableHead>{t("Created")}</TableHead>
+                    <TableHead>{translateUi("Name")}</TableHead>
+                    <TableHead>{translateUi("Owner")}</TableHead>
+                    <TableHead>{translateUi("Status")}</TableHead>
+                    <TableHead>{translateUi("Last Heartbeat")}</TableHead>
+                    <TableHead>{translateUi("Created")}</TableHead>
                     {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
-                      <TableHead className="w-[80px]">{t("Actions")}</TableHead>
+                      <TableHead className="w-[80px]">{translateUi("Actions")}</TableHead>
                     )}
                   </TableRow>
                 </TableHeader>
@@ -486,7 +486,7 @@ export function NodesPage() {
                           {node.name}
                         </span>
                         {node.metadata?.agent_version && (
-                          <span className="ml-2 text-xs text-muted-foreground">
+                          <span className="ml-2 text-13 text-muted-foreground">
                             v{node.metadata.agent_version}
                           </span>
                         )}
@@ -504,7 +504,7 @@ export function NodesPage() {
                         {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
-                        {formatRelativeTime(node.last_heartbeat_at) ?? t("Never")}
+                        {formatRelativeTime(node.last_heartbeat_at) ?? translateUi("Never")}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatRelativeTime(node.created_at)}
@@ -522,7 +522,7 @@ export function NodesPage() {
                               }}
                             >
                               <Trash2 className="h-4 w-4 text-destructive" />
-                              <span className="sr-only">{t("Delete ")}{node.name}</span>
+                              <span className="sr-only">{translateUi("Delete ")}{node.name}</span>
                             </Button>
                           )}
                         </TableCell>
@@ -545,16 +545,16 @@ export function NodesPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Delete Node")}</DialogTitle>
-            <DialogDescription>{t("Are you sure you want to delete \"")}{deleteTarget?.name ?? ""}{t("\"? This will disconnect the node and detach any AI Services routed through it. This action cannot be undone.")}</DialogDescription>
+            <DialogTitle>{translateUi("Delete Node")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete \"")}{deleteTarget?.name ?? ""}{translateUi("\"? This will disconnect the node and detach any AI Services routed through it. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >{t("Delete")}</Button>
+            >{translateUi("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

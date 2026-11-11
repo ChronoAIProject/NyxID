@@ -38,6 +38,7 @@ impl Fixture {
             keys: &self.state.encryption_keys,
             http: &self.state.http_client,
             config: &self.state.config,
+            jwt_keys: &self.state.jwt_keys,
             token_exchange_cache: &self.state.token_exchange_cache,
             node_manager: &self.state.node_ws_manager,
         }
@@ -81,10 +82,25 @@ pub(crate) async fn account_gate(
 
 async fn base(name: &str) -> (crate::AppState, String) {
     let db = connect_transaction_test_database(name).await;
+    super::security_readiness_service::ready_test_replica(&db).await;
     engine::ensure_indexes(&db).await.unwrap();
     let owner = Uuid::new_v4().to_string();
     db.collection(crate::models::user::COLLECTION_NAME)
         .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    // These fixtures isolate assistant consent and execution authority from the
+    // independent generic service approval. Explicit per-service required
+    // policies still take precedence. The real no-settings proxy control
+    // removes this preference before exercising the production default.
+    let channel = super::notification_service::get_or_create_channel(&db, &owner)
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$set": {"approval_required": false}},
+        )
         .await
         .unwrap();
     (test_app_state(db), owner)
@@ -180,6 +196,7 @@ async fn specialist_fixture(name: &str, assigned: bool) -> Fixture {
             description: "Help with the user's account".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -309,6 +326,18 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
+        channel_adapter_origin: None,
+        invocation_controlled: false,
+        invocation_id: None,
         platform_thread: false,
         platform_origin: None,
         org_agent_access: None,
@@ -381,7 +410,7 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
         a["instructions"]
             .as_str()
             .unwrap()
-            .starts_with("NyxID asked your orchestrator for this permission.")
+            .starts_with("This pending request is for your orchestrator to decide.")
     );
     let id = a["acknowledgement_id"].as_str().unwrap();
     for (user, conversation) in [
@@ -686,6 +715,14 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
     let allowed = acks::decide(db, &f.owner, &f.row.id, &row.id, true)
         .await
         .unwrap();
+    assert!(allowed.continuation_receipt_id.is_none());
+    assert!(
+        engine::get(db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
     assert_eq!(
         (allowed.expires_at - allowed.decided_at.unwrap()).num_seconds(),
         acks::ACTION_SECONDS
@@ -890,16 +927,28 @@ fn minimal_args(name: &str, id: &str) -> Value {
 
 #[test]
 fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
-    assert_eq!(tools::TOOL_NAMES.len(), 22);
+    assert_eq!(tools::TOOL_NAMES.len(), 26);
+    assert_eq!(
+        tools::TOOL_NAMES
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        tools::TOOL_NAMES.len()
+    );
+    assert_eq!(
+        super::assistant_cma_tools::NAMES,
+        &["list_cma_resources", "cma_save_attachment", "cma_guide",]
+    );
     let service = tools::virtual_service(&orchestrator_chat());
     // NyxBot also gets the team and memory tools; specialists get read-only
     // account tools plus their own agent tools. The flag-gated drafting tool
-    // is in both lists and only `virtual_service_for` adds it.
+    // is in both lists and only `virtual_service_for` adds it. The CMA tools
+    // also require actor-aware discovery and are absent from the static list.
     let team = super::assistant_team_tools::TOOL_NAMES.len();
     let memory = super::assistant_team_tools::AGENT_TOOL_NAMES.len();
     assert_eq!(
         service.endpoints.len(),
-        tools::TOOL_NAMES.len() + team + memory - 2
+        tools::TOOL_NAMES.len() - super::assistant_cma_tools::NAMES.len() + team + memory - 2
     );
     let mut subagent = orchestrator_chat();
     subagent.role = crate::models::assistant_conversation::AgentRole::Subagent;
@@ -942,6 +991,16 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
                 tools::validate_arguments(name, &invalid).is_err(),
                 "{name} {forbidden}"
             );
+        }
+        if super::assistant_cma_tools::owns(name) {
+            assert!(service.endpoints.iter().all(|e| e.name != *name));
+            assert!(limited.endpoints.iter().all(|e| e.name != *name));
+            assert!(!super::assistant_cma_tools::description(name).is_empty());
+            assert_eq!(
+                tools::schema(name),
+                super::assistant_cma_tools::schema(name)
+            );
+            continue;
         }
         let endpoint = service.endpoints.iter().find(|e| e.name == *name).unwrap();
         assert!(
@@ -1036,7 +1095,11 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
             )
             .await;
         assert!(result.is_error, "{name}");
-        if tools::read_only(name) {
+        if super::assistant_cma_tools::owns(name) {
+            assert_eq!(result.value["error"], "forbidden", "{name}");
+            assert!(result.permission_request.is_none(), "{name}");
+            assert!(result.value.get("acknowledgement_id").is_none(), "{name}");
+        } else if tools::read_only(name) {
             assert_eq!(result.value["error"], "acknowledgement_required", "{name}");
             assert_eq!(result.value["kind"], "account");
             assert_eq!(result.value["decider"], "orchestrator");
@@ -1072,7 +1135,12 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
                 &minimal_args(name, &missing),
             )
             .await;
-        if !tools::read_only(name) {
+        if super::assistant_cma_tools::owns(name) {
+            assert!(result.is_error, "{name}");
+            assert_eq!(result.value["error"], "forbidden", "{name}");
+            assert!(result.permission_request.is_none(), "{name}");
+            assert!(result.value.get("acknowledgement_id").is_none(), "{name}");
+        } else if !tools::read_only(name) {
             assert_eq!(result.value["error"], "orchestrator_only", "{name}");
         } else if name.starts_with("list_") && *name != "list_agent_key_bindings" {
             assert!(
@@ -1111,6 +1179,16 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         assert_eq!(event.get_str("role").unwrap(), "subagent");
         assert!(event.contains_key("tool_name") && event.contains_key("outcome"));
         assert!(!event.contains_key("arguments") && !event.contains_key("result"));
+        if super::assistant_cma_tools::owns(
+            event
+                .get_str("tool_name")
+                .unwrap()
+                .strip_prefix("nyxid__")
+                .unwrap(),
+        ) {
+            assert_eq!(event.get_str("outcome").unwrap(), "refused");
+            assert_eq!(event.get("acknowledgement_id"), Some(&bson::Bson::Null));
+        }
     }
 }
 
@@ -1242,6 +1320,27 @@ async fn native_inventory(full: bool) {
         "webhook_secret_hash": "not-returned", "status": "active", "is_active": true,
         "created_at": now, "updated_at": now,
     }).await.unwrap();
+    let adapters = call(&f, "list_channel_adapters", json!({})).await;
+    assert!(
+        adapters["setup_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/assistant?panel=nyxbot")
+    );
+    let profiles = adapters["adapters"].as_array().unwrap();
+    for expected in [
+        "telnyx.conversation_relay",
+        "telnyx.messaging",
+        "twilio.conversation_relay",
+        "twilio.messaging",
+        "elevenlabs.custom_llm",
+    ] {
+        assert!(
+            profiles
+                .iter()
+                .any(|profile| profile["adapter_id"] == expected)
+        );
+    }
     call(&f, "list_channel_bots", json!({})).await;
     assert_eq!(
         call(&f, "get_channel_bot", json!({"bot_id": bot})).await["label"],
@@ -1306,6 +1405,23 @@ async fn native_inventory(full: bool) {
     call(&f, "delete_node", json!({"node_id": node})).await;
     call(&f, "delete_agent_key", json!({"api_key_id": key})).await;
     assert!(key_service::get_api_key(db, &f.owner, &key).await.is_err());
+    // Ordinary account access, including Full access, does not grant CMA.
+    let discovered = tools::virtual_service_for(db, &f.chat).await;
+    for name in super::assistant_cma_tools::NAMES {
+        assert!(discovered.endpoints.iter().all(|e| e.name != *name));
+        let result = f
+            .tools()
+            .execute(
+                &f.auth,
+                &format!("nyxid__{name}"),
+                &minimal_args(name, &f.chat.agent_id),
+            )
+            .await;
+        assert!(result.is_error, "{name}");
+        assert_eq!(result.value["error"], "forbidden", "{name}");
+        assert!(result.permission_request.is_none(), "{name}");
+        assert!(result.value.get("acknowledgement_id").is_none(), "{name}");
+    }
     for name in tools::TOOL_NAMES {
         let count = db
             .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
@@ -1316,6 +1432,27 @@ async fn native_inventory(full: bool) {
             })
             .await
             .unwrap();
+        if super::assistant_cma_tools::owns(name) {
+            assert_eq!(count, 0, "{name}");
+            let refused = db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {
+                    "event_type": "assistant_account_tool_call",
+                    "event_data.tool_name": format!("nyxid__{name}"),
+                    "event_data.outcome": "refused",
+                    "event_data.acknowledgement_id": {"$type": "null"},
+                })
+                .await
+                .unwrap();
+            assert_eq!(refused, 1, "{name}");
+            let acknowledgements = db
+                .collection::<bson::Document>(ACKS)
+                .count_documents(doc! {"tool_name": format!("nyxid__{name}")})
+                .await
+                .unwrap();
+            assert_eq!(acknowledgements, 0, "{name}");
+            continue;
+        }
         assert!(count >= 1, "{name}");
         if tools::destructive(name) && !full {
             let count = db
@@ -2159,4 +2296,421 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     .unwrap();
     assert!(created);
     assert_eq!(row.decider, "orchestrator");
+}
+
+#[tokio::test]
+async fn receipt_history_joins_visible_answer_turn_before_its_timestamp_beyond_latest_twenty() {
+    let f = fixture("receipt_visible_turn_page").await;
+    let card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "account",
+            service: None,
+            tool: None,
+            arguments: None,
+            summary: "Account",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let created = card.created_at;
+    let turn = card.creation_turn_id.clone().unwrap();
+    assert_eq!(Some(&turn), f.row.active_turn.as_ref().map(|t| &t.turn_id));
+    let mut cards = Vec::new();
+    for i in 0..30 {
+        let mut next = card.clone();
+        next.id = Uuid::new_v4().to_string();
+        next.status = "allowed".into();
+        next.creation_turn_id = Some(format!("other-{i}"));
+        next.created_at = created + Duration::seconds(i + 2);
+        cards.push(next);
+    }
+    f.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_many(cards)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(ACKS)
+        .update_one(doc! {"_id":&card.id}, doc! {"$set":{"status":"denied"}})
+        .await
+        .unwrap();
+    let recent = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert!(!recent.iter().any(|c| c.id == card.id));
+    // Page begins with the assistant answer, after the card's creation time.
+    let page = acks::history_for_messages(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        Some(created + Duration::seconds(1)),
+        std::slice::from_ref(&turn),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.iter().filter(|c| c.id == card.id).count(), 1);
+    assert_eq!(page.len(), 21);
+    let linked = page.iter().find(|c| c.id == card.id).unwrap();
+    assert_eq!(linked.requested_turn_id, card.requested_turn_id);
+    assert_eq!(linked.creation_turn_id.as_deref(), Some(turn.as_str()));
+    let dto = crate::handlers::assistant_nyxagent::AcknowledgementResponse::from(linked.clone());
+    assert_eq!(serde_json::to_value(dto).unwrap()["creation_turn_id"], turn);
+}
+
+#[tokio::test]
+async fn built_in_channel_guide_needs_no_ornn_and_respects_guest_specialist_authority() {
+    let f = orchestrator_fixture("builtin_setup_discovery").await;
+    assert!(super::assistant_team_tools::read_only(
+        "channel_setup_guide"
+    ));
+    assert!(super::assistant_team_tools::is_team_tool(
+        "nyxid__channel_setup_guide"
+    ));
+    let (guide, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__channel_setup_guide",
+        &json!({}),
+    )
+    .await;
+    assert!(!error, "{guide}");
+    assert_eq!(guide["live_provider_verified"], false);
+    let text = guide["guide"].as_str().unwrap();
+    assert!(text.contains("/api/v1/webhooks/channel/x/platform"));
+    assert!(text.contains("/2/dm_conversations/{id}/messages"));
+    assert!(text.contains("Ornn is optional"));
+    assert!(text.contains("Native public/personal") || text.contains("native public/personal"));
+    assert!(text.contains("list_channel_adapters"));
+    assert!(guide.to_string().len() < 16 * 1024);
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    assert!(
+        crate::handlers::assistant_team::execute_tool(
+            &f.state,
+            &guest,
+            "nyxid__channel_setup_guide",
+            &json!({})
+        )
+        .await
+        .1
+    );
+    let specialist = direct_fixture("builtin_guide_specialist_acl").await;
+    let (blocked, error) = crate::handlers::assistant_team::execute_tool(
+        &specialist.state,
+        &specialist.chat,
+        "nyxid__channel_setup_guide",
+        &json!({}),
+    )
+    .await;
+    assert!(error);
+    assert_eq!(blocked["error"], "orchestrator_only");
+}
+
+#[tokio::test]
+async fn channel_setup_health_discovery_is_authorized_metadata_and_has_no_provider_effects() {
+    let f = orchestrator_fixture("setup_health_acl_evidence").await;
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    let bot_id = Uuid::new_v4().to_string();
+    let bot = bson::doc! {"_id":&bot_id,"user_id":&org,"platform":"x","label":"Org DM",
+    "platform_bot_id":"10","platform_bot_username":"support","webhook_registered":false,
+    "webhook_secret_hash":"secret-must-not-leak","status":"active","is_active":true,
+    "credential_source":"connection","connection_id":"credential-id",
+    "bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]},
+    "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()};
+    let bots = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    bots.insert_one(&bot).await.unwrap();
+    let args = json!({"bot_id":bot_id});
+    let result = f
+        .tools()
+        .execute(&f.auth, "nyxid__get_channel_bot", &args)
+        .await;
+    assert!(result.is_error);
+    let memberships = f
+        .state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME);
+    memberships
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &f.owner,
+            crate::models::org_membership::OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        f.tools()
+            .execute(&f.auth, "nyxid__get_channel_bot", &args)
+            .await
+            .is_error
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(
+            doc! {"org_user_id":&org,"member_user_id":&f.owner},
+            doc! {"$set":{"role":"admin"}},
+        )
+        .await
+        .unwrap();
+    let view = call(&f, "get_channel_bot", args).await;
+    let health = &view["health"];
+    assert_eq!(health["provider_slug"], "twitter");
+    assert_eq!(health["credential_connection_id"], "credential-id");
+    assert_eq!(health["authorization"], "not_probed");
+    assert_eq!(health["automatic_reply"], "not_verified");
+    assert!(health["last_authenticated_inbound_at"].is_null());
+    assert!(health["last_outbound_attempt_at"].is_null());
+    assert!(!view.to_string().contains("secret-must-not-leak"));
+    assert_eq!(
+        bots.find_one(doc! {"_id":&bot_id}).await.unwrap().unwrap(),
+        bot
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+async fn automation_action_card(f: &Fixture) -> AssistantAcknowledgement {
+    let mut card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id":"node"})),
+            summary: "Delete node",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let work = crate::models::trigger_run::AutomationWork {
+        run_id: Uuid::new_v4().to_string(),
+        work_id: Uuid::new_v4().to_string(),
+        coordinator_thread_id: f.row.id.clone(),
+        role: "direct".into(),
+        confirmation_policy: None,
+    };
+    f.state
+        .db
+        .collection::<bson::Document>(ACKS)
+        .update_one(
+            doc! {"_id":&card.id},
+            doc! {"$set":{"automation_work":bson::to_bson(&work).unwrap()}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(super::trigger_schedule::WORK)
+        .insert_one(doc! {"_id":&work.run_id,"at":bson::DateTime::now(),"wake_generation":0_i64})
+        .await
+        .unwrap();
+    card.automation_work = Some(work);
+    card
+}
+
+#[tokio::test]
+async fn automation_decision_rolls_back_when_queue_is_full_and_cannot_be_evicted() {
+    let f = direct_fixture("automation_decision_queue_durability").await;
+    let db = &f.state.db;
+    let card = automation_action_card(&f).await;
+    let mut events: Vec<_> = (0..engine::MAX_PENDING_EVENTS)
+        .map(|_| super::assistant_team_service::event("notice", "existing".into(), None))
+        .collect();
+    let conversations =
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    conversations
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"pending_events": bson::to_bson(&events).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        acks::decide(db, &f.owner, &f.row.id, &card.id, true).await,
+        Err(crate::errors::AppError::Conflict(_))
+    ));
+    let pending = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(doc! {"_id": &card.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert!(pending.continuation_receipt_id.is_none());
+    let unchanged = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(
+        bson::to_bson(&unchanged.pending_events).unwrap(),
+        bson::to_bson(&events).unwrap()
+    );
+    events.pop();
+    conversations
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"pending_events": bson::to_bson(&events).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    engine::push_events(
+        db,
+        &f.owner,
+        &f.row.id,
+        vec![super::assistant_team_service::event(
+            "notice",
+            "later".into(),
+            None,
+        )],
+    )
+    .await
+    .unwrap();
+    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(current.pending_events.len(), engine::MAX_PENDING_EVENTS);
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.text == "later")
+    );
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.kind == "automation_confirmation_decided"
+                && event.text.contains(&decided.id))
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn automation_queue_notice_eviction_preserves_provider_approval() {
+    let f = direct_fixture("automation_approval_queue_durability").await;
+    let db = &f.state.db;
+    let approval = super::assistant_team_service::event(
+        super::cma_operation::APPROVAL_EVENT_KIND,
+        "Approval needed".into(),
+        None,
+    );
+    let mut events = vec![approval.clone()];
+    let mut automation =
+        super::assistant_team_service::event("automation_work", "pending work".into(), None);
+    automation.automation_work = Some(crate::models::trigger_run::AutomationWork {
+        run_id: Uuid::new_v4().to_string(),
+        work_id: Uuid::new_v4().to_string(),
+        coordinator_thread_id: f.row.id.clone(),
+        role: "direct".into(),
+        confirmation_policy: None,
+    });
+    events.push(automation.clone());
+    while events.len() < engine::MAX_PENDING_EVENTS {
+        events.push(super::assistant_team_service::event(
+            "notice",
+            "ordinary notice".into(),
+            None,
+        ));
+    }
+    let evictable = events[2].id.clone();
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"pending_events": bson::to_bson(&events).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let notice = super::assistant_team_service::event("notice", "new notice".into(), None);
+    let current = engine::push_events(db, &f.owner, &f.row.id, vec![notice.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.pending_events.len(), engine::MAX_PENDING_EVENTS);
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| { event.id == approval.id })
+    );
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.id == automation.id)
+    );
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.id == notice.id)
+    );
+    assert!(
+        !current
+            .pending_events
+            .iter()
+            .any(|event| event.id == evictable)
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_approvals_cannot_wake_a_thread_at_the_event_streak_cap() {
+    use super::{assistant_team_service as team, async_service_operation as operations};
+    use crate::models::assistant_conversation::{COLLECTION_NAME, TurnOrigin};
+    let f = orchestrator_fixture("provider_approval_capped_wake").await;
+    f.state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"active_turn":bson::Bson::Null,"event_streak":team::MAX_EVENT_STREAK}},
+        )
+        .await
+        .unwrap();
+    let approval = team::event(
+        super::cma_operation::APPROVAL_EVENT_KIND,
+        "Approval needed".into(),
+        None,
+    );
+    engine::push_events(&f.state.db, &f.owner, &f.row.id, vec![approval.clone()])
+        .await
+        .unwrap();
+    assert!(
+        team::queued(&f.state.db, Some(&f.owner))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    crate::handlers::assistant_team::wake(&f.state, &f.owner, &f.row.id).await;
+    let mut row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    assert!(row.active_turn.is_none());
+    assert_eq!(row.event_streak, team::MAX_EVENT_STREAK);
+    assert_eq!(row.pending_events[0].id, approval.id);
+    assert!(operations::select_events(&mut row, TurnOrigin::User).is_empty());
+    let selected = operations::select_events(&mut row, TurnOrigin::Event);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].id, approval.id);
+    f.state.db.drop().await.unwrap();
 }

@@ -192,7 +192,7 @@ it("mounts populated provider controls only after loading", () => {
   expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
 });
 it("reviews and cancels, then submits only the provider name", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ProviderEditPage />);
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "Renamed provider" },
@@ -215,7 +215,7 @@ it("reviews and cancels, then submits only the provider name", async () => {
   );
 });
 it("preserves a draft and blocks confirmation after a background update", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   const view = render(<ProviderEditPage />);
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "My draft" },
@@ -254,7 +254,7 @@ it("keeps linked-service controls current while retaining the provider draft", (
   ).toHaveTextContent("Enable provider first");
 });
 it("shows selected inactive and unavailable apps and patches only a service rename", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ServiceEditPage />);
   expect(screen.getByLabelText("Rule 1 path")).toHaveValue("/messages/{id}");
   expect(screen.getByLabelText("Old app (inactive)")).toBeChecked();
@@ -275,7 +275,7 @@ it("shows selected inactive and unavailable apps and patches only a service rena
   );
 });
 it("retains a canceled endpoint-policy draft and sends only its confirmed sparse patch", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ServiceEditPage />);
   expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Rule 1 path"), {
@@ -310,7 +310,7 @@ it("retains a canceled endpoint-policy draft and sends only its confirmed sparse
 it.each(["clear", "deny all"] as const)(
   "confirms endpoint policy %s explicitly",
   async (action) => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<ServiceEditPage />);
     await user.click(
       action === "clear"
@@ -334,7 +334,7 @@ it.each(["clear", "deny all"] as const)(
   },
 );
 it("blocks a policy confirmation on background drift without replacing the draft", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   const view = render(<ServiceEditPage />);
   fireEvent.change(screen.getByLabelText("Rule 1 path"), {
     target: { value: "/draft" },
@@ -356,7 +356,7 @@ it("blocks a policy confirmation on background drift without replacing the draft
 it.each(["inactive", "missing"] as const)(
   "keeps a newly selected app visible and removable when refetched as %s",
   async (state) => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const view = render(<ServiceEditPage />);
     fireEvent.change(screen.getByLabelText("Service Name"), {
       target: { value: "Service draft" },
@@ -481,7 +481,7 @@ it.each([
 ] as const)(
   "displays saved SSH mode %s and confirms a change to %s",
   async (mode, nextMode, label, nextLabel) => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mock.service.data = {
       ...mock.service.data!,
       service_type: "ssh",
@@ -536,10 +536,11 @@ it.each(["https://example.com/new-revoke", ""])(
         style: "rfc7009",
         auth: "basic",
         revokes_grant: true,
+        effect_scope: "grant_wide",
         request_encoding: "json",
       },
     } as ProviderConfig;
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<ProviderEditPage />);
     fireEvent.change(screen.getByLabelText("Revocation URL"), {
       target: { value: url },
@@ -550,7 +551,7 @@ it.each(["https://example.com/new-revoke", ""])(
     );
     await waitFor(() =>
       expect(mock.updateProvider).toHaveBeenCalledWith({
-        revocation: url ? { ...mock.provider.data!.revocation, url } : null,
+        revocation: url ? { ...mock.provider.data!.revocation, url, effect_scope: null } : null,
       }),
     );
   },

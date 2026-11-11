@@ -39,11 +39,11 @@ function CodeBlock({
 
   return (
     <div className="space-y-2">
-      <Badge variant="secondary" className="text-10">
+      <Badge variant="secondary" className="text-12">
         {label}
       </Badge>
       <div className="relative">
-        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-14 text-foreground">
           {code}
         </pre>
         <Button
@@ -69,11 +69,12 @@ function StepCard({
   readonly title: string;
   readonly children: React.ReactNode;
 }) {
+  useUiTranslation();
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-3">
-          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary type-secondary-strong text-primary-foreground">
             {index}
           </span>
           {title}
@@ -213,8 +214,8 @@ export function IntegrationGuidePage() {
               className="flex items-center gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5"
             >
               <div className="min-w-0 flex-1">
-                <p className="text-12 text-foreground break-all">{scope}</p>
-                <p className="text-11 text-muted-foreground">
+                <p className="text-14 text-foreground break-all">{scope}</p>
+                <p className="text-13 text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {meta.title}
                   </span>

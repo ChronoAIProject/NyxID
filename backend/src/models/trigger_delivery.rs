@@ -18,6 +18,8 @@ pub enum TriggerDeliveryRecordStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TriggerDeliveryRecord {
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub trigger_id: String,
@@ -72,6 +74,7 @@ mod tests {
     fn bson_roundtrip_redacts_encrypted_envelope() {
         let now = Utc::now();
         let record = TriggerDeliveryRecord {
+            secret_context_versions: Default::default(),
             id: "delivery-id".to_string(),
             trigger_id: "trigger-id".to_string(),
             user_id: "user-id".to_string(),

@@ -1,4 +1,5 @@
-import { useWizardTranslation } from "@/i18n/wizard";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useOrgs } from "@/hooks/use-orgs";
 import {
   Select,
@@ -9,10 +10,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import { GroupedSelectTrigger } from "@/components/ui/grouped-list";
+
 const PERSONAL_VALUE = "__personal__";
 
 interface OrgScopeSelectProps {
   readonly id?: string;
+  readonly grouped?: boolean;
   readonly "aria-describedby"?: string;
   /** `null` means personal; `all` selects every scope when allowAll is set. */
   readonly value: string | null;
@@ -42,6 +46,7 @@ interface OrgScopeSelectProps {
  */
 export function OrgScopeSelect({
   id,
+  grouped = false,
   "aria-describedby": ariaDescribedBy,
   value,
   onChange,
@@ -51,13 +56,14 @@ export function OrgScopeSelect({
   allowAll = false,
   personalLabel = "Personal",
 }: OrgScopeSelectProps) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const { data: orgs, isLoading } = useOrgs();
 
   const eligibleOrgs = (orgs ?? []).filter(
     (o) => !adminOnly || o.your_role === "admin",
   );
 
+  const Trigger = grouped ? GroupedSelectTrigger : SelectTrigger;
   return (
     <Select
       value={value ?? PERSONAL_VALUE}
@@ -66,19 +72,19 @@ export function OrgScopeSelect({
       }
       disabled={disabled || isLoading}
     >
-      <SelectTrigger id={id} aria-label={t(label)} aria-describedby={ariaDescribedBy}>
-        <SelectValue placeholder={t(personalLabel)} />
-      </SelectTrigger>
+      <Trigger id={id} aria-label={translateUi(label)} aria-describedby={ariaDescribedBy}>
+        <SelectValue placeholder={translateUi(personalLabel)} />
+      </Trigger>
       <SelectContent>
         {allowAll && (
           <>
-            <SelectItem value="all">{t("View all")}</SelectItem>
+            <SelectItem value="all">{translateUi("View all")}</SelectItem>
             <SelectSeparator asChild className="border-0">
               <hr />
             </SelectSeparator>
           </>
         )}
-        <SelectItem value={PERSONAL_VALUE}>{t(personalLabel)}</SelectItem>
+        <SelectItem value={PERSONAL_VALUE}>{translateUi(personalLabel)}</SelectItem>
         {eligibleOrgs.map((org) => (
           <SelectItem key={org.id} value={org.id}>
             {org.display_name || org.id}

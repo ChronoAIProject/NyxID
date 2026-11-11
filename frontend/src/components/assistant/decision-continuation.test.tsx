@@ -44,8 +44,8 @@ it("refreshes a continuation inside a memoized transcript row without rebuilding
   const initialRenders = renderMessage.mock.calls.length;
 
   for (const [language, label] of [
-    ["zh-CN", "在你决定后继续"],
-    ["zh-TW", "在你決定後繼續"],
+    ["zh-CN", "在你做出决定后继续"],
+    ["zh-TW", "在你做出決定後繼續"],
   ]) {
     await act(async () => {
       await appI18n.changeLanguage(language);

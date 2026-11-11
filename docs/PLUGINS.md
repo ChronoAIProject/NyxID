@@ -58,6 +58,12 @@ Plugins sign in with OAuth dynamic client registration. On the consent page the 
 
 MCP sessions created by tokens issued to an OAuth client, or by tokens restricted to certain services or nodes, never authenticate on their own: every request must carry a live bearer token, so the grant always applies. This holds once every backend replica runs a build with `session_fallback_allowed`; during a rolling deploy older replicas still honor the fallback. Sessions created before that build (no flag) need a live bearer once; clients refresh on the 401.
 
+For MFA-enabled accounts, fallback also requires the exact live parent human
+session to carry MFA assurance. Legacy MCP rows without a parent and sessions
+whose parent has expired, was revoked, or lacks assurance receive 401. Sign in
+again with MFA and initialize a new connection. An unrelated assured login does
+not authorize an older MCP session.
+
 Connections recover without user action. A request naming an unknown, expired or foreign `Mcp-Session-Id` gets HTTP 404 (JSON-RPC body `-32002`), which Streamable HTTP clients answer by initializing a new session with the credential they hold. Ending a NyxID login, and server restarts, only remove session-fallback sessions, so OAuth clients' sessions survive both. On `/oauth/token`, every dead refresh token (malformed, expired, revoked, rotated past the grace period, or unknown) returns `400 invalid_grant`, which makes Claude and Codex clear their tokens and ask the user to sign in again; a deactivated issuing client returns `401 invalid_client` so the client re-registers.
 
 ## Requirements

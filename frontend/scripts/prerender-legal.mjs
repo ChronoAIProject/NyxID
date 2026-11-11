@@ -7,11 +7,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft } from "lucide-react";
+import { publicUrl } from "./public-origin.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
 const css = await fs.readFile(path.join(root, "scripts", "legal-page.css"), "utf8");
 const etags = {};
+const themeScript = `try{const mode=JSON.parse(localStorage.getItem("nyxid.theme")||"null")?.state?.mode;if(mode==="light"||(mode!=="dark"&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("theme-light")}catch{}`;
+const themePath = `/assets/legal-theme-${createHash("sha256").update(themeScript).digest("hex").slice(0, 16)}.js`;
+await fs.writeFile(path.join(dist, themePath.slice(1)), themeScript);
 
 function escapeHtml(value) {
   return value.replace(/[&<>"']/g, (char) => ({
@@ -40,13 +44,13 @@ for (const slug of ["privacy", "terms"]) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="description" content="${escapeHtml(displayTitle)} for NyxID">
-    <link rel="canonical" href="https://nyx.chrono-ai.fun/${slug}">
+    <link rel="canonical" href="${publicUrl(`/${slug}`)}">
     <link rel="icon" type="image/svg+xml" href="/nyxid-coloured-icon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
     <title>${escapeHtml(displayTitle)} | NyxID</title>
-    <script>try{const mode=JSON.parse(localStorage.getItem("nyxid.theme")||"null")?.state?.mode;if(mode==="light"||(mode!=="dark"&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("theme-light")}catch{}</script>
+    <script src="${themePath}"></script>
     <style>${css}</style>
   </head>
   <body class="legal-page legal-page--${slug}">

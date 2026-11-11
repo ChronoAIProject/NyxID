@@ -6,6 +6,14 @@ API keys and an admin-managed shared platform key. It uses
 Configure this service through **Services** or **Providers → Telnyx → Linked services**.
 Both entry points edit the same catalog service.
 
+For NyxBot phone conversations and SMS FAQ replies, see
+[NyxBot service adapters](NYXBOT_SERVICE_ADAPTERS.md). That integration adds
+verified number/application bindings, guest specialist execution and carrier
+usage settlement behind `nyxbot:service-adapters`. It supports user-owned Telnyx
+voice and SMS, plus allocated platform SMS. Shared-platform Telnyx voice remains
+unavailable because the inbound provider APIs do not enforce the required call
+duration bound.
+
 Choose the setup that matches who owns the key and how users will call Telnyx:
 
 | Setup | Where to configure it | Current behavior |
@@ -32,7 +40,7 @@ Other admin and ownership surfaces have different purposes:
 | --- | --- |
 | **Services → Telnyx → Edit → Platform key** | Existing admin storage and execution path; recommended for the shared catalog service. |
 | A separate admin-created internal HTTP service, such as `telnyx-shared` | Existing alternative when the shared service needs its own name, pricing, or endpoint policy. Configure its credential, explicit platform-key audience, and spec URL. |
-| **Admin → Platform Credentials** | Currently populated by registered channel adapters for managed onboarding and webhook credentials. Telnyx is not registered there, and the Telnyx proxy does not read this store. Exposing catalog keys here would require UI/API integration. |
+| **Admin → Platform Credentials** | Channel adapters use this page for managed onboarding. Its **Platform phone accounts and allocations** section also manages trusted carrier accounts and ownership allocations for NyxBot adapters. The encrypted Telnyx API key remains in the catalog; this section does not introduce a separate vendor-key store. |
 | **Providers → Telnyx → Linked services** | Select `api-telnyx` and choose **Configure service** to edit the same shared key, audience, endpoint policy, and prices. Provider OAuth app credentials remain separate. |
 | An organization-owned Telnyx connection | Existing option for sharing an organization's own account with authorized members. This remains an org credential, not a site-wide platform key. |
 
@@ -158,7 +166,8 @@ methods and paths with Telnyx's official specification.
 
 Text-to-speech WebSockets use `/text-to-speech/speech` through the existing proxy
 with Telnyx's documented handshake and frame protocol. Telnyx Ultra speech is
-HTTP-only. Incoming call media streams and webhooks need a separate application
+HTTP-only. NyxBot's service adapters provide an incoming Conversation Relay and
+SMS webhook receiver; raw call media streams require their own application
 receiver. Outbound calls require a configured Telnyx voice connection and an
 authorized caller ID; messages require a configured sender and any applicable
 messaging registration.

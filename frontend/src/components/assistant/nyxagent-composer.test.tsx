@@ -47,7 +47,7 @@ describe("NyxAgent web steering", () => {
     expect(nyxAgentTransport.steer).toHaveBeenCalledWith(conversation.id, "Focus on the latest results", "turn-1", expect.any(String));
     expect(view.props.onSend).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Attach files" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add context" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Stop assistant turn" }));
     expect(view.props.onStop).toHaveBeenCalledOnce();
   });

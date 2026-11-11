@@ -309,7 +309,11 @@ impl TelegramNewService<'_> {
     }
 
     async fn verify_claim_provenance(&self, claim: &TelegramBotClaim) -> AppResult<DateTime<Utc>> {
-        let (manager, _, values) = self.manager().await?;
+        let (manager, _, values) = self
+            .for_manager(claim.manager_bot_id)
+            .await?
+            .manager()
+            .await?;
         if manager != claim.manager_bot_id
             || values.get("observation_id") != Some(claim.observation_id.as_str())
         {
@@ -352,8 +356,12 @@ impl TelegramNewService<'_> {
         let claim = self.load_claim(code).await?;
         with_operation(
             self.db,
-            &format!("telegram-child:{}", claim.telegram_bot_id),
-            self.redeem_claim_inner(actor, owner, code, label),
+            "telegram-new-manager-configuration",
+            with_operation(
+                self.db,
+                &format!("telegram-child:{}", claim.telegram_bot_id),
+                self.redeem_claim_inner(actor, owner, code, label),
+            ),
         )
         .await
     }
@@ -426,6 +434,8 @@ impl TelegramNewService<'_> {
             status: Status::Ready,
             active: true,
             revision: 0,
+            previous_challenge_hashes: Vec::new(),
+            username_seed: None,
             challenge_hash: hash(&hex::encode(rand::random::<[u8; 24]>())),
             telegram_user_id: Some(claim.telegram_user_id),
             telegram_bot_id: Some(claim.telegram_bot_id),
@@ -434,6 +444,9 @@ impl TelegramNewService<'_> {
             manager_revision: Some(1),
             auto_connect: true,
             start_update_id: None,
+            creation_context: None,
+            prompt_delivery: None,
+            prompt_update_boundary: None,
             connection_attempts: 0,
             next_connection_attempt_at: None,
             connection_error: None,

@@ -27,6 +27,9 @@ mod billing;
 #[path = "service_pool_inspection_tests.rs"]
 mod inspection;
 
+#[path = "service_pool_assistant_policy_tests.rs"]
+mod assistant_policy;
+
 #[path = "service_pool_runtime_tests.rs"]
 mod runtime;
 

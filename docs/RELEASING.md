@@ -82,15 +82,123 @@ https://github.com/ChronoAIProject/NyxID/.github/workflows/release.yml@refs/tags
 8. On Windows, keeps the legacy `self-replace` in-place swap because native symlinks require Developer Mode or elevated privileges.
 9. Runs the newly-installed binary with `nyxid ai-setup update` as a bounded child process while retaining the update lock.
 
-If no compatible prebuilt asset exists for the host target, the updater clearly falls back to:
+If the requested release or compatible prebuilt asset is unavailable, the updater
+fails without building source. Attestation failure also fails closed. The
+`--insecure-skip-verify` flag has been removed; unattended CLI and machine updates
+have no verification bypass or source fallback.
+
+Source builds require an explicit choice:
 
 ```bash
-cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli --force --locked
+nyxid update --from-source --version X.Y.Z
 ```
 
-On Linux arm64 source fallback, the updater uses `CC=clang` when `clang` is available. If an affected GCC is configured, or if Cargo output shows the `aws-lc-sys` `gcc#95189` compiler guard, the updater tells the user to install `clang` and retry with `CC=clang`.
+The updater resolves that release's tag through GitHub's Git API, peels annotated
+tags to a full 40-hex commit, and fetches `cli/Cargo.toml` at that exact commit.
+The package version must match the requested release. It then runs
+`cargo install --git https://github.com/ChronoAIProject/NyxID --rev <commit> --locked`
+into private staging and requires the staged binary to report the exact requested
+version before activation. Omitted `--version` selects the latest actual release,
+never default-branch HEAD. On Linux arm64, it selects `CC=clang` when available and
+reports the existing GCC compiler-guard recovery instructions when applicable.
 
-Verification failures never fall back to source automatically. They fail closed unless the user explicitly passes `--insecure-skip-verify`.
+On Unix, a local source build is recorded separately as
+`vX.Y.Z+source.<commit>/nyxid` (appending `.source.<commit>` to an existing build
+suffix), with a `.local-source.json` marker. Activation copies into the destination
+filesystem, syncs, then atomically replaces the binary entry and active symlink.
+It never replaces the trusted unattended controller. Source activation persists
+an automatic-update hold first; install an attested prebuilt release and run
+`nyxid update auto resume` to resume scheduled upgrades. Enabling or resuming
+automatic upgrades while the active binary is a local source build fails clearly.
+Windows retains its in-place `self_replace` source-install path; versioned
+symlink activation and automatic updates are unsupported there.
+
+### Accepted provenance and authenticated time
+
+Both CLI release archives and machine images use the same verifier. Accepted
+bundles contain one in-toto DSSE signature, SLSA v1 provenance and one Rekor v1
+`dsse/0.0.1` entry. The certificate must chain to a Fulcio authority trusted at the
+signed event time, with code-signing usage, an embedded verified SCT, the GitHub
+Actions OIDC issuer, and the exact expected repository/workflow/tag SAN.
+
+The verifier binds the logged payload hash, envelope hash, signature and signing
+certificate to the supplied bundle. `envelopeHash` is over the original producer
+JSON bytes: the accepted GitHub producer encoding orders fields as `payload`,
+`payloadType`, `signatures`, and signature fields as `sig`, `keyid` (including an
+empty key id). Unsupported encodings fail closed rather than guessing their
+original bytes. The DSSE signature and archive/image SHA-256 subject must verify.
+
+Every accepted Rekor v1 entry requires a valid signed entry timestamp (SET), which
+signs the exact body bytes, integrated time, log ID and outer log index. Only
+then is `integratedTime` used for certificate/key validity. A body inclusion proof
+alone does not authenticate this outer time. Retired CT/Rekor keys remain usable
+within their authenticated validity intervals; Fulcio trust intervals and anchor
+certificate validity are also checked at event time.
+
+Bundle v0.1 (`application/vnd.dev.sigstore.bundle+json;version=0.1`) permits a SET
+without an inclusion proof. v0.2/v0.3 require both SET and inclusion proof. Any
+supplied proof is checked, including RFC6962 path/index/size/root and the log's
+signed checkpoint. Sharded Rekor outer indexes and shard-local proof indexes can
+differ. Proof-only bundles, unsupported versions/kinds, unknown keys, unsigned
+time, and malformed or inconsistent supplied evidence are rejected. RFC3161-only
+and Rekor v2 evidence are currently unsupported; their presence in the trust root
+does not invalidate supported v1 keys. Producer format changes require fixtures
+and an explicit reviewed verifier update before release.
+
+API JSON, individual bundle fetches, DSSE payloads, certificates, chain length,
+attestation count and Merkle paths have size/count bounds. Downloaded bundle URLs
+and each redirect must use an approved GitHub HTTPS origin on port443. The bundle
+client does not inherit the caller's default Authorization header. Authenticating
+TUF signatures, expiry, version/length/hash checks and the configured TLS roots
+remain mandatory. Public producer fixtures and their retrieval hashes are in
+`cli/tests/fixtures/sigstore/README.md`.
+
+Native CLI consumers persist TUF rollback state in
+`$HOME/.nyxid/tuf-public` (`%USERPROFILE%` on Windows), overridden by
+`NYXID_TUF_STATE_DIR`. The backend's updater-image verifier uses the separate
+`$HOME/.nyxid/server-tuf` directory by default and accepts an explicit absolute
+`NYXID_SERVER_TUF_STATE_DIR`. The backend image sets that variable to
+`/var/lib/nyxid/tuf`; Compose retains the directory in the `backend_tuf` volume.
+Provision mode0700 owned by the backend UID under trusted parent directories.
+Read-only root filesystems require a writable durable mount at that path; a
+temporary directory or a new empty volume on every restart loses rollback
+protection and is unsupported. Invalid, inaccessible or corrupt state fails
+verification without falling back to HOME, ephemeral state or an image tag.
+Native servers need no permission to write `/var/lib`. The Docker companion
+uses its existing private update-volume `tuf` directory and direct GitHub mirror
+transport. Native, backend and companion caches share the same state contract.
+
+On Unix the state directory must belong to the current user with mode0700, and
+state/lock files use mode0600 without following symlinks or accepting hardlinks.
+Every supplied ancestor and intermediate symlink target is checked while walking
+from pinned directory descriptors: owners must be root or the current UID, and
+group/other writes require a trusted-owned sticky directory. Platform aliases are
+supported only through trusted traversal. Rejection happens before creating state
+under an unsafe ancestor. Refreshes serialize through a file lock and publish one fsynced atomic state file containing verified
+root transitions, signed timestamp/snapshot metadata and the monotonic clock
+floor. Each refresh starts from the latest authenticated root, preserving
+rollback floors across restarts and avoiding repeated resets after key rotation.
+Malformed, missing previously initialized, or invalidly signed state fails
+closed; it is never silently replaced with the bootstrap. State, lock and legacy
+metadata opens and atomic publication remain relative to the pinned state inode,
+so renaming/replacing its pathname during a refresh cannot redirect those
+operations. Linux also anchors tough's disposable scratch workspace through the
+directory descriptor and retains that handle for the repository lifetime.
+Existing flat tough datastores migrate only after their root lineage and cached roles authenticate.
+Do not delete or restore an older trust directory as routine cache cleanup.
+These local permissions protect state from other users and accidental corruption;
+they cannot detect restoration of the entire filesystem by its administrator.
+Place custom state under a trusted home or dedicated service volume whose
+existing parent directories cannot be replaced by an untrusted user. First-run
+bootstrap remains available in a new empty private directory under trusted
+ancestors. Its initialization marker detects subsequent missing state within that
+directory. Trusted ancestry prevents another identity from renaming the whole
+directory to remove that marker; root or the current UID can still deliberately
+replace the whole tree, which cannot be distinguished from a fresh installation
+after restart. There is no separate external initialization anchor, and replacing
+an entire tree/volume remains unsupported cleanup. New binaries reconcile
+embedded bootstrap advancement with the retained authenticated lineage; applicable timestamp/snapshot floors survive
+that upgrade. An incompatible embedded root fork is rejected.
 
 ## Versioned Install Layout
 

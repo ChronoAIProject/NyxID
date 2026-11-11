@@ -1,6 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useEffect, useRef } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -23,19 +24,19 @@ import {
 } from "@/schemas/upload-retention";
 
 export function AdminUploadRetentionPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const query = useUploadRetention();
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t("Upload retention")}
-        description={t("Choose how long NyxID keeps assistant documents and images.")}
+        title={translateUi("Upload retention")}
+        description={translateUi("Choose how long NyxID keeps assistant documents and images.")}
       />
       {query.isPending ? (
-        <p role="status" className="text-xs text-muted-foreground">{t("Loading retention policy…")}</p>
+        <p role="status" className="text-13 text-muted-foreground">{translateUi("Loading retention policy…")}</p>
       ) : query.isError ? (
         <ErrorBanner
-          message={t("Could not load retention policy.")}
+          message={translateUi("Could not load retention policy.")}
           onRetry={() => void query.refetch()}
         />
       ) : query.data ? (
@@ -46,7 +47,7 @@ export function AdminUploadRetentionPage() {
 }
 
 function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const update = useUpdateUploadRetention();
   const form = useAppForm<UploadRetentionPolicy>({
     resolver: zodResolver(uploadRetentionPolicySchema),
@@ -79,10 +80,10 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
       const saved = await update.mutateAsync(policy);
       reset(saved.effective);
       toast.success(
-        policy ? "Retention policy saved" : "Default retention restored",
+        translateUi(policy ? "Retention policy saved" : "Default retention restored"),
       );
     } catch {
-      toast.error(translateUi("Could not save retention policy. Try again."));
+      toast.error(translateErrorMessage("Could not save retention policy. Try again."));
     }
   }
   const fields = [
@@ -116,8 +117,8 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
       >
         <Card className="space-y-5 p-5">
           <div className="space-y-1">
-            <h2 className="text-13 font-semibold">{t("Files kept by NyxID")}</h2>
-            <p className="text-xs text-muted-foreground">{t("Changes apply to existing files immediately. Expired files are deleted permanently; increasing a limit cannot restore them.")}</p>
+            <h2 className="type-card-title">{translateUi("Files kept by NyxID")}</h2>
+            <p className="text-13 text-muted-foreground">{translateUi("Changes apply to existing files immediately. Expired files are deleted permanently; increasing a limit cannot restore them.")}</p>
           </div>
           {fields.map(({ name, label, max, description }) => (
             <div key={name} className="space-y-1.5">
@@ -131,18 +132,19 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                 className="max-w-40"
                 {...form.register(name, { valueAsNumber: true })}
               />
-              <p className="text-xs text-muted-foreground">
-                {description}{t(" Default: ")}{data.defaults[name]}{t(". Range: 1–")}{max.toLocaleString(getFormattingLocale())}.
+              <p className="text-13 text-muted-foreground">
+                {description}{translateUi(" Default: ")}{data.defaults[name]}. Range: 1–
+                {max.toLocaleString(getFormattingLocale())}.
               </p>
               {form.formState.errors[name] && (
-                <p role="alert" className="text-xs text-destructive">{t("Enter a whole number from 1 to ")}{max.toLocaleString(getFormattingLocale())}.
+                <p role="alert" className="text-13 text-destructive">{translateUi("Enter a whole number from 1 to ")}{max.toLocaleString(getFormattingLocale())}.
                 </p>
               )}
               {name === "image_days" && (
                 <div className="flex items-start justify-between gap-4 pt-2">
                   <div className="space-y-1">
-                    <Label htmlFor="images-after-turn">{t("Delete images after their first turn")}</Label>
-                    <p className="text-xs text-muted-foreground">{t("Delete as soon as the first turn using an image settles, including stopped or failed turns. The day limit still applies. Default: off.")}</p>
+                    <Label htmlFor="images-after-turn">{translateUi("Delete images after their first turn")}</Label>
+                    <p className="text-13 text-muted-foreground">{translateUi("Delete as soon as the first turn using an image settles, including stopped or failed turns. The day limit still applies. Default: off.")}</p>
                   </div>
                   <Switch
                     id="images-after-turn"
@@ -158,8 +160,8 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
           <div className="space-y-2">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
-                <Label htmlFor="keep-tool-images">{t("Keep tool images with the conversation")}</Label>
-                <p className="text-xs text-muted-foreground">{t("Default: on. Includes screenshots returned by tools.")}</p>
+                <Label htmlFor="keep-tool-images">{translateUi("Keep tool images with the conversation")}</Label>
+                <p className="text-13 text-muted-foreground">{translateUi("Default: on. Includes screenshots returned by tools.")}</p>
               </div>
               <Switch
                 id="keep-tool-images"
@@ -171,7 +173,7 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
             </div>
             {toolDays !== null && (
               <div className="space-y-1.5">
-                <Label htmlFor="tool-days">{t("Tool images (days)")}</Label>
+                <Label htmlFor="tool-days">{translateUi("Tool images (days)")}</Label>
                 <Input
                   id="tool-days"
                   className="max-w-40"
@@ -184,24 +186,25 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                     form.setValue("tool_image_days", e.target.valueAsNumber)
                   }
                 />
-                <p className="text-xs text-muted-foreground">{t("Measured from creation. Range: 1–365.")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Measured from creation. Range: 1–365.")}</p>
                 {form.formState.errors.tool_image_days && (
-                  <p role="alert" className="text-xs text-destructive">{t("Enter a whole number from 1 to 365.")}</p>
+                  <p role="alert" className="text-13 text-destructive">{translateUi("Enter a whole number from 1 to 365.")}</p>
                 )}
               </div>
             )}
           </div>
         </Card>
-        <Card className="space-y-2 p-4 text-xs text-muted-foreground">
+        <Card className="space-y-2 p-4 text-13 text-muted-foreground">
           <p>
-            <strong className="font-medium text-foreground">{t("NyxID’s copy only.")}</strong>{" "}{t("Images an agent already saw may remain in its NyxAgent session until that session expires. Model providers also process those images; this setting does not delete their copies.")}</p>
-          <p role="status">{t("Policy revision ")}{data.revision}{t(". This replica has revision")}{" "}
+            <strong className="font-medium text-foreground">{translateUi("NyxID’s copy only.")}</strong>{" "}{translateUi("Images an agent already saw may remain in its NyxAgent session until that session expires. Model providers also process those images; this setting does not delete their copies.")}</p>
+          <p role="status">{translateUi("Policy revision ")}{data.revision}. This replica has revision{" "}
             {data.replica_revision}
             {data.replica_revision === data.revision
-              ? t(" (current)")
-              : t(" (refresh pending)")}{t(". Replicas refresh every ")}{data.refresh_seconds}{t(" seconds. Attachment reads always check the current policy.")}</p>
+              ? translateUi(" (current)")
+              : translateUi(" (refresh pending)")}
+            . Replicas refresh every {data.refresh_seconds}{translateUi(" seconds. Attachment reads always check the current policy.")}</p>
           {data.replica_refreshed_at && (
-            <p>{t("Replica last refreshed:")}{" "}
+            <p>{translateUi("Replica last refreshed:")}{" "}
               {new Date(data.replica_refreshed_at).toLocaleString(getFormattingLocale())}.
             </p>
           )}
@@ -213,19 +216,19 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
             variant="ghost"
             disabled={update.isPending || !data.overridden}
             onClick={() => void save(null)}
-          >{t("Restore defaults")}</Button>
+          >{translateUi("Restore defaults")}</Button>
           <Button
             type="button"
             variant="outline"
             disabled={!isDirty || update.isPending}
             onClick={() => reset(data.effective)}
-          >{t("Cancel")}</Button>
+          >{translateUi("Cancel")}</Button>
           <Button
             type="submit"
             variant="primary"
             disabled={!isDirty || !isValid || update.isPending}
           >
-            {update.isPending ? t("Saving…") : t("Save")}
+            {update.isPending ? translateUi("Saving…") : translateUi("Save")}
           </Button>
         </div>
       </form>

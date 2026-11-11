@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { QrCode } from "lucide-react";
 import QRCode from "qrcode";
@@ -48,7 +48,7 @@ export function AssistantDeviceOnboardDialog({
   readonly params: AssistantDeviceOnboardParams;
   readonly onComplete: (deviceId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const form = useAppForm({
     defaultValues: {
@@ -162,14 +162,14 @@ export function AssistantDeviceOnboardDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <QrCode className="size-4" />
-            {result ? t("Device onboarding ready") : t("Onboard headless device")}
+            {result ? translateUi("Device onboarding ready") : translateUi("Onboard headless device")}
           </DialogTitle>
           <DialogDescription>
             {result?.unavailable
-              ? t("The onboarding package was created, but its one-time QR credential was not captured. Create another onboarding package before provisioning the device.")
+              ? translateUi("The onboarding package was created, but its one-time QR credential was not captured. Create another onboarding package before provisioning the device.")
               : result
-                ? t("This provisioning credential is shown only once. Scan or store it securely now.")
-                : t("Review the device owner and initial service allowlist before creating the provisioning package.")}
+                ? translateUi("This provisioning credential is shown only once. Scan or store it securely now.")
+                : translateUi("Review the device owner and initial service allowlist before creating the provisioning package.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -178,30 +178,30 @@ export function AssistantDeviceOnboardDialog({
             {qrDataUrl ? (
               <img
                 src={qrDataUrl}
-                alt={t("One-time device onboarding QR code")}
+                alt={translateUi("One-time device onboarding QR code")}
                 className="mx-auto size-56 rounded-lg bg-white p-2"
               />
             ) : null}
             {result.qrPayload ? (
               <div className="space-y-1.5">
-                <Label htmlFor="assistant-device-qr-payload">{t("One-time provisioning payload")}</Label>
+                <Label htmlFor="assistant-device-qr-payload">{translateUi("One-time provisioning payload")}</Label>
                 <Input
                   id="assistant-device-qr-payload"
                   readOnly
                   value={result.qrPayload}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
             {result.expiresAt ? (
-              <p className="text-11 text-muted-foreground">{t("Expires ")}{result.expiresAt}
+              <p className="text-13 text-muted-foreground">{translateUi("Expires ")}{result.expiresAt}
               </p>
             ) : null}
           </div>
         ) : (
           <div className="space-y-4 border-y border-border py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-device-label">{t("Device label")}</Label>
+              <Label htmlFor="assistant-device-label">{translateUi("Device label")}</Label>
               <Input
                 id="assistant-device-label"
                 value={label}
@@ -209,7 +209,7 @@ export function AssistantDeviceOnboardDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-device-owner">{t("Organization owner (optional)")}</Label>
+              <Label htmlFor="assistant-device-owner">{translateUi("Organization owner (optional)")}</Label>
               <Input
                 id="assistant-device-owner"
                 value={targetOrgId}
@@ -219,7 +219,7 @@ export function AssistantDeviceOnboardDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-device-services">{t("Default service IDs (comma-separated)")}</Label>
+              <Label htmlFor="assistant-device-services">{translateUi("Default service IDs (comma-separated)")}</Label>
               <Input
                 id="assistant-device-services"
                 value={defaultServiceIds}
@@ -247,7 +247,7 @@ export function AssistantDeviceOnboardDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -261,18 +261,18 @@ export function AssistantDeviceOnboardDialog({
                 close();
               }}
             >
-              {result.unavailable ? t("Acknowledge") : t("I have saved it")}
+              {result.unavailable ? translateUi("Acknowledge") : translateUi("I have saved it")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting || !label.trim()}
                 onClick={() => void submit()}
-              >{t("Create onboarding package")}</Button>
+              >{translateUi("Create onboarding package")}</Button>
             </>
           )}
         </DialogFooter>

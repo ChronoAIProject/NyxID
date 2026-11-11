@@ -15,6 +15,12 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+// Keep the fixture future's construction outside these test drivers as well as
+// its polling; boxing at an await site still leaves a large debug temporary.
+fn boxed_chat_fixture(name: &'static str) -> futures::future::BoxFuture<'static, Fixture> {
+    Box::pin(fixture(name))
+}
+
 async fn authenticate(f: &Fixture) -> McpAuthContext {
     authenticate_id(f, &f.row.id).await
 }
@@ -39,7 +45,9 @@ async fn result(response: Response, error: bool) -> Value {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("error").is_none(), "{body}");
     assert_eq!(body["result"]["isError"], error, "{body}");
-    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap_or_else(
+        |error| panic!("Expected structured tool result: {error}; envelope: {body}"),
+    )
 }
 
 async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Response {
@@ -68,6 +76,75 @@ async fn call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Re
         json!({"tool_name": name, "arguments_json": args.to_string()}),
     )
     .await
+}
+
+async fn webhook_policy(f: &Fixture, policy: crate::models::trigger_schedule::ConfirmationPolicy) {
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .replace_one(doc! {"_id":"webhook-run"}, doc! {
+            "_id":"webhook-run","trigger_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,
+            "scheduled_at":now,"deadline":now,"outcome":"started","confirmation_policy":bson::to_bson(&policy).unwrap(),
+            "thread_id":&f.row.id,"turn_id":&f.row.active_turn.as_ref().unwrap().turn_id,
+            "fence":"test","lease_until":now,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::hours(4)),
+        }).upsert(true).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"active_turn.trigger_run_id":"webhook-run"}},
+        )
+        .await
+        .unwrap();
+}
+
+/// Exercise the real resolved MCP executor; user connections are gated there,
+/// after the operation and exact destination have been resolved.
+#[allow(clippy::too_many_arguments)]
+async fn execute_webhook_connection(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    _prepared: &mcp_service::PreparedProxyCall,
+    _tool: &str,
+    args: &Value,
+    request_id: Option<Value>,
+) -> Result<(), Box<Response>> {
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        service,
+        endpoint,
+        &webhook_execution_arguments(auth, args),
+    )
+    .unwrap()
+    .with_acknowledgement(args["acknowledgement_id"].as_str());
+    let exec = mcp_exec_context(auth);
+    let response = Box::pin(mcp_service::execute_tool_response(
+        &state.http_client,
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &state.billing,
+        &auth.user_id,
+        auth.billing_principal_user_id(),
+        service,
+        endpoint,
+        prepared,
+        &state.jwt_keys,
+        &state.config,
+        &state.connection_expiry_notifier,
+        &state.token_exchange_cache,
+        &state.cloud_response_cache,
+        &exec,
+        crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+    ))
+    .await
+    .expect("resolved webhook execution");
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else {
+        Err(Box::new(tool_result(request_id, &response.text, true)))
+    }
 }
 
 async fn assert_scoped_thread_attachment_access(f: &Fixture, auth: &McpAuthContext) {
@@ -244,197 +321,207 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
 
 #[tokio::test]
 async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypassing_denial() {
-    let f = fixture("chat_mcp_allow").await;
-    let hits = Arc::new(AtomicUsize::new(0));
-    let count = hits.clone();
-    let upstream = Router::new().route(
-        "/{*path}",
-        any(move || {
-            count.fetch_add(1, Ordering::SeqCst);
-            async { Json(json!({"ok": true})) }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
-    let id = connected(&f.state.db, &f.owner, "github", &address).await;
-    let auto = connected(&f.state.db, &f.owner, "chrono-llm-public", &address).await;
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": &auto},
-            doc! {"$set": {
-                "source": crate::models::user_service::AUTO_PROVISION_SOURCE,
-            }},
-        )
-        .await
-        .unwrap();
-    let auth = authenticate(&f).await;
-    let listing = result(
-        handle_meta_list_connected(&f.state, &auth, &json!({}), None).await,
-        false,
-    )
-    .await;
-    let rows = listing["services"].as_array().unwrap();
-    assert_eq!(
-        rows.iter().find(|r| r["service_id"] == id).unwrap()["chat_access"],
-        "acknowledgement_required"
-    );
-    // Subagents hold explicit grants only: auto-connected services too.
-    assert_eq!(
-        rows.iter().find(|r| r["service_id"] == auto).unwrap()["chat_access"],
-        "acknowledgement_required"
-    );
-    let search = result(
-        handle_meta_search(
-            &f.state,
-            &auth,
-            None,
-            &json!({"query": "github"}),
-            None,
+    let f = boxed_chat_fixture("chat_mcp_allow").await;
+    check_mcp_allow(f).await;
+}
+
+// Keep fixture construction out of this measured large scenario's poll frame.
+fn check_mcp_allow(f: Fixture) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let upstream = Router::new().route(
+            "/{*path}",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"ok": true})) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let id = connected(&f.state.db, &f.owner, "github", &address).await;
+        let auto = connected(&f.state.db, &f.owner, "chrono-llm-public", &address).await;
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &auto},
+                doc! {"$set": {
+                    "source": crate::models::user_service::AUTO_PROVISION_SOURCE,
+                }},
+            )
+            .await
+            .unwrap();
+        let auth = authenticate(&f).await;
+        let listing = result(
+            handle_meta_list_connected(&f.state, &auth, &json!({}), None).await,
             false,
         )
-        .await,
-        false,
-    )
-    .await;
-    let tool = &search["matches"][0];
-    assert_eq!(tool["chat_access"], "acknowledgement_required");
-    for body in [&listing, &search] {
-        let hint = body["chat_access_hint"].as_str().unwrap();
-        assert!(hint.contains("call the tool now"), "{hint}");
-    }
-    let name = tool["name"].as_str().unwrap();
-    let args = json!({"method": "GET", "path": "/ok"});
-    let refusal = result(call(&f, &auth, name, args.clone()).await, true).await;
-    assert_eq!(refusal["error"], "acknowledgement_required");
-    assert_eq!(refusal["kind"], "service");
-    assert_eq!(refusal["decider"], "orchestrator");
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-    // The request reached the orchestrator as a wake-up event (it is busy
-    // with its own turn, so the event waits in its queue).
-    let team_id = f.nyxbot_thread.clone();
-    let orchestrator = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &team_id)
-        .await
-        .unwrap();
-    assert!(orchestrator.pending_events.iter().any(|event| {
-        event.kind == "permission_requested"
-            && event.agent_id.as_deref() == Some(f.chat.agent_id.as_str())
-            && event
-                .text
-                .contains(refusal["acknowledgement_id"].as_str().unwrap())
-    }));
-    acks::decide(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        refusal["acknowledgement_id"].as_str().unwrap(),
-        true,
-    )
-    .await
-    .unwrap();
-    let auth = authenticate(&f).await;
-    let success = result(call(&f, &auth, name, args).await, false).await;
-    assert_eq!(success["ok"], true);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    let second = connected(&f.state.db, &f.owner, "denied", &address).await;
-    let refused = service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
-        .await
-        .unwrap()
-        .unwrap();
-    acks::decide(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        refused["acknowledgement_id"].as_str().unwrap(),
-        false,
-    )
-    .await
-    .unwrap();
-    let services = load_all_services_for_meta_tools(&f.state, &auth)
-        .await
-        .unwrap();
-    let service = services.iter().find(|s| s.service_id == second).unwrap();
-    let denied = result(
-        chat_service_gate(&f.state, &auth, service, None)
-            .await
-            .unwrap(),
-        true,
-    )
-    .await;
-    assert_eq!(denied["error"], "acknowledgement_denied");
-    // The orchestrator runs with Full access: no gates, every service granted.
-    let full = authenticate_id(&f, &team_id).await;
-    assert_eq!(chat_access(&full, service), "granted");
-    assert!(
-        chat_service_gate(&f.state, &full, service, None)
-            .await
-            .is_none()
-    );
-    let search = result(
-        handle_meta_search(
-            &f.state,
-            &full,
-            None,
-            &json!({"query": "denied"}),
-            None,
+        .await;
+        let rows = listing["services"].as_array().unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r["service_id"] == id).unwrap()["chat_access"],
+            "acknowledgement_required"
+        );
+        // Subagents hold explicit grants only: auto-connected services too.
+        assert_eq!(
+            rows.iter().find(|r| r["service_id"] == auto).unwrap()["chat_access"],
+            "acknowledgement_required"
+        );
+        let search = result(
+            handle_meta_search(
+                &f.state,
+                &auth,
+                None,
+                &json!({"query": "github"}),
+                None,
+                false,
+            )
+            .await,
             false,
         )
-        .await,
-        false,
-    )
-    .await;
-    let full_name = search["matches"][0]["name"].as_str().unwrap();
-    result(
-        call(
-            &f,
-            &full,
-            full_name,
-            json!({"method": "GET", "path": "/ok"}),
+        .await;
+        let tool = &search["matches"][0];
+        assert_eq!(tool["chat_access"], "acknowledgement_required");
+        for body in [&listing, &search] {
+            let hint = body["chat_access_hint"].as_str().unwrap();
+            assert!(hint.contains("call the tool now"), "{hint}");
+        }
+        let name = tool["name"].as_str().unwrap();
+        let args = json!({"method": "GET", "path": "/ok"});
+        let refusal = result(call(&f, &auth, name, args.clone()).await, true).await;
+        assert_eq!(refusal["error"], "acknowledgement_required");
+        assert_eq!(refusal["kind"], "service");
+        assert_eq!(refusal["decider"], "orchestrator");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        // The request reached the orchestrator as a wake-up event (it is busy
+        // with its own turn, so the event waits in its queue).
+        let team_id = f.nyxbot_thread.clone();
+        let orchestrator =
+            crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &team_id)
+                .await
+                .unwrap();
+        assert!(orchestrator.pending_events.iter().any(|event| {
+            event.kind == "permission_requested"
+                && event.agent_id.as_deref() == Some(f.chat.agent_id.as_str())
+                && event
+                    .text
+                    .contains(refusal["acknowledgement_id"].as_str().unwrap())
+        }));
+        acks::decide(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            refusal["acknowledgement_id"].as_str().unwrap(),
+            true,
         )
-        .await,
-        false,
-    )
-    .await;
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
-    let audit = f
-        .state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {
-            "event_type": "assistant_mcp_tool_call",
-            "event_data.conversation_id": &team_id,
-            "event_data.agent_role": "orchestrator",
-            "event_data.tool_name": "nyx__call_tool",
+        .await
+        .unwrap();
+        let auth = authenticate(&f).await;
+        let success = result(call(&f, &auth, name, args).await, false).await;
+        assert_eq!(success["ok"], true);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let second = connected(&f.state.db, &f.owner, "denied", &address).await;
+        let refused = service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
+            .await
+            .unwrap()
+            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            refused["acknowledgement_id"].as_str().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+        let services = load_all_services_for_meta_tools(&f.state, &auth)
+            .await
+            .unwrap();
+        let service = services.iter().find(|s| s.service_id == second).unwrap();
+        let denied = result(
+            chat_service_gate(&f.state, &auth, service, None)
+                .await
+                .unwrap(),
+            true,
+        )
+        .await;
+        assert_eq!(denied["error"], "acknowledgement_denied");
+        // The orchestrator runs with Full access: no gates, every service granted.
+        let full = authenticate_id(&f, &team_id).await;
+        assert_eq!(chat_access(&full, service), "granted");
+        assert!(
+            chat_service_gate(&f.state, &full, service, None)
+                .await
+                .is_none()
+        );
+        let search = result(
+            handle_meta_search(
+                &f.state,
+                &full,
+                None,
+                &json!({"query": "denied"}),
+                None,
+                false,
+            )
+            .await,
+            false,
+        )
+        .await;
+        let full_name = search["matches"][0]["name"].as_str().unwrap();
+        result(
+            call(
+                &f,
+                &full,
+                full_name,
+                json!({"method": "GET", "path": "/ok"}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        let audit = f
+            .state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {
+                "event_type": "assistant_mcp_tool_call",
+                "event_data.conversation_id": &team_id,
+                "event_data.agent_role": "orchestrator",
+                "event_data.tool_name": "nyx__call_tool",
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = audit.get_document("event_data").unwrap();
+        assert!(!metadata.contains_key("arguments"));
+        assert_eq!(metadata.get_str("outcome").unwrap(), "requested");
+        // Existing proxy audit is asynchronous. Poll its durable row, not a guessed delay.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let found = f
+                    .state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::audit_log::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"event_type": "mcp_tool_call",
+                    "event_data.agent_role": "orchestrator"})
+                    .await
+                    .unwrap()
+                    .is_some();
+                if found {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         })
         .await
-        .unwrap()
         .unwrap();
-    let metadata = audit.get_document("event_data").unwrap();
-    assert!(!metadata.contains_key("arguments"));
-    assert_eq!(metadata.get_str("outcome").unwrap(), "requested");
-    // Existing proxy audit is asynchronous. Poll its durable row, not a guessed delay.
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let found = f
-                .state
-                .db
-                .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                .find_one(doc! {"event_type": "mcp_tool_call",
-                "event_data.agent_role": "orchestrator"})
-                .await
-                .unwrap()
-                .is_some();
-            if found {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        server.abort();
     })
-    .await
-    .unwrap();
-    server.abort();
 }
 
 #[tokio::test]
@@ -1676,6 +1763,10 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
             crate::models::approval_grant::COLLECTION_NAME,
         )
         .insert_one(crate::models::approval_grant::ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             service_id: service.clone(),
@@ -1780,197 +1871,204 @@ async fn services_for(
 /// narrow); a method override is never sent.
 #[tokio::test]
 async fn guest_access_follows_spec_markers() {
-    let f = fixture("chat_mcp_guest_markers").await;
-    let service = connected(&f.state.db, &f.owner, "home", "http://127.0.0.1:9").await;
-    crate::services::assistant_team_service::set_grants(
-        &f.state.db,
-        &f.owner,
-        &f.chat.agent_id,
-        crate::services::assistant_team_service::GrantChange::Add(
-            crate::models::assistant_agent::AgentGrants {
-                service_ids: vec![service.clone()],
-                ..Default::default()
-            },
-        ),
-    )
-    .await
-    .unwrap();
-    set_guest_access(&f, &service, GuestAccess::All).await;
-    mark_guest(&f, true).await;
-    let guest = authenticate(&f).await;
-    // An operation its spec marks destructive (deletes or overwrites) is
-    // beyond "use" too, whatever its method.
-    let mut services = load_all_services_for_meta_tools(&f.state, &guest)
+    let f = boxed_chat_fixture("chat_mcp_guest_markers").await;
+    check_guest_spec(f).await;
+}
+
+// Keep fixture construction out of this measured large scenario's poll frame.
+fn check_guest_spec(f: Fixture) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let service = connected(&f.state.db, &f.owner, "home", "http://127.0.0.1:9").await;
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::GrantChange::Add(
+                crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![service.clone()],
+                    ..Default::default()
+                },
+            ),
+        )
         .await
         .unwrap();
-    let marked = services
-        .iter_mut()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap();
-    let endpoint_id = marked.endpoints[0].endpoint_id.clone();
-    marked
-        .durable_endpoint_metadata
-        .entry(endpoint_id)
-        .or_default()
-        .destructive = true;
-    let marked = services
-        .iter()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap();
-    let endpoint = &marked.endpoints[0];
-    let prepared = mcp_service::prepare_proxy_tool_call(
-        marked,
-        endpoint,
-        &json!({"method": "POST", "path": "/sheet/values"}),
-    )
-    .unwrap();
-    assert!(
-        guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
+        set_guest_access(&f, &service, GuestAccess::All).await;
+        mark_guest(&f, true).await;
+        let guest = authenticate(&f).await;
+        // An operation its spec marks destructive (deletes or overwrites) is
+        // beyond "use" too, whatever its method.
+        let mut services = load_all_services_for_meta_tools(&f.state, &guest)
             .await
-            .is_none()
-    );
-    set_guest_access(&f, &service, GuestAccess::Use).await;
-    assert!(
-        guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
-            .await
-            .is_some()
-    );
-    // The owner's own turns are never limited by guest access.
-    mark_guest(&f, false).await;
-    let owner = authenticate(&f).await;
-    assert!(
-        guest_service_refusal(&f.state, &owner, marked, endpoint, &prepared, None)
-            .await
-            .is_none()
-    );
-    mark_guest(&f, true).await;
-    let guest = authenticate(&f).await;
-    // An operation its spec marks read-only is a read, even as a POST (a
-    // search); a method override still counts.
-    let mut services = load_all_services_for_meta_tools(&f.state, &guest)
-        .await
+            .unwrap();
+        let marked = services
+            .iter_mut()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint_id = marked.endpoints[0].endpoint_id.clone();
+        marked
+            .durable_endpoint_metadata
+            .entry(endpoint_id)
+            .or_default()
+            .destructive = true;
+        let marked = services
+            .iter()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint = &marked.endpoints[0];
+        let prepared = mcp_service::prepare_proxy_tool_call(
+            marked,
+            endpoint,
+            &json!({"method": "POST", "path": "/sheet/values"}),
+        )
         .unwrap();
-    let search = services
-        .iter_mut()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap();
-    let endpoint_id = search.endpoints[0].endpoint_id.clone();
-    let metadata = search
-        .durable_endpoint_metadata
-        .entry(endpoint_id.clone())
-        .or_default();
-    metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
-    // As a stored catalog contract says.
-    metadata.catalog_contract = true;
-    let search = services
-        .iter()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap();
-    let endpoint = &search.endpoints[0];
-    set_guest_access(&f, &service, GuestAccess::Read).await;
-    for (args, refused) in [
-        (
-            json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
-            false,
-        ),
-        (
-            json!({"method": "POST", "path": "/search", "body": {"_method": "DELETE"}}),
-            true,
-        ),
-    ] {
-        let prepared = mcp_service::prepare_proxy_tool_call(search, endpoint, &args).unwrap();
-        assert_eq!(
-            guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+        assert!(
+            guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
                 .await
-                .is_some(),
-            refused,
-            "{args}"
+                .is_none()
         );
-    }
-    // NyxID's marker says what a method does not: a PUT that only acts is
-    // use, a POST that edits is not; a DELETE never is, whatever its spec says.
-    set_guest_access(&f, &service, GuestAccess::Use).await;
-    for (method, changes, contract, refused) in [
-        ("PUT", Some(false), true, false),
-        // "Only acts" widens: a remote spec cannot say it.
-        ("PUT", Some(false), false, true),
-        ("PUT", None, true, true),
-        ("POST", Some(true), false, true),
-        ("DELETE", Some(false), true, true),
-    ] {
-        let mut marked = services_for(&f, &guest, &service, |metadata| {
-            metadata.changes_existing = changes;
-            metadata.catalog_contract = contract;
+        set_guest_access(&f, &service, GuestAccess::Use).await;
+        assert!(
+            guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
+                .await
+                .is_some()
+        );
+        // The owner's own turns are never limited by guest access.
+        mark_guest(&f, false).await;
+        let owner = authenticate(&f).await;
+        assert!(
+            guest_service_refusal(&f.state, &owner, marked, endpoint, &prepared, None)
+                .await
+                .is_none()
+        );
+        mark_guest(&f, true).await;
+        let guest = authenticate(&f).await;
+        // An operation its spec marks read-only is a read, even as a POST (a
+        // search); a method override still counts.
+        let mut services = load_all_services_for_meta_tools(&f.state, &guest)
+            .await
+            .unwrap();
+        let search = services
+            .iter_mut()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint_id = search.endpoints[0].endpoint_id.clone();
+        let metadata = search
+            .durable_endpoint_metadata
+            .entry(endpoint_id.clone())
+            .or_default();
+        metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+        // As a stored catalog contract says.
+        metadata.catalog_contract = true;
+        let search = services
+            .iter()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint = &search.endpoints[0];
+        set_guest_access(&f, &service, GuestAccess::Read).await;
+        for (args, refused) in [
+            (
+                json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
+                false,
+            ),
+            (
+                json!({"method": "POST", "path": "/search", "body": {"_method": "DELETE"}}),
+                true,
+            ),
+        ] {
+            let prepared = mcp_service::prepare_proxy_tool_call(search, endpoint, &args).unwrap();
+            assert_eq!(
+                guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+                    .await
+                    .is_some(),
+                refused,
+                "{args}"
+            );
+        }
+        // NyxID's marker says what a method does not: a PUT that only acts is
+        // use, a POST that edits is not; a DELETE never is, whatever its spec says.
+        set_guest_access(&f, &service, GuestAccess::Use).await;
+        for (method, changes, contract, refused) in [
+            ("PUT", Some(false), true, false),
+            // "Only acts" widens: a remote spec cannot say it.
+            ("PUT", Some(false), false, true),
+            ("PUT", None, true, true),
+            ("POST", Some(true), false, true),
+            ("DELETE", Some(false), true, true),
+        ] {
+            let mut marked = services_for(&f, &guest, &service, |metadata| {
+                metadata.changes_existing = changes;
+                metadata.catalog_contract = contract;
+            })
+            .await;
+            let search = marked
+                .iter_mut()
+                .find(|candidate| candidate.service_id == service)
+                .unwrap();
+            let endpoint = &search.endpoints[0];
+            let prepared = mcp_service::prepare_proxy_tool_call(
+                search,
+                endpoint,
+                &json!({"method": method, "path": "/player/play"}),
+            )
+            .unwrap();
+            assert_eq!(
+                guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+                    .await
+                    .is_some(),
+                refused,
+                "{method} {changes:?} {contract}"
+            );
+        }
+        // A read-only DELETE row is still a DELETE.
+        set_guest_access(&f, &service, GuestAccess::Read).await;
+        let marked = services_for(&f, &guest, &service, |metadata| {
+            metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+            metadata.catalog_contract = true;
         })
         .await;
         let search = marked
-            .iter_mut()
+            .iter()
             .find(|candidate| candidate.service_id == service)
             .unwrap();
         let endpoint = &search.endpoints[0];
         let prepared = mcp_service::prepare_proxy_tool_call(
             search,
             endpoint,
-            &json!({"method": method, "path": "/player/play"}),
+            &json!({"method": "DELETE", "path": "/items/1"}),
         )
         .unwrap();
-        assert_eq!(
+        assert!(
             guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
                 .await
-                .is_some(),
-            refused,
-            "{method} {changes:?} {contract}"
+                .is_some()
         );
-    }
-    // A read-only DELETE row is still a DELETE.
-    set_guest_access(&f, &service, GuestAccess::Read).await;
-    let marked = services_for(&f, &guest, &service, |metadata| {
-        metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
-        metadata.catalog_contract = true;
+        // A remote spec read at call time may say read-only too, but only narrows.
+        let mut remote = services;
+        remote
+            .iter_mut()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap()
+            .durable_endpoint_metadata
+            .get_mut(&endpoint_id)
+            .unwrap()
+            .catalog_contract = false;
+        let search = remote
+            .iter()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint = &search.endpoints[0];
+        let prepared = mcp_service::prepare_proxy_tool_call(
+            search,
+            endpoint,
+            &json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
+        )
+        .unwrap();
+        assert!(
+            guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+                .await
+                .is_some()
+        );
     })
-    .await;
-    let search = marked
-        .iter()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap();
-    let endpoint = &search.endpoints[0];
-    let prepared = mcp_service::prepare_proxy_tool_call(
-        search,
-        endpoint,
-        &json!({"method": "DELETE", "path": "/items/1"}),
-    )
-    .unwrap();
-    assert!(
-        guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
-            .await
-            .is_some()
-    );
-    // A remote spec read at call time may say read-only too, but only narrows.
-    let mut remote = services;
-    remote
-        .iter_mut()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap()
-        .durable_endpoint_metadata
-        .get_mut(&endpoint_id)
-        .unwrap()
-        .catalog_contract = false;
-    let search = remote
-        .iter()
-        .find(|candidate| candidate.service_id == service)
-        .unwrap();
-    let endpoint = &search.endpoints[0];
-    let prepared = mcp_service::prepare_proxy_tool_call(
-        search,
-        endpoint,
-        &json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
-    )
-    .unwrap();
-    assert!(
-        guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
-            .await
-            .is_some()
-    );
 }
 
 /// A guest never widens what a specialist may use: an ungranted service is
@@ -2012,13 +2110,13 @@ async fn guests_never_ask_for_more_access() {
 async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects() {
     use crate::models::trigger_schedule::ConfirmationPolicy;
     let f = orchestrator_fixture("webhook_action_cards").await;
-    let service_id = connected(
-        &f.state.db,
-        &f.owner,
-        "webhook-target",
-        "http://127.0.0.1:9",
-    )
-    .await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    let service_id = connected(&f.state.db, &f.owner, "webhook-target", &server.uri()).await;
+    webhook_policy(&f, ConfirmationPolicy::Changes).await;
     let mut auth = authenticate(&f).await;
     auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Changes);
     f.state
@@ -2043,7 +2141,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let tool = "webhook-target__proxy";
     let args = json!({"method": "PATCH", "path": "/settings", "body": {"value": true}});
     let prepared = mcp_service::prepare_proxy_tool_call(service, &endpoint, &args).unwrap();
-    let response = webhook_service_gate(
+    let response = execute_webhook_connection(
         &f.state,
         &auth,
         service,
@@ -2055,7 +2153,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     )
     .await
     .unwrap_err();
-    let card = result(response, true).await;
+    let card = result(*response, true).await;
     assert_eq!(card["error"], "acknowledgement_required");
     let id = card["acknowledgement_id"].as_str().unwrap();
     let stored = acks::history(&f.state.db, &f.owner, &f.row.id)
@@ -2066,7 +2164,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let get = json!({"method": "GET", "path": "/settings"});
     let prepared_get = mcp_service::prepare_proxy_tool_call(service, &endpoint, &get).unwrap();
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state,
             &auth,
             service,
@@ -2088,22 +2186,23 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
     assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
         .is_ok()
     );
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
         .is_err()
     );
-    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    webhook_policy(&f, ConfirmationPolicy::Destructive).await;
+    auth = authenticate(&f).await;
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
@@ -2115,7 +2214,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
         .or_default()
         .destructive = true;
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
@@ -2166,297 +2265,307 @@ async fn webhook_native_changes_keep_owner_cards_in_auto() {
 
 #[tokio::test]
 async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasses() {
-    use crate::models::{
-        agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
-        downstream_service::ProxyOperationRule,
-    };
-    use crate::services::{
-        agent_operation_scope_service as scopes, assistant_team_service as team,
-    };
-    use tower::ServiceExt;
-    let f = fixture("operation_scope_paths").await;
-    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
-    let hits = Arc::new(AtomicUsize::new(0));
-    let count = hits.clone();
-    let upstream = Router::new().route(
-        "/{*path}",
-        any(move || {
-            count.fetch_add(1, Ordering::SeqCst);
-            async { Json(json!({"ok":true})) }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
-    let id = connected(&f.state.db, &f.owner, "scoped-http", &address).await;
-    team::set_grants(
-        &f.state.db,
-        &f.owner,
-        &f.chat.agent_id,
-        team::GrantChange::Add(AgentGrants {
-            service_ids: vec![id.clone()],
-            ..Default::default()
-        }),
-    )
-    .await
-    .unwrap();
-    scopes::set(
-        &f.state.db,
-        &f.owner,
-        &f.chat.agent_id,
-        &id,
-        &OperationSelection {
-            expected_revision: 0,
-            all_operations: false,
-            endpoint_ids: vec![],
-            rules: vec![
-                ProxyOperationRule {
-                    method: "GET".into(),
-                    path_template: "/items/{id}".into(),
-                    ..Default::default()
-                },
-                ProxyOperationRule {
-                    method: "DELETE".into(),
-                    path_template: "/items/{id}".into(),
-                    ..Default::default()
-                },
-            ],
-            contract_digest: None,
-            inputs: Default::default(),
-        },
-        true,
-    )
-    .await
-    .unwrap();
-    // Disabling configuration during rollout/rollback never disables enforcement.
-    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, false).await;
-    crate::services::service_pool_service::create_pool(
-        &f.state.db,
-        &f.owner,
-        crate::services::service_pool_service::CreatePoolInput {
-            slug: "scoped-pool".into(),
-            name: "Scoped pool".into(),
-            description: None,
-            strategy: Default::default(),
-            tier_balance: Default::default(),
-            member_contract: Default::default(),
-            failover: None,
-            is_active: None,
-            members: vec![crate::models::service_pool::ServicePoolMember {
-                user_service_id: id.clone(),
-                weight: 1,
-                enabled: true,
-                priority: 0,
-                model: None,
-                same_api_compatible: true,
-                health_reset_generation: 0,
-            }],
-        },
-    )
-    .await
-    .unwrap();
-    let auth = authenticate(&f).await;
-    let services = load_all_services_for_meta_tools(&f.state, &auth)
+    let f = boxed_chat_fixture("operation_scope_paths").await;
+    check_scope_paths(f).await;
+}
+
+// Keep fixture construction out of this measured large scenario's poll frame.
+fn check_scope_paths(f: Fixture) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        use crate::models::{
+            agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
+            downstream_service::ProxyOperationRule,
+        };
+        use crate::services::{
+            agent_operation_scope_service as scopes, assistant_team_service as team,
+        };
+        use tower::ServiceExt;
+        crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let upstream = Router::new().route(
+            "/{*path}",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"ok":true})) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let id = connected(&f.state.db, &f.owner, "scoped-http", &address).await;
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Add(AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
-    let service = services.iter().find(|s| s.service_id == id).unwrap();
-    let tool = format!("{}__{}", service.service_slug, service.endpoints[0].name);
-    for universal in [false, true] {
-        let args = json!({"method":"POST","path":"/items/1"});
-        let response = if universal {
-            call(&f, &auth, &tool, args).await
-        } else {
-            direct_call(&f, &auth, &tool, args).await
-        };
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        scopes::set(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &id,
+            &OperationSelection {
+                expected_revision: 0,
+                all_operations: false,
+                endpoint_ids: vec![],
+                rules: vec![
+                    ProxyOperationRule {
+                        method: "GET".into(),
+                        path_template: "/items/{id}".into(),
+                        ..Default::default()
+                    },
+                    ProxyOperationRule {
+                        method: "DELETE".into(),
+                        path_template: "/items/{id}".into(),
+                        ..Default::default()
+                    },
+                ],
+                contract_digest: None,
+                inputs: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        // Disabling configuration during rollout/rollback never disables enforcement.
+        crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, false).await;
+        crate::services::service_pool_service::create_pool(
+            &f.state.db,
+            &f.owner,
+            crate::services::service_pool_service::CreatePoolInput {
+                slug: "scoped-pool".into(),
+                name: "Scoped pool".into(),
+                description: None,
+                strategy: Default::default(),
+                tier_balance: Default::default(),
+                member_contract: Default::default(),
+                failover: None,
+                is_active: None,
+                members: vec![crate::models::service_pool::ServicePoolMember {
+                    user_service_id: id.clone(),
+                    weight: 1,
+                    enabled: true,
+                    priority: 0,
+                    model: None,
+                    same_api_compatible: true,
+                    health_reset_generation: 0,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let auth = authenticate(&f).await;
+        let services = load_all_services_for_meta_tools(&f.state, &auth)
             .await
             .unwrap();
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["result"]["isError"], true);
-        assert!(
-            value["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Allowed operations")
-        );
-    }
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        result(
-            call(&f, &auth, &tool, json!({"method":"GET","path":"/items/1"})).await,
-            false
-        )
-        .await["ok"],
-        true
-    );
-    let mut webhook = auth.clone();
-    webhook.chat.as_mut().unwrap().confirmation_policy =
-        Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
-    let card = result(
-        call(
-            &f,
-            &webhook,
-            &tool,
-            json!({"method":"DELETE","path":"/items/1"}),
-        )
-        .await,
-        true,
-    )
-    .await;
-    assert_eq!(card["kind"], "action");
-    assert_eq!(card["decider"], "user");
-    let before = hits.load(Ordering::SeqCst);
-    mark_guest(&f, true).await;
-    let guest = authenticate(&f).await;
-    let refused = result(
-        call(
-            &f,
-            &guest,
-            &tool,
-            json!({"method":"DELETE","path":"/items/1"}),
-        )
-        .await,
-        true,
-    )
-    .await;
-    assert_eq!(refused["error"], "owner_only");
-    mark_guest(&f, false).await;
-    let credential = credentials::load_for_conversation(
-        &f.state.db,
-        &f.state.encryption_keys,
-        &f.owner,
-        &f.row.id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let (_, router) = crate::routes::build_router_with_state(f.state.clone());
-    let router = router.with_state(f.state.clone());
-    for route in [
-        format!("/api/v1/proxy/{id}"),
-        "/api/v1/proxy/s/scoped-http".into(),
-        "/api/v1/proxy/s/scoped-pool".into(),
-    ] {
-        for (method, path, override_header) in [
-            ("POST", "/items/1", false),
-            ("HEAD", "/items/1", false),
-            ("GET", "/Items/1", false),
-            ("GET", "/items/1/", false),
-            ("GET", "/items//1", false),
-            ("GET", "/items/%2e%2e/secret", false),
-            ("GET", "/items/a%2fb", false),
-            ("GET", "/items/%252e%252e", false),
-            ("GET", "/items/1?_method=DELETE", false),
-            ("GET", "/items/1", true),
-        ] {
-            let mut request = axum::http::Request::builder()
-                .method(method)
-                .uri(format!("{route}{path}"))
-                .header(
-                    "authorization",
-                    format!("Bearer {}", credential.raw_key.as_str()),
-                );
-            if override_header {
-                request = request.header("x-http-method-override", "DELETE");
-            }
-            let response = router
-                .clone()
-                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+        let service = services.iter().find(|s| s.service_id == id).unwrap();
+        let tool = format!("{}__{}", service.service_slug, service.endpoints[0].name);
+        for universal in [false, true] {
+            let args = json!({"method":"POST","path":"/items/1"});
+            let response = if universal {
+                call(&f, &auth, &tool, args).await
+            } else {
+                direct_call(&f, &auth, &tool, args).await
+            };
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                 .await
                 .unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["result"]["isError"], true);
             assert!(
-                response.status().is_client_error(),
-                "{method} {path}: {}",
-                response.status()
+                value["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Allowed operations")
             );
         }
-    }
-    let ws = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/v1/proxy/s/scoped-http/items/1")
-                .header(
-                    "authorization",
-                    format!("Bearer {}", credential.raw_key.as_str()),
-                )
-                .header("connection", "upgrade")
-                .header("upgrade", "websocket")
-                .header("sec-websocket-version", "13")
-                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-                .body(axum::body::Body::empty())
-                .unwrap(),
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            result(
+                call(&f, &auth, &tool, json!({"method":"GET","path":"/items/1"})).await,
+                false
+            )
+            .await["ok"],
+            true
+        );
+        webhook_policy(
+            &f,
+            crate::models::trigger_schedule::ConfirmationPolicy::Changes,
+        )
+        .await;
+        let webhook = authenticate(&f).await;
+        let card = result(
+            call(
+                &f,
+                &webhook,
+                &tool,
+                json!({"method":"DELETE","path":"/items/1"}),
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(card["kind"], "action");
+        assert_eq!(card["decider"], "user");
+        let before = hits.load(Ordering::SeqCst);
+        mark_guest(&f, true).await;
+        let guest = authenticate(&f).await;
+        let refused = result(
+            call(
+                &f,
+                &guest,
+                &tool,
+                json!({"method":"DELETE","path":"/items/1"}),
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(refused["error"], "owner_only");
+        mark_guest(&f, false).await;
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
         )
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(ws.status(), axum::http::StatusCode::FORBIDDEN);
-    let relay = crate::crypto::jwt::generate_relay_access_token(
-        &f.state.jwt_keys,
-        &f.state.config,
-        &uuid::Uuid::parse_str(&f.owner).unwrap(),
-        "proxy llm:proxy",
-        None,
-        &crate::crypto::jwt::RelayAgentScope {
-            api_key_id: f.chat.api_key_id.clone(),
-            api_key_name: "test".into(),
-            allowed_service_ids: vec![id.clone()],
-            allowed_node_ids: vec![],
-            allow_all_services: false,
-            allow_all_nodes: false,
-        },
-    )
-    .unwrap();
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/api/v1/proxy/s/scoped-http/items/1")
-                .header("authorization", format!("Bearer {relay}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
+        let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+        let router = router.with_state(f.state.clone());
+        for route in [
+            format!("/api/v1/proxy/{id}"),
+            "/api/v1/proxy/s/scoped-http".into(),
+            "/api/v1/proxy/s/scoped-pool".into(),
+        ] {
+            for (method, path, override_header) in [
+                ("POST", "/items/1", false),
+                ("HEAD", "/items/1", false),
+                ("GET", "/Items/1", false),
+                ("GET", "/items/1/", false),
+                ("GET", "/items//1", false),
+                ("GET", "/items/%2e%2e/secret", false),
+                ("GET", "/items/a%2fb", false),
+                ("GET", "/items/%252e%252e", false),
+                ("GET", "/items/1?_method=DELETE", false),
+                ("GET", "/items/1", true),
+            ] {
+                let mut request = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("{route}{path}"))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", credential.raw_key.as_str()),
+                    );
+                if override_header {
+                    request = request.header("x-http-method-override", "DELETE");
+                }
+                let response = router
+                    .clone()
+                    .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_client_error(),
+                    "{method} {path}: {}",
+                    response.status()
+                );
+            }
+        }
+        let ws = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/proxy/s/scoped-http/items/1")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", credential.raw_key.as_str()),
+                    )
+                    .header("connection", "upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws.status(), axum::http::StatusCode::FORBIDDEN);
+        let relay = crate::crypto::jwt::generate_relay_access_token(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &uuid::Uuid::parse_str(&f.owner).unwrap(),
+            "proxy llm:proxy",
+            None,
+            &crate::crypto::jwt::RelayAgentScope {
+                api_key_id: f.chat.api_key_id.clone(),
+                api_key_name: "test".into(),
+                allowed_service_ids: vec![id.clone()],
+                allowed_node_ids: vec![],
+                allow_all_services: false,
+                allow_all_nodes: false,
+            },
         )
-        .await
         .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
-    let mut relay_headers = HeaderMap::new();
-    relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
-    let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
-        .await
-        .unwrap();
-    assert_eq!(
-        relay_auth.assistant_operation_scopes,
-        auth.assistant_operation_scopes
-    );
-    // Node routing cannot outrank the policy, even before a node is online.
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&id},
-            doc! {"$set":{"node_id":uuid::Uuid::new_v4().to_string()}},
-        )
-        .await
-        .unwrap();
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/api/v1/proxy/s/scoped-http/items/1")
-                .header(
-                    "authorization",
-                    format!("Bearer {}", credential.raw_key.as_str()),
-                )
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(hits.load(Ordering::SeqCst), before);
-    server.abort();
-    f.state.db.drop().await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/proxy/s/scoped-http/items/1")
+                    .header("authorization", format!("Bearer {relay}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let mut relay_headers = HeaderMap::new();
+        relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
+        let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            relay_auth.assistant_operation_scopes,
+            auth.assistant_operation_scopes
+        );
+        // Node routing cannot outrank the policy, even before a node is online.
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"node_id":uuid::Uuid::new_v4().to_string()}},
+            )
+            .await
+            .unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/proxy/s/scoped-http/items/1")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", credential.raw_key.as_str()),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(Ordering::SeqCst), before);
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    })
 }
 
 #[tokio::test]
@@ -2551,6 +2660,212 @@ async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
     )
     .await;
     assert_eq!(replay["error"], "acknowledgement_invalid");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_operation_scopes_native_input_rules_save_and_enforce_without_partial_write() {
+    use crate::models::{
+        agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
+        service_endpoint::ServiceEndpoint,
+    };
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+        proxy_authorization::CanonicalPath,
+    };
+    let f = fixture("operation_scope_input_rules").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "receipt-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    let endpoint: ServiceEndpoint = mongodb::bson::from_document(doc! {
+        "_id": &endpoint_id,
+        "service_id": &service,
+        "name": "record_create",
+        "description": null,
+        "method": "POST",
+        "path": "/items/{item_id}",
+        "parameters": null,
+        "request_body_schema": null,
+        "request_content_type": "application/json",
+        "request_body_required": true,
+        "response_description": null,
+        "risk": "write",
+        "supports_idempotency_key": false,
+        "is_active": true,
+        "created_at": mongodb::bson::DateTime::now(),
+        "updated_at": mongodb::bson::DateTime::now()
+    })
+    .unwrap();
+    f.state
+        .db
+        .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+        .insert_one(endpoint)
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    scopes::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &service,
+        &OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![],
+            contract_digest: None,
+            inputs: Default::default(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let input_rules = json!({
+        "path": {"item_id": {"type": "exact", "value": "receipt"}},
+        "body": {"type": "object", "properties": {
+            "fields": {"type": "object", "required": ["Type"], "properties": {
+                "Type": {"type": "one_of", "values": ["Expense", "Refund"]}
+            }}
+        }, "required": ["fields"]}
+    });
+    let mut inputs = serde_json::Map::new();
+    inputs.insert(endpoint_id.clone(), input_rules.clone());
+    let args = json!({
+        "subagent": "worker",
+        "service_id": service,
+        "selection": {
+            "expected_revision": 1,
+            "all_operations": false,
+            "endpoint_ids": [&endpoint_id],
+            "inputs": inputs
+        }
+    });
+    let card = result(
+        call(&f, &auth, "nyxid__set_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["kind"], "action");
+    let acknowledgement_id = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.nyxbot_thread,
+        acknowledgement_id,
+        true,
+    )
+    .await
+    .unwrap();
+    let mut retry = card["retry_arguments"].clone();
+    retry["acknowledgement_id"] = json!(acknowledgement_id);
+    result(
+        call(&f, &auth, "nyxid__set_agent_operations", retry).await,
+        false,
+    )
+    .await;
+
+    let agent = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let saved_scope = agent.operation_scopes.get(&service).unwrap();
+    assert_eq!(saved_scope.revision, 2);
+    assert_eq!(
+        saved_scope.operations[0].inputs,
+        Some(serde_json::from_value(input_rules.clone()).unwrap())
+    );
+
+    let path = CanonicalPath::from_mcp_literal("/items/receipt").unwrap();
+    let scopes_map = agent.operation_scopes.clone();
+    assert!(
+        scopes::check_inputs(
+            &scopes_map,
+            &service,
+            None,
+            Some(&endpoint_id),
+            "POST",
+            &path,
+            None,
+            br#"{"fields":{"Type":"Expense"}}"#,
+            Some("application/json"),
+        )
+        .is_ok()
+    );
+    assert!(
+        scopes::check_inputs(
+            &scopes_map,
+            &service,
+            None,
+            Some(&endpoint_id),
+            "POST",
+            &path,
+            None,
+            br#"{"fields":{"Type":"Other"}}"#,
+            Some("application/json"),
+        )
+        .is_err()
+    );
+
+    let mut invalid_inputs = serde_json::Map::new();
+    invalid_inputs.insert(
+        endpoint_id.clone(),
+        json!({"body": {
+            "type": "object",
+            "properties": {"fields": {"type": "string"}}
+        }}),
+    );
+    let invalid = json!({
+        "subagent": "worker",
+        "service_id": service,
+        "selection": {
+            "expected_revision": 2,
+            "endpoint_ids": [&endpoint_id],
+            "inputs": invalid_inputs
+        }
+    });
+    let refused = result(
+        call(&f, &auth, "nyxid__set_agent_operations", invalid).await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "validation_error");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("selection.inputs")
+    );
+    let unchanged = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.operation_scopes[&service], *saved_scope);
     f.state.db.drop().await.unwrap();
 }
 
@@ -2778,6 +3093,10 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
                     crate::models::approval_grant::COLLECTION_NAME,
                 )
                 .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    execution_review: None,
+                    execution_last_used_at: None,
+                    execution_use: None,
+                    execution: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: catalog.id.clone(),
@@ -3239,6 +3558,122 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     )
     .await;
     assert_eq!(read["content"], "Pinned guidance only");
+    let unbound = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__skill_read",
+            json!({"skill": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(unbound["error"], "forbidden");
+    // A concrete personal Ornn connection is deliberately absent from the
+    // specialist grant. Bound skill reads may use this exact owner connection
+    // after the server has verified the pin; ordinary Ornn calls still require
+    // a grant.
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user_endpoint::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user_endpoint(
+            &endpoint_id,
+            &f.owner,
+            "Ornn",
+            &upstream.uri(),
+            None,
+            Some(&catalog.id),
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::user_service::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user_service(
+            &connection_id,
+            &f.owner,
+            "ornn-owner",
+            &endpoint_id,
+            Some(&catalog.id),
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &connection_id},
+            doc! {"$set": {"identity_propagation_mode": "jwt"}},
+        )
+        .await
+        .unwrap();
+    let before_concrete = upstream.received_requests().await.unwrap().len();
+    let concrete_auth = authenticate(&f).await;
+    assert!(!concrete_auth.allow_all_services);
+    assert!(!concrete_auth.allowed_service_ids.contains(&connection_id));
+    let concrete_read = result(
+        call(&f, &concrete_auth, "nyxid__skill_read", json!({"skill":id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(concrete_read["content"], "Pinned guidance only");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), before_concrete + 1);
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .headers
+            .contains_key("x-nyxid-identity-token")
+    );
+    // The actual ordinary HTTP proxy ingress cannot borrow the server marker.
+    {
+        use tower::ServiceExt;
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let response = Box::pin(
+            private.with_state(f.state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/api/v1/proxy/{connection_id}/api/v1/skills/{id}/versions/1.0/download"
+                    ))
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            upstream.received_requests().await.unwrap().len(),
+            requests.len()
+        );
+    }
+    let ordinary_ornn = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__search_agent_skills",
+            json!({"query": "private", "page": 1}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(ordinary_ornn.get("error").is_some());
     f.state
         .db
         .collection::<crate::models::assistant_agent::AssistantAgent>(
@@ -3344,6 +3779,148 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         upstream.received_requests().await.unwrap().len(),
         before_scope
     );
+    // Revoking the real thread key still fences this internal capability.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": doc! {}}},
+        )
+        .await
+        .unwrap();
+    for (collection, target) in [
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            &catalog.id,
+        ),
+        (crate::models::user_service::COLLECTION_NAME, &connection_id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": target},
+                doc! {"$set": {"identity_propagation_mode": "none"}},
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &f.chat,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    for (collection, target) in [
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            &catalog.id,
+        ),
+        (crate::models::user_service::COLLECTION_NAME, &connection_id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": target},
+                doc! {"$set": {"identity_propagation_mode": "jwt"}},
+            )
+            .await
+            .unwrap();
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.api_key_id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &f.chat,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.api_key_id},
+            doc! {"$set": {"is_active": true}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &catalog.id},
+            doc! {"$set": {"is_active": false}},
+        )
+        .await
+        .unwrap();
+    let unavailable = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        true,
+    )
+    .await;
+    assert!(unavailable.get("error").is_some());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let records: Vec<crate::models::audit_log::AuditLog> = f
+                .state
+                .db
+                .collection(crate::models::audit_log::COLLECTION_NAME)
+                .find(doc! {"event_type": "assistant_skill_read_refused"})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if ["skill_not_bound", "grant_refused", "operation_restriction"]
+                .iter()
+                .all(|reason| {
+                    records
+                        .iter()
+                        .any(|row| row.event_data == Some(json!({"reason": reason})))
+                })
+            {
+                assert!(
+                    records.iter().all(|row| row
+                        .event_data
+                        .as_ref()
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .len()
+                        == 1)
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     // Removing needs neither an owner card nor an available Ornn.
     upstream.reset().await;
     let removed = result(
@@ -3426,398 +4003,480 @@ async fn assistant_skills_specialist_permission_is_advisory_and_agent_scoped() {
 
 #[tokio::test]
 async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged() {
-    use crate::services::service_preference_service as preferences;
-    let f = fixture("preference_mcp").await;
-    let hits = Arc::new(AtomicUsize::new(0));
-    let observed = hits.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/{*path}",
-                any(move || {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    async { Json(json!({"target":"alpha"})) }
-                }),
-            ),
-        )
-        .await
-        .unwrap();
-    });
-    let a = connected(&f.state.db, &f.owner, "alpha", &address).await;
-    let slack = connected(&f.state.db, &f.owner, "slack", "https://example.com").await;
-    let b = connected(&f.state.db, &f.owner, "beta", "https://example.com").await;
-    let hidden = connected(&f.state.db, &f.owner, "hidden", "https://example.com").await;
-    let catalog = uuid::Uuid::new_v4().to_string();
-    let group = format!("catalog:{catalog}");
-    f.state
-        .db
-        .collection::<bson::Document>("user_services")
-        .update_many(
-            doc! {"_id":{"$in":[&a,&b,&hidden]}},
-            doc! {"$set":{"catalog_service_id":&catalog}},
-        )
-        .await
-        .unwrap();
-    let slack_catalog = uuid::Uuid::new_v4().to_string();
-    for catalog_id in [&catalog, &slack_catalog] {
-        let mut service = crate::test_utils::test_auto_connected_catalog_service();
-        service.id = catalog_id.clone();
-        service.slug = if catalog_id == &catalog {
-            "anthropic"
-        } else {
-            "slack"
-        }
-        .into();
-        service.requires_user_credential = true;
-        f.state
-            .db
-            .collection(crate::models::downstream_service::COLLECTION_NAME)
-            .insert_one(service)
+    let f = boxed_chat_fixture("preference_mcp").await;
+    check_preference_discovery(f).await;
+}
+
+// Keep fixture construction out of this measured large scenario's poll frame.
+struct PreferenceScenario {
+    f: Fixture,
+    hits: Arc<AtomicUsize>,
+    server: tokio::task::JoinHandle<()>,
+    a: String,
+    slack: String,
+    b: String,
+    hidden: String,
+    group: String,
+}
+
+// Preparation and assertions return before the next phase is polled. Retain the
+// same fixture, upstream, snapshots and audit ordering through the final abort.
+fn check_preference_discovery(f: Fixture) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let s = prepare_preference_discovery(f).await;
+        let auth = authenticate(&s.f).await;
+        let baseline = preference_explicit_call(&s, &auth).await;
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let before = preference_tool_list(&s, &auth, &request).await;
+        check_preference_order(&s, &auth).await;
+        let after = preference_tool_list(&s, &auth, &request).await;
+        assert_eq!(before, after);
+        assert_eq!(preference_explicit_call(&s, &auth).await, baseline);
+        assert_eq!(s.hits.load(Ordering::SeqCst), 2);
+        check_preference_audits(&s, &auth).await;
+        check_preference_scoped(&s).await;
+        s.server.abort();
+    })
+}
+
+fn prepare_preference_discovery(
+    f: Fixture,
+) -> futures::future::BoxFuture<'static, PreferenceScenario> {
+    Box::pin(async move {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let observed = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/{*path}",
+                    any(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({"target":"alpha"})) }
+                    }),
+                ),
+            )
             .await
             .unwrap();
-        let now = bson::DateTime::now();
-        f.state.db.collection::<bson::Document>("service_endpoints").insert_one(doc! {
-            "_id":uuid::Uuid::new_v4().to_string(), "service_id":catalog_id,
-            "name":"request", "description":"Request service data", "method":"GET", "path":"/ok",
-            "risk":"read", "is_active":true, "created_at":now,"updated_at":now,
-        }).await.unwrap();
-    }
-    f.state
-        .db
-        .collection::<bson::Document>("user_services")
-        .update_one(
-            doc! {"_id":&slack},
-            doc! {"$set":{"catalog_service_id":&slack_catalog}},
-        )
-        .await
-        .unwrap();
-    for (i, id) in [&a, &slack, &b, &hidden].iter().enumerate() {
-        f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":*id},doc! {"$set":{"created_at":bson::DateTime::from_millis(2000000000000_i64-i as i64*1000)}}).await.unwrap();
-    }
-    let revoked = crate::services::user_api_key_service::create_api_key(
-        &f.state.db,
-        &f.state.encryption_keys,
-        &f.owner,
-        crate::services::user_api_key_service::CreateApiKeyParams {
-            label: "revoked fixture",
-            credential_type: "bearer",
-            credential: "fixture-only",
-            access_token: None,
-            refresh_token: None,
-            token_scopes: None,
-            expires_at: None,
-            provider_config_id: None,
-            connection_id: None,
-            oauth_client_id: None,
-            oauth_client_secret: None,
-            status: "revoked",
-            source: None,
-            source_id: None,
-        },
-    )
-    .await
-    .unwrap();
-    f.state
-        .db
-        .collection::<bson::Document>("user_services")
-        .update_one(
-            doc! {"_id":&hidden},
-            doc! {"$set":{"auth_method":"bearer","api_key_id":revoked.id}},
-        )
-        .await
-        .unwrap();
-    for id in [&a, &b, &slack] {
-        let ask = service_gate(
-            &f.state.db,
-            &f.chat,
-            id,
-            if id == &a {
-                "alpha"
-            } else if id == &b {
-                "beta"
+        });
+        let a = connected(&f.state.db, &f.owner, "alpha", &address).await;
+        let slack = connected(&f.state.db, &f.owner, "slack", "https://example.com").await;
+        let b = connected(&f.state.db, &f.owner, "beta", "https://example.com").await;
+        let hidden = connected(&f.state.db, &f.owner, "hidden", "https://example.com").await;
+        let catalog = uuid::Uuid::new_v4().to_string();
+        let group = format!("catalog:{catalog}");
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .update_many(
+                doc! {"_id":{"$in":[&a,&b,&hidden]}},
+                doc! {"$set":{"catalog_service_id":&catalog}},
+            )
+            .await
+            .unwrap();
+        let slack_catalog = uuid::Uuid::new_v4().to_string();
+        for catalog_id in [&catalog, &slack_catalog] {
+            let mut service = crate::test_utils::test_auto_connected_catalog_service();
+            service.id = catalog_id.clone();
+            service.slug = if catalog_id == &catalog {
+                "anthropic"
             } else {
                 "slack"
+            }
+            .into();
+            service.requires_user_credential = true;
+            f.state
+                .db
+                .collection(crate::models::downstream_service::COLLECTION_NAME)
+                .insert_one(service)
+                .await
+                .unwrap();
+            let now = bson::DateTime::now();
+            f.state.db.collection::<bson::Document>("service_endpoints").insert_one(doc! {
+                "_id":uuid::Uuid::new_v4().to_string(), "service_id":catalog_id,
+                "name":"request", "description":"Request service data", "method":"GET", "path":"/ok",
+                "risk":"read", "is_active":true, "created_at":now,"updated_at":now,
+            }).await.unwrap();
+        }
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .update_one(
+                doc! {"_id":&slack},
+                doc! {"$set":{"catalog_service_id":&slack_catalog}},
+            )
+            .await
+            .unwrap();
+        for (i, id) in [&a, &slack, &b, &hidden].iter().enumerate() {
+            f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":*id},doc! {"$set":{"created_at":bson::DateTime::from_millis(2000000000000_i64-i as i64*1000)}}).await.unwrap();
+        }
+        let revoked = crate::services::user_api_key_service::create_api_key(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            crate::services::user_api_key_service::CreateApiKeyParams {
+                label: "revoked fixture",
+                credential_type: "bearer",
+                credential: "fixture-only",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "revoked",
+                source: None,
+                source_id: None,
             },
-            "Service",
+        )
+        .await
+        .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .update_one(
+                doc! {"_id":&hidden},
+                doc! {"$set":{"auth_method":"bearer","api_key_id":revoked.id}},
+            )
+            .await
+            .unwrap();
+        for id in [&a, &b, &slack] {
+            let ask = service_gate(
+                &f.state.db,
+                &f.chat,
+                id,
+                if id == &a {
+                    "alpha"
+                } else if id == &b {
+                    "beta"
+                } else {
+                    "slack"
+                },
+                "Service",
+                false,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            acks::decide(
+                &f.state.db,
+                &f.owner,
+                &f.row.id,
+                ask["acknowledgement_id"].as_str().unwrap(),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        PreferenceScenario {
+            f,
+            hits,
+            server,
+            a,
+            slack,
+            b,
+            hidden,
+            group,
+        }
+    })
+}
+
+fn preference_explicit_call<'a>(
+    s: &'a PreferenceScenario,
+    auth: &'a McpAuthContext,
+) -> futures::future::BoxFuture<'a, Value> {
+    Box::pin(async move {
+        let f = &s.f;
+        let call_args = json!({
+            "tool_name":"alpha__request",
+            "arguments":{}
+        });
+        result(
+            direct_call(f, auth, "nyx__call_tool", call_args).await,
             false,
         )
         .await
+    })
+}
+
+fn preference_tool_list<'a>(
+    s: &'a PreferenceScenario,
+    auth: &'a McpAuthContext,
+    request: &'a JsonRpcRequest,
+) -> futures::future::BoxFuture<'a, axum::body::Bytes> {
+    Box::pin(async move {
+        let f = &s.f;
+        axum::body::to_bytes(
+            handle_tools_list(&f.state, auth, None, request)
+                .await
+                .into_body(),
+            2 * 1024 * 1024,
+        )
+        .await
         .unwrap()
-        .unwrap();
-        acks::decide(
+    })
+}
+
+fn check_preference_order<'a>(
+    s: &'a PreferenceScenario,
+    auth: &'a McpAuthContext,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        use crate::services::service_preference_service as preferences;
+        let f = &s.f;
+        let slack = s.slack.clone();
+        let b = s.b.clone();
+        let hidden = s.hidden.clone();
+        let group = s.group.clone();
+        preferences::replace_group(
             &f.state.db,
             &f.owner,
-            &f.row.id,
-            ask["acknowledgement_id"].as_str().unwrap(),
-            true,
+            &group,
+            &[b.clone(), hidden.clone()],
+            0,
         )
         .await
         .unwrap();
-    }
-    let auth = authenticate(&f).await;
-    let call_args = json!({
-        "tool_name":"alpha__request",
-        "arguments":{}
-    });
-    let baseline = result(
-        direct_call(&f, &auth, "nyx__call_tool", call_args.clone()).await,
-        false,
-    )
-    .await;
-    let request = JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        id: Some(json!(1)),
-        method: "tools/list".into(),
-        params: None,
-    };
-    let before = axum::body::to_bytes(
-        handle_tools_list(&f.state, &auth, None, &request)
-            .await
-            .into_body(),
-        2 * 1024 * 1024,
-    )
-    .await
-    .unwrap();
-    preferences::replace_group(
-        &f.state.db,
-        &f.owner,
-        &group,
-        &[b.clone(), hidden.clone()],
-        0,
-    )
-    .await
-    .unwrap();
-    let listed = result(
-        direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await,
-        false,
-    )
-    .await;
-    assert_eq!(listed["services"][0]["service_id"], b);
-    assert_eq!(listed["services"][0]["preference_rank"], 1);
-    assert!(listed.to_string().contains(&hidden));
-    assert_eq!(listed["services"][1]["service_id"], slack);
-    assert!(listed["services"][1]["preference_rank"].is_null());
-    let unavailable = listed["services"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["service_id"] == hidden)
-        .unwrap();
-    assert_eq!(unavailable["executable"], false);
-    assert_eq!(unavailable["preference_rank"], 2);
-    let searched = result(
-        direct_call(&f, &auth, "nyx__search_tools", json!({"query":"request"})).await,
-        false,
-    )
-    .await;
-    assert!(
-        searched["matches"][0]["name"]
-            .as_str()
-            .unwrap()
-            .starts_with("beta__")
-    );
-    assert_eq!(searched["matches"][0]["preference_rank"], 1);
-    assert!(
-        searched["matches"][1]["name"]
-            .as_str()
-            .unwrap()
-            .starts_with("slack__")
-    );
-    assert!(
-        searched["matches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row.get("executable").is_some())
-    );
-    assert_eq!(
-        searched["matches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["name"].as_str().unwrap().starts_with("hidden__"))
-            .unwrap()["executable"],
-        false
-    );
-    assert!(
-        searched["matches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row.get("preference_rank").is_some())
-    );
-    let native = result(
-        direct_call(
-            &f,
-            &auth,
-            "nyx__search_tools",
-            json!({"query":"uploaded document"}),
+        let listed = result(
+            direct_call(f, auth, "nyx__list_connected_services", json!({})).await,
+            false,
         )
-        .await,
-        false,
-    )
-    .await;
-    let attachment = native["matches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["name"] == "nyx__attachment_read")
-        .expect("native upload search extra");
-    assert_eq!(attachment["preference_rank"], Value::Null);
-    assert_eq!(attachment["executable"], true);
-    assert_eq!(
-        attachment["hint"],
-        "Call this native tool directly by name."
-    );
-    let after = axum::body::to_bytes(
-        handle_tools_list(&f.state, &auth, None, &request)
-            .await
-            .into_body(),
-        2 * 1024 * 1024,
-    )
-    .await
-    .unwrap();
-    assert_eq!(before, after);
-    assert_eq!(
-        result(
-            direct_call(&f, &auth, "nyx__call_tool", call_args).await,
-            false
+        .await;
+        assert_eq!(listed["services"][0]["service_id"], b);
+        assert_eq!(listed["services"][0]["preference_rank"], 1);
+        assert!(listed.to_string().contains(&hidden));
+        assert_eq!(listed["services"][1]["service_id"], slack);
+        assert!(listed["services"][1]["preference_rank"].is_null());
+        let unavailable = listed["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["service_id"] == hidden)
+            .unwrap();
+        assert_eq!(unavailable["executable"], false);
+        assert_eq!(unavailable["preference_rank"], 2);
+        let searched = result(
+            direct_call(f, auth, "nyx__search_tools", json!({"query":"request"})).await,
+            false,
         )
-        .await,
-        baseline
-    );
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
-    let audits = f.state.db.collection::<crate::models::audit_log::AuditLog>(
-        crate::models::audit_log::COLLECTION_NAME,
-    );
-    let filter = doc! {"event_type":"mcp_tool_call", "event_data.tool":"alpha__request"};
-    let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let events: Vec<_> = audits
-                .find(filter.clone())
-                .await
+        .await;
+        assert!(
+            searched["matches"][0]["name"]
+                .as_str()
                 .unwrap()
-                .try_collect()
-                .await
-                .unwrap();
-            if events.len() >= 2 {
-                break events;
+                .starts_with("beta__")
+        );
+        assert_eq!(searched["matches"][0]["preference_rank"], 1);
+        assert!(
+            searched["matches"][1]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("slack__")
+        );
+        assert!(
+            searched["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("executable").is_some())
+        );
+        assert_eq!(
+            searched["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"].as_str().unwrap().starts_with("hidden__"))
+                .unwrap()["executable"],
+            false
+        );
+        assert!(
+            searched["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("preference_rank").is_some())
+        );
+        let native = result(
+            direct_call(
+                f,
+                auth,
+                "nyx__search_tools",
+                json!({"query":"uploaded document"}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        let attachment = native["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "nyx__attachment_read")
+            .expect("native upload search extra");
+        assert_eq!(attachment["preference_rank"], Value::Null);
+        assert_eq!(attachment["executable"], true);
+        assert_eq!(
+            attachment["hint"],
+            "Call this native tool directly by name."
+        );
+    })
+}
+
+fn check_preference_audits<'a>(
+    s: &'a PreferenceScenario,
+    auth: &'a McpAuthContext,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let f = &s.f;
+        let a = s.a.clone();
+        let audits = f.state.db.collection::<crate::models::audit_log::AuditLog>(
+            crate::models::audit_log::COLLECTION_NAME,
+        );
+        let filter = doc! {"event_type":"mcp_tool_call", "event_data.tool":"alpha__request"};
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let events: Vec<_> = audits
+                    .find(filter.clone())
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                if events.len() >= 2 {
+                    break events;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        })
+        .await
+        .expect("both asynchronous execution audits arrive");
+        assert_eq!(events.len(), 2, "no execution retry or extra audit");
+        assert_eq!(events[0].event_data, events[1].event_data);
+        for event in &events {
+            assert_eq!(event.user_id.as_deref(), Some(f.owner.as_str()));
+            assert_eq!(event.api_key_id.as_deref(), auth.api_key_id.as_deref());
+            assert_eq!(event.event_data.as_ref().unwrap()["service_id"], a);
+            assert_eq!(event.event_data.as_ref().unwrap()["via"], "nyx__call_tool");
         }
     })
-    .await
-    .expect("both asynchronous execution audits arrive");
-    assert_eq!(events.len(), 2, "no execution retry or extra audit");
-    assert_eq!(events[0].event_data, events[1].event_data);
-    for event in &events {
-        assert_eq!(event.user_id.as_deref(), Some(f.owner.as_str()));
-        assert_eq!(event.api_key_id.as_deref(), auth.api_key_id.as_deref());
-        assert_eq!(event.event_data.as_ref().unwrap()["service_id"], a);
-        assert_eq!(event.event_data.as_ref().unwrap()["via"], "nyx__call_tool");
-    }
-    preferences::replace_group(
-        &f.state.db,
-        &f.owner,
-        &group,
-        &[hidden.clone(), b.clone()],
-        1,
-    )
-    .await
-    .unwrap();
-    let scoped_key = crate::services::key_service::create_api_key_with_scope_authorization(
-        &f.state.db,
-        &f.owner,
-        Some(&f.owner),
-        "preference-scoped",
-        "proxy",
-        None,
-        None,
-        Some(&[a.clone(), b.clone()]),
-        Some(&[]),
-        Some(false),
-        Some(false),
-        Some(false),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert("x-api-key", scoped_key.full_key.parse().unwrap());
-    let scoped = authenticate_mcp(&f.state, &headers, false).await.unwrap();
-    let listed = result(
-        direct_call(&f, &scoped, "nyx__list_connected_services", json!({})).await,
-        false,
-    )
-    .await;
-    assert_eq!(listed["services"][0]["service_id"], b);
-    assert_eq!(listed["services"][0]["preference_rank"], 1);
-    assert!(!listed.to_string().contains(&hidden));
-    let relay = crate::crypto::jwt::generate_relay_access_token(
-        &f.state.jwt_keys,
-        &f.state.config,
-        &uuid::Uuid::parse_str(&f.owner).unwrap(),
-        "proxy",
-        None,
-        &crate::crypto::jwt::RelayAgentScope {
-            api_key_id: scoped.api_key_id.clone().unwrap(),
-            api_key_name: "preference-scoped".into(),
-            allowed_service_ids: vec![a.clone(), b.clone()],
-            allowed_node_ids: vec![],
-            allow_all_services: false,
-            allow_all_nodes: false,
-        },
-    )
-    .unwrap();
-    let mut relay_headers = HeaderMap::new();
-    relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
-    let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
+}
+
+fn check_preference_scoped(s: &PreferenceScenario) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        use crate::services::service_preference_service as preferences;
+        let f = &s.f;
+        let a = s.a.clone();
+        let b = s.b.clone();
+        let hidden = s.hidden.clone();
+        let group = s.group.clone();
+        preferences::replace_group(
+            &f.state.db,
+            &f.owner,
+            &group,
+            &[hidden.clone(), b.clone()],
+            1,
+        )
         .await
         .unwrap();
-    assert_eq!(relay_auth.user_id, f.owner);
-    let relay_listed = result(
-        direct_call(&f, &relay_auth, "nyx__list_connected_services", json!({})).await,
-        false,
-    )
-    .await;
-    assert_eq!(relay_listed["services"], listed["services"]);
-    let relay_search = result(
-        direct_call(
-            &f,
-            &relay_auth,
-            "nyx__search_tools",
-            json!({"query":"request"}),
+        let scoped_key = crate::services::key_service::create_api_key_with_scope_authorization(
+            &f.state.db,
+            &f.owner,
+            Some(&f.owner),
+            "preference-scoped",
+            "proxy",
+            None,
+            None,
+            Some(&[a.clone(), b.clone()]),
+            Some(&[]),
+            Some(false),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
-        .await,
-        false,
-    )
-    .await;
-    assert_eq!(relay_search["matches"][0]["preference_rank"], 1);
-    assert!(
-        relay_search["matches"][0]["name"]
-            .as_str()
-            .unwrap()
-            .starts_with("beta__")
-    );
-    assert!(!relay_search.to_string().contains(&hidden));
-    mark_guest(&f, true).await;
-    let guest = authenticate(&f).await;
-    let listed = result(
-        direct_call(&f, &guest, "nyx__list_connected_services", json!({})).await,
-        false,
-    )
-    .await;
-    assert_eq!(listed["services"][0]["service_id"], b);
-    assert_eq!(listed["services"][0]["preference_rank"], 1);
-    assert!(!listed.to_string().contains(&hidden));
-    server.abort();
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", scoped_key.full_key.parse().unwrap());
+        let scoped = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+        let listed = result(
+            direct_call(f, &scoped, "nyx__list_connected_services", json!({})).await,
+            false,
+        )
+        .await;
+        assert_eq!(listed["services"][0]["service_id"], b);
+        assert_eq!(listed["services"][0]["preference_rank"], 1);
+        assert!(!listed.to_string().contains(&hidden));
+        let relay = crate::crypto::jwt::generate_relay_access_token(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &uuid::Uuid::parse_str(&f.owner).unwrap(),
+            "proxy",
+            None,
+            &crate::crypto::jwt::RelayAgentScope {
+                api_key_id: scoped.api_key_id.clone().unwrap(),
+                api_key_name: "preference-scoped".into(),
+                allowed_service_ids: vec![a.clone(), b.clone()],
+                allowed_node_ids: vec![],
+                allow_all_services: false,
+                allow_all_nodes: false,
+            },
+        )
+        .unwrap();
+        let mut relay_headers = HeaderMap::new();
+        relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
+        let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
+            .await
+            .unwrap();
+        assert_eq!(relay_auth.user_id, f.owner);
+        let relay_listed = result(
+            direct_call(f, &relay_auth, "nyx__list_connected_services", json!({})).await,
+            false,
+        )
+        .await;
+        assert_eq!(relay_listed["services"], listed["services"]);
+        let relay_search = result(
+            direct_call(
+                f,
+                &relay_auth,
+                "nyx__search_tools",
+                json!({"query":"request"}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(relay_search["matches"][0]["preference_rank"], 1);
+        assert!(
+            relay_search["matches"][0]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("beta__")
+        );
+        assert!(!relay_search.to_string().contains(&hidden));
+        mark_guest(f, true).await;
+        let guest = authenticate(f).await;
+        let listed = result(
+            direct_call(f, &guest, "nyx__list_connected_services", json!({})).await,
+            false,
+        )
+        .await;
+        assert_eq!(listed["services"][0]["service_id"], b);
+        assert_eq!(listed["services"][0]["preference_rank"], 1);
+        assert!(!listed.to_string().contains(&hidden));
+    })
 }
 #[path = "async_service_operation_tests.rs"]
 mod async_service_operation_tests;
@@ -4018,13 +4677,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     use crate::services::assistant_settings_service as settings;
     let f = fixture("strict_connect_link").await;
     let auth = authenticate(&f).await;
-    let service = connected(
-        &f.state.db,
-        &f.owner,
-        "connect-service",
-        "http://127.0.0.1:9",
-    )
-    .await;
+    let service = public_connect_catalog(&f, "connect-service").await.id;
     settings::update(
         &f.state.db,
         &f.owner,
@@ -4080,6 +4733,45 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     )
     .unwrap();
     assert!(routed_body.contains("access_request_denied"));
+    assert!(routed_body.contains("connect-service"));
+    assert!(routed_body.contains("NyxBot send one"));
+    assert!(!routed_body.contains("/keys"));
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(doc! {"_id":&service}, doc! {"$set":{"service_type":"ssh"}})
+        .await
+        .unwrap();
+    let ssh = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":service}),
+            None,
+            false,
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(ssh["connect_own"]["reason"], "ssh_requires_advanced_setup");
+    assert!(
+        ssh["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("advanced configuration")
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -4213,29 +4905,32 @@ async fn set_access_mode(f: &Fixture, mode: crate::models::assistant_settings::A
 async fn owner_access_mode_gates_service_operations_by_effect() {
     use crate::models::assistant_settings::AccessMode;
     let f = orchestrator_fixture("owner_mode_service_gate").await;
-    let service_id = connected(&f.state.db, &f.owner, "mode-target", "http://127.0.0.1:9").await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    connected(&f.state.db, &f.owner, "mode-target", &server.uri()).await;
     let auth = authenticate(&f).await;
     assert!(auth.chat.as_ref().unwrap().confirmation_policy.is_none());
-    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
-        .await
-        .unwrap();
-    let service = services
-        .iter_mut()
-        .find(|candidate| candidate.service_id == service_id)
-        .unwrap();
-    let endpoint = service.endpoints.remove(0);
-    let (service, endpoint) = (&*service, &endpoint);
-    let tool = "mode-target__proxy";
-    let gate = |method: &'static str| {
+    let tool = "mode-target__request";
+    let gate = |method: &'static str, meta: bool| {
         let args = json!({"method": method, "path": "/items/1"});
-        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
         let (f, auth) = (&f, &auth);
         async move {
-            webhook_service_gate(
-                &f.state, auth, service, endpoint, &prepared, tool, &args, None,
-            )
-            .await
-            .is_err()
+            let response = if meta {
+                call(f, auth, tool, args).await
+            } else {
+                direct_call(f, auth, tool, args).await
+            };
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let text = body["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            text.contains("acknowledgement_required")
         }
     };
     let matrix = [
@@ -4246,7 +4941,13 @@ async fn owner_access_mode_gates_service_operations_by_effect() {
     for (mode, expected) in matrix {
         set_access_mode(&f, mode).await;
         for (method, asks) in ["GET", "POST", "PATCH", "DELETE"].into_iter().zip(expected) {
-            assert_eq!(gate(method).await, asks, "{mode:?} {method}");
+            for meta in [false, true] {
+                assert_eq!(
+                    gate(method, meta).await,
+                    asks,
+                    "{mode:?} {method} meta={meta}"
+                );
+            }
         }
     }
     let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
@@ -4283,7 +4984,35 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
     use crate::models::assistant_settings::AccessMode;
     let f = orchestrator_fixture("owner_mode_meta_gate").await;
     let auth = authenticate(&f).await;
-    let args = json!({"service": "no-such-host", "command": "uptime"});
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.service_type = "ssh".into();
+    catalog.ssh_config = Some(
+        crate::services::ssh_service::build_ssh_config(
+            &f.state.encryption_keys,
+            &catalog.id,
+            None,
+            crate::services::ssh_service::SshConfigInput {
+                host: "127.0.0.1",
+                port: 22,
+                certificate_auth_enabled: true,
+                ssh_auth_mode: Some(crate::models::ssh_auth_mode::SshAuthMode::Cert),
+                certificate_ttl_minutes: 30,
+                allowed_principals: &["ubuntu".into()],
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let connection = connected(&f.state.db, &f.owner, "mode-ssh", "ssh://127.0.0.1").await;
+    f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":&connection},
+        doc! {"$set":{"service_type":"ssh","catalog_service_id":&catalog.id,"ssh_auth_mode":"cert"}}).await.unwrap();
+    let args = json!({"service": connection, "command": "uptime"});
     let text = |response: Response| async move {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -4303,7 +5032,7 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(row.tool_name.as_deref(), Some("nyx__ssh_exec"));
+    assert_eq!(row.tool_name.as_deref(), Some("nyxid.service_execution"));
     assert_eq!(row.confirmation.as_ref().unwrap().risk, "destructive");
     assert!(
         !row.summary.contains("uptime"),
@@ -4578,6 +5307,7 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
     let f = crate::services::assistant_authority_tests::direct_fixture("mcp_missing_access_links")
         .await;
     let service_id = connected(&f.state.db, &f.owner, "github", "https://api.github.com").await;
+    let catalog = public_connect_catalog(&f, "personal-github").await;
     let auth = authenticate(&f).await;
     let services = load_all_services_for_meta_tools(&f.state, &auth)
         .await
@@ -4598,7 +5328,7 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
             &f.state,
             &auth,
             None,
-            &json!({"service_id": service_id}),
+            &json!({"service_id": catalog.id}),
             None,
             false,
         )
@@ -4606,17 +5336,2961 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
         true,
     )
     .await;
-    for value in [service, connect] {
-        assert_eq!(value["error"], "missing_access");
-        let instructions = value["instructions"].as_str().unwrap();
-        assert!(
-            instructions.contains(&format!(
-                "({}/assistant?",
-                f.state.config.frontend_url.trim_end_matches('/')
-            )),
-            "{instructions}"
+    assert_eq!(service["error"], "missing_access");
+    assert!(service["instructions"].as_str().unwrap().contains(&format!(
+        "({}/assistant?",
+        f.state.config.frontend_url.trim_end_matches('/')
+    )));
+    assert_eq!(connect["error"], "missing_access");
+    assert_eq!(connect["catalog_service_id"], catalog.id);
+    assert_eq!(connect["service_slug"], catalog.slug);
+    assert!(
+        connect["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("NyxBot send one")
+    );
+    assert!(!connect.to_string().contains("/keys"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_dispatch() {
+    use crate::models::{approval_request as approvals, service_approval_config as configs};
+    use crate::services::{assistant_invocation_service as receipts, assistant_nyxagent as engine};
+    use mongodb::bson::Document;
+    use tower::ServiceExt;
+    for (dispatch, credential_header) in [
+        ("mcp_direct", "x-api-key"),
+        ("mcp_meta", "x-api-key"),
+        ("proxy_uuid", "x-api-key"),
+        ("proxy_slug", "x-api-key"),
+        ("llm_provider", "x-api-key"),
+        ("llm_provider", "authorization"),
+        ("llm_gateway", "x-api-key"),
+        ("llm_gateway", "authorization"),
+    ] {
+        let mut f = orchestrator_fixture(&format!(
+            "invocation_approval_wait_{dispatch}_{credential_header}"
+        ))
+        .await;
+        receipts::ensure_indexes(&f.state.db).await.unwrap();
+        engine::force_stop(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            &f.row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap();
+        let request = engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "approval fixture".into(),
+            model: None,
+            access_mode: None,
+        };
+        let start = engine::TurnStart::from(&request);
+        let key = uuid::Uuid::new_v4().to_string();
+        let admission = receipts::admit(
+            &f.state.db,
+            &f.owner,
+            &key,
+            "fixture",
+            &start,
+            &f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        f.row = admission.claim.unwrap().conversation;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let upstream = Router::new().route(
+            "/{*path}",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"ok":true})) }
+            }),
         );
-        assert!(!instructions.contains("(/assistant?"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let service = connected(&f.state.db, &f.owner, "approval-fixture", &address).await;
+        let mut approval_services = vec![service.clone()];
+        let mut provider_config_id = None;
+        if dispatch.starts_with("llm_") {
+            let provider_id = uuid::Uuid::new_v4().to_string();
+            let now = mongodb::bson::DateTime::now();
+            let provider: crate::models::provider_config::ProviderConfig =
+                mongodb::bson::from_document(doc! {
+                    "_id": &provider_id,
+                    "slug": "openai",
+                    "name": "Approval fixture provider",
+                    "provider_type": "api_key",
+                    "is_active": true,
+                    "created_by": &f.owner,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+                .unwrap();
+            f.state
+                .db
+                .collection::<crate::models::provider_config::ProviderConfig>(
+                    crate::models::provider_config::COLLECTION_NAME,
+                )
+                .insert_one(provider)
+                .await
+                .unwrap();
+            provider_config_id = Some(provider_id);
+        }
+        let route_catalog_id = if dispatch.starts_with("proxy_") || dispatch.starts_with("llm_") {
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = if dispatch.starts_with("llm_") {
+                "llm-openai"
+            } else {
+                "approval-fixture"
+            }
+            .into();
+            catalog.base_url = address.clone();
+            catalog.provider_config_id = provider_config_id;
+            f.state
+                .db
+                .collection::<crate::models::downstream_service::DownstreamService>(
+                    crate::models::downstream_service::COLLECTION_NAME,
+                )
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<Document>(crate::models::user_service::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &service},
+                    doc! {"$set": {"catalog_service_id": &catalog.id}},
+                )
+                .await
+                .unwrap();
+            approval_services.push(catalog.id.clone());
+            Some(catalog.id)
+        } else {
+            None
+        };
+        set_access_mode(
+            &f,
+            crate::models::assistant_settings::AccessMode::AskEveryTime,
+        )
+        .await;
+        let now = chrono::Utc::now();
+        for service_id in &approval_services {
+            f.state
+                .db
+                .collection(configs::COLLECTION_NAME)
+                .insert_one(configs::ServiceApprovalConfig {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: f.owner.clone(),
+                    service_id: service_id.clone(),
+                    service_name: "fixture".into(),
+                    approval_required: true,
+                    approval_mode: Default::default(),
+                    rules: vec![],
+                    default_effect: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+        }
+        let auth = authenticate(&f).await;
+        assert_eq!(
+            acks::effective_access_mode(&f.state.db, auth.chat.as_ref().unwrap())
+                .await
+                .unwrap(),
+            crate::models::assistant_settings::AccessMode::AskEveryTime
+        );
+        let name = if dispatch.starts_with("mcp_") {
+            let search = result(
+                handle_meta_search(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"query":"approval-fixture"}),
+                    None,
+                    false,
+                )
+                .await,
+                false,
+            )
+            .await;
+            Some(
+                search["matches"][0]["name"]
+                    .as_str()
+                    .expect("MCP fixture must expose its generic HTTP tool")
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let credential_value = zeroize::Zeroizing::new(if credential_header == "authorization" {
+            format!("Bearer {}", credential.raw_key.as_str())
+        } else {
+            credential.raw_key.to_string()
+        });
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let mounted = private.with_state(f.state.clone());
+        for denied_path in [
+            format!("/api/v1/ssh/{service}"),
+            "/api/v1/assistant/nyxagent/settings".into(),
+        ] {
+            let refusal = mounted
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(denied_path)
+                        .header(credential_header, credential_value.as_str())
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(refusal.status(), axum::http::StatusCode::FORBIDDEN);
+        }
+        let action = async {
+            let args = json!({"method":"GET","path":"/effect"});
+            match dispatch {
+                "mcp_direct" => {
+                    direct_call(&f, &auth, name.as_deref().expect("MCP fixture tool"), args).await
+                }
+                "mcp_meta" => {
+                    call(&f, &auth, name.as_deref().expect("MCP fixture tool"), args).await
+                }
+                _ => {
+                    let path = match dispatch {
+                        "proxy_uuid" => format!(
+                            "/api/v1/proxy/{}/effect",
+                            route_catalog_id.as_deref().expect("proxy catalog fixture")
+                        ),
+                        "proxy_slug" => "/api/v1/proxy/s/approval-fixture/effect".into(),
+                        "llm_provider" => "/api/v1/llm/openai/v1/chat/completions".into(),
+                        "llm_gateway" => "/api/v1/llm/gateway/v1/chat/completions".into(),
+                        _ => unreachable!(),
+                    };
+                    let llm = dispatch.starts_with("llm_");
+                    let body = if llm {
+                        axum::body::Body::from(
+                            json!({"model":"gpt-fixture","messages":[{"role":"user","content":"fixture"}]})
+                                .to_string(),
+                        )
+                    } else {
+                        axum::body::Body::empty()
+                    };
+                    mounted
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method(if llm { "POST" } else { "GET" })
+                                .uri(path)
+                                .header(credential_header, credential_value.as_str())
+                                .header("content-type", "application/json")
+                                .body(body)
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                }
+            }
+        };
+        tokio::pin!(action);
+        let pending_approval = async {
+            loop {
+                if let Some(card) = f
+                    .state
+                    .db
+                    .collection::<Document>(approvals::COLLECTION_NAME)
+                    .find_one(doc! {"service_id": {"$in": &approval_services}, "status": "pending"})
+                    .await
+                    .unwrap()
+                {
+                    break card;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                response = &mut action => {
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    // These fixtures send no secret-bearing arguments. Report
+                    // only the tool's safe error text, never auth/fixture state.
+                    panic!(
+                        "{dispatch} ({credential_header}) returned before service approval: {}",
+                        body["result"]["content"][0]["text"]
+                            .as_str()
+                            .or_else(|| body["message"].as_str())
+                            .unwrap_or("missing error result")
+                    );
+                }
+                pending = pending_approval => pending,
+            }
+        })
+        .await
+        .expect("tool must reach service approval before cancellation");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        receipts::cancel(&f.state, &f.owner, &key).await.unwrap();
+        f.state
+            .db
+            .collection::<Document>(approvals::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":pending.get_str("_id").unwrap()},
+                doc! {"$set":{"status":"approved"}},
+            )
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), action)
+            .await
+            .expect("approved cancelled request must resume and refuse dispatch");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        if dispatch.starts_with("mcp_") {
+            assert_eq!(body["result"]["isError"], true);
+            assert!(
+                body["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("originating invocation")
+            );
+        } else {
+            assert_eq!(
+                status,
+                axum::http::StatusCode::CONFLICT,
+                "{dispatch} ({credential_header})"
+            );
+            assert_eq!(
+                body["error_code"], 12102,
+                "{dispatch} ({credential_header})"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        server.abort();
+        f.state.db.drop().await.unwrap();
     }
+}
+
+async fn configure_guest_with_owner_card(
+    f: &Fixture,
+    auth: &McpAuthContext,
+    mut args: Value,
+) -> Value {
+    let card = result(
+        call(f, auth, "nyxid__set_guest_access", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert_eq!(card["decider"], "user");
+    let ack = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
+        .await
+        .unwrap();
+    args["acknowledgement_id"] = json!(ack);
+    result(call(f, auth, "nyxid__set_guest_access", args).await, false).await
+}
+
+#[tokio::test]
+async fn guest_access_none_then_clear_selection_preserves_read_level() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+        feature_flag_service as flags,
+    };
+    let f = boxed_chat_fixture("guest_none_preserves_read").await;
+    let id = connected(&f.state.db, &f.owner, "read-only", "http://127.0.0.1:9").await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let nyxbot = authenticate_id(&f, &f.nyxbot_thread).await;
+    configure_guest_with_owner_card(
+        &f,
+        &nyxbot,
+        json!({"subagent":"worker", "services":[id], "access":"read"}),
+    )
+    .await;
+    let mut guest = f.auth.clone();
+    let mut chat = f.chat.clone();
+    chat.guest = true;
+    guest.assistant_chat = Some(Arc::new(chat));
+    let path =
+        crate::services::proxy_authorization::CanonicalPath::from_mcp_literal("/items").unwrap();
+    let allowed = |method: &'static str| {
+        scopes::check_non_mcp_context(
+            &f.state.db,
+            &guest,
+            false,
+            &id,
+            None,
+            method,
+            Some(&path),
+            Default::default(),
+        )
+    };
+    assert!(allowed("GET").await.is_ok());
+    assert!(allowed("POST").await.is_err());
+
+    configure_guest_with_owner_card(
+        &f,
+        &nyxbot,
+        json!({"subagent":"worker", "services":[id], "access":"none",
+            "selection":{"expected_revision":0}}),
+    )
+    .await;
+    let withheld = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(withheld.guest_access[&id], GuestAccess::Read);
+    assert!(withheld.guest_operation_scopes[&id].operations.is_empty());
+    assert!(allowed("GET").await.is_err());
+
+    // Clear only the selection through the human route. Supplying `read` again
+    // would hide a regression where `none` had silently widened the stored level.
+    let Json(cleared) = crate::handlers::assistant_team::set_guest_operations(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), id.clone())),
+        Json(
+            serde_json::from_value(json!({
+                "expected_revision":1, "all_operations":true
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cleared["revision"], 2);
+    let restored = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(restored.guest_access[&id], GuestAccess::Read);
+    assert!(!restored.guest_operation_scopes.contains_key(&id));
+    assert_eq!(restored.guest_operation_scope_revisions[&id], 2);
+    assert!(allowed("GET").await.is_ok());
+    assert!(allowed("POST").await.is_err());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_operation_selection_filters_discovery_and_refuses_direct_and_universal_calls() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::{assistant_team_service as team, feature_flag_service as flags};
+    let f = boxed_chat_fixture("guest_scope_mcp").await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let server_app = Router::new().route(
+        "/{*path}",
+        any(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { Json(json!({"ok":true})) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, server_app).await.unwrap() });
+    let id = connected(&f.state.db, &f.owner, "limited", &url).await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let generic_auth = authenticate(&f).await;
+    let generic = load_all_services_for_meta_tools(&f.state, &generic_auth)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.service_id == id)
+        .unwrap();
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "guest-limited-catalog".into();
+    catalog.base_url = url.clone();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    let read = crate::test_utils::test_service_endpoint(&catalog.id, "read_one", "GET", "/files");
+    let send = crate::test_utils::test_service_endpoint(&catalog.id, "send", "POST", "/mail");
+    f.state
+        .db
+        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_many([&read, &send])
+        .await
+        .unwrap();
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    let svc = services.iter().find(|s| s.service_id == id).unwrap();
+    assert_eq!(svc.endpoints.len(), 2);
+    let send_name = format!("{}__{}", svc.service_slug, send.name);
+    let read_name = format!("{}__{}", svc.service_slug, read.name);
+    flags::set_platform_override(
+        &f.state.db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let nyxbot = authenticate_id(&f, &f.nyxbot_thread).await;
+    configure_guest_with_owner_card(&f,&nyxbot,json!({"subagent":"worker","services":[id],"access":"use","selection":{"expected_revision":0,"endpoint_ids":[read.id]}})).await;
+    let services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    let visible = services.iter().find(|s| s.service_id == id).unwrap();
+    assert_eq!(visible.endpoints.len(), 1);
+    assert_eq!(visible.endpoints[0].endpoint_id, read.id);
+    // Known tool names remain refused even though they are now hidden.
+    result(direct_call(&f, &guest, &send_name, json!({})).await, true).await;
+    result(call(&f, &guest, &send_name, json!({})).await, true).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    result(call(&f, &guest, &read_name, json!({})).await, false).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // The guest selection cannot widen the specialist's ordinary B1 scope.
+    flags::set_platform_override(
+        &f.state.db,
+        flags::AGENT_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let deny: crate::models::agent_operation_scope::OperationSelection =
+        serde_json::from_value(json!({"expected_revision":0})).unwrap();
+    crate::services::agent_operation_scope_service::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &id,
+        &deny,
+        true,
+    )
+    .await
+    .unwrap();
+    let scoped_guest = authenticate(&f).await;
+    let refused = call(&f, &scoped_guest, &read_name, json!({})).await;
+    let bytes = axum::body::to_bytes(refused.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let refused: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refused["result"]["isError"], true);
+    assert!(
+        refused["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Specialist operation scope denied this call")
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let restore: crate::models::agent_operation_scope::OperationSelection =
+        serde_json::from_value(json!({"expected_revision":1,"all_operations":true})).unwrap();
+    crate::services::agent_operation_scope_service::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &id,
+        &restore,
+        true,
+    )
+    .await
+    .unwrap();
+    // A generic path cannot spend the typed endpoint's scope on another path.
+    assert!(generic.is_generic_proxy);
+    let endpoint = &generic.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        &generic,
+        endpoint,
+        &json!({"method":"POST","path":"/mail"}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, &generic, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
+    // NyxBot configures none on the existing key with the same durable revision.
+    let configured=configure_guest_with_owner_card(&f,&nyxbot,json!({"subagent":"worker","services":[id],"access":"none","selection":{"expected_revision":1}})).await;
+    assert_eq!(configured["guest_operations"][0]["endpoint_ids"], json!([]));
+    let services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    assert!(!services.iter().any(|s| s.service_id == id));
+    result(call(&f, &guest, &read_name, json!({})).await, true).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // Guests and specialists cannot use the configuration tool to escape.
+    result(
+        call(
+            &f,
+            &guest,
+            "nyxid__set_guest_access",
+            json!({"subagent":"worker","access":"all","services":[id]}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    mark_guest(&f, false).await;
+    let owner = authenticate(&f).await;
+    result(
+        call(
+            &f,
+            &owner,
+            "nyxid__set_guest_access",
+            json!({"subagent":"worker","access":"all","services":[id]}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(
+        guest_service_refusal(&f.state, &owner, &generic, endpoint, &prepared, None)
+            .await
+            .is_none()
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_operations_do_not_follow_redirects_or_mint_delegation_tokens() {
+    use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
+    use crate::services::{assistant_team_service as team, feature_flag_service as flags};
+    let f = boxed_chat_fixture("guest_scope_redirect").await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let redirects = hits.clone();
+    let escaped = Arc::new(AtomicUsize::new(0));
+    let escape_count = escaped.clone();
+    let app = Router::new()
+        .route(
+            "/allowed",
+            any(move || {
+                redirects.fetch_add(1, Ordering::SeqCst);
+                async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "/other")],
+                    )
+                }
+            }),
+        )
+        .route(
+            "/other",
+            any(move || {
+                escape_count.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"ok": true})) }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let id = connected(&f.state.db, &f.owner, "redirect", &url).await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "guest-redirect-catalog".into();
+    catalog.base_url = url;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    let endpoint =
+        crate::test_utils::test_service_endpoint(&catalog.id, "allowed", "GET", "/allowed");
+    f.state
+        .db
+        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(&endpoint)
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let selection: OperationSelection =
+        serde_json::from_value(json!({"expected_revision":0,"endpoint_ids":[endpoint.id]}))
+            .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::GuestOperations {
+            base: Box::new(team::GrantChange::Guests(Default::default())),
+            selections: [(id.clone(), selection)].into(),
+        },
+    )
+    .await
+    .unwrap();
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    let response = call(&f, &guest, "redirect__allowed", json!({})).await;
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "the selected route was reached"
+    );
+    assert_eq!(
+        escaped.load(Ordering::SeqCst),
+        0,
+        "a redirect cannot escape guest limits"
+    );
+    // Delegation tokens carry key scopes, but no guest policy. Refuse issuance.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"inject_delegation_token":true}},
+        )
+        .await
+        .unwrap();
+    let response = call(&f, &guest, "redirect__allowed", json!({})).await;
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_append_mcp_checks_actual_query_and_intersects_guest_level() {
+    use crate::services::assistant_team_service as team;
+    let f = boxed_chat_fixture("guest_append_mcp").await;
+    let id = connected(&f.state.db, &f.owner, "sheets", "http://127.0.0.1:9").await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let owner = authenticate(&f).await;
+    let mut generic = load_all_services_for_meta_tools(&f.state, &owner)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|service| service.service_id == id)
+        .unwrap();
+    assert!(generic.is_generic_proxy);
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "api-google-workspace".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    if let mcp_service::McpToolSource::UserManaged {
+        catalog_service_id, ..
+    } = &mut generic.source
+    {
+        *catalog_service_id = Some(catalog.id.clone());
+    } else {
+        panic!("user-managed fixture");
+    }
+    let path = "/v4/spreadsheets/{spreadsheetId}/values/{range}:append";
+    let spec = crate::services::catalog_spec_registry::spec_for_slug(&catalog.slug).unwrap();
+    let mut row =
+        crate::test_utils::test_service_endpoint(&catalog.id, "sheets_append_values", "POST", path);
+    row.parameters = Some(spec["paths"][path]["post"]["parameters"].clone());
+    row.request_body_schema = Some(
+        spec["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"].clone(),
+    );
+    f.state
+        .db
+        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(&row)
+        .await
+        .unwrap();
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    let service = services.iter().find(|s| s.service_id == id).unwrap();
+    let endpoint = &service.endpoints[0];
+    let metadata = service.durable_endpoint_metadata[&endpoint.endpoint_id];
+    assert!(metadata.append_only && metadata.catalog_contract && metadata.destructive);
+    for (insert, allowed) in [
+        (None, false),
+        (Some("OVERWRITE"), false),
+        (Some("INSERT_ROWS"), true),
+    ] {
+        let mut args = json!({"spreadsheetId":"sheet","range":"A1:B2","valueInputOption":"RAW","body":{"values":[["new","row"]]}});
+        if let Some(insert) = insert {
+            args["insertDataOption"] = json!(insert);
+        }
+        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
+        assert_eq!(
+            guest_service_refusal(&f.state, &guest, service, endpoint, &prepared, None)
+                .await
+                .is_none(),
+            allowed
+        );
+        assert!(
+            prepared.guest_effects(metadata).destructive,
+            "owner approval classification stays destructive"
+        );
+    }
+    // A generic fallback must still classify the actual compiled route even
+    // after durable endpoint rows are unavailable.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &row.id})
+        .await
+        .unwrap();
+    for (query, allowed) in [
+        ("", false),
+        ("insertDataOption=OVERWRITE", false),
+        ("insertDataOption=INSERT_ROWS", true),
+    ] {
+        let endpoint = &generic.endpoints[0];
+        let prepared = mcp_service::prepare_proxy_tool_call(
+            &generic,
+            endpoint,
+            &json!({
+                "method":"POST","path":"/v4/spreadsheets/sheet/values/A1:append","query":query,
+                "body":{"values":[["new"]]}
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            guest_service_refusal(&f.state, &guest, &generic, endpoint, &prepared, None)
+                .await
+                .is_none(),
+            allowed
+        );
+    }
+    set_guest_access(&f, &id, GuestAccess::Read).await;
+    let args = json!({"spreadsheetId":"sheet","range":"A1","valueInputOption":"RAW","insertDataOption":"INSERT_ROWS","body":{"values":[["new"]]}});
+    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, service, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_scopes_raw_proxy_and_pool_member_keep_owner_access() {
+    use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
+    use crate::services::{assistant_team_service as team, feature_flag_service as flags};
+    use tower::ServiceExt;
+    let f = boxed_chat_fixture("guest_scope_raw_pool").await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let app = Router::new().route(
+        "/{*path}",
+        any(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { Json(json!({"ok":true})) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let id = connected(&f.state.db, &f.owner, "guest-member", &url).await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "guest-member-catalog".into();
+    catalog.base_url = url;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set":{"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    crate::services::service_pool_service::create_pool(
+        &f.state.db,
+        &f.owner,
+        crate::services::service_pool_service::CreatePoolInput {
+            slug: "guest-pool".into(),
+            name: "Guest pool".into(),
+            description: None,
+            strategy: Default::default(),
+            tier_balance: Default::default(),
+            member_contract: Default::default(),
+            failover: None,
+            is_active: None,
+            members: vec![crate::models::service_pool::ServicePoolMember {
+                user_service_id: id.clone(),
+                weight: 1,
+                enabled: true,
+                priority: 0,
+                model: None,
+                same_api_compatible: true,
+                health_reset_generation: 0,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let none: OperationSelection = serde_json::from_value(json!({"expected_revision":0})).unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::GuestOperations {
+            base: Box::new(team::GrantChange::Guests(Default::default())),
+            selections: [(id.clone(), none)].into(),
+        },
+    )
+    .await
+    .unwrap();
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+    let router = router.with_state(f.state.clone());
+    for guest in [true, false] {
+        mark_guest(&f, guest).await;
+        for route in [
+            format!("/api/v1/proxy/{}/read", catalog.id),
+            "/api/v1/proxy/s/guest-member/read".into(),
+            "/api/v1/proxy/s/guest-pool/read".into(),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(&route)
+                        .header("x-api-key", key.raw_key.as_str())
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if guest {
+                assert!(
+                    response.status().is_client_error(),
+                    "{route}: {}",
+                    response.status()
+                );
+            } else {
+                assert!(
+                    response.status().is_success(),
+                    "{route}: {}",
+                    response.status()
+                );
+            }
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), if guest { 0 } else { 3 });
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+async fn public_connect_catalog(
+    f: &Fixture,
+    slug: &str,
+) -> crate::models::downstream_service::DownstreamService {
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug = slug.into();
+    catalog.visibility = "public".into();
+    catalog.requires_user_credential = true;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    catalog
+}
+
+async fn seeded_github(f: &Fixture) -> crate::models::downstream_service::DownstreamService {
+    crate::services::provider_service::seed_default_providers(
+        &f.state.db,
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    crate::services::provider_service::seed_default_services(&f.state.db, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .find_one(doc! {"slug":"api-github"})
+        .await
+        .unwrap()
+        .expect("seeded GitHub catalog")
+}
+
+async fn catalog_connection(
+    f: &Fixture,
+    owner: &str,
+    catalog: &str,
+    slug: &str,
+    active: bool,
+) -> String {
+    let id = connected(&f.state.db, owner, slug, "https://example.test").await;
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>("user_services")
+        .find_one(doc! {"_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set":{"catalog_service_id":catalog,"is_active":active}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_endpoints")
+        .update_one(doc! {"_id": &row.endpoint_id}, doc! {"$set":{"label":slug}})
+        .await
+        .unwrap();
+    id
+}
+
+async fn legacy_catalog_connection(
+    f: &Fixture,
+    owner: &str,
+    catalog: &str,
+    label: &str,
+    active: bool,
+) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id":&id,"user_id":owner,"service_id":catalog,
+            "credential_label":label,"is_active":active,"created_at":now,"updated_at":now,
+            // Inventory must succeed without even deserializing these fields.
+            "credential_encrypted":{"excluded_secret":"legacy-secret-never-returned"},
+            "metadata":{"excluded_metadata":"legacy-metadata-never-returned"},
+        })
+        .await
+        .unwrap();
+    id
+}
+
+async fn connect_test_org(f: &Fixture, active: bool) -> String {
+    use crate::models::org_membership::{MemberScopeSource, OrgRole};
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut org = crate::test_utils::test_user(&id, crate::models::user::UserType::Org);
+    org.display_name = Some("Example Organization".into());
+    f.state
+        .db
+        .collection("users")
+        .insert_one(org)
+        .await
+        .unwrap();
+    crate::services::org_service::create_membership(
+        &f.state.db,
+        &id,
+        &f.owner,
+        OrgRole::Member,
+        MemberScopeSource::Inherit,
+        None,
+    )
+    .await
+    .unwrap();
+    if !active {
+        f.state
+            .db
+            .collection::<bson::Document>("users")
+            .update_one(doc! {"_id":&id}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+    }
+    id
+}
+
+#[tokio::test]
+async fn chat_hosted_connect_returns_both_personal_and_org_facts_and_skips_inactive_owners() {
+    let f = orchestrator_fixture("connect_existing_facts").await;
+    let catalog = seeded_github(&f).await;
+    let org = connect_test_org(&f, true).await;
+    let inactive = connect_test_org(&f, false).await;
+    let personal = catalog_connection(&f, &f.owner, &catalog.id, "personal-github", false).await;
+    let shared = catalog_connection(&f, &org, &catalog.id, "work-github", true).await;
+    catalog_connection(&f, &inactive, &catalog.id, "inactive-owner", true).await;
+    let other = public_connect_catalog(&f, "unrelated-service").await;
+    catalog_connection(&f, &f.owner, &other.id, "unrelated", true).await;
+    // User-owned label metadata takes precedence; secret fields never enter the response.
+    let key = crate::services::user_api_key_service::create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        crate::services::user_api_key_service::CreateApiKeyParams {
+            label: "Personal PAT",
+            credential_type: "api_key",
+            credential: "must-never-appear",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_api_keys")
+        .update_one(
+            doc! {"_id":&key.id},
+            doc! {"$set":{"metadata":{"provider_account":"do-not-infer"}}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(doc! {"_id":&personal}, doc! {"$set":{"api_key_id":&key.id}})
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":catalog.slug}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(
+        value["connect_url"]
+            .as_str()
+            .unwrap()
+            .contains("/connect/nyx_clk_")
+    );
+    let existing = value["existing_connections"].as_array().unwrap();
+    assert_eq!(existing.len(), 2, "{value}");
+    let own = existing
+        .iter()
+        .find(|v| v["connection_id"] == personal)
+        .unwrap();
+    assert_eq!(own["relation"], "self");
+    assert_eq!(own["label"], "Personal PAT");
+    assert_eq!(own["is_active"], false);
+    let org = existing
+        .iter()
+        .find(|v| v["connection_id"] == shared)
+        .unwrap();
+    assert_eq!(org["relation"], "organization");
+    assert_eq!(org["organization_name"], "Example Organization");
+    assert_eq!(org["label"], "work-github");
+    assert_eq!(org["is_active"], true);
+    for fact in existing {
+        assert_eq!(fact["account"]["status"], "unknown");
+    }
+    assert_eq!(value["existing_connections_truncated"], false);
+    assert!(!value.to_string().contains("must-never-appear"));
+    assert!(!value.to_string().contains("do-not-infer"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_connect_inventory_excludes_viewers_revoked_scopes_and_both_tombstone_shapes() {
+    use crate::models::org_membership::OrgRole;
+    let f = orchestrator_fixture("connect_inventory_visibility").await;
+    let catalog = public_connect_catalog(&f, "visible-connect").await;
+    let viewer = connect_test_org(&f, true).await;
+    let revoked = connect_test_org(&f, true).await;
+    let scoped = connect_test_org(&f, true).await;
+    catalog_connection(&f, &viewer, &catalog.id, "viewer-hidden", true).await;
+    catalog_connection(&f, &revoked, &catalog.id, "revoked-hidden", true).await;
+    catalog_connection(&f, &scoped, &catalog.id, "scope-hidden", true).await;
+    let in_scope = catalog_connection(&f, &scoped, &catalog.id, "in-scope", true).await;
+    f.state
+        .db
+        .collection::<bson::Document>("org_memberships")
+        .update_one(
+            doc! {"org_user_id":&viewer,"member_user_id":&f.owner},
+            doc! {"$set":{"role":"viewer"}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("org_memberships")
+        .update_one(
+            doc! {"org_user_id":&revoked,"member_user_id":&f.owner},
+            doc! {"$set":{"revoked_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    crate::services::org_role_scope_service::set_scope(
+        &f.state.db,
+        &scoped,
+        OrgRole::Member,
+        Some(vec![in_scope.clone()]),
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let disabled = catalog_connection(&f, &f.owner, &catalog.id, "disabled-retained", false).await;
+    let deleted = catalog_connection(&f, &f.owner, &catalog.id, "deleted-marker", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&deleted},
+            doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let tombstone =
+        catalog_connection(&f, &f.owner, &catalog.id, "deleted-without-marker", false).await;
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>("user_services")
+        .find_one(doc! {"_id":&tombstone})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_endpoints")
+        .delete_one(doc! {"_id":&row.endpoint_id})
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(doc! {"_id":&tombstone}, doc! {"$unset":{"deleted_at":""}})
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    let facts = value["existing_connections"].as_array().unwrap();
+    assert_eq!(facts.len(), 2, "{value}");
+    assert!(facts.iter().any(|fact| fact["connection_id"] == in_scope));
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact["connection_id"] == disabled && fact["is_active"] == false)
+    );
+    assert_eq!(value["existing_connections_truncated"], false);
+    for hidden in [
+        "viewer-hidden",
+        "revoked-hidden",
+        "scope-hidden",
+        "deleted-marker",
+        "deleted-without-marker",
+    ] {
+        assert!(!value.to_string().contains(hidden), "{hidden}: {value}");
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_connect_facts_are_bounded_and_respect_org_scopes_and_deleted_rows() {
+    use crate::models::org_membership::{MemberScopeSource, OrgMembership};
+    let f = orchestrator_fixture("connect_bounded_facts").await;
+    let catalog = public_connect_catalog(&f, "bounded-connect").await;
+    let org = connect_test_org(&f, true).await;
+    catalog_connection(&f, &org, &catalog.id, "hidden-by-scope", true).await;
+    f.state.db.collection::<OrgMembership>("org_memberships").update_many(doc! {"org_user_id":&org}, doc! {"$set":{"scope_source":bson::to_bson(&MemberScopeSource::Override).unwrap(),"allowed_service_ids":[]}}).await.unwrap();
+    let deleted = catalog_connection(&f, &f.owner, &catalog.id, "deleted", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&deleted},
+            doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let empty = crate::services::assistant_connection_service::existing_connections(
+        &f.state.db,
+        &f.owner,
+        &catalog,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(empty.connections.is_empty());
+    for n in 0..12 {
+        catalog_connection(
+            &f,
+            &f.owner,
+            &catalog.id,
+            &format!("account-{n}"),
+            n % 2 == 0,
+        )
+        .await;
+    }
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 10);
+    assert_eq!(value["existing_connections_truncated"], true);
+    assert!(!value.to_string().contains("hidden-by-scope"));
+    assert!(!value.to_string().contains("\"deleted\""));
+    assert!(serde_json::to_string_pretty(&value).unwrap().len() < 10_000);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_legacy_inventory_filters_owner_catalog_and_activity_and_shares_the_bound() {
+    use crate::services::assistant_connection_service::existing_connections;
+    let f = orchestrator_fixture("connect_legacy_inventory_bound").await;
+    let catalog = public_connect_catalog(&f, "legacy-bound").await;
+    let other_catalog = public_connect_catalog(&f, "legacy-other-catalog").await;
+    let org = connect_test_org(&f, true).await;
+    legacy_catalog_connection(&f, &org, &catalog.id, "organization-legacy", true).await;
+    legacy_catalog_connection(
+        &f,
+        &f.owner,
+        &other_catalog.id,
+        "other-catalog-legacy",
+        true,
+    )
+    .await;
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "personal-legacy", false).await;
+    let empty = existing_connections(&f.state.db, &f.owner, &catalog, None)
+        .await
+        .unwrap();
+    assert!(empty.connections.is_empty());
+    assert!(!empty.truncated);
+
+    let timestamp = bson::DateTime::from_millis(1_700_000_000_000);
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&legacy},
+            doc! {"$set":{"is_active":true,"created_at":timestamp}},
+        )
+        .await
+        .unwrap();
+    let mut unified_ids = Vec::new();
+    for n in 0..10 {
+        unified_ids.push(
+            catalog_connection(&f, &f.owner, &catalog.id, &format!("account-{n}"), true).await,
+        );
+        if n == 8 {
+            let exact = existing_connections(&f.state.db, &f.owner, &catalog, None)
+                .await
+                .unwrap();
+            assert_eq!(exact.connections.len(), 10);
+            assert!(
+                !exact.truncated,
+                "nine unified plus one legacy fits exactly"
+            );
+            assert!(
+                exact
+                    .connections
+                    .iter()
+                    .any(|fact| fact["connection_id"] == legacy)
+            );
+        }
+    }
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":&unified_ids}},
+            doc! {"$set":{"created_at":timestamp}},
+        )
+        .await
+        .unwrap();
+    // The legacy row participates in the same timestamp/UUID ordering, whether
+    // it is newest, oldest, or tied with the unified rows at the ten-row boundary.
+    for offset in [1_000, -1_000, 0] {
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&legacy},
+                doc! {"$set":{"created_at":bson::DateTime::from_millis(timestamp.timestamp_millis()+offset)}},
+            )
+            .await
+            .unwrap();
+        let inventory = existing_connections(&f.state.db, &f.owner, &catalog, None)
+            .await
+            .unwrap();
+        let mut expected = unified_ids.clone();
+        expected.sort();
+        if offset > 0 {
+            expected.insert(0, legacy.clone());
+        } else if offset < 0 {
+            expected.push(legacy.clone());
+        } else {
+            expected.push(legacy.clone());
+            expected.sort();
+        }
+        expected.truncate(10);
+        assert_eq!(
+            inventory
+                .connections
+                .iter()
+                .map(|fact| fact["connection_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(inventory.truncated);
+        let serialized = serde_json::to_string(&inventory.connections).unwrap();
+        for excluded in [
+            "organization-legacy",
+            "other-catalog-legacy",
+            "legacy-secret-never-returned",
+            "legacy-metadata-never-returned",
+        ] {
+            assert!(!serialized.contains(excluded), "{serialized}");
+        }
+    }
+    let selected = existing_connections(&f.state.db, &f.owner, &catalog, Some(&[]))
+        .await
+        .unwrap();
+    assert!(selected.connections.is_empty());
+    assert!(!selected.truncated);
+    // Legacy and unified facts share the same active-owner check.
+    f.state
+        .db
+        .collection::<bson::Document>("users")
+        .update_one(doc! {"_id":&f.owner}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    assert!(
+        existing_connections(&f.state.db, &f.owner, &catalog, None)
+            .await
+            .unwrap()
+            .connections
+            .is_empty()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_inventory_lists_a_migrated_legacy_connection_once_without_hiding_independent_rows() {
+    use crate::services::assistant_connection_service::existing_connections;
+    let f = orchestrator_fixture("connect_legacy_migration_dedup").await;
+    let catalog = public_connect_catalog(&f, "legacy-migration").await;
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "Migrated credential", true).await;
+    // Give the real startup migration a valid credential-free source. The
+    // other inventory fixtures deliberately use an unreadable credential field.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&legacy},
+            doc! {"$set":{"credential_encrypted":null}},
+        )
+        .await
+        .unwrap();
+    crate::db::migrate_service_connections(&f.state.db, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let migrated = f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .find_one(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id,"source":"migration_connection","source_id":&legacy})
+        .projection(doc! {"_id":1})
+        .await
+        .unwrap()
+        .unwrap();
+    let migrated_id = migrated.get_str("_id").unwrap();
+    for n in 0..9 {
+        catalog_connection(&f, &f.owner, &catalog.id, &format!("independent-{n}"), true).await;
+    }
+    for active in [true, false] {
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .update_one(doc! {"_id":migrated_id}, doc! {"$set":{"is_active":active}})
+            .await
+            .unwrap();
+        let inventory = existing_connections(&f.state.db, &f.owner, &catalog, None)
+            .await
+            .unwrap();
+        assert_eq!(inventory.connections.len(), 10);
+        assert!(
+            !inventory.truncated,
+            "the mirrored legacy row must not count twice"
+        );
+        assert_eq!(
+            inventory
+                .connections
+                .iter()
+                .filter(|fact| fact["connection_id"] == migrated_id)
+                .count(),
+            1
+        );
+        assert!(
+            inventory
+                .connections
+                .iter()
+                .all(|fact| fact["connection_id"] != legacy)
+        );
+        assert!(
+            inventory
+                .connections
+                .iter()
+                .all(|fact| fact["source"] != "legacy_connection")
+        );
+        let fact = inventory
+            .connections
+            .iter()
+            .find(|fact| fact["connection_id"] == migrated_id)
+            .unwrap();
+        assert_eq!(fact["label"], "Migrated credential");
+        assert_eq!(fact["is_active"], active);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn specialist_connect_refusal_inventory_follows_effective_connection_and_auto_grants() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service::{self as team, GrantChange};
+    let f = fixture("specialist_connect_inventory").await;
+    let catalog = public_connect_catalog(&f, "specialist-connect").await;
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "legacy-ungranted-account", true)
+            .await;
+    let granted = catalog_connection(&f, &f.owner, &catalog.id, "granted-account", true).await;
+    catalog_connection(&f, &f.owner, &catalog.id, "ungranted-account", true).await;
+    let auto = catalog_connection(&f, &f.owner, &catalog.id, "auto-account", true).await;
+    let platform = catalog_connection(&f, &f.owner, &catalog.id, "platform-account", true).await;
+    let disabled_auto =
+        catalog_connection(&f, &f.owner, &catalog.id, "disabled-auto-account", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&auto,&disabled_auto]}},
+            doc! {"$set":{"source":crate::models::user_service::AUTO_PROVISION_SOURCE}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&platform},
+            doc! {"$set":{"credential_binding":"platform"}},
+        )
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        f.row.agent_id.as_deref().unwrap(),
+        GrantChange::Add(AgentGrants {
+            service_ids: vec![granted.clone()],
+            platform_service_ids: vec![catalog.id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    // Managed specialists normally set this false. If a live key has the opt-in,
+    // authentication and the real execution scope include its active auto rows.
+    for allow_auto in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":&f.row.credential_api_key_id},
+                doc! {"$set":{"allow_auto_connected_services":allow_auto}},
+            )
+            .await
+            .unwrap();
+        let auth = authenticate(&f).await;
+        assert!(!auth.allow_all_services);
+        assert!(auth.allowed_service_ids.contains(&granted));
+        // Personal effective scopes also merge platform catalog IDs. Their
+        // presence must never grant inventory of all that catalog's connections.
+        assert!(auth.allowed_service_ids.contains(&catalog.id));
+        assert_eq!(auth.allowed_service_ids.contains(&auto), allow_auto);
+        assert_eq!(auth.allowed_service_ids.contains(&platform), allow_auto);
+        assert!(!auth.allowed_service_ids.contains(&disabled_auto));
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_slug":catalog.slug}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        let facts = value["existing_connections"].as_array().unwrap();
+        assert_eq!(facts.len(), if allow_auto { 3 } else { 1 }, "{value}");
+        assert!(facts.iter().all(|fact| fact["connection_id"] != catalog.id));
+        for id in auth
+            .allowed_service_ids
+            .iter()
+            .filter(|id| **id != catalog.id)
+        {
+            assert!(
+                facts.iter().any(|fact| fact["connection_id"] == *id),
+                "{id}: {value}"
+            );
+        }
+        assert!(!value.to_string().contains("ungranted-account"));
+        assert!(!value.to_string().contains("disabled-auto-account"));
+        assert!(facts.iter().all(|fact| fact["connection_id"] != legacy));
+        assert!(
+            facts
+                .iter()
+                .all(|fact| fact["source"] != "legacy_connection")
+        );
+        assert!(!value.to_string().contains("legacy-ungranted-account"));
+        assert!(value.get("connect_url").is_none());
+        assert!(
+            value["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Specialists cannot mint connect links")
+        );
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_specialist_connect_inventory_keeps_the_member_identity_and_only_org_grants() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::{assistant_nyxagent as engine, assistant_team_service as team};
+    let f =
+        crate::services::org_agent_tests::Fixture::new("org_specialist_connect_inventory").await;
+    let (agent, _) = f.create().await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug = "org-specialist-connect".into();
+    catalog.visibility = "public".into();
+    catalog.requires_user_credential = true;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let org_service = f.service(&f.org, "org-granted").await;
+    let personal = f.service(&f.member, "member-personal").await;
+    let org_ungranted = f.service(&f.org, "org-ungranted").await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&personal},
+            doc! {"$set":{"source":crate::models::user_service::AUTO_PROVISION_SOURCE}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&org_service,&personal,&org_ungranted]}},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.admin,
+        &agent.id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![org_service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    let thread = engine::begin_turn(
+        &f.state.db,
+        &f.member,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(thread.id),
+            text: "Connect this service".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &thread.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", key.raw_key.parse().unwrap());
+    for allow_auto in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":&thread.credential_api_key_id},
+                doc! {"$set":{"allow_auto_connected_services":allow_auto}},
+            )
+            .await
+            .unwrap();
+        let auth = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+        assert_eq!(auth.user_id, f.member);
+        assert_eq!(
+            auth.assistant_agent_owner_id.as_deref(),
+            Some(f.org.as_str())
+        );
+        assert_eq!(auth.allowed_service_ids, vec![org_service.clone()]);
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        let facts = value["existing_connections"].as_array().unwrap();
+        assert_eq!(facts.len(), 1, "{value}");
+        assert_eq!(facts[0]["connection_id"], org_service);
+        assert_eq!(facts[0]["relation"], "organization");
+        assert!(!value.to_string().contains("member-personal"));
+        assert!(!value.to_string().contains("org-ungranted"));
+        assert!(value.get("connect_url").is_none());
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_master_and_platform_catalogs_without_platform_selection_keep_legacy_one_step() {
+    let f = orchestrator_fixture("chat_master_legacy_connect").await;
+    let auth = authenticate(&f).await;
+    for platform_enabled in [false, true] {
+        let mut catalog = public_connect_catalog(&f, &format!("master-{platform_enabled}")).await;
+        catalog.requires_user_credential = false;
+        catalog.auth_method = "bearer".into();
+        catalog.service_category = "internal".into();
+        catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
+            enabled: platform_enabled,
+            ..Default::default()
+        });
+        catalog.credential_encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"internal-master")
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                "downstream_services",
+            )
+            .replace_one(doc! {"_id":&catalog.id}, &catalog)
+            .await
+            .unwrap();
+        let existing = catalog_connection(
+            &f,
+            &f.owner,
+            &catalog.id,
+            &format!("existing-{platform_enabled}"),
+            true,
+        )
+        .await;
+        for expected in ["connected", "already_connected", "already_connected"] {
+            let value = result(
+                handle_meta_connect(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"service_id":catalog.id}),
+                    None,
+                    false,
+                )
+                .await,
+                false,
+            )
+            .await;
+            assert_eq!(value["status"], expected, "{value}");
+            let facts = value["existing_connections"].as_array().unwrap();
+            assert!(facts.iter().any(|fact| fact["connection_id"] == existing));
+            assert_eq!(facts.len(), if expected == "connected" { 1 } else { 2 });
+            assert!(
+                value.get("service_id").is_none(),
+                "legacy success must not emit null IDs: {value}"
+            );
+            if expected == "already_connected" {
+                assert_eq!(value["catalog_service_id"], catalog.id);
+                assert_eq!(value["service_slug"], catalog.slug);
+                assert!(
+                    value["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .contains("no separate account to add")
+                );
+            } else {
+                assert!(value.get("service_slug").is_none());
+            }
+            assert!(value.get("connect_url").is_none());
+        }
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("user_service_connections")
+                .count_documents(doc! {"user_id":&f.owner,"service_id":&catalog.id})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .count_documents(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id})
+                .await
+                .unwrap(),
+            1,
+            "legacy connects must not create independent unified rows"
+        );
+        if !platform_enabled {
+            let value = result(
+                handle_meta_connect(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"service_id":catalog.id,"use_platform_key":true}),
+                    None,
+                    false,
+                )
+                .await,
+                true,
+            )
+            .await;
+            assert_eq!(value["error"], "connect_failed");
+            assert!(
+                value["existing_connections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|fact| fact["connection_id"] == existing)
+            );
+            assert!(value.get("connect_url").is_none());
+        }
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn requirement_only_connect_refuses_only_required_providers_without_a_catalog_credential() {
+    let f = orchestrator_fixture("requirement_only_connect").await;
+    let mut catalog = seeded_github(&f).await;
+    catalog.provider_config_id = None;
+    catalog.service_category = "internal".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    let id = catalog_connection(&f, &f.owner, &catalog.id, "existing", true).await;
+    let connection =
+        crate::services::user_service_service::find_user_service_by_id(&f.state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+    let auth = authenticate(&f).await;
+    for required in [false, true] {
+        let updated = f
+            .state
+            .db
+            .collection::<bson::Document>("service_provider_requirements")
+            .update_many(
+                doc! {"service_id":&catalog.id},
+                doc! {"$set":{"required":required}},
+            )
+            .await
+            .unwrap();
+        assert!(updated.matched_count > 0);
+        for credentialed in [false, true] {
+            f.state
+                .db
+                .collection::<bson::Document>("downstream_services")
+                .update_one(
+                    doc! {"_id":&catalog.id},
+                    doc! {"$set":{"requires_user_credential":credentialed}},
+                )
+                .await
+                .unwrap();
+            let unavailable = required && !credentialed;
+            let value = result(
+                handle_meta_connect(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"service_id":catalog.id}),
+                    None,
+                    false,
+                )
+                .await,
+                unavailable,
+            )
+            .await;
+            assert!(
+                value["existing_connections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|fact| fact["connection_id"] == id)
+            );
+            let offer = crate::services::assistant_connection_service::connect_own(
+                &f.state.db,
+                &f.owner,
+                &connection,
+            )
+            .await
+            .unwrap();
+            if unavailable {
+                assert_eq!(value["error"], "connect_unavailable");
+                assert_eq!(value["reason"], "provider_requirement_only");
+                assert_eq!(offer["reason"], "provider_requirement_only");
+                assert_eq!(offer["supported"], false);
+                assert!(value.get("connect_url").is_none());
+            } else if credentialed {
+                assert_eq!(value["status"], "pending_connection");
+                assert!(
+                    value["connect_url"]
+                        .as_str()
+                        .is_some_and(|url| url.contains("/connect/"))
+                );
+                assert_eq!(offer["supported"], true);
+            } else {
+                assert_eq!(value["status"], "connected");
+                assert_eq!(offer["reason"], "no_separate_account");
+                assert!(value.get("connect_url").is_none());
+            }
+        }
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_connect_retains_legacy_duplicate_refusal_and_pending_contract() {
+    let f = orchestrator_fixture("external_connect_unchanged").await;
+    let catalog = seeded_github(&f).await;
+    let mut auth = authenticate(&f).await;
+    auth.chat = None;
+    auth.api_key_id = Some(ordinary_key(&f).await);
+    auth.allow_all_services = true;
+    // External callers still use the legacy one-step path for this shape.
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(
+            doc! {"_id":&catalog.id},
+            doc! {"$set":{"service_category":"internal"}},
+        )
+        .await
+        .unwrap();
+    let args = json!({"service_id":catalog.id});
+    let first = result(
+        handle_meta_connect(&f.state, &auth, None, &args, None, false).await,
+        false,
+    )
+    .await;
+    assert_eq!(first.as_object().unwrap().len(), 4, "{first}");
+    assert!(first.get("existing_connections").is_none());
+    let response = handle_meta_connect(&f.state, &auth, None, &args, None, false).await;
+    let bytes = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    let duplicate: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(duplicate["result"]["isError"], true);
+    assert_eq!(
+        duplicate["result"]["content"][0]["text"],
+        "Conflict: Already connected to this service"
+    );
+    let mut credentialed = public_connect_catalog(&f, "external-pending").await;
+    credentialed.auth_method = "bearer".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&credentialed.id}, &credentialed)
+        .await
+        .unwrap();
+    let pending = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":credentialed.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(pending["status"], "pending_connection");
+    assert_eq!(pending.as_object().unwrap().len(), 8, "{pending}");
+    assert!(pending.get("existing_connections").is_none());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_free_chat_connect_is_idempotent_without_unified_rows() {
+    let f = orchestrator_fixture("chat_no_auth_legacy").await;
+    let mut catalog = public_connect_catalog(&f, "credential-free").await;
+    catalog.requires_user_credential = false;
+    catalog.auth_method = "none".into();
+    catalog.service_category = "internal".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let mut legacy_id = None;
+    let label = "界".repeat(121);
+    for expected in ["connected", "already_connected", "already_connected"] {
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id}),
+                None,
+                false,
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(value["status"], expected, "{value}");
+        if expected == "connected" {
+            assert_eq!(value["existing_connections"], json!([]));
+            let row = f
+                .state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::user_service_connection::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id":&f.owner,"service_id":&catalog.id})
+                .projection(doc! {"_id":1})
+                .await
+                .unwrap()
+                .unwrap();
+            let id = row.get_str("_id").unwrap().to_owned();
+            f.state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::user_service_connection::COLLECTION_NAME,
+                )
+                .update_one(doc! {"_id":&id}, doc! {"$set":{"credential_label":&label}})
+                .await
+                .unwrap();
+            legacy_id = Some(id);
+        } else {
+            assert_eq!(
+                value["existing_connections"],
+                json!([{
+                    "catalog_service_id":catalog.id,
+                    "catalog_service_slug":catalog.slug,
+                    "connection_id":legacy_id.as_ref().unwrap(),
+                    "connection_slug":catalog.slug,
+                    "label":"界".repeat(120),
+                    "is_active":true,
+                    "owner_type":"person",
+                    "relation":"self",
+                    "organization_name":null,
+                    "account":{"status":"unknown"},
+                    "source":"legacy_connection",
+                }]),
+                "{value}"
+            );
+        }
+        assert_eq!(value["existing_connections_truncated"], false);
+        assert!(value.get("service_id").is_none());
+        assert!(value.get("connect_url").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_service_connections")
+            .count_documents(doc! {"user_id":&f.owner,"service_id":&catalog.id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already_connected() {
+    // Production case: the seeded GitHub catalog gets its credential from an
+    // OAuth provider (requires_user_credential=false) and the owner already
+    // has a legacy GitHub connection. The legacy connector refused with
+    // "Already connected"; a chat must receive a hosted link instead.
+    let f = orchestrator_fixture("assistant_provider_connect").await;
+    let catalog = seeded_github(&f).await;
+    assert!(!catalog.requires_user_credential && catalog.provider_config_id.is_some());
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "Legacy GitHub credential", true)
+            .await;
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":"api-github"}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(
+        value["connect_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/connect/"))
+    );
+    let facts = value["existing_connections"].as_array().unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0]["connection_id"], legacy);
+    assert_eq!(facts[0]["source"], "legacy_connection");
+    assert_eq!(facts[0]["relation"], "self");
+    assert_eq!(facts[0]["label"], "Legacy GitHub credential");
+    assert_eq!(facts[0]["account"], json!({"status":"unknown"}));
+    assert!(!value.to_string().contains("legacy-secret-never-returned"));
+    assert!(!value.to_string().contains("legacy-metadata-never-returned"));
+    assert_eq!(value["existing_connections_truncated"], false);
+    let stored = f
+        .state
+        .db
+        .collection::<crate::models::connect_link::ConnectLink>("connect_links")
+        .find_one(doc! {"_id":value["connect_link_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.use_platform_key, Some(false));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_connect_reports_unavailable_providers_and_accepts_configured_device_clients() {
+    let f = orchestrator_fixture("assistant_provider_inactive").await;
+    let catalog = seeded_github(&f).await;
+    catalog_connection(&f, &f.owner, &catalog.id, "existing-offline", true).await;
+    let auth = authenticate(&f).await;
+    for (active, kind, reason) in [
+        (false, "oauth2", "provider_unavailable"),
+        (true, "oauth2", "provider_not_configured"),
+        (true, "device_code", "provider_not_configured"),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>("provider_configs")
+            .update_one(
+                doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+                doc! {"$set":{"is_active":active,"provider_type":kind,"credential_mode":"admin",
+                "client_id_encrypted":bson::Bson::Null,"client_secret_encrypted":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_slug":"api-github"}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(value["error"], "connect_unavailable", "{value}");
+        assert_eq!(value["reason"], reason, "{kind}: {value}");
+        assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+        assert!(value.get("connect_url").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    // Public device-code clients need an ID, but no client secret.
+    let client_id = f
+        .state
+        .encryption_keys
+        .encrypt(b"public-device-client")
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+            doc! {"$set":{"client_id_encrypted":bson::Binary {
+            subtype:bson::spec::BinarySubtype::Generic, bytes:client_id}}},
+        )
+        .await
+        .unwrap();
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(value["connect_url"].as_str().is_some());
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_keeps_platform_one_step()
+ {
+    use crate::services::feature_flag_service as flags;
+    let f = orchestrator_fixture("assistant_hosted_connect").await;
+    flags::set_platform_override(
+        &f.state.db,
+        flags::HOSTED_CONNECT_INTENT_FLAG_KEY,
+        &flags::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let mut catalog = public_connect_catalog(&f, "personal-github").await;
+    // A credentialed HTTP catalog, as in platform_key_service tests: a
+    // no-auth row would take the no-auth platform availability path instead.
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
+    catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
+        enabled: true,
+        audience: crate::models::downstream_service::PlatformKeyAudience::Public,
+        ..Default::default()
+    });
+    catalog.credential_encrypted = f
+        .state
+        .encryption_keys
+        .encrypt(b"fixture-platform-key")
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    // An existing organization connection must not suppress personal setup.
+    let org = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    let connection = connected(&f.state.db, &org, "org-github", "https://example.test").await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":connection},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    for args in [
+        json!({"service_slug":catalog.slug}),
+        json!({"service_id":catalog.id}),
+    ] {
+        let value = result(
+            handle_meta_connect(&f.state, &auth, None, &args, None, false).await,
+            false,
+        )
+        .await;
+        assert_eq!(value["status"], "pending_connection");
+        assert_eq!(value["catalog_service_id"], catalog.id);
+        assert_eq!(value["service_slug"], catalog.slug);
+        let stored = f
+            .state
+            .db
+            .collection::<crate::models::connect_link::ConnectLink>("connect_links")
+            .find_one(doc! {"_id":value["connect_link_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.assistant_intent_locked);
+        assert_eq!(stored.use_platform_key, Some(false));
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner})
+            .await
+            .unwrap(),
+        0,
+        "personal intent never provisions without the human completing the link"
+    );
+    // Platform keys are outside the organization rule: one step, as before.
+    let platform = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id,"service_slug":catalog.slug,"use_platform_key":true}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(platform["status"], "connected", "{platform}");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner,"credential_binding":"platform"})
+            .await
+            .unwrap(),
+        1
+    );
+    let second = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id,"use_platform_key":true}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(second["status"], "connected");
+    assert_ne!(second["service_id"], platform["service_id"]);
+    assert_eq!(second["existing_connections"].as_array().unwrap().len(), 1);
+    let response = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":catalog.id,"service_slug":"mismatch"}),
+        None,
+        false,
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["result"]["isError"], true);
+    assert!(!value.to_string().contains("connect_url"));
+    f.state.db.drop().await.unwrap();
+}
+
+// #2271: drive both direct native and nyx__call_tool discovery through the
+// real authenticated handler. Only synthetic lengths/IDs enter these fixtures.
+async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service as team;
+    let f = boxed_chat_fixture(name).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "discovery-page",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let mut ids = Vec::new();
+    let now = bson::DateTime::now();
+    let rows:Vec<_>=(0..120).map(|i| {
+        let id=uuid::Uuid::new_v4().to_string(); ids.push(id.clone());
+        doc!{"_id":id,"service_id":&service,"name":format!("operation_{i}"),
+            "description":"中文 JSON \"value\"\n# Markdown\\path".repeat(8),
+            "method":"GET","path":format!("/items/{i}"),"is_active":true,"created_at":now,"updated_at":now}
+    }).collect();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    ids.sort();
+    (f, service, ids)
+}
+
+#[tokio::test]
+async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_filtered() {
+    let (f, service, expected) = operation_discovery_fixture("discovery_pages").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let hidden = connected(
+        &f.state.db,
+        &f.owner,
+        "ungranted-discovery",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    let mut args = json!({"subagent":"worker","service_id":service,"limit":50});
+    let mut actual = Vec::new();
+    let mut snapshot = None;
+    let mut pages = 0usize;
+    loop {
+        let response = if pages.is_multiple_of(2) {
+            call(&f, &auth, "nyxid__get_agent_operations", args.clone()).await
+        } else {
+            direct_call(&f, &auth, "nyxid__get_agent_operations", args.clone()).await
+        };
+        let body = axum::body::to_bytes(response.into_body(), 32_000)
+            .await
+            .unwrap();
+        let wire: Value = serde_json::from_slice(&body).unwrap();
+        assert!(wire["result"].to_string().len() <= 9200);
+        assert_eq!(wire["result"]["isError"], false, "{wire}");
+        let value: Value =
+            serde_json::from_str(wire["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if let Some(ref snapshot) = snapshot {
+            assert_eq!(&value["snapshot"], snapshot);
+        } else {
+            snapshot = Some(value["snapshot"].clone());
+        }
+        assert_eq!(value["services"].as_array().unwrap().len(), 1);
+        assert_eq!(value["services"][0]["service_id"], service);
+        actual.extend(
+            value["services"][0]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| op["endpoint_id"].as_str().unwrap().to_owned()),
+        );
+        pages += 1;
+        if value["complete"] == true {
+            assert!(value["next_cursor"].is_null());
+            break;
+        }
+        args["cursor"] = value["next_cursor"].clone();
+        assert!(pages < 120);
+    }
+    assert!(pages > 3);
+    assert_eq!(actual, expected);
+    for service_id in [hidden, uuid::Uuid::new_v4().to_string()] {
+        let value = result(
+            call(
+                &f,
+                &auth,
+                "nyxid__get_agent_operations",
+                json!({"subagent":"worker","service_id":service_id}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(value["services"], json!([]));
+        assert_eq!(value["complete"], true);
+        assert_eq!(value["total"], 0);
+    }
+    // Discovery remains non-mutating and never creates a confirmation card.
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_team_operation_discovery_live_revocation_and_cursor_binding() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service as team;
+    let (f, service, ids) = operation_discovery_fixture("discovery_fences").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let initial = json!({"subagent":"worker","limit":1});
+    let first = result(
+        call(&f, &auth, "nyxid__get_agent_operations", initial.clone()).await,
+        false,
+    )
+    .await;
+    let args = json!({"subagent":"worker","cursor":first["next_cursor"],"limit":1});
+    // A specialist cannot borrow NyxBot's cursor, even for its own scope.
+    let own = authenticate(&f).await;
+    let denied = result(
+        call(&f, &own, "nyxid__get_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    assert!(denied.get("services").is_none());
+    assert_eq!(denied["reason"], "discovery_snapshot_changed");
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("without cursor")
+    );
+    let mut guests = args.clone();
+    guests["guests"] = json!(true);
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", guests).await,
+        true,
+    )
+    .await;
+    let mut filter = args.clone();
+    filter["service_id"] = json!(service);
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", filter).await,
+        true,
+    )
+    .await;
+    // A concurrent contract change invalidates pagination before returning rows.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .update_one(doc! {"_id":&ids[0]}, doc! {"$set":{"path":"/changed"}})
+        .await
+        .unwrap();
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    let first = result(
+        call(&f, &auth, "nyxid__get_agent_operations", initial.clone()).await,
+        false,
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Remove(AgentGrants {
+            service_ids: vec![service],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let stale = json!({"subagent":"worker","cursor":first["next_cursor"]});
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", stale).await,
+        true,
+    )
+    .await;
+    let empty = result(
+        call(&f, &auth, "nyxid__get_agent_operations", initial).await,
+        false,
+    )
+    .await;
+    assert_eq!(empty["services"], json!([]));
+    // Cross-owner lookups retain not-found shaping, regardless of cursor.
+    let stranger = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &stranger,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let thread = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &stranger,
+        "Read my operations",
+    )
+    .await;
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &stranger,
+        &thread.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", key.raw_key.parse().unwrap());
+    let stranger_auth = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+    let denied = result(
+        call(
+            &f,
+            &stranger_auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":f.chat.agent_id,"cursor":first["next_cursor"]}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(denied.get("services").is_none());
+    assert_eq!(denied["error"], "not_found");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn approval_gated_native_activity_keeps_tool_bytes_and_reconciles_after_allow() {
+    let f = boxed_chat_fixture("approval_activity_native").await;
+    let id = connected(
+        &f.state.db,
+        &f.owner,
+        "decision-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    crate::services::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let args = json!({"subagent":"worker","services":[id],"access":"read"});
+    let response = call(&f, &auth, "nyxid__set_guest_access", args.clone()).await;
+    assert_eq!(
+        response.extensions().get::<ToolOutcome>(),
+        Some(&ToolOutcome::DecisionRequired)
+    );
+    assert!(tool_failure(&response).is_none());
+    let digest = response
+        .extensions()
+        .get::<ToolResultDigest>()
+        .unwrap()
+        .0
+        .clone();
+    let pending = result(response, true).await;
+    assert_eq!(pending["error"], "acknowledgement_required");
+    assert!(!digest.is_empty());
+    let ack = pending["acknowledgement_id"].as_str().unwrap();
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+        .await
+        .unwrap();
+    let mut a = row.active_turn.unwrap().activities;
+    let gated = a
+        .iter_mut()
+        .find(|a| a.decision.as_ref().is_some_and(|d| d.id == ack))
+        .unwrap();
+    assert_eq!(gated.decision.as_ref().unwrap().state, "waiting");
+    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
+        .await
+        .unwrap();
+    let mut args = args;
+    args["acknowledgement_id"] = json!(ack);
+    result(
+        call(&f, &auth, "nyxid__set_guest_access", args).await,
+        false,
+    )
+    .await;
+    crate::services::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.nyxbot_thread,
+        vec![gated],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        a.iter().find_map(|a| a.decision.as_ref()).unwrap().state,
+        "completed"
+    );
+    // A provider-authored acknowledgement-shaped result is still a genuine error.
+    let forged = rpc_success(
+        None,
+        json!({"isError":true,"content":[{"type":"text","text":"acknowledgement_required"}],"acknowledgement_id":ack}),
+    );
+    assert_eq!(
+        forged.extensions().get::<ToolOutcome>(),
+        Some(&ToolOutcome::Error)
+    );
+    assert!(tool_failure(&forged).is_some());
     f.state.db.drop().await.unwrap();
 }

@@ -189,10 +189,12 @@ without renumbering ranks; groups remain alphabetical and connection rows retain
 inventory order. Inline Agent order controls use the complete service group and
 preserve filters, saved views and the expanded card without writing service-view settings.
 Within equal relevance, discovery preference refills only that catalog service's
-occupied slots; unrelated services retain their slots. The order is advisory.
-Explicit execution uses the called
-slug, pool priority or rotation, and the personal → organization → platform
-credential cascade. Preference does not change those decisions or cause retries.
+occupied slots; unrelated services retain their slots. NyxBot also enforces
+personal-first saved order at execution within each catalog group. Exact calls
+are refused when out of order, never silently moved to different credentials.
+Other clients retain advisory discovery ordering. Owner one-turn selection and
+bounded server-verified fallback are described in
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 Priority pools support bounded failover; round-robin and weighted pools select a
 single member per request. Omitted/null priority policies use server defaults, not
@@ -553,6 +555,31 @@ partial `(user_id, slug)` index let it reuse the catalog slug. We retain non-aut
 tombstones rather than reviving deleted endpoints or changing a user's binding.
 Inactive automatic rows are reconciled away to release their unique
 `(source, source_id)` before recreation.
+
+### Automatic no-auth connections and optional providers
+
+When a listing is allowed to provision, active HTTP catalog services with
+`auth_method = "none"`, no required user credential, and category `connection`
+or `internal` may auto-connect under the existing visibility and consent rules.
+Optional `ServiceProviderRequirement` (SPR) rows do not block these connections;
+any required SPR does. Repeated listing and adding optional SPRs preserve an
+eligible automatic `UserService` and `UserEndpoint`, including their IDs.
+
+Making an SPR required immediately makes the held automatic route ineligible
+at execution. The next provisioning/reconciliation pass removes its automatic
+row and orphan endpoint without recreating them. Making it optional again can
+provision a new pair of IDs. Missing or malformed requirement policy fails closed.
+The implicit legacy public/internal master-credential fallback still blocks on
+**any** SPR; explicit catalog `platform_key` eligibility and grants are unchanged.
+
+REST, MCP, both LLM gateway routes, and utility inference share a narrow optional
+inheritance path for automatic, no-auth, credentialless connections. It verifies
+the persisted row and binds its authorized effective owner, catalog, endpoint,
+and resolved destination before selecting that owner's legacy `UserProviderToken`.
+An absent token permits execution without its optional injection. It never picks
+an arbitrary modern `UserApiKey` by provider or uses the billing payer as owner.
+Explicit credentials, manual connections, node-managed or platform-bound routes,
+and explicit multi-account connection/target selection keep their existing paths.
 
 ### Known gaps
 
@@ -976,9 +1003,10 @@ dedicated native order form outside the connection table, so unrelated panel
 buttons cannot submit the order. Invalid/failed submissions focus and reveal
 one error below the sticky cover, including repeated same-error attempts.
 The named **Info** button sits beside the preference text in that same shared
-section. Its standard tooltip gives three short rules: equal matches follow the saved order; the AI chooses a
-connection and this order is advisory; agents see only enabled HTTP connections
-they can access. Only applicable short protocol/gateway notes are added.
+section. Its tooltip explains saved discovery order, NyxBot's personal-first
+execution enforcement and one-turn connection choice, and enabled accessible
+HTTP discovery. The model note explains eligible model routing and the separate
+Service Pool strategy. Only applicable short protocol notes are added.
 The tooltip is noninteractive, with no links or buttons; Service Pools retain
 their existing settings navigation. Normal LLM copy is at most about 85 words.
 Implementation details remain in this documentation. No separate help row,
@@ -1000,9 +1028,9 @@ draft and offer scoped Reload/Overwrite, bound to the original identity.
 | Choice | Behavior |
 |---|---|
 | Present preferred Anthropic alternatives to agents | Refill that catalog group's discovery slots; preference applies within equal search relevance |
-| Run a named tool or connection slug | Execute exactly the addressed connection |
+| Run a named tool or connection slug | Execute exactly the addressed connection; NyxBot first checks preference, target choice and consent |
 | Route/fail over across alternatives | Explicit service pool, addressed by its pool slug; its strategy is unchanged |
-| Resolve an implicit LLM provider/model without `pool:` | Existing active-row database choice within owner tiers; unchanged by Part A |
+| Resolve an implicit LLM provider/model without `pool:` | NyxBot selects the first eligible preferred connection for that provider/model; other clients retain their existing routing |
 
 The card's agent-key count is keys with access, not connections. HTTP rows are alternatives
 with different tool-name prefixes. Non-HTTP rows keep saved positions but have

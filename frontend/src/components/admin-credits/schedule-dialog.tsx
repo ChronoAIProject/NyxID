@@ -1,4 +1,10 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label, FieldHelp } from "@/components/ui/label";
+import { useRef, useState } from "react";
+import { scheduleFormSchema } from "@/schemas/billing-credits";
+import { ServiceLimitsEditor } from "./service-limits-editor";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import type { UseFormReturn } from "react-hook-form";
 import type { CreditSchedule, ScheduleForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -20,6 +26,7 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
+  FormSubmitErrors,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
@@ -43,7 +50,15 @@ export function ScheduleDialog({
   pending,
   editingSchedule,
   onSubmit,
+  allocationPolicies = false,
+  servicesError = false,
+  servicesLoading = false,
+  retryServices,
 }: {
+  readonly allocationPolicies?: boolean;
+  readonly servicesError?: boolean;
+  readonly servicesLoading?: boolean;
+  readonly retryServices?: () => void;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly form: ScheduleFormApi;
@@ -52,54 +67,113 @@ export function ScheduleDialog({
   readonly editingSchedule: CreditSchedule | null;
   readonly onSubmit: (value: ScheduleForm) => Promise<void>;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
+  const [lookupBlocked, setLookupBlocked] = useState(false);
+  const submitting = useRef(false);
+  const values = form.watch();
+  const exactAmount = allocationPolicies || values.amount !== undefined;
+  const valid = scheduleFormSchema.safeParse(values).success;
+  const blocked =
+    lookupBlocked ||
+    ((servicesError || servicesLoading) &&
+      (!values.all_services || Boolean(values.service_limits?.length)));
   const expiry = form.watch("expiry");
   const allServices = form.watch("all_services");
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!pending && !submitting.current) onOpenChange(next);
+      }}
+    >
       <DialogContent scrollMode="body" className="md:max-w-2xl">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>
             {editingSchedule
-              ? t("Edit credit schedule")
-              : t("Create credit schedule")}
+              ? translateUi("Edit credit schedule")
+              : translateUi("Create credit schedule")}
           </DialogTitle>
-          <DialogDescription>{t("Disburse wallet credits on a UTC cycle. Credits are wallet currency, not service units such as tokens, requests, or bytes.")}</DialogDescription>
+          <DialogDescription>{translateUi("Issue a fresh shared credit total on a UTC cycle. Each issuance has its own service ceilings. Changes affect future periods only.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)}>
+          <form
+            onSubmit={form.handleSubmit(async (data) => {
+              if (
+                pending ||
+                submitting.current ||
+                blocked ||
+                !form.formState.isDirty ||
+                !valid
+              )
+                return;
+              submitting.current = true;
+              try {
+                await onSubmit(data);
+              } finally {
+                submitting.current = false;
+              }
+            })}
+          >
             <DialogBody className="-mx-1 px-1">
               <div className="space-y-5 pb-1">
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <FormField
-                    control={form.control}
-                    name="amount_credits"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>{t("Wallet credits per owner")}</FormLabel>
-                        <FormControl>
-                          <Input
-                            type="number"
-                            min={1}
-                            max={1_000_000}
-                            {...field}
-                            onChange={(event) =>
-                              field.onChange(event.target.valueAsNumber)
-                            }
-                          />
-                        </FormControl>
-                        <FormDescription className="text-11">{t("Minted as an ordinary promotional credit grant each period.")}</FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                  {exactAmount ? (
+                    <FormField
+                      control={form.control}
+                      name="amount"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{translateUi("Credits per recipient")}</FormLabel>
+                          <FormControl>
+                            <Input
+                              inputMode="decimal"
+                              {...field}
+                              value={field.value ?? ""}
+                              disabled={!allocationPolicies}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  ) : (
+                    <>
+                      <FormField
+                        control={form.control}
+                        name="amount_credits"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{translateUi("Credits per recipient")}</FormLabel>
+                            <FormControl>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={1_000_000}
+                                {...field}
+                                value={
+                                  Number.isFinite(field.value)
+                                    ? field.value
+                                    : ""
+                                }
+                                onChange={(event) =>
+                                  field.onChange(event.target.valueAsNumber)
+                                }
+                              />
+                            </FormControl>
+                            <FormDescription className="text-13">{translateUi("Issued as a separate credit allocation each period.")}</FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </>
+                  )}
                   <FormField
                     control={form.control}
                     name="recurrence"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Recurrence")}</FormLabel>
+                        <FormLabel>{translateUi("Recurrence")}</FormLabel>
                         <Select
                           value={field.value}
                           disabled={editingSchedule !== null}
@@ -111,13 +185,13 @@ export function ScheduleDialog({
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="daily">{t("Daily")}</SelectItem>
-                            <SelectItem value="weekly">{t("Weekly")}</SelectItem>
-                            <SelectItem value="monthly">{t("Monthly")}</SelectItem>
+                            <SelectItem value="daily">{translateUi("Daily")}</SelectItem>
+                            <SelectItem value="weekly">{translateUi("Weekly")}</SelectItem>
+                            <SelectItem value="monthly">{translateUi("Monthly")}</SelectItem>
                           </SelectContent>
                         </Select>
                         {editingSchedule ? (
-                          <FormDescription className="text-11">{t("Pause this schedule and create another to change its recurrence.")}</FormDescription>
+                          <FormDescription className="text-13">{translateUi("Pause this schedule and create another to change its recurrence.")}</FormDescription>
                         ) : null}
                         <FormMessage />
                       </FormItem>
@@ -131,27 +205,27 @@ export function ScheduleDialog({
                   render={({ field }) => (
                     <FormItem>
                       <fieldset className="space-y-2">
-                        <legend className="text-xs font-medium text-muted-foreground">{t("Expiry policy")}</legend>
+                        <Label asChild><legend className="text-muted-foreground">{translateUi("Expiry policy")}</legend></Label>
                         <div className="grid gap-2 sm:grid-cols-3">
                           <ExpiryOption
-                            label={t("End of each period")}
-                            description={t("No rollover")}
+                            label={translateUi("End of each period")}
+                            description={translateUi("No rollover")}
                             checked={field.value.kind === "end_of_period"}
                             onChange={() =>
                               field.onChange({ kind: "end_of_period" })
                             }
                           />
                           <ExpiryOption
-                            label={t("After a fixed number of days")}
-                            description={t("From disbursement")}
+                            label={translateUi("After a fixed number of days")}
+                            description={translateUi("From disbursement")}
                             checked={field.value.kind === "after_days"}
                             onChange={() =>
                               field.onChange({ kind: "after_days", days: 30 })
                             }
                           />
                           <ExpiryOption
-                            label={t("Never")}
-                            description={t("Credits do not expire")}
+                            label={translateUi("Never")}
+                            description={translateUi("Credits do not expire")}
                             checked={field.value.kind === "never"}
                             onChange={() => field.onChange({ kind: "never" })}
                           />
@@ -167,17 +241,20 @@ export function ScheduleDialog({
                     name="expiry.days"
                     render={({ field }) => (
                       <FormItem className="max-w-52">
-                        <FormLabel>{t("Days until expiry")}</FormLabel>
+                        <FormLabel>{translateUi("Days until expiry")}</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
                             min={1}
                             max={3_650}
                             {...field}
-                            value={Number.isNaN(field.value) ? "" : field.value}
-                            onChange={(event) =>
-                              field.onChange(event.target.valueAsNumber)
+                            value={
+                              Number.isFinite(field.value) ? field.value : ""
                             }
+                            onChange={(event) => {
+                              field.onChange(event.target.valueAsNumber);
+                              void form.trigger("expiry.days");
+                            }}
                           />
                         </FormControl>
                         <FormMessage />
@@ -186,7 +263,10 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
-                <RecipientTargetFields description={t("Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period.")} />
+                <RecipientTargetFields
+                  onLookupBlocked={setLookupBlocked}
+                  description={translateUi("Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period.")}
+                />
 
                 <FormField
                   control={form.control}
@@ -194,8 +274,8 @@ export function ScheduleDialog({
                   render={({ field }) => (
                     <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                       <div>
-                        <FormLabel>{t("All services")}</FormLabel>
-                        <p className="text-11 text-muted-foreground">{t("Allow each period's credits to fund any service.")}</p>
+                        <FormLabel>{translateUi("All services")}</FormLabel>
+                        <p className="text-13 text-muted-foreground">{translateUi("Allow each period's credits to fund any service.")}</p>
                       </div>
                       <FormControl>
                         <Switch
@@ -209,13 +289,23 @@ export function ScheduleDialog({
                     </FormItem>
                   )}
                 />
-                {!allServices ? (
+                {servicesError ? (
+                  <ErrorBanner
+                    message={translateUi("Services could not be loaded. Retry to verify restrictions.")}
+                    onRetry={retryServices}
+                  />
+                ) : null}
+                {servicesLoading &&
+                (!allServices || Boolean(values.service_limits?.length)) ? (
+                  <p role="status">{translateUi("Loading services…")}</p>
+                ) : null}
+                {!allServices && !servicesError && !servicesLoading ? (
                   <FormField
                     control={form.control}
                     name="service_refs"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t("Service scope")}</FormLabel>
+                        <FormLabel>{translateUi("Service scope")}</FormLabel>
                         <FormControl>
                           <ServicePicker
                             services={services}
@@ -224,24 +314,42 @@ export function ScheduleDialog({
                             multiple
                           />
                         </FormControl>
-                        <FormDescription className="text-11">{t("Service metrics do not change the scheduled credit amount.")}</FormDescription>
+                        <FormDescription className="text-13">{translateUi("Service metrics do not change the scheduled credit amount.")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
                   />
                 ) : null}
 
+                {allocationPolicies ||
+                Boolean(editingSchedule?.service_limits?.length) ? (
+                  <ServiceLimitsEditor
+                    services={
+                      allServices
+                        ? services
+                        : services.filter((service) =>
+                            values.service_refs.includes(service.id),
+                          )
+                    }
+                    disabled={
+                      !allocationPolicies ||
+                      pending ||
+                      servicesError ||
+                      servicesLoading
+                    }
+                  />
+                ) : null}
                 <FormField
                   control={form.control}
                   name="reason"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("Reason / note")}</FormLabel>
+                      <FormLabel>{translateUi("Reason / note")}</FormLabel>
                       <FormControl>
                         <textarea
                           rows={3}
-                          className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-12 outline-none focus:border-input-focus"
-                          placeholder={t("Why these recurring credits are issued")}
+                          className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-14 outline-none focus:border-input-focus"
+                          placeholder={translateUi("Why these recurring credits are issued")}
                           {...field}
                         />
                       </FormControl>
@@ -255,10 +363,19 @@ export function ScheduleDialog({
               <Button
                 type="button"
                 variant="ghost"
-                onClick={() => onOpenChange(false)}
-              >{t("Cancel")}</Button>
-              <Button type="submit" variant="primary" isLoading={pending}>
-                {editingSchedule ? t("Save changes") : t("Create schedule")}
+                disabled={pending}
+                onClick={() => {
+                  if (!pending && !submitting.current) onOpenChange(false);
+                }}
+              >{translateUi("Cancel")}</Button>
+              <FormSubmitErrors />
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={pending}
+                disabled={!form.formState.isDirty || !valid || blocked}
+              >
+                {editingSchedule ? translateUi("Save changes") : translateUi("Create schedule")}
               </Button>
             </DialogFooter>
           </form>
@@ -279,8 +396,9 @@ function ExpiryOption({
   readonly checked: boolean;
   readonly onChange: () => void;
 }) {
+  useUiTranslation();
   return (
-    <label className="flex cursor-pointer gap-2 rounded-lg border border-border px-3 py-2">
+    <Label className="flex cursor-pointer gap-2 rounded-lg border border-border px-3 py-2">
       <input
         type="radio"
         name="schedule-expiry-policy"
@@ -290,11 +408,11 @@ function ExpiryOption({
         onChange={onChange}
       />
       <span>
-        <span className="block text-12 font-medium">{label}</span>
-        <span className="block text-11 text-muted-foreground">
+        <span className="block">{label}</span>
+        <FieldHelp className="block text-muted-foreground">
           {description}
-        </span>
+        </FieldHelp>
       </span>
-    </label>
+    </Label>
   );
 }

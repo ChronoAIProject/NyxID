@@ -680,6 +680,8 @@ fn constrained_headers(
                 | "if-range"
                 | "if-none-match"
                 | "if-modified-since"
+                | "if-match"
+                | "if-unmodified-since"
                 | "http-referer"
                 | "x-title"
         ) || ["x-openclaw-", "x-amz-", "x-goog-", "x-openrouter-"]
@@ -1082,13 +1084,11 @@ pub async fn authorize_and_reserve(
         created_at: now,
         updated_at: now,
     };
-    if let Err(error) = db
-        .collection::<DurableOperationExecution>(EXECUTIONS)
-        .insert_one(&execution)
-        .await
+    if let Err(error) =
+        super::erasure_admission::insert_owned(db, EXECUTIONS, owner_user_id, &execution).await
     {
-        if !is_duplicate_key_error(&error) {
-            return Err(error.into());
+        if !matches!(&error, AppError::DatabaseError(error) if is_duplicate_key_error(error)) {
+            return Err(error);
         }
         let existing = db
             .collection::<DurableOperationExecution>(EXECUTIONS)
@@ -1131,24 +1131,36 @@ pub async fn mark_dispatched(
     reservation: &DurableExecutionReservation,
     node_id: Option<&str>,
 ) -> AppResult<()> {
-    let now = Utc::now();
-    let result = db
+    let owner = db
         .collection::<DurableOperationExecution>(EXECUTIONS)
-        .update_one(
-            doc! { "_id": &reservation.execution_id, "status": "reserved" },
-            doc! { "$set": {
-                "status": "dispatched",
-                "downstream_attempts": 1_i64,
-                "node_id": node_id,
-                "dispatched_at": bson::DateTime::from_chrono(now),
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-    if result.modified_count != 1 {
-        return Err(AppError::DurableOperationOutcomeUncertain);
+        .find_one(doc! {"_id":&reservation.execution_id,"status":"reserved"})
+        .await?
+        .ok_or(AppError::DurableOperationOutcomeUncertain)?
+        .user_id;
+    let mut tx = super::erasure_admission::begin_write(db, &owner).await?;
+    let result: AppResult<()> = async {
+        let now = Utc::now();
+        let result = db
+            .collection::<DurableOperationExecution>(EXECUTIONS)
+            .update_one(
+                doc! { "_id": &reservation.execution_id, "status": "reserved" },
+                doc! { "$set": {
+                    "status": "dispatched",
+                    "downstream_attempts": 1_i64,
+                    "node_id": node_id,
+                    "dispatched_at": bson::DateTime::from_chrono(now),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .session(&mut tx)
+            .await?;
+        if result.modified_count != 1 {
+            return Err(AppError::DurableOperationOutcomeUncertain);
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    super::org_membership_authority::finish(tx, result).await
 }
 
 pub async fn mark_pre_dispatch_rejected(
@@ -1157,6 +1169,24 @@ pub async fn mark_pre_dispatch_rejected(
     detail: &str,
 ) {
     reject_execution(db, &reservation.execution_id, detail).await;
+}
+
+/// Only for a sender's proven refusal before any operation dispatch. A transport
+/// error or cancellation after send must retain the uncertain-outcome contract.
+pub(crate) async fn mark_send_rejected(
+    db: &mongodb::Database,
+    reservation: &DurableExecutionReservation,
+) {
+    let now = bson::DateTime::now();
+    let _ = db
+        .collection::<DurableOperationExecution>(EXECUTIONS)
+        .update_one(
+            doc! {"_id": &reservation.execution_id, "status": {"$in": ["reserved", "dispatched"]}},
+            doc! {"$set": {"status": "rejected", "downstream_attempts": 0_i64,
+            "terminal_detail": "assistant authority changed before actual send",
+            "terminal_at": now, "updated_at": now}},
+        )
+        .await;
 }
 
 pub async fn mark_terminal(
@@ -1585,6 +1615,7 @@ mod tests {
     fn scheduled_key(id: &str, owner: &str, user_service_id: &str) -> ApiKey {
         let now = Utc::now();
         ApiKey {
+            permission_policy_id: None,
             id: id.to_string(),
             user_id: owner.to_string(),
             name: "scheduler".to_string(),
@@ -1783,6 +1814,27 @@ mod tests {
     }
 
     #[test]
+    fn precondition_2113_durable_grants_require_declared_constrained_headers() {
+        for name in ["if-match", "if-unmodified-since"] {
+            let mut endpoint = endpoint();
+            let mut headers = HeaderMap::new();
+            headers.insert(name, "revision-one".parse().unwrap());
+            assert!(constrained_headers(&endpoint, &headers).is_err());
+            endpoint.parameters = Some(json!([{"name":name, "in":"header", "required":true}]));
+            let actual = constrained_headers(&endpoint, &headers).unwrap();
+            assert!(validate_parameter_constraints(&BTreeMap::new(), &actual, "header").is_err());
+            let constraints = BTreeMap::from([(name.into(), exact(json!("revision-one")))]);
+            assert!(validate_parameter_constraints(&constraints, &actual, "header").is_ok());
+            headers.insert(name, "revision-two".parse().unwrap());
+            let changed = constrained_headers(&endpoint, &headers).unwrap();
+            assert!(validate_parameter_constraints(&constraints, &changed, "header").is_err());
+            assert!(
+                validate_parameter_constraints(&constraints, &BTreeMap::new(), "header").is_err()
+            );
+        }
+    }
+
+    #[test]
     fn operation_ids_are_bounded_ascii_identifiers() {
         assert!(valid_operation_id("schedule-42:call_site_3"));
         assert!(!valid_operation_id(""));
@@ -1887,6 +1939,99 @@ mod tests {
             matches!(result, Err(AppError::ApiKeyScopePlanNotFound(_))),
             "unexpected planning result: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_endpoint_loading_keeps_the_allowed_connection_through_a_slug_collision() {
+        let Some(db) = connect_test_database("durable_exact_service_id_collision").await else {
+            return;
+        };
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let catalog_id = Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-github-pat".into();
+        catalog.requires_user_credential = true;
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        let endpoint = endpoint();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one({
+                let mut endpoint = endpoint.clone();
+                endpoint.service_id = catalog_id.clone();
+                endpoint
+            })
+            .await
+            .unwrap();
+        let personal = Uuid::new_v4().to_string();
+        let allowed = Uuid::new_v4().to_string();
+        let personal_endpoint = Uuid::new_v4().to_string();
+        let allowed_endpoint = Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &personal_endpoint,
+                    &owner,
+                    "Personal GitHub",
+                    "https://personal.example.test",
+                    None,
+                    Some(&catalog_id),
+                ),
+                test_user_endpoint(
+                    &allowed_endpoint,
+                    &owner,
+                    "Allowed GitHub",
+                    "https://allowed.example.test",
+                    None,
+                    Some(&catalog_id),
+                ),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([
+                test_user_service(
+                    &personal,
+                    &owner,
+                    "api-github-pat",
+                    &personal_endpoint,
+                    Some(&catalog_id),
+                    None,
+                ),
+                test_user_service(
+                    &allowed,
+                    &owner,
+                    "api-github-pat",
+                    &allowed_endpoint,
+                    Some(&catalog_id),
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        let loaded = load_active_published_endpoint(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &owner,
+            &allowed,
+            &[],
+            &endpoint.id,
+        )
+        .await
+        .unwrap()
+        .expect("allowed connection's endpoint should remain loadable");
+        assert_eq!(loaded.id, endpoint.id);
+        assert_eq!(loaded.service_id, allowed);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

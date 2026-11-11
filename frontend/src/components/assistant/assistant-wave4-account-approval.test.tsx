@@ -89,48 +89,51 @@ describe("Wave 4 account journeys", () => {
     expect(onComplete).toHaveBeenCalledWith(IDS.user);
   });
 
-  it("requires the account email on every destructive delete", async () => {
-    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence()).mockRejectedValueOnce(new MockApiError(404));
-    mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
+  it("requires the account email and server policy acknowledgement on every destructive delete", async () => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence());
+    mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false,
+      erasure: { status: "accepted", accepted_at: "2026-10-19T00:00:00Z", completed_at: null, domains: [] } });
     renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-1" onComplete={vi.fn()} />);
     await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
     expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Account deletion accepted");
     expect(mockGet).toHaveBeenNthCalledWith(2, "/users/me/authorization");
-    expect(mockGet).toHaveBeenNthCalledWith(3, "/users/me/authorization");
-    // The confirmation must reach the server -- a browser-side comparison is
-    // not a control, since the effect route is mounted and reachable.
+    expect(mockGet).toHaveBeenCalledTimes(2);
     expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/delete", {
-      actionRequestId: "delete-1",
-      confirmEmail: expect.any(String),
-      deletionPolicyVersion: "machine-data",
+      actionRequestId: "delete-1", confirmEmail: "owner@example.com", deletionPolicyVersion: "machine-data-provider-revocation-v2",
     });
   });
 
-  it("shows committed account deletion after the real revoked-session 401 and clears the session on completion", async () => {
-    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence()).mockRejectedValueOnce(new MockApiError(401));
-    mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
+  it("reports durable acceptance without inferring erasure from a revoked session and clears the session on Continue", async () => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence());
+    mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false,
+      erasure: { status: "pending", accepted_at: "2026-10-19T00:00:00Z", completed_at: null,
+        domains: [{ domain: "provider_credentials", status: "pending", reason: null, completed_at: null }] } });
     const onComplete = vi.fn();
     renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-revoked-session" onComplete={onComplete} />);
     await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
     expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
-    expect(mockApiClient).toHaveBeenCalledWith("/users/me/authorization", { preserveSessionOn401: true });
+    expect(screen.getByRole("dialog")).toHaveTextContent("cleanup continues until verified");
+    expect(mockApiClient).not.toHaveBeenCalled();
+    expect(mockGet).toHaveBeenCalledTimes(2);
     expect(mockSetUser).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(onComplete).toHaveBeenCalledWith(IDS.user);
     expect(mockSetUser).toHaveBeenCalledExactlyOnceWith(null);
   });
 
-  it("still rejects a successful deletion response when the account remains readable", async () => {
-    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence()).mockResolvedValueOnce(accountEvidence());
+  it("rejects a legacy success response without durable erasure acceptance", async () => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence());
     mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
     const onComplete = vi.fn();
-    renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-still-present" onComplete={onComplete} />);
+    renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-unproven" onComplete={onComplete} />);
     await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("The account still exists after deletion.");
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
     expect(onComplete).not.toHaveBeenCalled();
     expect(mockSetUser).not.toHaveBeenCalled();

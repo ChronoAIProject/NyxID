@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -24,7 +25,7 @@ export function OidcCredentialsSection({
   serviceId,
   oauthClientId,
 }: OidcCredentialsSectionProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const queryClient = useQueryClient();
   const [showCredentials, setShowCredentials] = useState(false);
   const [secretVisible, setSecretVisible] = useState(false);
@@ -48,9 +49,9 @@ export function OidcCredentialsSection({
   async function handleCopy(text: string, label: string) {
     try {
       await copyToClipboard(text);
-      toast.success(translateUi("{{label}} copied to clipboard", { label: label }));
+      toast.success(translateUi(`${label} copied to clipboard`));
     } catch {
-      toast.error(translateUi("Failed to copy to clipboard"));
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -60,16 +61,16 @@ export function OidcCredentialsSection({
       setConfirmRegenerate(false);
       setShowCredentials(false);
       setSecretVisible(false);
-      toast.success(result.message);
+      toast.success(translateUi(result.message));
     } catch {
-      toast.error(translateUi("Failed to regenerate secret"));
+      toast.error(translateErrorMessage("Failed to regenerate secret"));
     }
   }
 
   return (
     <div className="space-y-3">
       {oauthClientId && (
-        <DetailRow label={t("Client ID")} value={oauthClientId} copyable />
+        <DetailRow label={translateUi("Client ID")} value={oauthClientId} copyable />
       )}
 
       {!showCredentials ? (
@@ -79,23 +80,23 @@ export function OidcCredentialsSection({
             className="text-text-tertiary hover:text-muted-foreground"
             onClick={() => setShowCredentials(true)}
           >
-            <ButtonIcon><Eye className="h-3 w-3" /></ButtonIcon>{t("Reveal Credentials")}</Button>
-          <p className="mt-1 text-xs text-muted-foreground">{t("Credentials should be stored securely and never shared publicly.")}</p>
+            <ButtonIcon><Eye className="h-3 w-3" /></ButtonIcon>{translateUi("Reveal Credentials")}</Button>
+          <p className="mt-1 text-13 text-muted-foreground">{translateUi("Credentials should be stored securely and never shared publicly.")}</p>
         </div>
       ) : credentialsLoading ? (
-        <p className="text-12 text-muted-foreground">{t("Loading credentials...")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Loading credentials...")}</p>
       ) : credentials ? (
         <div className="space-y-3">
           <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
-            <div className="flex items-center gap-2 text-12 font-medium text-warning">
-              <AlertTriangle className="h-4 w-4" />{t("Store this secret securely")}</div>
-            <p className="mt-1 text-xs text-muted-foreground">{t("The client secret provides full access to this OIDC client. Never expose it in client-side code or version control.")}</p>
+            <div className="flex items-center gap-2 type-row-title text-warning">
+              <AlertTriangle className="h-4 w-4" />{translateUi("Store this secret securely")}</div>
+            <p className="mt-1 text-13 text-muted-foreground">{translateUi("The client secret provides full access to this OIDC client. Never expose it in client-side code or version control.")}</p>
           </div>
 
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Client Secret")}</p>
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Client Secret")}</p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-xs">
+              <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-14">
                 {secretVisible
                   ? credentials.client_secret
                   : "***".padEnd(32, "*")}
@@ -128,7 +129,7 @@ export function OidcCredentialsSection({
           <Separator />
 
           <div>
-            <p className="mb-2 text-xs font-medium text-muted-foreground">{t("Redirect URIs")}</p>
+            <p className="mb-2 type-secondary-emphasis text-muted-foreground">{translateUi("Redirect URIs")}</p>
             <RedirectUriEditor
               serviceId={serviceId}
               initialUris={credentials.redirect_uris}
@@ -139,9 +140,9 @@ export function OidcCredentialsSection({
             <>
               <Separator />
               <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">{t("Delegation Scopes")}</p>
-                <p className="text-12">{credentials.delegation_scopes}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{t("Scopes this client can request via token exchange (RFC 8693). Empty means token exchange is disabled.")}</p>
+                <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Delegation Scopes")}</p>
+                <p className="text-14">{credentials.delegation_scopes}</p>
+                <p className="mt-1 text-13 text-muted-foreground">{translateUi("Scopes this client can request via token exchange (RFC 8693). Empty means token exchange is disabled.")}</p>
               </div>
             </>
           )}
@@ -164,21 +165,21 @@ export function OidcCredentialsSection({
                 variant="destructive"
                 onClick={() => setConfirmRegenerate(true)}
               >
-                <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>{t("Regenerate secret")}</Button>
+                <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>{translateUi("Regenerate secret")}</Button>
             ) : (
               <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
-                <p className="text-12 font-medium text-destructive">{t("This will invalidate the current secret immediately.")}</p>
-                <p className="text-xs text-muted-foreground">{t("All existing integrations using the current secret will stop working until updated with the new secret.")}</p>
+                <p className="type-row-title text-destructive">{translateUi("This will invalidate the current secret immediately.")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("All existing integrations using the current secret will stop working until updated with the new secret.")}</p>
                 <div className="flex justify-end gap-2">
                   <Button
                     variant="destructive"
                     onClick={() => void handleRegenerate()}
                     isLoading={regenerateMutation.isPending}
-                  >{t("Confirm regeneration")}</Button>
+                  >{translateUi("Confirm regeneration")}</Button>
                   <Button
                     variant="outline"
                     onClick={() => setConfirmRegenerate(false)}
-                  >{t("Cancel")}</Button>
+                  >{translateUi("Cancel")}</Button>
                 </div>
               </div>
             )}

@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { useUpdateRedirectUris } from "@/hooks/use-services";
 import { redirectUriSchema } from "@/schemas/services";
@@ -17,7 +18,7 @@ export function RedirectUriEditor({
   serviceId,
   initialUris,
 }: RedirectUriEditorProps) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [uris, setUris] = useState<readonly string[]>(initialUris);
   const [newUri, setNewUri] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -56,7 +57,7 @@ export function RedirectUriEditor({
       });
       toast.success(translateUi("Redirect URIs updated"));
     } catch {
-      toast.error(translateUi("Failed to update redirect URIs"));
+      toast.error(translateErrorMessage("Failed to update redirect URIs"));
     }
   }
 
@@ -65,7 +66,7 @@ export function RedirectUriEditor({
       <div className="space-y-2">
         {uris.map((uri, index) => (
           <div key={uri} className="flex items-center gap-2">
-            <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-xs">
+            <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-14">
               {uri}
             </code>
             <Button
@@ -75,12 +76,12 @@ export function RedirectUriEditor({
               onClick={() => handleRemove(index)}
             >
               <Trash2 className="h-3 w-3 text-destructive" />
-              <span className="sr-only">{t("Remove URI")}</span>
+              <span className="sr-only">{translateUi("Remove URI")}</span>
             </Button>
           </div>
         ))}
         {uris.length === 0 && (
-          <p className="text-xs text-muted-foreground">{t("No redirect URIs configured.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("No redirect URIs configured.")}</p>
         )}
       </div>
 
@@ -99,10 +100,10 @@ export function RedirectUriEditor({
                 handleAdd();
               }
             }}
-            className="h-8 text-12"
+            className="h-8 text-14"
           />
           {validationError && (
-            <p className="text-xs text-destructive">{translateUi(validationError)}</p>
+            <p className="text-13 text-destructive">{translateUi(validationError)}</p>
           )}
         </div>
         <Button
@@ -110,7 +111,7 @@ export function RedirectUriEditor({
           className="h-8 shrink-0"
           onClick={handleAdd}
         >
-          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>{t("Add")}</Button>
+          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>{translateUi("Add")}</Button>
       </div>
 
       {hasChanges && (
@@ -118,7 +119,7 @@ export function RedirectUriEditor({
           variant="primary"
           onClick={() => void handleSave()}
           isLoading={updateMutation.isPending}
-        >{t("Save Redirect URIs")}</Button>
+        >{translateUi("Save Redirect URIs")}</Button>
       )}
     </div>
   );

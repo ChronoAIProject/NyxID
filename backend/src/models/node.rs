@@ -91,7 +91,11 @@ pub struct NodeConnectionOwner {
     #[serde(default)]
     pub credential_ack_correlation: bool,
     #[serde(default)]
+    pub credential_target_update_v1: bool,
+    #[serde(default)]
     pub remote_credential_crypto_v1: bool,
+    #[serde(default)]
+    pub machine_execution_approval_v1: bool,
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
     #[serde(default)]
@@ -134,7 +138,7 @@ impl NodeConnectionOwner {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Node {
     #[serde(rename = "_id")]
     pub id: String,
@@ -146,6 +150,11 @@ pub struct Node {
     /// Encrypted HMAC signing secret (raw hex string encrypted with app keys)
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub signing_secret_encrypted: Option<Vec<u8>>,
+    /// Server-owned storage discriminator. Absence uses the exact legacy
+    /// decoder; version 3 requires this node/owner/field context. Never infer
+    /// the format from random legacy nonce prefix bytes.
+    #[serde(default)]
+    pub signing_secret_context_version: Option<u32>,
     /// SHA-256 hash of the HMAC signing secret
     #[serde(default)]
     pub signing_secret_hash: String,
@@ -173,6 +182,25 @@ pub struct Node {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Node")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("name", &self.name)
+            .field("status", &self.status)
+            .field("auth_token_hash", &"[REDACTED]")
+            .field("signing_secret_encrypted", &"[REDACTED]")
+            .field("signing_secret_hash", &"[REDACTED]")
+            .field(
+                "signing_secret_context_version",
+                &self.signing_secret_context_version,
+            )
+            .field("is_active", &self.is_active)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +221,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "deadbeef".repeat(8),
             signing_secret_encrypted: Some(vec![1, 2, 3, 4]),
+            signing_secret_context_version: None,
             signing_secret_hash: "abcdef01".repeat(8),
             last_heartbeat_at: None,
             connected_at: None,
@@ -217,6 +246,40 @@ mod tests {
         assert_eq!(
             node.signing_secret_encrypted,
             restored.signing_secret_encrypted
+        );
+    }
+
+    #[test]
+    fn context_version_is_stored_and_debug_redacts_node_credentials() {
+        let mut node = make_node();
+        node.auth_token_hash = "distinctive-auth-material".into();
+        node.signing_secret_hash = "distinctive-signing-material".into();
+        node.signing_secret_encrypted = Some(b"distinctive-ciphertext".to_vec());
+        node.signing_secret_context_version = Some(3);
+        let doc = bson::to_document(&node).unwrap();
+        assert_eq!(doc.get_i64("signing_secret_context_version").unwrap(), 3);
+        let restored: Node = bson::from_document(doc.clone()).unwrap();
+        assert_eq!(
+            restored.signing_secret_encrypted,
+            node.signing_secret_encrypted
+        );
+        for rendered in [format!("{node:?}"), format!("{node:#?}")] {
+            for secret in [
+                &node.auth_token_hash,
+                &node.signing_secret_hash,
+                &String::from_utf8(node.signing_secret_encrypted.clone().unwrap()).unwrap(),
+            ] {
+                assert!(!rendered.contains(secret));
+            }
+            assert!(rendered.contains("[REDACTED]"));
+        }
+        let mut old = doc;
+        old.remove("signing_secret_context_version");
+        assert_eq!(
+            bson::from_document::<Node>(old)
+                .unwrap()
+                .signing_secret_context_version,
+            None
         );
     }
 
@@ -315,7 +378,9 @@ mod tests {
             renewed_at: now,
             expires_at: now + chrono::Duration::seconds(30),
             credential_ack_correlation: true,
+            credential_target_update_v1: false,
             remote_credential_crypto_v1: true,
+            machine_execution_approval_v1: false,
             proxy_max_body_size: Some(1024),
             capabilities_resolved: true,
         };

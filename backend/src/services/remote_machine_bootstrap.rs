@@ -268,7 +268,12 @@ pub async fn bootstrap(
         .ok_or_else(|| AppError::Unauthorized("managed workload is unavailable".into()))?;
     validate_binding(&selected, &input.binding)?;
     let selected_capabilities = selected.capabilities;
-    let material = node_service::prepare_managed_credentials(encryption_keys).await?;
+    let material = node_service::prepare_managed_credentials(
+        encryption_keys,
+        &input.binding.node_id,
+        &selected.owner_id,
+    )
+    .await?;
     #[derive(Serialize)]
     struct Secrets<'a> {
         auth_token: &'a str,
@@ -334,7 +339,7 @@ pub async fn bootstrap(
                 .session(&mut *session).await?;
             if updated.modified_count != 1 { return Err(rekey_required()); }
             node_service::activate_managed_credentials(&db, session, &machine.node_id, &machine.owner_id,
-                &auth_hash, &signing_hash, &material.signing_secret_encrypted, now).await?;
+                &auth_hash, &signing_hash, &material.signing_secret_encrypted, material.signing_secret_context_version, now).await?;
             db.collection::<ManagedBootstrapDelivery>(DELIVERIES).insert_one(&row).session(&mut *session).await?;
             let audit_key = super::audit_service::audit_chain_hmac_key();
             #[cfg(test)]

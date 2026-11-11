@@ -27,9 +27,11 @@ pub struct ModelRequest {
     turn: String,
     attempt: String,
     completion: Arc<Completion>,
+    setup: bool,
 }
 
 struct Completion {
+    started: std::time::Instant,
     db: Database,
     conversation: String,
     turn: String,
@@ -41,17 +43,28 @@ impl Completion {
         if self.done.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        complete_request(&self.db, &self.conversation, &self.turn).await?;
+        complete_request(
+            &self.db,
+            &self.conversation,
+            &self.turn,
+            self.started.elapsed(),
+        )
+        .await?;
         Ok(())
     }
 }
 
-async fn complete_request(db: &Database, conversation: &str, turn: &str) -> AppResult<()> {
+async fn complete_request(
+    db: &Database,
+    conversation: &str,
+    turn: &str,
+    elapsed: std::time::Duration,
+) -> AppResult<()> {
     db.collection::<bson::Document>(COLLECTION_NAME)
         .update_one(
             doc! {"_id": conversation, "active_turn.turn_id": turn},
             vec![
-                doc! {"$set": {"active_turn.model_requests_active": {"$max": [0, {"$subtract": [
+                doc! {"$set": {"active_turn.timing.model_ms":{"$add":[{"$ifNull":["$active_turn.timing.model_ms",0]}, elapsed.as_millis().min(i64::MAX as u128) as i64]}, "active_turn.model_requests_active": {"$max": [0, {"$subtract": [
                     {"$ifNull": ["$active_turn.model_requests_active", 0]}, 1
                 ]}]}}},
             ],
@@ -66,8 +79,9 @@ impl Drop for Completion {
             let db = self.db.clone();
             let conversation = self.conversation.clone();
             let turn = self.turn.clone();
+            let elapsed = self.started.elapsed();
             tokio::spawn(async move {
-                let _ = complete_request(&db, &conversation, &turn).await;
+                let _ = complete_request(&db, &conversation, &turn, elapsed).await;
             });
         }
     }
@@ -90,10 +104,12 @@ impl ModelRequest {
             .filter(|turn| !turn.stop_requested)
             .map(|turn| Self {
                 db: db.clone(),
+                setup: row.as_ref().is_some_and(|r| r.guest_model_setup),
                 conversation: conversation.into(),
                 turn: turn.turn_id.clone(),
                 attempt: Uuid::new_v4().to_string(),
                 completion: Arc::new(Completion {
+                    started: std::time::Instant::now(),
                     db: db.clone(),
                     conversation: conversation.into(),
                     turn: turn.turn_id.clone(),
@@ -107,6 +123,7 @@ impl ModelRequest {
                     request.turn_fence(),
                     vec![doc! {"$set": {
                         "active_turn.model_attempt_id": &request.attempt,
+                        "active_turn.timing.model_calls":{"$add":[{"$ifNull":["$active_turn.timing.model_calls",0]},1]},
                         "active_turn.model_attribution_uncertain": {"$or": [
                             {"$ifNull": ["$active_turn.model_attribution_uncertain", false]},
                             {"$gt": [{"$ifNull": ["$active_turn.model_requests_active", 0]}, 0]}
@@ -138,32 +155,65 @@ impl ModelRequest {
     }
 
     pub async fn refusal(&self, error: &AppError) -> AppResult<()> {
-        let Some(code) = refusal_code(error) else {
+        if refusal_code(error).is_none() {
             return self.complete().await;
-        };
+        }
+        self.rejected(error).await
+    }
+
+    /// Only stable AppError metadata, never Display/debug strings or bodies.
+    /// Called around the whole model proxy so pre-billing refusals are visible.
+    pub async fn rejected(&self, error: &AppError) -> AppResult<()> {
         self.db
             .collection::<bson::Document>(COLLECTION_NAME)
             .update_one(
                 self.fence(),
                 doc! {"$set": {"active_turn.model_refusal": {
-                    "code": code, "attempt_id": &self.attempt, "at": bson::DateTime::now()
+                    "code": error.error_key(), "http_status": i32::from(error.status_code().as_u16()),
+                    "error_code": i64::from(error.error_code()),
+                    "attempt_id": &self.attempt, "at": bson::DateTime::now()
                 }}},
             )
             .await?;
         self.complete().await
     }
 
+    pub async fn first_output(&self) -> AppResult<()> {
+        let mut filter = self.turn_fence();
+        filter.insert("active_turn.timing.first_output_ms", bson::Bson::Null);
+        self.db.collection::<bson::Document>(COLLECTION_NAME).update_one(filter,
+            vec![doc! {"$set":{"active_turn.timing.first_output_ms":{"$max":[0,{"$subtract":["$$NOW","$active_turn.started_at"]}]}}}]).await?;
+        Ok(())
+    }
+
     pub async fn complete(&self) -> AppResult<()> {
         self.completion.finish().await
     }
 
+    pub(super) fn is_setup(&self) -> bool {
+        self.setup
+    }
+
     pub async fn accepted(&self) -> AppResult<()> {
+        if self.setup {
+            self.db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION).update_one(
+                doc!{"kind":super::assistant_guest_model_setup::KIND,"conversation_id":&self.conversation,"status":"setting_up","until":{"$gt":bson::DateTime::now()}},
+                doc!{"$set":{"model_accepted":true}}).await?;
+        }
         let mut fence = self.fence();
         fence.insert("active_turn.model_refusal", doc! {"$ne": null});
         self.db
             .collection::<bson::Document>(COLLECTION_NAME)
             .update_one(fence, doc! {"$unset": {"active_turn.model_refusal": ""}})
             .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn dispatched(&self) -> AppResult<()> {
+        if self.setup {
+            super::assistant_guest_model_setup::backoff::dispatched(&self.db, &self.conversation)
+                .await?;
+        }
         Ok(())
     }
 
@@ -186,10 +236,20 @@ impl ModelRequest {
 }
 
 pub fn refusal_code(error: &AppError) -> Option<&'static str> {
-    match error {
-        AppError::InsufficientCredits => Some("insufficient_credits"),
-        AppError::WalletSuspended => Some("wallet_suspended"),
-        AppError::PlanEntitlementRequired(_) => Some("plan_entitlement_required"),
+    if matches!(error, AppError::AssistantModelAuthorityChanged) {
+        Some("model_authority_changed")
+    } else {
+        billing_failure_code(error.error_key())
+    }
+}
+
+pub fn billing_failure_code(code: &str) -> Option<&'static str> {
+    match code {
+        "insufficient_credits" => Some("insufficient_credits"),
+        "wallet_suspended" => Some("wallet_suspended"),
+        "plan_entitlement_required" => Some("plan_entitlement_required"),
+        "billing_not_configured" => Some("billing_not_configured"),
+        "billing_provider_unavailable" => Some("billing_provider_unavailable"),
         _ => None,
     }
 }
@@ -199,7 +259,9 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
         && error.upstream_code.is_some()
         && matches!(error.stage, "stream" | "upstream_response"))
         || (error.code == "invalid_stream" && error.stage == "stream");
-    if !generic || turn.model_attribution_uncertain {
+    let billing_wrapper =
+        error.code == "nyxid_error" && matches!(error.stage, "stream" | "upstream_response");
+    if !(generic || billing_wrapper) || turn.model_attribution_uncertain {
         return error.clone();
     }
     let recent = |at: DateTime<Utc>| {
@@ -214,17 +276,25 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
         .filter(|fact| {
             turn.model_attempt_id.as_deref() == Some(&fact.attempt_id) && recent(fact.at)
         })
-        .and_then(|fact| match fact.code.as_str() {
-            "insufficient_credits" => Some("insufficient_credits"),
-            "wallet_suspended" => Some("wallet_suspended"),
-            "plan_entitlement_required" => Some("plan_entitlement_required"),
-            _ => None,
+        .and_then(|fact| {
+            (fact.code == "model_authority_changed"
+                && fact.http_status == Some(403)
+                && fact.error_code == Some(12104))
+            .then_some("model_authority_changed")
+            .or_else(|| billing_failure_code(&fact.code))
+            .or_else(|| {
+                (fact.code == "guest_model_route_required"
+                    && fact.http_status == Some(403)
+                    && fact.error_code == Some(9000))
+                .then_some("guest_model_route_required")
+            })
         })
         .or_else(|| {
             turn.model_stream_fault
                 .as_ref()
                 .filter(|fact| {
-                    turn.model_attempt_id.as_deref() == Some(&fact.attempt_id)
+                    generic
+                        && turn.model_attempt_id.as_deref() == Some(&fact.attempt_id)
                         && fact.attributable
                         && recent(fact.at)
                         && matches!(
@@ -241,7 +311,77 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
     let classified = TurnError::new(code);
     attributed.code = classified.code;
     attributed.message = classified.message;
-    attributed
+    let reason = turn
+        .model_route_diagnostic
+        .as_ref()
+        .filter(|fact| {
+            fact.attempt_id.is_some() && fact.attempt_id == turn.model_attempt_id && recent(fact.at)
+        })
+        .map(|fact| fact.reason.as_str());
+    attributed.with_model_route_reason(reason)
+}
+
+/// A recent, unambiguous failure of this turn's exact model attempt explains a
+/// generic NyxAgent failure. Success clears it; old/parallel attempts never do.
+pub fn failure_reason(
+    error: &TurnError,
+    turn: &ActiveTurn,
+    now: DateTime<Utc>,
+) -> Option<Box<crate::models::assistant_message::TurnFailureReason>> {
+    use crate::models::assistant_message::TurnFailureReason;
+    if error.stage == "guest_setup" && error.code == "guest_model_route_required" {
+        return error
+            .metadata
+            .as_ref()
+            .and_then(|m| m.failure_reason.clone());
+    }
+    let model_route = turn
+        .model_route_diagnostic
+        .as_ref()
+        .filter(|fact| {
+            !turn.model_attribution_uncertain
+                && fact.attempt_id.is_some()
+                && fact.attempt_id == turn.model_attempt_id
+                && fact.at <= now
+                && now.signed_duration_since(fact.at)
+                    <= chrono::Duration::from_std(MODEL_ATTRIBUTION_WINDOW).expect("bounded window")
+        })
+        .cloned()
+        .map(Box::new);
+    if matches!(error.stage, "stream" | "upstream_response")
+        && matches!(
+            error.upstream_code.as_deref(),
+            Some("turn_failed" | "nyxid_error")
+        )
+        && !turn.model_attribution_uncertain
+        && let Some(fact) = turn.model_refusal.as_ref().filter(|fact| {
+            turn.model_attempt_id.as_deref() == Some(&fact.attempt_id)
+                && fact.at <= now
+                && now.signed_duration_since(fact.at)
+                    <= chrono::Duration::from_std(MODEL_ATTRIBUTION_WINDOW).expect("bounded window")
+                && fact.http_status.is_some()
+                && fact.error_code.is_some()
+        })
+    {
+        return Some(Box::new(TurnFailureReason {
+            model_route: model_route.clone(),
+            source: "nyxid".into(),
+            stage: "model_proxy".into(),
+            code: fact.code.clone(),
+            http_status: fact.http_status,
+            nyxid_error_code: fact.error_code,
+        }));
+    }
+    error.upstream_code.as_ref().map(|code| {
+        Box::new(TurnFailureReason {
+            model_route: model_route.clone(),
+            source: "nyxagent".into(),
+            stage: error.stage.into(),
+            code: code.to_string(),
+            http_status: error.http_status,
+            nyxid_error_code: None,
+        })
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +406,8 @@ pub fn protocol(path: &str) -> Protocol {
 }
 
 pub struct StreamObserver {
+    output: bool,
+    output_taken: bool,
     protocol: Protocol,
     terminal: bool,
     failed: bool,
@@ -276,6 +418,8 @@ impl StreamObserver {
     pub fn new(protocol: Protocol) -> Self {
         Self {
             protocol,
+            output: false,
+            output_taken: false,
             terminal: false,
             failed: false,
             decoder: super::sse_parser::BoundedEventDecoder::with_max_bytes(
@@ -319,6 +463,33 @@ impl StreamObserver {
         {
             self.failed = true;
         }
+        self.output |= match self.protocol {
+            Protocol::Responses => {
+                matches!(
+                    kind,
+                    "response.output_text.delta"
+                        | "response.function_call_arguments.delta"
+                        | "response.reasoning_summary_text.delta"
+                ) && value["delta"].as_str().is_some_and(|s| !s.is_empty())
+            }
+            Protocol::ChatCompletions => value["choices"].as_array().is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice["delta"]["content"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+                        || choice["delta"]["tool_calls"]
+                            .as_array()
+                            .is_some_and(|calls| !calls.is_empty())
+                })
+            }),
+            Protocol::Anthropic => {
+                kind == "content_block_delta"
+                    && ["text", "partial_json", "thinking"]
+                        .iter()
+                        .any(|key| value["delta"][*key].as_str().is_some_and(|s| !s.is_empty()))
+            }
+            Protocol::Unknown => false,
+        };
         self.terminal |= match self.protocol {
             Protocol::Responses => matches!(
                 kind,
@@ -328,6 +499,13 @@ impl StreamObserver {
             Protocol::Anthropic => kind == "message_stop",
             Protocol::Unknown => false,
         };
+    }
+    pub fn take_first_output(&mut self) -> bool {
+        if !self.output || self.output_taken || self.invalid_framing {
+            return false;
+        }
+        self.output_taken = true;
+        true
     }
     pub fn provider_failed(&self) -> bool {
         self.failed && !self.invalid_framing
@@ -358,4 +536,22 @@ impl StreamObserver {
             None
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn model_2142_authority_refusal_is_actionable_and_never_replaces_identity_or_retries() {
+    use super::assistant_nyxagent::{Recovery, RecoveryAction};
+    let error = AppError::AssistantModelAuthorityChanged;
+    assert_eq!(error.status_code().as_u16(), 403);
+    assert_eq!(refusal_code(&error), Some("model_authority_changed"));
+    let classified = TurnError::new(error.error_key());
+    assert_eq!(classified.code, "model_authority_changed");
+    assert!(classified.message.contains("Review the completed actions"));
+    let mut recovery = Recovery::default();
+    assert_eq!(
+        recovery.decide(403, error.error_key(), true),
+        RecoveryAction::Fail
+    );
+    assert!(!recovery.replaced && !recovery.rebound && recovery.retries == 0);
 }

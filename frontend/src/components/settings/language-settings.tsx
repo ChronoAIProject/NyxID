@@ -1,5 +1,6 @@
 import { LANGUAGES } from "@/i18n/language";
 import { useAppTranslation } from "@/i18n/use-app-translation";
+import { Label } from "@/components/ui/label";
 import { ChevronDown } from "lucide-react";
 import {
   Card,
@@ -14,7 +15,7 @@ export function LanguageSettings() {
     <Card>
       <CardHeader>
         <CardTitle>
-          <label htmlFor="interface-language">{t("Language")}</label>
+          <Label htmlFor="interface-language">{t("Language")}</Label>
         </CardTitle>
         <CardDescription>
           {t(

@@ -80,6 +80,28 @@ pub async fn require_admin_or_operator(
     Ok(())
 }
 
+/// Authorize the explicitly delegated erasure/transport reconciliation actions.
+/// The service must append its action audit in the mutation transaction. This
+/// does not create the asynchronous read audit used by metadata GET handlers.
+pub(crate) async fn require_reconciliation_operator(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> AppResult<()> {
+    let user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id":auth_user.user_id.to_string()})
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    if !role_service::resolve_platform_role(&state.db, &user)
+        .await?
+        .has_admin_read()
+    {
+        return Err(AppError::Forbidden("Admin access required".into()));
+    }
+    Ok(())
+}
+
 /// Check that the caller may read platform-wide usage data
 /// (see [`role_service::can_read_admin_usage`]) and return their platform
 /// role, which decides how much identity data usage endpoints disclose.

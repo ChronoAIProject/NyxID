@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -28,14 +28,14 @@ const EXISTING_SETUP =
   "Finish or cancel your existing Telegram creation request first";
 
 export function TelegramClaimPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const actor = useAuthStore((state) => state.user?.id);
-  if (!actor) return <p role="status">{t("Loading your account…")}</p>;
+  if (!actor) return <p role="status">{translateUi("Loading your account…")}</p>;
   return <TelegramClaimForm key={actor} />;
 }
 
 export function TelegramClaimForm() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const [code, setCode] = useState(
     () => readTelegramClaimHandoff()?.code ?? "",
@@ -161,7 +161,7 @@ export function TelegramClaimForm() {
 
   return (
     <section
-      aria-label={t("Connect Telegram bot")}
+      aria-label={translateUi("Connect Telegram bot")}
       className="mx-auto w-full max-w-2xl space-y-6 pb-6"
     >
       <Button
@@ -172,14 +172,14 @@ export function TelegramClaimForm() {
           void navigate({ to: "/channel-bots", search: {}, replace: true });
         }}
       >
-        <ArrowLeft className="size-4" />{t(" Back to Channel Bots")}</Button>
+        <ArrowLeft className="size-4" />{translateUi(" Back to Channel Bots")}</Button>
       <PageHeader
         title={
           preview.data
-            ? t("Connect @{{bot_username}}", { bot_username: preview.data.bot_username })
-            : t("Connect your Telegram bot")
+            ? translateUi("Connect @{{value1}}", { value1: preview.data.bot_username })
+            : translateUi("Connect your Telegram bot")
         }
-        description={t("Choose where your bot will appear in NyxID, then connect it.")}
+        description={translateUi("Choose where your bot will appear in NyxID, then connect it.")}
       />
       {(notice || preview.error || redeem.error || cancel.error) && (
         <ErrorBanner
@@ -188,7 +188,7 @@ export function TelegramClaimForm() {
             cancel.error?.message ??
             redeem.error?.message ??
             preview.error?.message ??
-            t("Unable to connect")
+            translateUi("Unable to connect")
           }
         />
       )}
@@ -202,7 +202,7 @@ export function TelegramClaimForm() {
           }}
         >
           <div className="space-y-2">
-            <Label htmlFor="telegram-claim-code">{t("Claim code")}</Label>
+            <Label htmlFor="telegram-claim-code">{translateUi("Claim code")}</Label>
             <Input
               id="telegram-claim-code"
               data-sensitive
@@ -219,7 +219,7 @@ export function TelegramClaimForm() {
                 setNotice(null);
               }}
             />
-            <p className="text-xs text-muted-foreground">{t("Use the code from your private Telegram setup chat. Only enter codes for bots you created.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Use the code from your private Telegram setup chat. Only enter codes for bots you created.")}</p>
           </div>
           <Button
             type="submit"
@@ -227,7 +227,7 @@ export function TelegramClaimForm() {
             isLoading={preview.isPending}
             disabled={busy || !code.trim()}
           >
-            {preview.error ? t("Retry") : t("Check code")}
+            {preview.error ? translateUi("Retry") : translateUi("Check code")}
           </Button>
         </form>
       ) : (
@@ -237,7 +237,7 @@ export function TelegramClaimForm() {
           onSubmit={form.handleSubmit(connect)}
         >
           <div className="space-y-2">
-            <Label htmlFor="telegram-claim-label">{t("Bot label in NyxID")}</Label>
+            <Label htmlFor="telegram-claim-label">{translateUi("Bot label in NyxID")}</Label>
             <Input
               id="telegram-claim-label"
               maxLength={128}
@@ -245,37 +245,37 @@ export function TelegramClaimForm() {
               {...form.register("label")}
             />
             {form.formState.errors.label && (
-              <p className="text-xs text-destructive">
-                {translateUi(form.formState.errors.label.message ?? "")}
+              <p className="text-13 text-destructive">
+                {form.formState.errors.label.message}
               </p>
             )}
           </div>
           <div className="space-y-2">
-            <Label>{t("Connect to")}</Label>
+            <Label>{translateUi("Connect to")}</Label>
             <OrgScopeSelect
-              label={t("Connect to")}
+              label={translateUi("Connect to")}
               value={orgId ?? null}
               disabled={locked || busy}
               onChange={(next) =>
                 form.setValue("target_org_id", next ?? undefined)
               }
             />
-            <p className="text-xs text-muted-foreground">{t("Your personal account or an organization you manage.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Your personal account or an organization you manage.")}</p>
           </div>
-          <p className="text-xs text-muted-foreground">{t("Once connected, choose an AI agent in the bot’s settings to handle replies.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Once connected, choose an AI agent in the bot’s settings to handle replies.")}</p>
           <Button
             type="submit"
             variant="primary"
             isLoading={redeem.isPending}
             disabled={busy || !code || !label.trim()}
           >
-            {locked && redeem.error ? t("Retry connection") : t("Connect")}
+            {locked && redeem.error ? translateUi("Retry connection") : translateUi("Connect")}
           </Button>
         </form>
       )}
       {conflict && pending && (
         <div className="space-y-3 rounded-xl border border-border bg-card p-4">
-          <p className="text-sm">{t("Existing setup: ")}{pending.label}</p>
+          <p className="text-14">{translateUi("Existing setup: ")}{pending.label}</p>
           <Button
             variant="outline"
             onClick={() =>
@@ -284,7 +284,7 @@ export function TelegramClaimForm() {
                 search: { connect: "telegram-new", request_id: pending.id },
               })
             }
-          >{t("Resume existing setup")}</Button>
+          >{translateUi("Resume existing setup")}</Button>
           {!["provisioning", "connected", "suspended"].includes(
             pending.status,
           ) && (
@@ -299,7 +299,7 @@ export function TelegramClaimForm() {
                   })
                   .catch(() => {});
               }}
-            >{t("Cancel setup")}</Button>
+            >{translateUi("Cancel setup")}</Button>
           )}
         </div>
       )}

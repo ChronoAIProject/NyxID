@@ -57,7 +57,7 @@ const MINTED_KEY: ApiKeyCreateResponse = {
   scopes: ["proxy"],
   allow_all_services: false,
   allowed_service_ids: ["svc-1"],
-  allow_all_nodes: true,
+  allow_all_nodes: false,
   allowed_node_ids: [],
   created_at: "2026-01-01T00:00:00Z",
   rate_limit_per_second: null,
@@ -89,7 +89,7 @@ function renderStep(props: Partial<ComponentProps<typeof ConnectVerifyStep>> = {
       <DialogContent>
         <ConnectVerifyStep
           createdKey={CREATED_KEY}
-          isNodeRouted={false}
+          nodeId={null}
           onDone={vi.fn()}
           {...props}
         />
@@ -126,29 +126,36 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
     expect(screen.getByRole("button", { name: /Maybe later/i })).toBeEnabled();
   });
 
-  it("REGRESSION (silent CTA): clicking 'Create Agent Key' fires the mutation", async () => {
-    const user = userEvent.setup();
-    renderStep();
+  it.each([
+    { route: "direct", nodeId: null, allowedNodeIds: [] },
+    { route: "node", nodeId: "node-1", allowedNodeIds: ["node-1"] },
+  ])(
+    "creates a restricted key for the $route route",
+    async ({ nodeId, allowedNodeIds }) => {
+      const user = userEvent.setup();
+      renderStep({ nodeId });
 
-    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+      await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
-    // If dispatch drifts back to "return function reference" form, this
-    // fails immediately with 0 calls instead of 1.
-    expect(createApiKeyMutate).toHaveBeenCalledTimes(1);
-    expect(createApiKeyMutate).toHaveBeenCalledWith(
-      {
-        name: "Key for OpenAI",
-        scopes: ["proxy"],
-        allow_all_services: false,
-        allowed_service_ids: ["svc-1"],
-        allow_all_nodes: true,
-      },
-      expect.objectContaining({
-        onSuccess: expect.any(Function),
-        onError: expect.any(Function),
-      }),
-    );
-  });
+      // If dispatch drifts back to "return function reference" form, this
+      // fails immediately with 0 calls instead of 1.
+      expect(createApiKeyMutate).toHaveBeenCalledTimes(1);
+      expect(createApiKeyMutate).toHaveBeenCalledWith(
+        {
+          name: "Key for OpenAI",
+          scopes: ["proxy"],
+          allow_all_services: false,
+          allowed_service_ids: ["svc-1"],
+          allow_all_nodes: false,
+          allowed_node_ids: allowedNodeIds,
+        },
+        expect.objectContaining({
+          onSuccess: expect.any(Function),
+          onError: expect.any(Function),
+        }),
+      );
+    },
+  );
 
   it("'Maybe later' calls onDone without firing the mutation", async () => {
     const onDone = vi.fn();

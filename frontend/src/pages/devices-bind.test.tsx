@@ -75,6 +75,7 @@ beforeEach(() => {
     device_label: "Hall camera",
     hw_id: "esp32-aabbcc",
     api_key_id: "7ef9c1a4-8df9-43af-9f92-98a6c9a7f45d",
+    api_key_expires_at: "2099-01-01T00:00:00Z",
     node_id: "4df27e8f-8cb5-47b7-8d29-e6529f2c1c40",
     owner_user_id: "user-1",
     org_id: null,
@@ -96,6 +97,7 @@ describe("DevicesBindPage", () => {
 
     await screen.findByText("Device approved");
     expect(screen.getByText("Hall camera")).toBeInTheDocument();
+    expect(screen.getByText("2099-01-01T00:00:00Z")).toBeInTheDocument();
     expect(mockApproveMutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({
         user_code: "ABCD-EFGH-JKLM",

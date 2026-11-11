@@ -45,7 +45,7 @@ export function GrantCascadeDialog({
           </div>
         </DialogHeader>
 
-        <div className="space-y-4 text-12">
+        <div className="space-y-4 text-14">
           <div className="rounded-lg border border-destructive/20 bg-destructive/[0.04] px-4 py-3">
             <p className="font-medium text-foreground">{t("Also using this ")}{details.provider_name}{t(" authorization")}</p>
             <ul className="mt-2 space-y-1.5 text-muted-foreground">
@@ -77,7 +77,7 @@ export function GrantCascadeDialog({
             </p>
           )}
 
-          <p className="text-11 leading-relaxed text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             {grantCascadeCaveat(details.provider_name)}
           </p>
         </div>

@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useAuthStore } from "@/stores/auth-store";
 import { canWriteTool } from "@/types/api";
 import { useEndpoints } from "@/hooks/use-endpoints";
@@ -15,7 +16,7 @@ export function PublicationOperations({
   tool: DownstreamService;
   disabled?: boolean;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const admin = user?.is_admin === true;
   const writable = canWriteTool(user, tool);
@@ -24,16 +25,16 @@ export function PublicationOperations({
   return (
     <div className="space-y-2">
       {!admin && (
-        <p className="text-11 text-text-tertiary">{t("Admin publication and audience approval required before use.")}</p>
+        <p className="text-13 text-text-tertiary">{translateUi("Admin publication and audience approval required before use.")}</p>
       )}
       {operations.map((op) => (
         <div
           key={op.id}
-          className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2 text-12"
+          className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2 text-14"
         >
           <div>
             <span className="font-medium">{op.name}</span>
-            <code className="ml-2 text-11 text-text-tertiary">
+            <code className="ml-2 text-14 text-text-tertiary">
               {op.method} {op.path}
             </code>
           </div>
@@ -41,7 +42,9 @@ export function PublicationOperations({
             <Badge
               variant={op.publication === "published" ? "success" : "secondary"}
             >
-              {t((op.publication ?? "published").replace(/^./, (s) => s.toUpperCase()))}
+              {(op.publication ?? "published").replace(/^./, (s) =>
+                s.toUpperCase(),
+              )}
             </Badge>
             <Button
               disabled={
@@ -62,15 +65,15 @@ export function PublicationOperations({
                           ? "published"
                           : "validated",
                   },
-                  { onError: () => toast.error(translateUi("Publication failed")) },
+                  { onError: () => toast.error(translateErrorMessage("Publication failed")) },
                 )
               }
             >
               {op.publication === "published"
-                ? t("Pause")
+                ? translateUi("Pause")
                 : admin
-                  ? t("Publish")
-                  : t("Validate")}
+                  ? translateUi("Publish")
+                  : translateUi("Validate")}
             </Button>
           </div>
         </div>

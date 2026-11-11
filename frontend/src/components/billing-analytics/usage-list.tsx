@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import {
   Fragment,
   useEffect,
@@ -144,6 +144,7 @@ function Choice({
   onChange: (value: string) => void;
   options: { value: string; label: string }[];
 }) {
+  useUiTranslation();
   return (
     <Select value={value} onValueChange={onChange}>
       <SelectTrigger
@@ -163,22 +164,22 @@ function Choice({
   );
 }
 function Identity({ user }: { user: AdminUsageIdentity }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="min-w-0">
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="text-12 font-medium">{user.display_name}</span>
+          <span className="type-row-title">{user.display_name}</span>
         </TooltipTrigger>
         <TooltipContent>{user.id}</TooltipContent>
       </Tooltip>
       {user.email && (
-        <div className="break-all text-11 text-muted-foreground">
+        <div className="break-all text-13 text-muted-foreground">
           {user.email}
         </div>
       )}
       {user.user_type === "org" && (
-        <Badge variant="secondary">{t("Organization")}</Badge>
+        <Badge variant="secondary">{translateUi("Organization")}</Badge>
       )}
     </div>
   );
@@ -190,10 +191,10 @@ function Quantities({
   usage: AdminUsageStats;
   tokenView: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const allSelected = tokenView.length === TOKEN_METRICS.length;
   return (
-    <div className="space-y-1 font-mono text-11 tabular-nums">
+    <div className="space-y-1 font-mono text-13 tabular-nums">
       {Object.entries(usage.quantities).map(([metric, quantity]) => (
         <div key={metric}>
           {formatNumber(quantity)} {metricLabel(metric)}
@@ -205,14 +206,14 @@ function Quantities({
         <div className="text-muted-foreground">
           {allSelected ? (
             <>
-              {formatNumber(usage.total_tokens)}{t(" total tokens · in")}{" "}
-              {formatNumber(usage.prompt_tokens)}{t(" · out")}{" "}
+              {formatNumber(usage.total_tokens)}{translateUi(" total tokens · in")}{" "}
+              {formatNumber(usage.prompt_tokens)}{translateUi(" · out")}{" "}
               {formatNumber(usage.completion_tokens)}
-              <br />{t("cache read ")}{formatNumber(usage.cached_tokens)}{t(" · cache write")}{" "}
+              <br />{translateUi("cache read ")}{formatNumber(usage.cached_tokens)}{translateUi(" · cache write")}{" "}
               {formatNumber(usage.cache_creation_tokens)}
               {usage.audio_input_tokens + usage.audio_output_tokens > 0 && (
                 <>
-                  <br />{t("voice in ")}{formatNumber(usage.audio_input_tokens)}{t(" · voice out")}{" "}
+                  <br />{translateUi("voice in ")}{formatNumber(usage.audio_input_tokens)}{translateUi(" · voice out")}{" "}
                   {formatNumber(usage.audio_output_tokens)}
                 </>
               )}
@@ -225,7 +226,7 @@ function Quantities({
           ) : (
             <>
               <span className="inline-flex items-center gap-1">
-                {formatNumber(sumTokenMetrics(usage, tokenView))}{t(" selected tokens")}<TokenOverlapHint selected={tokenView} />
+                {formatNumber(sumTokenMetrics(usage, tokenView))}{translateUi(" selected tokens")}<TokenOverlapHint selected={tokenView} />
               </span>
               {tokenView.map((metric) => (
                 <div key={metric}>
@@ -241,23 +242,23 @@ function Quantities({
   );
 }
 function Cost({ usage }: { usage: AdminUsageStats }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
-    <div className="space-y-1 font-mono text-11 tabular-nums">
+    <div className="space-y-1 font-mono text-13 tabular-nums">
       <span>
         {formatEstimatedCredits(usage.gross_cost ?? usage.gross_cost_micros)}
       </span>
-      <div className="text-muted-foreground">{t("Wallet")}{" "}
+      <div className="text-muted-foreground">{translateUi("Wallet")}{" "}
         {formatEstimatedCredits(usage.wallet_cost ?? usage.wallet_cost_micros)}
-        <br />{t("Credit grants")}{" "}
+        <br />{translateUi("Grants")}{" "}
         {formatEstimatedCredits(usage.grant_cost ?? usage.grant_cost_micros)}
-        <br />{t("Allowance")}{" "}
+        <br />{translateUi("Allowance")}{" "}
         {formatEstimatedCredits(
           usage.allowance_cost ?? usage.allowance_cost_micros,
         )}
       </div>
       {usage.unknown_cost_events > 0 && (
-        <Badge variant="warning">{t("Partial estimate")}</Badge>
+        <Badge variant="warning">{translateUi("Partial estimate")}</Badge>
       )}
     </div>
   );
@@ -267,11 +268,12 @@ function ServiceName({
 }: {
   service: Pick<AdminUsageService, "service_name" | "service_slug">;
 }) {
+  useUiTranslation();
   return (
-    <div className="text-12 font-medium">
+    <div className="type-row-title">
       {service.service_name}
       {service.service_slug && (
-        <div className="text-11 font-normal text-muted-foreground">
+        <div className="type-secondary text-muted-foreground">
           {service.service_slug}
         </div>
       )}
@@ -280,24 +282,24 @@ function ServiceName({
 }
 function StatsTable({
   rows,
-  firstHeading: firstHeadingProp,
+  firstHeading = "Service",
   tokenView,
 }: {
   rows: { key: string; label: ReactNode; usage: AdminUsageStats }[];
   firstHeading?: string;
   tokenView: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <>
       <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{firstHeadingProp === undefined ? t("Service") : firstHeadingProp}</TableHead>
-              <TableHead>{t("Requests")}</TableHead>
-              <TableHead>{t("Usage")}</TableHead>
-              <TableHead>{t("Gross cost")}</TableHead>
+              <TableHead>{firstHeading}</TableHead>
+              <TableHead>{translateUi("Requests")}</TableHead>
+              <TableHead>{translateUi("Usage")}</TableHead>
+              <TableHead>{translateUi("Gross cost")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -325,8 +327,8 @@ function StatsTable({
             className="space-y-3 rounded-lg border border-border bg-card p-4"
           >
             {row.label}
-            <div className="font-mono text-11">
-              {formatNumber(row.usage.requests)}{t(" requests")}</div>
+            <div className="font-mono text-13">
+              {formatNumber(row.usage.requests)}{translateUi(" requests")}</div>
             <Quantities usage={row.usage} tokenView={tokenView} />
             <Cost usage={row.usage} />
           </div>
@@ -342,7 +344,7 @@ function ServiceTable({
   services: AdminUsageService[];
   tokenView: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <StatsTable
       tokenView={tokenView}
@@ -351,8 +353,8 @@ function ServiceTable({
         label: (
           <div className="space-y-2">
             <ServiceName service={service} />
-            <span className="text-11 text-muted-foreground">
-              {formatNumber(service.unique_users)}{t(" users")}</span>
+            <span className="text-13 text-muted-foreground">
+              {formatNumber(service.unique_users)}{translateUi(" users")}</span>
             <DataTableBadgeCell>
               {service.by_credential_class.map((lane) => (
                 <Badge key={lane.credential_class} variant="secondary">
@@ -391,7 +393,7 @@ function UserServices({
   search: AdminUsageParams;
   tokenView: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const usage = useAdminUsage({
     ...search,
     user: user.id,
@@ -400,12 +402,12 @@ function UserServices({
   });
   return (
     <div className="space-y-3 p-3">
-      <p className="text-12 font-medium">{t("Services for ")}{user.display_name}</p>
+      <p className="type-row-title">{translateUi("Services for ")}{user.display_name}</p>
       {usage.isPending ? (
         <Skeleton className="h-20" />
       ) : usage.isError ? (
         <ErrorBanner
-          message={t("Could not load user breakdown.")}
+          message={translateUi("Could not load user breakdown.")}
           onRetry={() => void usage.refetch()}
         />
       ) : (
@@ -428,7 +430,7 @@ function RankingTable({
   search: AdminUsageParams;
   tokenView: readonly TokenMetric[];
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [expanded, setExpanded] = useState<string | null>(null);
   const rowKey = (row: AdminUsageRanking) =>
     `${row.user.id}:${row.billing_owner?.id}:${row.service_id}:${row.service_slug}`;
@@ -437,7 +439,7 @@ function RankingTable({
       <Identity user={row.user} />
       {row.billing_owner && (
         <div className="border-l border-border pl-2">
-          <span className="text-10 text-muted-foreground">{t("Billed to")}</span>
+          <span className="text-12 text-muted-foreground">{translateUi("Billed to")}</span>
           <Identity user={row.billing_owner} />
         </div>
       )}
@@ -449,7 +451,7 @@ function RankingTable({
           onClick={() =>
             setExpanded(expanded === rowKey(row) ? null : rowKey(row))
           }
-        >{t("Services ")}<ChevronDown className="size-3" />
+        >{translateUi("Services ")}<ChevronDown className="size-3" />
         </Button>
       )}
     </div>
@@ -460,11 +462,11 @@ function RankingTable({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{t("User")}</TableHead>
-              <TableHead>{t("Service")}</TableHead>
-              <TableHead>{t("Usage")}</TableHead>
-              <TableHead>{t("Requests")}</TableHead>
-              <TableHead>{t("Gross cost")}</TableHead>
+              <TableHead>{translateUi("User")}</TableHead>
+              <TableHead>{translateUi("Service")}</TableHead>
+              <TableHead>{translateUi("Usage")}</TableHead>
+              <TableHead>{translateUi("Requests")}</TableHead>
+              <TableHead>{translateUi("Gross cost")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -509,8 +511,8 @@ function RankingTable({
           >
             {person(row)}
             <ServiceName service={row} />
-            <p className="font-mono text-11">
-              {formatNumber(row.requests)}{t(" requests")}</p>
+            <p className="font-mono text-13">
+              {formatNumber(row.requests)}{translateUi(" requests")}</p>
             <Quantities usage={row} tokenView={tokenView} />
             <Cost usage={row} />
             {expanded === rowKey(row) && (
@@ -527,7 +529,7 @@ function RankingTable({
   );
 }
 export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const routeSearch = useSearch({ from: "/dashboard/admin/usage" });
   const search = normalizeAdminUsageSearch(routeSearch);
   const navigate = useNavigate();
@@ -567,7 +569,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
   return (
     <div className="space-y-6">
       {rangeError ? (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {translateUi(rangeError)}
         </p>
       ) : usage.isError ? (
@@ -575,76 +577,80 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
           message={
             usage.error instanceof Error
               ? usage.error.message
-              : t("Failed to load usage.")
+              : translateUi("Failed to load usage.")
           }
           onRetry={() => void usage.refetch()}
         />
       ) : usage.isPending ? (
-        <div aria-label={t("Loading usage")} className="space-y-3">
+        <div aria-label={translateUi("Loading usage")} className="space-y-3">
           <Skeleton className="h-28" />
           <Skeleton className="h-64" />
         </div>
       ) : (
         data && (
           <>
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {new Date(data.window.from).toLocaleString(getFormattingLocale())} –{" "}
               {new Date(data.window.to).toLocaleString(getFormattingLocale())} ·{" "}
               {data.freshness && (
                 <>
                   {new Date(data.freshness.rolled_up_through) <
                   new Date(data.window.from)
-                    ? t("Backfilling history · rollups complete through {{value}}", { value: new Date(data.freshness.rolled_up_through).toLocaleString(getFormattingLocale()) })
-                    : t("Live · includes {{value}} unfolded rows", { value: data.freshness.tail_rows.toLocaleString(getFormattingLocale()) })}
+                    ? translateUi("Backfilling history · rollups complete through {{value1}}", { value1: new Date(data.freshness.rolled_up_through).toLocaleString(getFormattingLocale()) })
+                    : translateUi("Live · includes {{value1}} unfolded rows", { value1: data.freshness.tail_rows.toLocaleString(getFormattingLocale()) })}
                   {data.freshness.validated === false && " · Updating totals"}{" "}
                   ·{" "}
                 </>
               )}
-              {formatNumber(data.totals.events)}{t(" metered events ·")}{" "}
-              {formatNumber(data.totals.unique_services)}{t(" services")}</p>
+              {formatNumber(data.totals.events)}{translateUi(" metered events ·")}{" "}
+              {formatNumber(data.totals.unique_services)}{translateUi(" services")}</p>
             {data.totals.events === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
                 <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
-                <p className="text-12 font-medium text-muted-foreground">{t("No usage in this window.")}</p>
-                <p className="text-12 text-muted-foreground">{t("Try another time range or clear filters. New usage appears after services process requests with usage metering enabled.")}</p>
+                <p className="type-row-title text-muted-foreground">{translateUi("No usage in this window.")}</p>
+                <p className="text-14 text-muted-foreground">{translateUi("Try another time range or clear filters. New usage appears after services process requests with usage metering enabled.")}</p>
               </div>
             ) : (
               <>
                 {data.totals.unknown_cost_events > 0 && (
-                  <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("Costs are partial:")}{" "}
-                    {formatNumber(data.totals.unknown_cost_events)}{t(" historical events have no cached rate.")}</p>
+                  <p className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("Costs are partial:")}{" "}
+                    {formatNumber(data.totals.unknown_cost_events)}{translateUi(" historical events have no cached rate.")}</p>
                 )}
-                <p className="text-11 text-muted-foreground">{t("Gross costs use settled amounts or current rates for legacy events. Wallet")}{" "}
+                <p className="text-13 text-muted-foreground">{translateUi("Gross costs use settled amounts or current rates for legacy events. Wallet")}{" "}
                   {formatEstimatedCredits(
                     data.totals.wallet_cost ?? data.totals.wallet_cost_micros,
-                  )}{" "}{t("· Grants")}{" "}
+                  )}{" "}{translateUi("· Grants")}{" "}
                   {formatEstimatedCredits(
                     data.totals.grant_cost ?? data.totals.grant_cost_micros,
-                  )}{" "}{t("· Allowances")}{" "}
+                  )}{" "}{translateUi("· Allowances")}{" "}
                   {formatEstimatedCredits(
                     data.totals.allowance_cost ??
                       data.totals.allowance_cost_micros,
-                  )}{t(". Token total is input + output; provider cache counts can overlap input. Quantities include each billing component and resale event.")}</p>
+                  )}
+                  . Token total is input + output; provider cache counts can
+                  overlap input. Quantities include each billing component and
+                  resale event.
+                </p>
                 <div className="flex justify-end">
                   <TokenMetricPicker
-                    label={t("Token view")}
+                    label={translateUi("Token view")}
                     selected={tokenView}
                     onChange={setTokenView}
-                    allLabel={t("All token types")}
+                    allLabel={translateUi("All token types")}
                   />
                 </div>
                 <section className="space-y-3">
-                  <h2 className="text-15 font-semibold">{t("By service")}</h2>
+                  <h2 className="type-card-title">{translateUi("By service")}</h2>
                   <ServiceTable
                     services={data.by_service}
                     tokenView={tokenView}
                   />
                 </section>
                 <section className="space-y-3">
-                  <h2 className="text-15 font-semibold">{t("Platform key vs own key")}</h2>
+                  <h2 className="type-card-title">{translateUi("Platform key vs own key")}</h2>
                   <StatsTable
                     tokenView={tokenView}
-                    firstHeading={t("Credential type")}
+                    firstHeading={translateUi("Credential type")}
                     rows={data.by_credential_class.map((lane) => ({
                       key: lane.credential_class,
                       label: (
@@ -659,12 +665,12 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                 <section className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-15 font-semibold">{t("Top users")}</h2>
-                      <p className="text-11 text-muted-foreground">{t("Ranked by user, service, and billing owner.")}</p>
+                      <h2 className="type-card-title">{translateUi("Top users")}</h2>
+                      <p className="text-13 text-muted-foreground">{translateUi("Ranked by user, service, and billing owner.")}</p>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <Choice
-                        label={t("Ranking sort")}
+                        label={translateUi("Ranking sort")}
                         value={search.sort}
                         onChange={(sort) =>
                           change({ sort: sort as AdminUsageSearch["sort"] })
@@ -676,7 +682,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                       />
                       {search.sort === "quantity" && (
                         <Choice
-                          label={t("Ranking metric")}
+                          label={translateUi("Ranking metric")}
                           value={search.metric}
                           onChange={(metric) =>
                             change({
@@ -697,13 +703,13 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                     tokenView={tokenView}
                   />
                   {data.ranking.length === 0 && (
-                    <p className="text-12 text-muted-foreground">{t("No ranking rows on this page.")}</p>
+                    <p className="text-14 text-muted-foreground">{translateUi("No ranking rows on this page.")}</p>
                   )}
-                  <div className="flex flex-wrap items-center justify-between gap-3 text-11 text-text-tertiary">
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-13 text-text-tertiary">
                     <span>
-                      {formatNumber(data.ranking_total)}{t(" user/service entries")}</span>
+                      {formatNumber(data.ranking_total)}{translateUi(" user/service entries")}</span>
                     <Choice
-                      label={t("Rows per page")}
+                      label={translateUi("Rows per page")}
                       value={String(search.per_page)}
                       onChange={(value) => change({ per_page: Number(value) })}
                       options={[25, 50, 100].map((value) => ({
@@ -715,18 +721,18 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                       <Button
                         variant="outline"
                         size="icon"
-                        aria-label={t("Previous page")}
+                        aria-label={translateUi("Previous page")}
                         disabled={search.page <= 1 || usage.isFetching}
                         onClick={() => change({ page: search.page - 1 })}
                       >
                         <ChevronLeft className="size-3" />
                       </Button>
-                      <span>{t("Page ")}{search.page}{t(" of ")}{pages}
+                      <span>{translateUi("Page ")}{search.page}{translateUi(" of ")}{pages}
                       </span>
                       <Button
                         variant="outline"
                         size="icon"
-                        aria-label={t("Next page")}
+                        aria-label={translateUi("Next page")}
                         disabled={search.page >= pages || usage.isFetching}
                         onClick={() => change({ page: search.page + 1 })}
                       >

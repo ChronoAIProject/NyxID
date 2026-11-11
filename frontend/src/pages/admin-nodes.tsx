@@ -1,6 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
 import { useState } from "react";
 import {
   useAdminNodes,
@@ -61,7 +61,7 @@ import type { AdminNodeInfo } from "@/types/nodes";
 const PER_PAGE = 50;
 
 export function AdminNodesPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
   const [page, setPage] = useState(1);
@@ -98,10 +98,10 @@ export function AdminNodesPage() {
     try {
       if (action === "disconnect") {
         await disconnectMutation.mutateAsync(node.id);
-        toast.success(translateUi("Node \"{{name}}\" disconnected", { name: node.name }));
+        toast.success(translateUi(`Node "${node.name}" disconnected`));
       } else {
         await deleteMutation.mutateAsync(node.id);
-        toast.success(translateUi("Node \"{{name}}\" deleted", { name: node.name }));
+        toast.success(translateUi(`Node "${node.name}" deleted`));
       }
     } catch (err) {
       toast.error(
@@ -125,8 +125,8 @@ export function AdminNodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={t("Node Registry")}
-        description={t("View and manage all credential nodes across all users.")}
+        title={translateUi("Node Registry")}
+        description={translateUi("View and manage all credential nodes across all users.")}
       />
 
       <div className="flex items-center gap-2">
@@ -134,13 +134,13 @@ export function AdminNodesPage() {
           <div className="relative max-w-sm flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder={t("Filter by user ID...")}
+              placeholder={translateUi("Filter by user ID...")}
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               className="pl-9"
             />
           </div>
-          <Button type="submit" variant="outline" size="sm">{t("Search")}</Button>
+          <Button type="submit" variant="outline" size="sm">{translateUi("Search")}</Button>
           {search && (
             <Button
               type="button"
@@ -151,7 +151,7 @@ export function AdminNodesPage() {
                 setSearch("");
                 setPage(1);
               }}
-            >{t("Clear")}</Button>
+            >{translateUi("Clear")}</Button>
           )}
         </form>
         <Select
@@ -162,13 +162,13 @@ export function AdminNodesPage() {
           }}
         >
           <SelectTrigger className="w-[140px]">
-            <SelectValue placeholder={t("All statuses")} />
+            <SelectValue placeholder={translateUi("All statuses")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">{t("All statuses")}</SelectItem>
-            <SelectItem value="online">{t("Online")}</SelectItem>
-            <SelectItem value="offline">{t("Offline")}</SelectItem>
-            <SelectItem value="draining">{t("Draining")}</SelectItem>
+            <SelectItem value="all">{translateUi("All statuses")}</SelectItem>
+            <SelectItem value="online">{translateUi("Online")}</SelectItem>
+            <SelectItem value="offline">{translateUi("Offline")}</SelectItem>
+            <SelectItem value="draining">{translateUi("Draining")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -186,19 +186,19 @@ export function AdminNodesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("Failed to load nodes")}</p>
-            <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
+            <p className="type-row-title text-muted-foreground">{translateUi("Failed to load nodes")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Please try again later.")}</p>
           </div>
         </div>
       ) : nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">{t("No nodes found")}</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">{translateUi("No nodes found")}</p>
+            <p className="text-13 text-muted-foreground">
               {search || statusFilter
-                ? t("No nodes match your filters.")
-                : t("No credential nodes registered.")}
+                ? translateUi("No nodes match your filters.")
+                : translateUi("No credential nodes registered.")}
             </p>
           </div>
         </div>
@@ -234,7 +234,7 @@ export function AdminNodesPage() {
                                 })
                               }
                             >
-                              <Unplug className="h-3 w-3" />{t("Disconnect")}</DropdownMenuItem>
+                              <Unplug className="h-3 w-3" />{translateUi("Disconnect")}</DropdownMenuItem>
                           )}
                           <DropdownMenuItem
                             className="text-destructive focus:text-destructive"
@@ -242,22 +242,22 @@ export function AdminNodesPage() {
                               setActionTarget({ node, action: "delete" })
                             }
                           >
-                            <Trash2 className="h-3 w-3" />{t("Delete")}</DropdownMenuItem>
+                            <Trash2 className="h-3 w-3" />{translateUi("Delete")}</DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>
                   )}
 
                   <div className="pr-8">
-                    <p className="text-13 font-semibold text-foreground truncate">
+                    <p className="type-card-title text-foreground truncate">
                       {node.name}
                       {node.metadata?.agent_version && (
-                        <span className="ml-2 text-11 font-normal text-muted-foreground">
+                        <span className="ml-2 type-secondary text-muted-foreground">
                           v{node.metadata.agent_version}
                         </span>
                       )}
                     </p>
-                    <p className="text-11 font-mono text-muted-foreground truncate">
+                    <p className="text-13 font-mono text-muted-foreground truncate">
                       {node.id}
                     </p>
                   </div>
@@ -272,8 +272,8 @@ export function AdminNodesPage() {
                     </Badge>
                   </div>
 
-                  <div className="mt-3 text-11 text-muted-foreground">{t("Last seen:")}{" "}
-                    {formatRelativeTime(node.last_heartbeat_at) ?? t("Never")}
+                  <div className="mt-3 text-13 text-muted-foreground">{translateUi("Last seen:")}{" "}
+                    {formatRelativeTime(node.last_heartbeat_at) ?? translateUi("Never")}
                   </div>
                 </div>
               </div>
@@ -285,14 +285,14 @@ export function AdminNodesPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t("Name")}</TableHead>
-                  <TableHead>{t("User")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead>{t("Requests")}</TableHead>
-                  <TableHead>{t("Success Rate")}</TableHead>
-                  <TableHead>{t("Avg Latency")}</TableHead>
-                  <TableHead>{t("Last Heartbeat")}</TableHead>
-                  <TableHead className="w-[100px]">{t("Actions")}</TableHead>
+                  <TableHead>{translateUi("Name")}</TableHead>
+                  <TableHead>{translateUi("User")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Requests")}</TableHead>
+                  <TableHead>{translateUi("Success Rate")}</TableHead>
+                  <TableHead>{translateUi("Avg Latency")}</TableHead>
+                  <TableHead>{translateUi("Last Heartbeat")}</TableHead>
+                  <TableHead className="w-[100px]">{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -304,14 +304,14 @@ export function AdminNodesPage() {
                           {node.name}
                         </span>
                         {node.metadata?.agent_version && (
-                          <span className="ml-2 text-xs text-muted-foreground">
+                          <span className="ml-2 text-13 text-muted-foreground">
                             v{node.metadata.agent_version}
                           </span>
                         )}
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="text-11 text-text-tertiary">
+                      <span className="text-13 text-text-tertiary">
                         {node.user_email ?? node.user_id}
                       </span>
                     </TableCell>
@@ -322,24 +322,24 @@ export function AdminNodesPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-14 tabular-nums text-muted-foreground">
                         {node.metrics
                           ? String(node.metrics.total_requests)
                           : "0"}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-14 tabular-nums text-muted-foreground">
                         {formatSuccessRate(node.metrics)}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-14 tabular-nums text-muted-foreground">
                         {formatLatency(node.metrics)}
                       </span>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
-                      {formatRelativeTime(node.last_heartbeat_at) ?? t("Never")}
+                      {formatRelativeTime(node.last_heartbeat_at) ?? translateUi("Never")}
                     </TableCell>
                     <TableCell>
                       {canWrite && (
@@ -363,7 +363,7 @@ export function AdminNodesPage() {
                                   })
                                 }
                               >
-                                <Unplug className="h-3 w-3" />{t("Disconnect")}</DropdownMenuItem>
+                                <Unplug className="h-3 w-3" />{translateUi("Disconnect")}</DropdownMenuItem>
                             )}
                             <DropdownMenuItem
                               className="text-destructive focus:text-destructive"
@@ -371,7 +371,7 @@ export function AdminNodesPage() {
                                 setActionTarget({ node, action: "delete" })
                               }
                             >
-                              <Trash2 className="h-3 w-3" />{t("Delete")}</DropdownMenuItem>
+                              <Trash2 className="h-3 w-3" />{translateUi("Delete")}</DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
@@ -383,26 +383,26 @@ export function AdminNodesPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-11 text-text-tertiary">{t("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
-              {String(Math.min(page * PER_PAGE, total))}{t(" of ")}{String(total)}{" "}{t("nodes")}</p>
+            <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
+              {String(Math.min(page * PER_PAGE, total))}{translateUi(" of ")}{String(total)}{" "}{translateUi("nodes")}</p>
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
                 size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                aria-label={t("Previous page")}
+                aria-label={translateUi("Previous page")}
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-11 text-text-tertiary">{t("Page ")}{String(page)}{t(" of ")}{String(totalPages)}
+              <span className="text-13 text-text-tertiary">{translateUi("Page ")}{String(page)}{translateUi(" of ")}{String(totalPages)}
               </span>
               <Button
                 variant="outline"
                 size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
-                aria-label={t("Next page")}
+                aria-label={translateUi("Next page")}
               >
                 <ChevronRight className="h-3 w-3" />
               </Button>
@@ -422,17 +422,17 @@ export function AdminNodesPage() {
           <DialogHeader>
             <DialogTitle>
               {actionTarget?.action === "disconnect"
-                ? t("Disconnect Node")
-                : t("Delete Node")}
+                ? translateUi("Disconnect Node")
+                : translateUi("Delete Node")}
             </DialogTitle>
             <DialogDescription>
               {actionTarget?.action === "disconnect"
-                ? t("Are you sure you want to force-disconnect \"{{name}}\"? The node will need to reconnect.", { name: actionTarget.node.name })
-                : t("Are you sure you want to delete \"{{value}}\"? This will remove the node and detach any AI Services routed through it. This action cannot be undone.", { value: actionTarget?.node.name ?? "" })}
+                ? translateUi("Are you sure you want to force-disconnect \"{{value1}}\"? The node will need to reconnect.", { value1: actionTarget.node.name })
+                : translateUi("Are you sure you want to delete \"{{value1}}\"? This will remove the node and detach any AI Services routed through it. This action cannot be undone.", { value1: actionTarget?.node.name ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setActionTarget(null)}>{t("Cancel")}</Button>
+            <Button variant="outline" onClick={() => setActionTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleAction()}
@@ -440,7 +440,7 @@ export function AdminNodesPage() {
                 disconnectMutation.isPending || deleteMutation.isPending
               }
             >
-              {actionTarget?.action === "disconnect" ? t("Disconnect") : t("Delete")}
+              {actionTarget?.action === "disconnect" ? translateUi("Disconnect") : translateUi("Delete")}
             </Button>
           </DialogFooter>
         </DialogContent>

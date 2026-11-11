@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -108,7 +108,7 @@ export function AssistantKeyBindDialog({
     readonly userServiceId: string;
   }) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -201,19 +201,19 @@ export function AssistantKeyBindDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultKeyId ? t("Credential bound") : t("Bind credential")}
+            {resultKeyId ? translateUi("Credential bound") : translateUi("Bind credential")}
           </DialogTitle>
           <DialogDescription>
             {resultKeyId
-              ? t("NyxID bound this agent key to the chosen credential. The assistant receives only the safe key reference.")
-              : t("Binding a dedicated credential widens this agent's reach and is never remembered.")}
+              ? translateUi("NyxID bound this agent key to the chosen credential. The assistant receives only the safe key reference.")
+              : translateUi("Binding a dedicated credential widens this agent's reach and is never remembered.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultKeyId ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Key")}</span>
+              <span className="text-muted-foreground">{translateUi("Key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -222,7 +222,7 @@ export function AssistantKeyBindDialog({
               </Badge>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Service")}</span>
+              <span className="text-muted-foreground">{translateUi("Service")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -231,7 +231,7 @@ export function AssistantKeyBindDialog({
               </Badge>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("Credential")}</span>
+              <span className="text-muted-foreground">{translateUi("Credential")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -243,26 +243,26 @@ export function AssistantKeyBindDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-11 text-success">{t("Exact binding evidence verified.")}</p>
+          <p className="text-13 text-success">{translateUi("Exact binding evidence verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!resultKeyId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void bindCredential()}
-              >{t("Bind credential")}</Button>
+              >{translateUi("Bind credential")}</Button>
             </>
           ) : (
             <>
@@ -277,7 +277,7 @@ export function AssistantKeyBindDialog({
                     void verifyBinding(resultKeyId, expected);
                   }}
                 >
-                  <RefreshCw />{t("Retry verification")}</Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -291,7 +291,7 @@ export function AssistantKeyBindDialog({
                   close();
                 }}
               >
-                {replayed ? t("Report existing key") : t("Done")}
+                {replayed ? translateUi("Report existing key") : translateUi("Done")}
               </Button>
             </>
           )}

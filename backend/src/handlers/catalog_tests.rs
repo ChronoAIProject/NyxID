@@ -337,6 +337,7 @@ fn minimal_catalog_entry() -> crate::services::catalog_service::CatalogEntry {
         provider_config_id: None,
         provider_type: None,
         revokes_grant: None,
+        revocation_effect_scope: None,
         requires_gateway_url: false,
         api_key_instructions: None,
         api_key_url: None,

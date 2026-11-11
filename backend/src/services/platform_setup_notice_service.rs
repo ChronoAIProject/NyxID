@@ -68,6 +68,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
 
 async fn deliver(state: &AppState, row: &Document) -> AppResult<()> {
     let service = super::telegram_new_service::TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -91,6 +92,9 @@ async fn deliver_with_service(
     }
     let binding = state.db.collection::<PlatformBinding>(crate::models::platform_binding::COLLECTION_NAME)
         .find_one(doc! {"_id": row.get_str("binding_id").map_err(|_| closed())?, "generation": row.get_i64("binding_generation").map_err(|_| closed())?}).await?.ok_or_else(closed)?;
+    let service = service
+        .for_manager(profile.manager_bot_id.parse().map_err(|_| closed())?)
+        .await?;
     let (manager, _, values) = service.manager().await?;
     if manager.to_string() != profile.manager_bot_id
         || values.get("observation_id") != Some(profile.observation_id.as_str())

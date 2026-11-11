@@ -447,6 +447,7 @@ pub async fn push_no_auth_to_node_strict(
     target_url: Option<&str>,
 ) -> AppResult<()> {
     let params = CredentialUpdateParams {
+        target_revision: None,
         service_slug: service_slug.to_string(),
         injection_method: "none".to_string(),
         header_name: None,
@@ -581,6 +582,7 @@ fn build_credential_params_from_fields(
 ) -> CredentialUpdateParams {
     match auth_method {
         "ifttt_webhook" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "ifttt_webhook".to_string(),
             header_name: None,
@@ -590,6 +592,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "bearer" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             // Bearer auth is always injected under `Authorization`, matching
@@ -609,6 +612,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "header" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some(auth_key_name.to_string()),
@@ -618,6 +622,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "query" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "query_param".to_string(),
             header_name: None,
@@ -627,6 +632,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "basic" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some("Authorization".to_string()),
@@ -639,6 +645,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "path" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "path_prefix".to_string(),
             header_name: Some(auth_key_name.to_string()),
@@ -648,6 +655,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "none" => CredentialUpdateParams {
+            target_revision: None,
             // No-auth placeholder: node keeps the slug entry (so
             // `proxy_executor` can resolve `target_url`) but stops
             // injecting any secret. Used when a server-held service
@@ -668,6 +676,7 @@ fn build_credential_params_from_fields(
         // field). The node agent's ws_client + credential_store
         // re-parse the JSON inside proxy_executor at signing time.
         "aws_sigv4" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "aws_sigv4".to_string(),
             header_name: None,
@@ -677,6 +686,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         _ => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some(auth_key_name.to_string()),
@@ -692,21 +702,31 @@ fn build_credential_params_from_fields(
 async fn decrypt_api_key_credential(
     api_key: &UserApiKey,
     encryption_keys: &EncryptionKeys,
-) -> Option<String> {
-    let encrypted = match api_key.credential_type.as_str() {
-        "oauth2" => api_key.access_token_encrypted.as_ref(),
-        _ => api_key.credential_encrypted.as_ref(),
-    }?;
-
-    let decrypted_bytes = match encryption_keys.decrypt(encrypted).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to decrypt credential for push");
-            return None;
-        }
+) -> Option<zeroize::Zeroizing<String>> {
+    let (field, encrypted) = match api_key.credential_type.as_str() {
+        "oauth2" => (
+            "access_token_encrypted",
+            api_key.access_token_encrypted.as_ref(),
+        ),
+        _ => (
+            "credential_encrypted",
+            api_key.credential_encrypted.as_ref(),
+        ),
     };
-
-    String::from_utf8(decrypted_bytes).ok()
+    let encrypted = encrypted?;
+    match super::credential_record_service::CredentialRecord::key(api_key)
+        .text(encryption_keys, field, encrypted)
+        .await
+    {
+        Ok(value) => Some(value),
+        Err(_) => {
+            tracing::warn!(
+                category = "credential_decode_failed",
+                "Failed to decode credential for push"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1065,7 +1085,9 @@ mod no_auth_strict_push_tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
+                credential_target_update_v1: false,
                 remote_credential_crypto_v1: false,
+                machine_execution_approval_v1: false,
                 proxy_max_body_size: None,
             },
         );

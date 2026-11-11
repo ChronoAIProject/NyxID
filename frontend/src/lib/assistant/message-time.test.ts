@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { messageTime } from "@/lib/assistant/message-time";
+
+afterEach(() => vi.unstubAllGlobals());
 
 /** ICU separates some parts with narrow no-break spaces. */
 function label(value: Parameters<typeof messageTime>[0], timeZone: string, locale = "en-US") {
@@ -18,6 +20,25 @@ describe("messageTime", () => {
 
   it("follows the reader's locale", () => {
     expect(label("2026-10-12T07:40:43Z", "UTC", "en-GB")).toBe("12 Oct 2026, 07:40 UTC");
+  });
+
+  it("prefers the browser's first requested language", () => {
+    vi.stubGlobal("navigator", { languages: ["en-GB"], language: "en-US" });
+    expect(messageTime("2026-10-12T07:40:43Z", { timeZone: "UTC" })?.label)
+      .toBe("12 Oct 2026, 07:40 UTC");
+  });
+
+  it.each([undefined, []])("uses the browser's language when its language list is %s", (languages) => {
+    vi.stubGlobal("navigator", { languages, language: "en-GB" });
+    expect(messageTime("2026-10-12T07:40:43Z", { timeZone: "UTC" })?.label)
+      .toBe("12 Oct 2026, 07:40 UTC");
+  });
+
+  it.each([undefined, {}])("formats timestamps when browser locale preferences are unavailable: %s", (browser) => {
+    vi.stubGlobal("navigator", browser);
+    const labels = messageTime("2026-10-12T07:40:43Z", { timeZone: "UTC" });
+    expect(labels?.iso).toBe("2026-10-12T07:40:43.000Z");
+    expect(labels?.label).toBeTruthy();
   });
 
   it("places instants on the reader's local calendar day", () => {
@@ -41,6 +62,33 @@ describe("messageTime", () => {
 
   it("accepts epoch milliseconds", () => {
     expect(label(Date.parse("2026-10-12T07:40:43Z"), "UTC")).toBe("Oct 12, 2026, 7:40 AM UTC");
+  });
+
+  describe("short label", () => {
+    const now = Date.parse("2026-10-28T04:00:00Z");
+    function short(value: string, timeZone: string, locale = "en-US") {
+      return messageTime(value, { locale, timeZone, now })?.short.replace(/\s/g, " ");
+    }
+
+    it("shows only the day and month within the current year, day first for English", () => {
+      expect(short("2026-10-27T00:04:00Z", "Asia/Singapore")).toBe("27 Oct");
+      expect(short("2026-01-02T12:00:00Z", "UTC", "en-GB")).toBe("2 Jan");
+    });
+
+    it("adds the year outside the current one", () => {
+      expect(short("2025-10-27T00:04:00Z", "Asia/Singapore")).toBe("27 Oct 2025");
+      expect(short("2027-01-02T12:00:00Z", "UTC")).toBe("2 Jan 2027");
+    });
+
+    it("judges the year on the reader's own calendar", () => {
+      // New Year's Eve in UTC is already next year in Tokyo.
+      expect(short("2026-12-31T16:00:00Z", "UTC")).toBe("31 Dec");
+      expect(short("2026-12-31T16:00:00Z", "Asia/Tokyo")).toBe("1 Jan 2027");
+    });
+
+    it("keeps other languages' own day and month order", () => {
+      expect(short("2026-10-27T00:04:00Z", "Asia/Shanghai", "zh-CN")).toBe("10月27日");
+    });
   });
 
   it("yields nothing for a missing or unparseable instant", () => {

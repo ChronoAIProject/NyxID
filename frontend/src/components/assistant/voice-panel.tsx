@@ -1,7 +1,9 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
+import { NativeSelect } from "@/components/ui/native-select";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
   Mic,
   MicOff,
@@ -11,11 +13,22 @@ import {
   VolumeX,
   Minimize2,
   Maximize2,
+  Settings2,
 } from "lucide-react";
+import type { PreparedMicrophone } from "@/lib/microphone-capture";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { useAppForm } from "@/components/ui/form";
 import { metricLabel } from "@/schemas/billing-metrics";
 import { api } from "@/lib/api-client";
+import { useAuthStore } from "@/stores/auth-store";
+import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
+import type { VoiceView } from "./voice-captions";
 import { useAssistantVoice } from "@/hooks/use-assistant-voice";
 import {
   voiceOptionsSchema,
@@ -31,7 +44,7 @@ function tariff(option: VoiceOption) {
           (p) => p.sync_status === "synced" && p.metric.includes("tokens"),
         )
       : [];
-    return translateUi(extras.length ? "No NyxID duration charge; your provider's charges still apply" : "No NyxID voice charge; your provider's charges still apply") + extras.map((p) => translateUi("; {{rate}} credits per reported {{metric}}", { rate: p.credits_per_unit, metric: metricLabel(p.metric, 1) })).join("");
+    return `No NyxID ${extras.length ? "duration" : "voice"} charge; your provider's charges still apply${extras.map((p) => translateUi("; {{rate}} credits per reported {{metric}}", { rate: p.credits_per_unit, metric: metricLabel(p.metric, 1) })).join("")}`;
   }
   const prices = option.pricing
     ? [option.pricing, ...option.pricing.components]
@@ -51,22 +64,92 @@ function tariff(option: VoiceOption) {
         )),
   );
   return duration
-    ? translateUi("{{rate}} credits per second", { rate: duration.credits_per_unit }) + extras.map((p) => translateUi(" plus {{rate}} credits per {{metric}}", { rate: p.credits_per_unit, metric: p.metric === "requests" ? translateUi("start") : metricLabel(p.metric, 1) })).join("")
+    ? `${duration.credits_per_unit} credits per second${extras.map((p) => ` plus ${p.credits_per_unit} credits per ${p.metric === "requests" ? "start" : metricLabel(p.metric, 1)}`).join("")}`
     : translateUi("Voice tariff unavailable");
+}
+
+function VoiceCreditUsage({ option }: { option: VoiceOption }) {
+  useUiTranslation();
+  return (
+    <details className="mt-3 text-14 text-text-tertiary">
+      <summary className="cursor-pointer">{translateUi("Credit usage")}</summary>
+      <p className="mt-2">
+        {tariff(option)}. Paid by{" "}
+        {option.billing_owner === "organization" ? translateUi("the organization") : translateUi("you")}.
+      </p>
+      <p className="mt-1">{translateUi("Assistant tasks are billed separately. Muting keeps the call running and billed.")}{" "}
+        {option.billing_owner === "organization"
+          ? translateUi("Charges are recorded against the organization's credits.")
+          : translateUi("View recorded charges in your account menu under Usage.")}
+      </p>
+    </details>
+  );
 }
 
 /** Media remains mounted when minimized; starting always needs a gesture. */
 export function VoicePanel({
   threadId,
+  panelId,
   savedPreferences,
+  preparation,
+  settingsRequest = 0,
+  preferencesReady = true,
+  settingsOnly = false,
+  preferencesError = false,
+  onRetryPreferences,
   onClose,
+  onViewChange,
 }: {
   threadId: string;
+  panelId?: string;
   savedPreferences?: VoicePreferences | null;
+  preparation?: PreparedMicrophone;
+  settingsRequest?: number;
+  preferencesReady?: boolean;
+  settingsOnly?: boolean;
+  preferencesError?: boolean;
+  onRetryPreferences?: () => Promise<unknown>;
   onClose: () => void;
+  onViewChange?: (view: VoiceView) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const voice = useAssistantVoice(threadId);
+  const actorId = useAuthStore((state) => state.user?.id);
+  const queryClient = useQueryClient();
+  const [saving, setSaving] = useState(false);
+  const [callPreferences, setCallPreferences] = useState<VoicePreferences>();
+  const active = voice.starting || voice.connected;
+  const effectivePreferences = active
+    ? (callPreferences ?? savedPreferences)
+    : savedPreferences;
+  const preparingCapture = Boolean(preparation && !preparation.isClosed);
+  useEffect(() => {
+    onViewChange?.({
+      panelId,
+      threadId,
+      actorId,
+      snapshot: voice.snapshot,
+      active: voice.starting || voice.connected || preparingCapture,
+      activity: voice.activity,
+    });
+  }, [
+    onViewChange,
+    panelId,
+    threadId,
+    actorId,
+    voice.snapshot,
+    voice.starting,
+    voice.connected,
+    voice.activity,
+    preparingCapture,
+  ]);
+  const [settingsOpen, setSettingsOpen] = useState(Boolean(settingsRequest));
+  const [seenSettingsRequest, setSeenSettingsRequest] =
+    useState(settingsRequest);
+  if (seenSettingsRequest !== settingsRequest) {
+    setSeenSettingsRequest(settingsRequest);
+    if (settingsRequest) setSettingsOpen(true);
+  }
   const [minimized, setMinimized] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -74,53 +157,101 @@ export function VoicePanel({
     return () => clearInterval(timer);
   }, []);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const [selected, setSelected] = useState("");
   const preferencesForm = useAppForm<
     Pick<VoicePreferences, "input_mode" | "voice" | "notify_on_completion">
   >({
     defaultValues: {
-      input_mode: savedPreferences?.input_mode ?? "push_to_talk",
+      input_mode: savedPreferences?.input_mode ?? "automatic",
       voice: savedPreferences?.voice ?? null,
       notify_on_completion: savedPreferences?.notify_on_completion ?? false,
     },
   });
+  const hydrated = useRef(preferencesReady && !preferencesError);
+  const hydratePreferences = useEffectEvent(() => {
+    if (hydrated.current || !preferencesReady || preferencesError) return;
+    hydrated.current = true;
+    preferencesForm.reset({
+      input_mode: savedPreferences?.input_mode ?? "automatic",
+      voice: savedPreferences?.voice ?? null,
+      notify_on_completion: savedPreferences?.notify_on_completion ?? false,
+    });
+  });
+  useEffect(() => {
+    hydratePreferences();
+  }, [preferencesReady, preferencesError]);
   const configuredInputMode = preferencesForm.watch("input_mode");
   const preferredVoice = preferencesForm.watch("voice");
   const notifyOnCompletion = preferencesForm.watch("notify_on_completion");
+  const { reset } = preferencesForm;
+  const { isDirty } = preferencesForm.formState;
+  useEffect(() => {
+    if (!active && !isDirty && preferencesReady && !preferencesError)
+      reset({
+        input_mode: savedPreferences?.input_mode ?? "automatic",
+        voice: savedPreferences?.voice ?? null,
+        notify_on_completion: savedPreferences?.notify_on_completion ?? false,
+      });
+  }, [
+    active,
+    isDirty,
+    preferencesReady,
+    preferencesError,
+    savedPreferences,
+    reset,
+  ]);
   const options = useQuery({
-    queryKey: ["assistant-voice-options", threadId],
+    queryKey: ["assistant-voice-options", actorId, threadId],
+    retry: false,
     queryFn: async () =>
       voiceOptionsSchema.parse(
         await api.get(
-          `/assistant/nyxagent/voice/options?conversation_id=${encodeURIComponent(threadId)}`,
+          `/assistant/nyxagent/voice/options${threadId ? `?conversation_id=${encodeURIComponent(threadId)}` : ""}`,
         ),
       ),
   });
   const choices = options.data?.options ?? [];
+  // An explicit or saved paid source is exact. Unavailable preferences never
+  // authorize silently starting another service/connection/model.
   const option =
-    choices.find(
-      (o) =>
-        `${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}` ===
-        selected,
-    ) ??
-    (savedPreferences
+    !active && selected
       ? choices.find(
           (o) =>
-            o.service_id === savedPreferences.service_id &&
-            o.connection_id === savedPreferences.connection_id &&
-            o.key_source === savedPreferences.key_source &&
-            o.model === savedPreferences.model,
+            `${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}` ===
+            selected,
         )
-      : undefined) ??
-    choices.find((o) => o.available && o.default_model) ??
-    choices.find((o) => o.available);
+      : effectivePreferences
+        ? choices.find(
+            (o) =>
+              o.service_id === effectivePreferences.service_id &&
+              o.connection_id === effectivePreferences.connection_id &&
+              o.key_source === effectivePreferences.key_source &&
+              o.model === effectivePreferences.model,
+          )
+        : (choices.find(
+            (o) =>
+              o.available && o.default_model && o.key_source === "platform",
+          ) ??
+          choices.find((o) => o.available && o.default_model) ??
+          choices.find((o) => o.available));
   const isGrok = option?.voice.protocol === "xai_realtime";
-  const inputMode = isGrok ? "push_to_talk" : configuredInputMode;
+  const inputMode =
+    active && callPreferences
+      ? callPreferences.input_mode
+      : isGrok
+        ? "push_to_talk"
+        : configuredInputMode;
   const voiceName =
-    option?.voice.voices.find((v) => v.id === preferredVoice)?.id ??
+    option?.voice.voices.find(
+      (v) =>
+        v.id ===
+        (active && callPreferences ? callPreferences.voice : preferredVoice),
+    )?.id ??
     option?.voice.voices[0]?.id ??
     null;
-  const active = voice.starting || voice.connected;
+  const settingsDisabled =
+    active || !preferencesReady || preferencesError || retrying || saving;
   const elapsed = voice.snapshot
     ? Math.max(
         0,
@@ -135,19 +266,31 @@ export function VoicePanel({
     : 0;
   const timer = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
   const status = voice.starting
-    ? "Connecting"
+    ? voice.connectionStatus === "microphone"
+      ? "Opening microphone"
+      : voice.connectionStatus === "audio"
+        ? "Preparing audio"
+        : voice.connectionStatus === "reconnecting"
+          ? "Reconnecting"
+          : "Connecting"
     : voice.snapshot?.session.state === "active"
       ? "Connected"
       : voice.snapshot?.session.state === "closing"
         ? "Ending"
         : "Ready";
   const microphoneMuted = voice.snapshot?.session.muted ?? false;
+  const canTalk =
+    voice.connected &&
+    !voice.starting &&
+    !microphoneMuted &&
+    voice.snapshot?.session.state === "active" &&
+    !voice.snapshot.session.input_muted;
   const selectionKey = option
     ? `${option.service_id}:${option.connection_id ?? option.key_source}:${option.model}`
     : "";
-  async function start() {
+  function selectedPreferences(): VoicePreferences | undefined {
     if (!option?.available) return;
-    const preferences: VoicePreferences = {
+    return {
       service_id: option.service_id,
       connection_id: option.connection_id,
       key_source: option.key_source,
@@ -157,22 +300,158 @@ export function VoicePanel({
       language: savedPreferences?.language ?? null,
       notify_on_completion: notifyOnCompletion,
     };
+  }
+  async function remember(preferences: VoicePreferences) {
+    const startingActor = actorId;
+    if (!startingActor || useAuthStore.getState().user?.id !== startingActor)
+      throw new Error("Your account changed. Start voice again.");
+    // The session request carries these preferences and revalidates access
+    // and funding. An unchanged saved selection needs no settings round trip.
+    if (
+      savedPreferences &&
+      (Object.keys(preferences) as (keyof VoicePreferences)[]).every(
+        (key) => preferences[key] === savedPreferences[key],
+      )
+    )
+      return;
+    try {
+      const settings = await nyxBotApi.updateSettings({
+        voice: preferences,
+      });
+      if (useAuthStore.getState().user?.id !== startingActor)
+        throw new Error("Your account changed. Start voice again.");
+      // Only the server-confirmed response replaces the original actor's
+      // cache. A later panel remount must see the preferences just saved.
+      queryClient.setQueryData(
+        nyxBotQueryKeys.settings(startingActor),
+        settings,
+      );
+    } catch {
+      if (useAuthStore.getState().user?.id === startingActor)
+        setSettingsError(
+          "Voice preferences could not be saved. Please try again.",
+        );
+      throw new Error("Voice preferences could not be saved.");
+    }
+  }
+  async function saveSettings() {
+    const preferences = selectedPreferences();
+    if (!preferences || settingsDisabled || options.isError) return;
+    setSettingsError(null);
+    setSaving(true);
+    try {
+      await remember(preferences);
+      if (settingsOnly) onClose();
+    } catch {
+      /* remember reports the account-scoped error. */
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function start(prepared?: PreparedMicrophone) {
+    const preferences = selectedPreferences();
+    if (!preferences || settingsOnly || settingsDisabled || options.isError)
+      return;
+    setSettingsError(null);
+    setCallPreferences(preferences);
+    await voice.start(
+      preferences,
+      isGrok ? "xai_realtime" : undefined,
+      () => remember(preferences),
+      ...(prepared ? ([prepared] as const) : []),
+    );
+  }
+
+  async function retryLoading() {
+    setRetrying(true);
     setSettingsError(null);
     try {
-      await api.put("/assistant/nyxagent/settings", { voice: preferences });
+      await Promise.all([
+        ...(options.isError ? [options.refetch()] : []),
+        ...(preferencesError && onRetryPreferences
+          ? [onRetryPreferences()]
+          : []),
+      ]);
     } catch {
       setSettingsError(
-        "Voice preferences could not be saved. Please try again.",
+        "Voice settings could not be loaded. Check your connection and try again.",
       );
-      return;
+    } finally {
+      setRetrying(false);
     }
-    if (isGrok) await voice.start(preferences, "xai_realtime");
-    else await voice.start(preferences);
   }
+  const loadingError = preferencesError || options.isError;
+  const retryControl = !active && loadingError && (
+    <Button
+      size="sm"
+      variant="ghost"
+      disabled={retrying || options.isFetching || !preferencesReady}
+      onClick={() => void retryLoading()}
+    >
+      {retrying ? translateUi("Retrying…") : translateUi("Retry voice loading")}
+    </Button>
+  );
+
+  const attempted = useRef<PreparedMicrophone | undefined>(undefined);
+  const automaticStart = useEffectEvent((prepared: PreparedMicrophone) =>
+    start(prepared),
+  );
+  useEffect(() => {
+    if (
+      settingsOnly ||
+      retrying ||
+      !preferencesReady ||
+      !preparation ||
+      attempted.current === preparation ||
+      active ||
+      (!options.data && !options.isError)
+    )
+      return;
+    // Defer so effect rehearsal can cancel before starting a call.
+    const timer = setTimeout(() => {
+      attempted.current = preparation;
+      if (preparation.isClosed) return;
+      if (
+        preferencesError ||
+        options.isError ||
+        !option?.available ||
+        (savedPreferences?.voice &&
+          !option.voice.voices.some(
+            (item) => item.id === savedPreferences.voice,
+          )) ||
+        (option.voice.protocol === "xai_realtime" &&
+          savedPreferences?.input_mode === "automatic")
+      ) {
+        preparation.close();
+        setSettingsError(
+          preferencesError
+            ? "Voice preferences could not be loaded. Check your connection and try again."
+            : options.isError
+              ? "Voice options could not be loaded. Check your connection and try again."
+              : "Your selected voice source is unavailable. Choose a source in Voice settings, then use the waveform to try again.",
+        );
+        return;
+      }
+      void automaticStart(preparation);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [
+    preparation,
+    settingsOnly,
+    savedPreferences,
+    retrying,
+    preferencesReady,
+    preferencesError,
+    options.data,
+    options.isError,
+    option,
+    active,
+  ]);
+
   const micControl = (
     <Button
       variant="outline"
-      aria-label={microphoneMuted ? t("Unmute microphone") : t("Mute microphone")}
+      aria-label={microphoneMuted ? translateUi("Unmute microphone") : translateUi("Mute microphone")}
       aria-pressed={microphoneMuted}
       disabled={voice.starting}
       onClick={() => {
@@ -184,7 +463,7 @@ export function VoicePanel({
       ) : (
         <Mic className="h-4 w-4" />
       )}
-      {microphoneMuted ? t("Unmute") : t("Mute")}
+      {microphoneMuted ? translateUi("Unmute") : translateUi("Mute")}
     </Button>
   );
   const endControl = (
@@ -195,22 +474,310 @@ export function VoicePanel({
         setMinimized(false);
       }}
     >
-      <PhoneOff className="h-4 w-4" />{t("End call")}</Button>
+      <PhoneOff className="h-4 w-4" />{translateUi("End call")}</Button>
   );
+  const tasks = (
+    <ul className="mt-3 space-y-2" aria-label={translateUi("Voice tasks")}>
+      {voice.snapshot?.tasks.map((t, i) => (
+        <li key={t.id} className="flex items-center justify-between gap-2">
+          <span className="min-w-0 break-words">
+            {t.title?.trim() || translateUi("Request {{value1}}", { value1: i + 1 })} ·{" "}
+            {(
+              {
+                queued: "Queued",
+                claimed: "Running",
+                awaiting_confirmation: "Needs your OK",
+                completed: "Done",
+                cancelled: "Cancelled",
+                failed: "Failed",
+              } as Record<string, string>
+            )[t.outcome ?? t.state] ?? t.state}
+            {t.progress && (
+              <span className="mt-1 block text-13 text-text-secondary">
+                {t.progress.detail}
+                {t.progress.last_completed_step && (
+                  <span className="block">{translateUi("Last finished step: ")}{t.progress.last_completed_step}</span>
+                )}
+              </span>
+            )}
+            {t.result_message_id ? (
+              <a
+                className="ml-1 text-nyx-secondary-400 underline"
+                href={`#message-${t.result_message_id}`}
+              >{translateUi("result")}</a>
+            ) : null}
+          </span>
+          {!["completed", "cancelled"].includes(t.state) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={translateUi("Stop request {{value1}}", { value1: i + 1 })}
+              onClick={() => {
+                void voice.stopTask(t.id);
+              }}
+            >
+              <Square className="h-3 w-3" />{translateUi("Stop")}</Button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+  if (onViewChange)
+    return (
+      <section
+        aria-label={settingsOnly ? translateUi("Voice settings") : translateUi("Voice conversation")}
+        className="text-14"
+      >
+        <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-hairline pb-1.5">
+          <span role="status" className="min-w-0 flex-1 text-primary">
+            {active
+              ? voice.starting
+                ? translateUi("Connecting…")
+                : status
+              : options.isPending
+                ? translateUi("Loading voice…")
+                : translateUi("Voice")}
+            {active && (
+              <span
+                aria-label={translateUi("Call duration")}
+                className="ml-2 font-mono text-13 text-text-tertiary"
+              >
+                {timer}
+              </span>
+            )}
+          </span>
+          {active && (
+            <>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label={
+                  microphoneMuted ? translateUi("Unmute microphone") : translateUi("Mute microphone")
+                }
+                aria-pressed={microphoneMuted}
+                disabled={voice.starting}
+                onClick={() => void voice.mute(!microphoneMuted)}
+              >
+                {microphoneMuted ? <MicOff /> : <Mic />}
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label={
+                  voice.speakerMuted ? translateUi("Enable speaker") : translateUi("Mute speaker")
+                }
+                aria-pressed={voice.speakerMuted}
+                onClick={() => voice.muteSpeaker(!voice.speakerMuted)}
+              >
+                {voice.speakerMuted ? <VolumeX /> : <Volume2 />}
+              </Button>
+            </>
+          )}
+          <Popover open={settingsOpen} onOpenChange={setSettingsOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={translateUi("Voice settings")}
+              >
+                <Settings2 />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              side="top"
+              align="end"
+              className="max-h-[60dvh] w-80 max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto rounded-2xl p-3 text-14"
+              onOpenAutoFocus={(e) => e.preventDefault()}
+            >
+              <p className="font-medium">{translateUi("Voice settings")}</p>
+              <Label className="block min-w-0">{translateUi("Voice source")}<NativeSelect
+                  aria-label={translateUi("Voice source")}
+                  value={selectionKey}
+                  disabled={
+                    settingsDisabled || options.isPending || options.isError
+                  }
+                  onChange={(e) => setSelected(e.target.value)}
+                  className="mt-1"
+                >
+                  {!option && (
+                    <option value="">{translateUi("Choose an available source")}</option>
+                  )}
+                  {choices.map((o) => (
+                    <option
+                      key={`${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}`}
+                      value={`${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}`}
+                      disabled={!o.available}
+                    >
+                      {o.model_label} ·{" "}
+                      {o.key_source === "own" ? translateUi("Your key") : translateUi("Platform")}
+                      {!o.available ? translateUi(" · unavailable") : ""}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </Label>
+              <Label className="block min-w-0">{translateUi("Voice")}<NativeSelect
+                  aria-label={translateUi("Voice")}
+                  value={voiceName ?? ""}
+                  disabled={settingsDisabled}
+                  onChange={(e) =>
+                    preferencesForm.setValue("voice", e.target.value)
+                  }
+                  className="mt-1"
+                >
+                  {option?.voice.voices.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </Label>
+              <Label className="block min-w-0">{translateUi("Microphone")}<NativeSelect
+                  aria-label={translateUi("Microphone mode")}
+                  value={inputMode}
+                  disabled={settingsDisabled}
+                  onChange={(e) =>
+                    preferencesForm.setValue(
+                      "input_mode",
+                      e.target.value as typeof inputMode,
+                    )
+                  }
+                  className="mt-1"
+                >
+                  <option value="automatic" disabled={isGrok}>{translateUi("Automatic")}</option>
+                  <option value="push_to_talk">{translateUi("Hold to talk")}</option>
+                </NativeSelect>
+              </Label>
+              <Label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={notifyOnCompletion}
+                  disabled={settingsDisabled}
+                  onChange={(e) =>
+                    preferencesForm.setValue(
+                      "notify_on_completion",
+                      e.target.checked,
+                    )
+                  }
+                />{translateUi("Notify when a task finishes")}</Label>
+              <p className="text-text-tertiary">
+                {isGrok ? translateUi("Grok requires Hold to talk. ") : ""}{translateUi("Audio goes to")}{" "}
+                {isGrok ? translateUi("xAI through NyxID") : translateUi("OpenAI")}. NyxID keeps the
+                transcript, never an audio recording. Use headphones if the
+                assistant hears itself. Calls end after 30 minutes or 3 minutes
+                without user speech.
+              </p>
+              {option && <VoiceCreditUsage option={option} />}
+              {active && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void voice.resumeAudio()}
+                >{translateUi("Resume audio")}</Button>
+              )}
+              {tasks}
+            </PopoverContent>
+          </Popover>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="text-destructive"
+            aria-label={
+              active
+                ? voice.starting
+                  ? translateUi("Cancel voice connection")
+                  : translateUi("End call")
+                : translateUi("Close voice")
+            }
+            onClick={() => {
+              preparation?.close();
+              void voice.end();
+              if (!active) onClose();
+            }}
+          >
+            <PhoneOff />
+          </Button>
+        </div>
+        {!active && !option && !options.isPending && !options.isError && (
+          <p role="alert" className="mt-1 text-destructive">{translateUi("Your selected voice source is unavailable. Choose a source in Voice settings.")}</p>
+        )}
+        {voice.conflictSession && !active && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <p role="status">{translateUi("A call is already active.")}</p>
+            {voice.conflictSession.resumable && (
+              <Button size="sm" onClick={() => voice.rejoin()}>{translateUi("Rejoin")}</Button>
+            )}
+            <Button size="sm" variant="ghost" onClick={() => void voice.end()}>{translateUi("End call")}</Button>
+          </div>
+        )}
+        {active && inputMode === "push_to_talk" && (
+          <Button
+            className="mt-2 w-full touch-none"
+            variant={voice.holding ? "primary" : "outline"}
+            aria-label={translateUi("Hold to talk")}
+            aria-pressed={voice.holding}
+            disabled={!canTalk}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              voice.hold(true);
+            }}
+            onPointerUp={() => voice.hold(false)}
+            onPointerCancel={() => voice.hold(false)}
+            onLostPointerCapture={() => voice.hold(false)}
+            onBlur={() => voice.hold(false)}
+            onKeyDown={(e) => {
+              if (e.key === " " || e.key === "Enter") {
+                e.preventDefault();
+                if (!e.repeat) voice.hold(true);
+              }
+            }}
+            onKeyUp={() => voice.hold(false)}
+          >
+            <Mic className="size-4" />{translateUi("Hold to talk")}</Button>
+        )}
+        {(voice.error || settingsError || loadingError) && (
+          <p role="alert" className="mt-1 text-destructive">
+            {settingsError ||
+              voice.error ||
+              (preferencesError
+                ? translateUi("Voice preferences could not be loaded. Check your connection and try again.")
+                : translateUi("Voice options could not be loaded. Check your connection and try again."))}
+          </p>
+        )}
+        {retryControl}
+        {!active &&
+          voice.error &&
+          option?.available &&
+          !settingsDisabled &&
+          !loadingError &&
+          !preparingCapture &&
+          !voice.conflictSession && (
+            <Button size="sm" variant="outline" onClick={() => void start()}>{translateUi("Retry voice")}</Button>
+          )}
+        {voice.snapshot?.session.idle_warning && (
+          <p role="status" className="mt-1 text-warning">{translateUi("Speak to keep this call open. It will end shortly.")}</p>
+        )}
+      </section>
+    );
   if (minimized && active)
     return (
       <section
-        aria-label={t("Minimized voice call")}
+        aria-label={translateUi("Minimized voice call")}
         className="fixed bottom-6 right-4 z-40 flex max-w-[calc(100vw-2rem)] flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-3 shadow-lg"
       >
-        <span role="status">{status}</span>
-        <span aria-label={t("Call duration")} className="font-mono tabular-nums">
-          {timer}
-        </span>
+        {!settingsOnly && (
+          <>
+            <span role="status">{status}</span>
+            <span aria-label={translateUi("Call duration")} className="font-mono tabular-nums">
+              {timer}
+            </span>
+          </>
+        )}
         {inputMode === "push_to_talk" && (
           <Button
-            aria-label={t("Hold to talk")}
-            disabled={voice.starting || microphoneMuted}
+            aria-label={translateUi("Hold to talk")}
+            disabled={!canTalk}
             aria-pressed={voice.holding}
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
@@ -222,7 +789,7 @@ export function VoicePanel({
             onKeyDown={(e) => {
               if (e.key === " " || e.key === "Enter") {
                 e.preventDefault();
-                voice.hold(true);
+                if (!e.repeat) voice.hold(true);
               }
             }}
             onKeyUp={() => voice.hold(false)}
@@ -234,13 +801,13 @@ export function VoicePanel({
         {endControl}
         <Button
           variant="ghost"
-          aria-label={t("Restore voice panel")}
+          aria-label={translateUi("Restore voice panel")}
           onClick={() => setMinimized(false)}
         >
           <Maximize2 className="h-4 w-4" />
         </Button>
         {voice.snapshot?.session.idle_warning && (
-          <p role="status" className="w-full">{t("Speak to keep this call open.")}</p>
+          <p role="status" className="w-full">{translateUi("Speak to keep this call open.")}</p>
         )}
         {voice.error && (
           <p role="alert" className="w-full text-destructive">
@@ -251,19 +818,25 @@ export function VoicePanel({
     );
   return (
     <section
-      aria-label={t("Voice conversation")}
-      className="rounded-xl border border-border bg-card p-4 text-12"
+      aria-label={settingsOnly ? translateUi("Voice settings") : translateUi("Voice conversation")}
+      className="max-h-[50dvh] overflow-y-auto rounded-xl border border-border bg-card p-3 text-14 shadow-sm"
     >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-15 font-semibold">{t("Talk to your assistant")}</h2>
-        <span role="status">{status}</span>
-        <span aria-label={t("Call duration")} className="font-mono tabular-nums">
-          {timer}
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="type-card-title">
+          {settingsOnly ? translateUi("Voice settings") : translateUi("Talk to your assistant")}
+        </h2>
+        {!settingsOnly && (
+          <>
+            <span role="status">{status}</span>
+            <span aria-label={translateUi("Call duration")} className="font-mono tabular-nums">
+              {timer}
+            </span>
+          </>
+        )}
         {active && (
           <Button
             variant="ghost"
-            aria-label={t("Minimize voice call")}
+            aria-label={translateUi("Minimize voice call")}
             onClick={() => {
               voice.hold(false);
               setMinimized(true);
@@ -279,31 +852,45 @@ export function VoicePanel({
             void voice.end();
             onClose();
           }}
-        >{t("Close")}</Button>
+        >{translateUi("Close")}</Button>
       </div>
-      <p className="mt-2 text-muted-foreground">{t("Audio goes to ")}{isGrok ? t("xAI through NyxID") : t("OpenAI")}{t(". NyxID keeps the transcript, never an audio recording. Muting keeps the call running and billed.")}</p>
+      {settingsOnly && (
+        <p className="mt-2 text-muted-foreground">{translateUi("Saved for your account across conversations. Changes apply to your next call.")}</p>
+      )}
+      {!active && (
+        <p className="mt-2 text-muted-foreground">{translateUi("Audio goes to ")}{isGrok ? translateUi("xAI through NyxID") : translateUi("OpenAI")}. NyxID keeps
+          the transcript, never an audio recording. Calls end after 30 minutes
+          or 3 minutes without user speech.
+        </p>
+      )}
       {voice.conflictSession && !active && (
         <div className="mt-4 rounded-lg border border-warning/40 p-3">
-          <p role="status">{t("A voice call is already active in this conversation.")}</p>
+          <p role="status">{translateUi("A voice call is already active in this conversation.")}</p>
           <div className="mt-2 flex gap-2">
             {voice.conflictSession.resumable && (
-              <Button onClick={() => voice.rejoin()}>{t("Rejoin")}</Button>
+              <Button onClick={() => voice.rejoin()}>{translateUi("Rejoin")}</Button>
             )}
-            <Button variant="destructive" onClick={() => void voice.end()}>{t("End call")}</Button>
+            <Button variant="destructive" onClick={() => void voice.end()}>{translateUi("End call")}</Button>
           </div>
         </div>
       )}
       {isGrok && (
-        <p className="mt-2 text-muted-foreground">{t("Grok private beta: Hold to talk, with headphones recommended. Automatic speaker mode is awaiting verification.")}</p>
+        <p className="mt-2 text-muted-foreground">{translateUi("Grok private beta: Hold to talk, with headphones recommended. Automatic speaker mode is awaiting verification.")}</p>
       )}
       {!active && (
         <div className="mt-4 flex flex-wrap gap-3">
-          <label>{t("Voice source")}<select
-              aria-label={t("Voice source")}
+          <Label className="block min-w-0 flex-1 basis-48">{translateUi("Voice source")}<NativeSelect
+              aria-label={translateUi("Voice source")}
               value={selectionKey}
+              disabled={
+                settingsDisabled || options.isPending || options.isError
+              }
               onChange={(e) => setSelected(e.target.value)}
-              className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
+              className="mt-1"
             >
+              {!option && (
+                <option value="" disabled>{translateUi("Choose a voice source")}</option>
+              )}
               {choices.map((o) => (
                 <option
                   key={`${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}`}
@@ -311,96 +898,109 @@ export function VoicePanel({
                   value={`${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}`}
                 >
                   {o.model_label} ·{" "}
-                  {o.key_source === "own" ? t("Your key") : t("Platform key")}
-                  {!o.available ? t(" (not available yet)") : ""}
+                  {o.key_source === "own" ? translateUi("Your key") : translateUi("Platform key")}
+                  {!o.available ? translateUi(" (not available yet)") : ""}
                 </option>
               ))}
-            </select>
-          </label>
-          <label>{t("Voice")}<select
-              aria-label={t("Voice")}
+            </NativeSelect>
+          </Label>
+          <Label className="block min-w-0 flex-1 basis-48">{translateUi("Voice")}<NativeSelect
+              aria-label={translateUi("Voice")}
               value={voiceName ?? ""}
+              disabled={settingsDisabled}
               onChange={(e) =>
                 preferencesForm.setValue("voice", e.target.value)
               }
-              className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
+              className="mt-1"
             >
               {option?.voice.voices.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.label}
                 </option>
               ))}
-            </select>
-          </label>
-          <label>{t("Microphone")}<select
-              aria-label={t("Microphone mode")}
+            </NativeSelect>
+          </Label>
+          <Label className="block min-w-0 flex-1 basis-48">{translateUi("Microphone")}<NativeSelect
+              aria-label={translateUi("Microphone mode")}
               value={inputMode}
+              disabled={settingsDisabled}
               onChange={(e) =>
                 preferencesForm.setValue(
                   "input_mode",
                   e.target.value as typeof inputMode,
                 )
               }
-              className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
+              className="mt-1"
             >
-              <option value="push_to_talk">{t("Hold to talk")}</option>
-              <option value="automatic" disabled={isGrok}>{t("Automatic")}{isGrok ? t(" (not available in Grok beta)") : ""}
+              <option value="push_to_talk">{translateUi("Hold to talk")}</option>
+              <option value="automatic" disabled={isGrok}>{translateUi("Automatic")}{isGrok ? translateUi(" (not available in Grok beta)") : ""}
               </option>
-            </select>
-          </label>
+            </NativeSelect>
+          </Label>
         </div>
       )}
       {!active && (
-        <label className="mt-3 flex items-center gap-2">
+        <Label className="mt-3 flex items-center gap-2">
           <input
             type="checkbox"
             checked={notifyOnCompletion}
+            disabled={settingsDisabled}
             onChange={(event) =>
               preferencesForm.setValue(
                 "notify_on_completion",
                 event.target.checked,
               )
             }
-          />{t("Notify when tasks finish after this call (no message preview)")}</label>
+          />{translateUi("Notify when tasks finish after this call (no message preview)")}</Label>
       )}
-      {option && (
-        <p className="mt-3 text-muted-foreground">
-          {tariff(option)}{t(". Paid by")}{" "}
-          {option.billing_owner === "organization" ? t("the organization") : t("you")}{t(". Assistant tasks are billed separately. Calls end after 30 minutes or 3 minutes without user speech.")}</p>
-      )}
+      {!active && option && <VoiceCreditUsage option={option} />}
       {settingsError && (
         <p role="alert" className="mt-3 text-destructive">
           {translateUi(settingsError)}
         </p>
       )}
       {(!option || !option.available) && options.isSuccess && (
-        <p role="status" className="mt-3">{t("Select an available voice source to start. Your saved choice may no longer be available.")}</p>
+        <p role="status" className="mt-3">{translateUi("Select an available voice source to start. Your saved choice may no longer be available.")}</p>
       )}
       {voice.error && (
         <p role="alert" className="mt-3 text-destructive">
           {voice.error}
         </p>
       )}
-      {options.isError && (
-        <p role="alert" className="mt-3 text-destructive">{t("Voice options could not be loaded.")}</p>
+      {loadingError && (
+        <p role="alert" className="mt-3 text-destructive">
+          {preferencesError
+            ? translateUi("Voice preferences could not be loaded.")
+            : translateUi("Voice options could not be loaded.")}
+        </p>
       )}
+      {retryControl}
       {voice.snapshot?.session.idle_warning && (
-        <p role="status" className="mt-3 text-warning">{t("Speak to keep this call open. It will end shortly.")}</p>
+        <p role="status" className="mt-3 text-warning">{translateUi("Speak to keep this call open. It will end shortly.")}</p>
       )}
       <div className="mt-4 flex flex-wrap gap-2">
-        {!active ? (
+        {settingsOnly ? (
           <Button
             variant="primary"
-            disabled={!option?.available || voice.starting}
+            disabled={!option?.available || settingsDisabled || options.isError}
+            onClick={() => void saveSettings()}
+          >
+            {saving ? translateUi("Saving…") : translateUi("Save voice settings")}
+          </Button>
+        ) : !active ? (
+          <Button
+            variant="primary"
+            disabled={!option?.available || settingsDisabled || options.isError}
             onClick={() => {
               void start();
             }}
           >
-            <Mic className="h-4 w-4" />{t("Start voice")}</Button>
+            <Mic className="h-4 w-4" />{translateUi("Start voice")}</Button>
         ) : (
           <>
             {inputMode === "push_to_talk" && (
               <Button
+                disabled={!canTalk}
                 aria-pressed={voice.holding}
                 onPointerDown={(e) => {
                   e.currentTarget.setPointerCapture(e.pointerId);
@@ -412,18 +1012,18 @@ export function VoicePanel({
                 onKeyDown={(e) => {
                   if (e.key === " " || e.key === "Enter") {
                     e.preventDefault();
-                    voice.hold(true);
+                    if (!e.repeat) voice.hold(true);
                   }
                 }}
                 onKeyUp={() => voice.hold(false)}
               >
-                <Mic className="h-4 w-4" />{t("Hold to talk")}</Button>
+                <Mic className="h-4 w-4" />{translateUi("Hold to talk")}</Button>
             )}
             {micControl}
             <Button
               variant="outline"
               aria-label={
-                voice.speakerMuted ? t("Enable speaker") : t("Mute speaker")
+                voice.speakerMuted ? translateUi("Enable speaker") : translateUi("Mute speaker")
               }
               aria-pressed={voice.speakerMuted}
               onClick={() => voice.muteSpeaker(!voice.speakerMuted)}
@@ -432,76 +1032,47 @@ export function VoicePanel({
                 <VolumeX className="h-4 w-4" />
               ) : (
                 <Volume2 className="h-4 w-4" />
-              )}{t("Speaker")}</Button>
+              )}{translateUi("Speaker")}</Button>
             <Button
               variant="outline"
               onClick={() => {
                 void voice.resumeAudio();
               }}
             >
-              <Volume2 className="h-4 w-4" />{t("Resume audio")}</Button>
+              <Volume2 className="h-4 w-4" />{translateUi("Resume audio")}</Button>
             {endControl}
           </>
         )}
       </div>
-      <p className="mt-2 text-muted-foreground">{t("If the assistant hears its own voice, use headphones or Hold to talk.")}</p>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        {(["user", "assistant"] as const).map((speaker) => (
-          <div
-            key={speaker}
-            role="log"
-            aria-live="polite"
-            aria-label={
-              speaker === "user" ? t("Your captions") : t("Assistant captions")
-            }
-            className="max-h-48 space-y-2 overflow-y-auto"
-          >
-            <h3 className="font-medium">
-              {speaker === "user" ? t("You") : t("Assistant")}
-            </h3>
-            {voice.snapshot?.captions
-              .filter((c) => c.speaker === speaker)
-              .map((c) => (
-                <p key={c.id}>
-                  {c.text}
-                  {c.sealed && !c.complete ? t(" (interrupted)") : ""}
-                </p>
-              ))}
-          </div>
-        ))}
-      </div>
-      <ul className="mt-3 space-y-2" aria-label={t("Voice tasks")}>
-        {voice.snapshot?.tasks.map((task, i) => (
-          <li key={task.id} className="flex items-center justify-between gap-2">
-            <span className="min-w-0 truncate">
-              {task.title?.trim() || t("Request {{value}}", { value: i + 1 })} · {({
-                queued: "Queued",
-                claimed: "Running",
-                awaiting_confirmation: "Needs your OK",
-                completed: "Done",
-                cancelled: "Cancelled",
-              } as Record<string, string>)[task.state] ?? task.state}
-              {task.result_message_id ? (
-                <a
-                  className="ml-1 text-nyx-secondary-400 underline"
-                  href={`#message-${task.result_message_id}`}
-                >{t("result")}</a>
-              ) : null}
-            </span>
-            {!["completed", "cancelled"].includes(task.state) && (
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={t("Stop request {{value}}", { value: i + 1 })}
-                onClick={() => {
-                  void voice.stopTask(task.id);
-                }}
-              >
-                <Square className="h-3 w-3" />{t("Stop")}</Button>
-            )}
-          </li>
-        ))}
-      </ul>
+      <p className="mt-2 text-muted-foreground">{translateUi("If the assistant hears its own voice, use headphones or Hold to talk.")}</p>
+      {!settingsOnly && !onViewChange && (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          {(["user", "assistant"] as const).map((speaker) => (
+            <div
+              key={speaker}
+              role="log"
+              aria-live="polite"
+              aria-label={
+                speaker === "user" ? translateUi("Your captions") : translateUi("Assistant captions")
+              }
+              className="max-h-48 space-y-2 overflow-y-auto"
+            >
+              <h3 className="font-medium">
+                {speaker === "user" ? translateUi("You") : translateUi("Assistant")}
+              </h3>
+              {voice.snapshot?.captions
+                .filter((c) => c.speaker === speaker)
+                .map((c) => (
+                  <p key={c.id}>
+                    {c.text}
+                    {c.sealed && !c.complete ? translateUi(" (interrupted)") : ""}
+                  </p>
+                ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {!settingsOnly && tasks}
     </section>
   );
 }

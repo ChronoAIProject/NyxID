@@ -135,6 +135,17 @@ pub(crate) fn hold_for_rollback(version: &str) -> Result<()> {
     write_in(&root, &policy)
 }
 
+pub(super) fn hold_for_source_build(version: &str) -> Result<()> {
+    let root = root()?;
+    let mut policy = read_in(&root)?;
+    policy.held_version = Some(version.into());
+    policy.hold_reason = Some(
+        "Local source build; install a verified release before resuming automatic upgrades".into(),
+    );
+    policy.next_eligible_check = None;
+    write_in(&root, &policy)
+}
+
 fn active_version(root: &Path, binary: &Path) -> Result<String> {
     anyhow::ensure!(
         cfg!(any(target_os = "macos", target_os = "linux")),
@@ -145,8 +156,13 @@ fn active_version(root: &Path, binary: &Path) -> Result<String> {
         "Automatic upgrades require a versioned prebuilt installation. Run nyxid update first, then enable automatic upgrades"
     );
     let versions = super::installed_versions_in(root, Some(binary))?;
-    versions.into_iter().find(|v| v.active).map(|v| v.tag)
-        .context("Active binary is outside this versioned installation; reinstall using the documented terminal installer")
+    let active = versions.into_iter().find(|v| v.active)
+        .context("Active binary is outside this versioned installation; reinstall using the documented terminal installer")?;
+    anyhow::ensure!(
+        !active.dir.join(super::SOURCE_BUILD_MARKER).exists(),
+        "Automatic upgrades require an attested prebuilt release; the active binary is a local source build"
+    );
+    Ok(active.tag)
 }
 
 pub async fn run(command: AutoUpdateCommands) -> Result<()> {
@@ -230,6 +246,7 @@ pub async fn run(command: AutoUpdateCommands) -> Result<()> {
             );
         }
         AutoUpdateCommands::Resume => {
+            active_version(&root, &super::active_binary_path()?)?;
             policy.held_version = None;
             policy.hold_reason = None;
             policy.next_eligible_check = policy.enabled.then(Utc::now);
@@ -726,6 +743,13 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 }
 
 pub(super) fn install_controller(root: &Path, source: &Path) -> Result<()> {
+    let resolved = fs::canonicalize(source)?;
+    anyhow::ensure!(
+        !resolved
+            .parent()
+            .is_some_and(|p| p.join(super::SOURCE_BUILD_MARKER).exists()),
+        "Local source builds cannot become the trusted automatic update controller"
+    );
     let mut temporary = tempfile::NamedTempFile::new_in(root)?;
     let mut binary = fs::File::open(source)?;
     std::io::copy(&mut binary, &mut temporary)?;

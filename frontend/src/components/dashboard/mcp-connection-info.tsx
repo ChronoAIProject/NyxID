@@ -1,5 +1,6 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { copyToClipboard } from "@/lib/utils";
@@ -51,17 +52,17 @@ function CopyButton({
   readonly text: string;
   readonly label: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success(translateUi("{{label}} copied to clipboard", { label: label }));
+      toast.success(translateUi(`${label} copied to clipboard`));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error(translateUi("Failed to copy to clipboard"));
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -77,13 +78,13 @@ function CopyButton({
       ) : (
         <Copy className="h-3 w-3" />
       )}
-      <span className="sr-only">{t("Copy ")}{label}</span>
+      <span className="sr-only">{translateUi("Copy ")}{label}</span>
     </Button>
   );
 }
 
 export function McpConnectionInfo() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
 
   if (isLoading) {
@@ -98,67 +99,67 @@ export function McpConnectionInfo() {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-xs text-muted-foreground">{t("NyxID exposes a single MCP endpoint that provides tools for all your connected services. Connect your MCP client once and it will automatically discover tools from every service you have enabled.")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("NyxID exposes a single MCP endpoint that provides tools for all your connected services. Connect your MCP client once and it will automatically discover tools from every service you have enabled.")}</p>
       </div>
 
       <div>
-        <p className="mb-1 text-xs font-medium text-muted-foreground">{t("MCP Proxy URL")}</p>
+        <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("MCP Proxy URL")}</p>
         <div className="relative">
-          <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all">
+          <code className="block rounded bg-muted px-3 py-2 pr-10 text-14 break-all">
             {mcpUrl}
           </code>
-          <CopyButton text={mcpUrl} label={t("MCP proxy URL")} />
+          <CopyButton text={mcpUrl} label={translateUi("MCP proxy URL")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">{t("Cursor Configuration")}</p>
-          <Badge variant="secondary" className="text-10">
+          <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Cursor Configuration")}</p>
+          <Badge variant="secondary" className="text-12">
             .cursor/mcp.json
           </Badge>
         </div>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {cursorConfig}
           </pre>
-          <CopyButton text={cursorConfig} label={t("Cursor config")} />
+          <CopyButton text={cursorConfig} label={translateUi("Cursor config")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">{t("Claude Code Configuration")}</p>
-          <Badge variant="secondary" className="text-10">
+          <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Claude Code Configuration")}</p>
+          <Badge variant="secondary" className="text-12">
             .claude/settings.json
           </Badge>
         </div>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {claudeCodeConfig}
           </pre>
-          <CopyButton text={claudeCodeConfig} label={t("Claude Code config")} />
+          <CopyButton text={claudeCodeConfig} label={translateUi("Claude Code config")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">{t("Codex Configuration")}</p>
-          <Badge variant="secondary" className="text-10">
+          <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Codex Configuration")}</p>
+          <Badge variant="secondary" className="text-12">
             ~/.codex/config.toml
           </Badge>
         </div>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {codexConfig}
           </pre>
-          <CopyButton text={codexConfig} label={t("Codex config")} />
+          <CopyButton text={codexConfig} label={translateUi("Codex config")} />
         </div>
       </div>
 
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-xs font-medium mb-1">{t("How it works")}</p>
-        <p className="text-xs text-muted-foreground">{t("When an MCP client connects, NyxID authenticates via OAuth in your browser. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.")}</p>
+        <p className="type-secondary-emphasis mb-1">{translateUi("How it works")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("When an MCP client connects, NyxID authenticates via OAuth in your browser. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.")}</p>
       </div>
     </div>
   );

@@ -1,12 +1,13 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
-import { useRef, useEffect } from "react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import type { Control } from "react-hook-form";
+import { useRef, useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
-import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
+import { mfaLoginSchema, type MfaVerifyFormData } from "@/schemas/auth";
 import { useMfaVerify } from "@/hooks/use-auth";
 import { useAuthStore } from "@/stores/auth-store";
-import { ApiError } from "@/lib/api-client";
+import { apiClient, ApiError } from "@/lib/api-client";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import {
   useAppForm,
@@ -23,18 +24,20 @@ import { ShieldCheck } from "lucide-react";
 
 interface MfaVerifyFormProps {
   readonly returnTo?: string;
+  readonly cookieChallenge?: boolean;
 }
 
-export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
-  const { t } = useUiTranslation();
+export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFormProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   const verifyMutation = useMfaVerify();
   const mfaToken = useAuthStore((s) => s.mfaToken);
   const clearMfaState = useAuthStore((s) => s.clearMfaState);
   const codeInputRef = useRef<HTMLInputElement>(null);
+  const [recoveryMode, setRecoveryMode] = useState(false);
 
   const form = useAppForm<MfaVerifyFormData>({
-    resolver: zodResolver(mfaVerifySchema),
+    resolver: zodResolver(mfaLoginSchema),
     defaultValues: {
       code: "",
     },
@@ -45,20 +48,29 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
   }, []);
 
   async function onSubmit(data: MfaVerifyFormData) {
-    if (!mfaToken) return;
+    if (!cookieChallenge && !mfaToken) return;
     try {
       await verifyMutation.mutateAsync({
         code: data.code,
-        mfa_token: mfaToken,
+        ...(!cookieChallenge && mfaToken ? { mfa_token: mfaToken } : {}),
       });
       const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
       if (trustedReturnTo) {
         window.location.assign(trustedReturnTo);
         return;
       }
-      void navigate({ to: "/dashboard" as string });
+      void navigate({ to: "/assistant" as string });
     } catch (error) {
       if (error instanceof ApiError) {
+        const details = error.errorResponse.details;
+        if (details && typeof details === "object" && "reason" in details && details.reason === "mfa_challenge_expired") {
+          clearMfaState();
+          const params = new URLSearchParams({ mfa: "expired" });
+          const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+          if (trustedReturnTo) params.set("return_to", trustedReturnTo);
+          window.location.assign(`/login?${params}`);
+          return;
+        }
         form.setError("root", { message: error.message });
       } else {
         form.setError("root", {
@@ -68,8 +80,22 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
     }
   }
 
-  function handleCancel() {
+  async function handleCancel() {
+    if (cookieChallenge) {
+      try {
+        await apiClient("/auth/mfa/cancel", { method: "POST" });
+      } catch {
+        form.setError("root", { message: "Could not cancel verification. Please try again." });
+        return;
+      }
+    }
     clearMfaState();
+    if (cookieChallenge) {
+      const params = new URLSearchParams();
+      const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+      if (trustedReturnTo) params.set("return_to", trustedReturnTo);
+      window.location.assign(`/login${params.size ? `?${params}` : ""}`);
+    }
   }
 
   return (
@@ -78,8 +104,14 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary-text" aria-hidden="true" />
         </div>
-        <h1 className="text-28 font-normal tracking-tight">{t("MFA verification")}</h1>
-        <p className="text-12 text-muted-foreground">{t("Enter the 6-digit code from your authenticator app")}</p>
+        <h1 className="type-metric tracking-tight">{translateUi("MFA verification")}</h1>
+        <p className="text-14 unthemed:text-12 text-muted-foreground">
+          {verifyMutation.sessionConfirmationPending
+            ? translateUi("Verification was submitted. Confirm your session to continue.")
+            : cookieChallenge
+              ? translateUi("Your social sign-in needs one more verification step.")
+              : translateUi("Enter your authenticator code or a single-use recovery code")}
+        </p>
       </div>
 
       <Form {...form}>
@@ -87,33 +119,18 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
           {form.formState.errors.root && (
             <div
               role="alert"
-              className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+              className="rounded-lg bg-destructive/10 p-3 text-14 unthemed:text-12 text-destructive"
             >
-              {translateUi(form.formState.errors.root.message ?? "")}
+              {form.formState.errors.root.message}
             </div>
           )}
 
-          <FormField
+          <MfaCodeFields
             control={form.control}
-            name="code"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t("Verification Code")}</FormLabel>
-                <FormControl>
-                  <Input
-                    placeholder="000000"
-                    maxLength={6}
-                    autoComplete="one-time-code"
-                    inputMode="numeric"
-                    aria-label={t("Enter 6-digit verification code")}
-                    className="text-center font-mono text-lg tracking-widest"
-                    {...field}
-                    ref={codeInputRef}
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
+            recoveryMode={recoveryMode}
+            onToggleRecovery={() => setRecoveryMode((value) => !value)}
+            disabled={verifyMutation.sessionConfirmationPending}
+            inputRef={codeInputRef}
           />
 
           <div className="flex flex-col gap-2">
@@ -122,16 +139,76 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               type="submit"
               className="w-full"
               isLoading={verifyMutation.isPending}
-            >{t("Verify")}</Button>
+            >
+              {verifyMutation.sessionConfirmationPending ? translateUi("Retry session check") : translateUi("Verify")}
+            </Button>
             <Button
               type="button"
               variant="ghost"
               className="w-full"
               onClick={handleCancel}
-            >{t("Back to Login")}</Button>
+            >{translateUi("Back to Login")}</Button>
           </div>
         </form>
       </Form>
     </div>
+  );
+}
+
+/** Shared authenticator/recovery input for sign-in and current-session step-up. */
+export function MfaCodeFields({
+  control,
+  recoveryMode,
+  onToggleRecovery,
+  disabled = false,
+  inputRef,
+}: {
+  control: Control<MfaVerifyFormData>;
+  recoveryMode: boolean;
+  onToggleRecovery: () => void;
+  disabled?: boolean;
+  inputRef?: React.Ref<HTMLInputElement>;
+}) {
+  useUiTranslation();
+  return (
+    <>
+      <FormField
+        control={control}
+        name="code"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>
+              {recoveryMode ? translateUi("Recovery code") : translateUi("Authenticator code")}
+            </FormLabel>
+            <FormControl>
+              <Input
+                placeholder={recoveryMode ? translateUi("Paste a recovery code") : "000000"}
+                maxLength={32}
+                autoComplete="one-time-code"
+                inputMode={recoveryMode ? "text" : "numeric"}
+                disabled={disabled}
+                aria-label={
+                  recoveryMode ? translateUi("Recovery code") : translateUi("Authenticator code")
+                }
+                className="min-w-0 font-mono text-14 tracking-normal sm:text-14"
+                {...field}
+                ref={inputRef ?? field.ref}
+              />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+
+      <Button
+        type="button"
+        variant="link"
+        className="h-auto p-0 text-14 unthemed:text-12"
+        disabled={disabled}
+        onClick={onToggleRecovery}
+      >
+        {recoveryMode ? translateUi("Use an authenticator code") : translateUi("Use a recovery code")}
+      </Button>
+    </>
   );
 }

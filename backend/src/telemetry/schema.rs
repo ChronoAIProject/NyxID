@@ -17,6 +17,11 @@ use super::scrub;
 /// `docs/TELEMETRY.md` §5.1.
 #[derive(Debug, Clone)]
 pub enum TelemetryEvent {
+    /// Explicit client event admitted under a revision captured before enqueue.
+    ClientOriginated {
+        event: super::client_event::ClientEvent,
+        revision: String,
+    },
     // --- handlers/auth.rs -----------------------------------------------
     UserSignedUp {
         /// `email` | `google` | `github` | `apple` — the auth method.
@@ -55,6 +60,7 @@ pub enum TelemetryEvent {
         method: String,
         mfa_required: bool,
     },
+    AuthMobileMfaExempted,
     AuthLoggedOut,
     AuthPasswordResetRequested,
     AuthPasswordResetCompleted,
@@ -372,9 +378,11 @@ impl TelemetryEvent {
     /// Canonical event name. Dot-namespaced, lowercase, past-tense verb.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::ClientOriginated { event, .. } => event.name.name(),
             Self::UserSignedUp { .. } => "user.signed_up",
             Self::UserEmailVerified => "user.email_verified",
             Self::AuthLoggedIn { .. } => "auth.logged_in",
+            Self::AuthMobileMfaExempted => "auth.mobile_mfa_exempted",
             Self::AuthLoggedOut => "auth.logged_out",
             Self::AuthPasswordResetRequested => "auth.password_reset_requested",
             Self::AuthPasswordResetCompleted => "auth.password_reset_completed",
@@ -466,6 +474,9 @@ impl TelemetryEvent {
     /// `properties()` can centralize the scrubber call.
     fn raw_properties(&self) -> Value {
         match self {
+            Self::ClientOriginated { event, .. } => {
+                event.properties().unwrap_or_else(|_| json!({}))
+            }
             Self::UserSignedUp {
                 method,
                 source,
@@ -491,6 +502,7 @@ impl TelemetryEvent {
                 "method": method,
                 "mfa_required": mfa_required,
             }),
+            Self::AuthMobileMfaExempted => json!({"mfa": "skipped_mobile_rollout"}),
             Self::AuthLoggedOut => json!({}),
             Self::AuthPasswordResetRequested => json!({}),
             Self::AuthPasswordResetCompleted => json!({}),
@@ -902,6 +914,11 @@ mod tests {
                 json!({"method": "email", "mfa_required": true}),
             ),
             (TelemetryEvent::AuthLoggedOut, "auth.logged_out", json!({})),
+            (
+                TelemetryEvent::AuthMobileMfaExempted,
+                "auth.mobile_mfa_exempted",
+                json!({"mfa": "skipped_mobile_rollout"}),
+            ),
             (
                 TelemetryEvent::AuthPasswordResetRequested,
                 "auth.password_reset_requested",

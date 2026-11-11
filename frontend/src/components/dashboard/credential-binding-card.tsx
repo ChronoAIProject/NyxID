@@ -72,7 +72,7 @@ export function CredentialBindingCard({
       <CardHeader>
         <CardTitle className="text-15">{t("Service key")}</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3 text-xs">
+      <CardContent className="space-y-3 text-13">
         <p>
           {platform ? t("Using NyxID's key") : t("Using your own key")} —{" "}
           {!service.platform_key_pricing &&

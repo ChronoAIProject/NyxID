@@ -461,6 +461,7 @@ pub async fn approve(
             expiry,
             Some(&ip),
             user_agent(&headers).as_deref(),
+            user.derived_mfa_authority(),
         )
         .await?;
         Ok(private_json(DecisionResponse { ok: true }))
@@ -580,7 +581,8 @@ pub async fn poll(
                 method: "agent_key".into(),
                 mfa_required: false,
             },
-        );
+        )
+        .await;
         Ok(private_json(DeliveryResponse {
             credential: result.credential.to_string(),
             credential_id: result.credential_id,

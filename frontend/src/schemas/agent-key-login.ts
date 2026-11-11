@@ -64,10 +64,11 @@ export const agentKeyPreviewSchema = previewResponseSchema.extend({
   requested_profile: z.string().max(64).nullable(),
   interval: z.number().int().positive(),
 });
-const newKeySelectionSchema = createApiKeySchema
+const newKeySelectionSchema = z.object(createApiKeySchema.shape)
   .pick({
     name: true,
     expires_at: true,
+    never_expires: true,
     rate_limit_per_second: true,
     rate_limit_burst: true,
     platform: true,
@@ -98,6 +99,8 @@ const newKeySelectionSchema = createApiKeySchema
         z.object({ service_id: z.string(), permission_snapshot: z.string() }),
       )
       .optional(),
+  }).refine((value) => !(value.never_expires && value.expires_at), {
+    path: ["expires_at"], message: "Choose either an expiry date or no expiry",
   });
 export const agentKeyApproveSchema = z
   .object({
@@ -170,6 +173,7 @@ export function newKeySelection(form: CreateApiKeyFormData) {
     name: form.name,
     scopes: form.scopes.join(" "),
     expires_at: loginKeyExpiry(form.expires_at),
+    ...(form.never_expires ? { never_expires: true } : {}),
     allowed_service_ids: form.allow_all_services
       ? []
       : (form.allowed_service_ids ?? []),

@@ -1,9 +1,28 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useAuthStore } from "./auth-store";
 import { useAssistantContextStore } from "./assistant-context-store";
 import { useAssistantDraftStore } from "./assistant-draft-store";
 import { useAssistantWireLogStore } from "./assistant-wire-log-store";
+import { useServiceCardView } from "./service-card-view-store";
+import { useConsentStore } from "./consent-store";
 import { ApiError } from "@/lib/api-client";
+import type { User } from "@/types/api";
+import {
+  identify as telemetryIdentify,
+  reset as telemetryReset,
+} from "@/lib/telemetry";
+import {
+  getAssistantIdentityUserId,
+  transitionAssistantIdentity,
+} from "@/lib/assistant/identity";
+
+vi.mock("@/lib/telemetry", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/telemetry")>(
+    "@/lib/telemetry",
+  )),
+  identify: vi.fn(),
+  reset: vi.fn(),
+}));
 
 vi.mock("@/lib/api-client", async () => {
   const actual =
@@ -34,13 +53,22 @@ async function getApiMock() {
 }
 
 beforeEach(() => {
+  vi.resetAllMocks();
   localStorage.clear();
+  transitionAssistantIdentity(null);
+  useServiceCardView.setState({
+    accountId: undefined,
+    filters: undefined,
+    expanded: [],
+    savedViewId: undefined,
+  });
   useAssistantContextStore.setState({
     ownerUserId: null,
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAssistantWireLogStore.setState({
+    featureEnabled: false,
     captureEnabled: false,
     showResponses: true,
     entries: [],
@@ -56,7 +84,41 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+const previousAccount = {
+  id: "previous-person",
+  email: "previous@example.com",
+  display_name: null,
+  avatar_url: null,
+  email_verified: true,
+  mfa_enabled: true,
+  is_admin: false,
+  is_active: true,
+  created_at: "2026-01-01T00:00:00Z",
+};
+
 describe("useAuthStore initial state", () => {
+  it.each([401, 503])(
+    "retains pending password MFA when profile verification fails (%i)",
+    async (status) => {
+      const api = await getApiMock();
+      useAuthStore.getState().setMfaRequired(true, "pending-password-mfa");
+      api.get.mockRejectedValueOnce(
+        new ApiError(status, {
+          error: "failed",
+          error_code: 1000,
+          message: "Failed",
+        }),
+      );
+      await useAuthStore.getState().checkAuth();
+      expect(useAuthStore.getState().mfaRequired).toBe(true);
+      expect(useAuthStore.getState().mfaToken).toBe("pending-password-mfa");
+    },
+  );
+
   it("has correct initial state", () => {
     const state = useAuthStore.getState();
     expect(state.user).toBeNull();
@@ -115,21 +177,109 @@ describe("clearMfaState", () => {
 });
 
 describe("login", () => {
-  it("sets authenticated on success", async () => {
+  it("waits for the profile and capabilities before completing password login", async () => {
     const apiMock = await getApiMock();
-    apiMock.post.mockResolvedValueOnce({
-      user_id: "u1",
+    const response = { user_id: "u1" };
+    const user: User = {
+      ...previousAccount,
+      id: "u1",
+      email: "a@b.com",
+      display_name: "Test",
+      mfa_enabled: false,
+      capabilities: { enabled_features: ["assistant:nyxagent-engine"] },
+    };
+    let finishProfile!: (user: User) => void;
+    apiMock.post.mockResolvedValueOnce(response);
+    apiMock.get.mockReturnValueOnce(
+      new Promise<User>((resolve) => {
+        finishProfile = resolve;
+      }),
+    );
+    useAuthStore.setState({ isLoading: false });
+
+    let completed = false;
+    const login = useAuthStore.getState().login("a@b.com", "pass").then((result) => {
+      completed = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(apiMock.get).toHaveBeenCalledWith("/users/me"));
+    expect(completed).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({
+      user: null,
+      isAuthenticated: false,
+      isLoading: true,
     });
 
-    const result = await useAuthStore.getState().login("a@b.com", "pass");
-    expect(result.mfaRequired).toBe(false);
-    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    finishProfile(user);
+    await expect(login).resolves.toEqual({ mfaRequired: false, response });
+    expect(useAuthStore.getState()).toMatchObject({
+      user,
+      isAuthenticated: true,
+      isLoading: false,
+      mfaRequired: false,
+      mfaToken: null,
+    });
+    expect(getAssistantIdentityUserId()).toBe(user.id);
+    expect(telemetryIdentify).toHaveBeenCalledExactlyOnceWith(user.id);
     expect(apiMock.post).toHaveBeenCalledWith("/auth/login", {
       email: "a@b.com",
       password: "pass",
       client: "web",
     });
   });
+
+  it("clears account-local state when the confirmed login changes identity", async () => {
+    const apiMock = await getApiMock();
+    useAuthStore.getState().setUser(previousAccount);
+    useAssistantContextStore.getState().recordScreen(previousAccount.id, "/keys");
+    useAssistantDraftStore
+      .getState()
+      .saveDraft(previousAccount.id, "conv:private", "Private draft");
+    useServiceCardView.setState({ expanded: ["private-service"] });
+    const nextAccount = { ...previousAccount, id: "next-person" };
+    apiMock.post.mockResolvedValueOnce({ user_id: nextAccount.id });
+    apiMock.get.mockResolvedValueOnce(nextAccount);
+
+    await useAuthStore.getState().login("next@example.com", "pass");
+
+    expect(useAuthStore.getState().user).toEqual(nextAccount);
+    expect(getAssistantIdentityUserId()).toBe(nextAccount.id);
+    expect(useConsentStore.getState().accountId).toBe(nextAccount.id);
+    expect(useAssistantContextStore.getState().lastScreen).toBeNull();
+    expect(useAssistantDraftStore.getState().drafts).toEqual({});
+    expect(useServiceCardView.getState().expanded).toEqual([]);
+  });
+
+  it.each([
+    new ApiError(401, {
+      error: "unauthorized",
+      error_code: 1001,
+      message: "Not authenticated",
+    }),
+    new ApiError(503, {
+      error: "unavailable",
+      error_code: 1001,
+      message: "Profile unavailable",
+    }),
+    new TypeError("Network unavailable"),
+  ])(
+    "rejects password login when the fresh profile fails: $message",
+    async (error) => {
+      const apiMock = await getApiMock();
+      apiMock.post.mockResolvedValueOnce({ user_id: "u1" });
+      apiMock.get.mockRejectedValueOnce(error);
+      useAuthStore.setState({ isLoading: false });
+
+      await expect(useAuthStore.getState().login("a@b.com", "pass")).rejects.toBe(error);
+
+      expect(useAuthStore.getState()).toMatchObject({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+      });
+      expect(telemetryIdentify).not.toHaveBeenCalled();
+    },
+  );
 
   it("sets MFA state on MFA required error", async () => {
     const apiMock = await getApiMock();
@@ -146,6 +296,8 @@ describe("login", () => {
     expect(result.mfaRequired).toBe(true);
     expect(useAuthStore.getState().mfaRequired).toBe(true);
     expect(useAuthStore.getState().mfaToken).toBe("session-tok-123");
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(apiMock.get).not.toHaveBeenCalled();
   });
 
   it("rethrows non-MFA errors", async () => {
@@ -174,6 +326,7 @@ describe("logout", () => {
     useAssistantDraftStore
       .getState()
       .saveDraft("u1", "conv:conversation-private", "Private draft");
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     useAssistantWireLogStore.getState().recordExchange({
       kind: "sse",
@@ -201,6 +354,7 @@ describe("logout", () => {
         },
       ],
     });
+    expect(useAssistantWireLogStore.getState().entries).toHaveLength(1);
     await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();
@@ -277,6 +431,8 @@ describe("checkAuth", () => {
 
   it("only clears loading on non-401 errors", async () => {
     const apiMock = await getApiMock();
+    useAuthStore.getState().setUser(previousAccount);
+    vi.mocked(telemetryReset).mockClear();
     apiMock.get.mockRejectedValueOnce(
       new ApiError(500, {
         error: "server_error",
@@ -288,7 +444,222 @@ describe("checkAuth", () => {
     await useAuthStore.getState().checkAuth();
     const state = useAuthStore.getState();
     expect(state.isLoading).toBe(false);
-    // user stays null since initial state
-    expect(state.isAuthenticated).toBe(false);
+    expect(state.user).toEqual(previousAccount);
+    expect(state.isAuthenticated).toBe(true);
+    expect(telemetryReset).not.toHaveBeenCalled();
+  });
+});
+
+describe("scoped QR session restoration", () => {
+  it.each([
+    [false, 200],
+    [false, 401],
+    [false, 503],
+    [true, 200],
+    [true, 401],
+    [true, 503],
+  ] as const)(
+    "clears unconfirmed identity before profile, preserving global loading %s through status %s",
+    async (isLoading, status) => {
+      useAuthStore.getState().setUser(previousAccount);
+      useAuthStore.getState().setMfaRequired(true, "pending-password-mfa");
+      useAuthStore.setState({ isLoading });
+      useServiceCardView.setState({
+        accountId: previousAccount.id,
+        expanded: ["private-service"],
+        savedViewId: "private-view",
+      });
+      useAssistantContextStore
+        .getState()
+        .recordScreen(previousAccount.id, "/keys");
+      useAssistantDraftStore
+        .getState()
+        .saveDraft(previousAccount.id, "conv:private", "Private draft");
+      useAssistantWireLogStore.getState().setFeatureEnabled(true);
+      useAssistantWireLogStore.getState().setCaptureEnabled(true);
+      useAssistantWireLogStore.getState().recordExchange({
+        kind: "sse",
+        status: 200,
+        conversationId: "private",
+        wireLogId: "private-wire-log",
+        label: "POST /assistant/chat",
+      });
+      expect(useAssistantWireLogStore.getState().entries).toHaveLength(1);
+      vi.mocked(telemetryIdentify).mockClear();
+      vi.mocked(telemetryReset).mockClear();
+      let finishProfile!: (response: Response) => void;
+      const response = new Promise<Response>((resolve) => {
+        finishProfile = resolve;
+      });
+      vi.stubGlobal("fetch", vi.fn().mockReturnValue(response));
+
+      const restoration = useAuthStore
+        .getState()
+        .checkAuth({ isCurrent: () => true });
+      expect(useAuthStore.getState()).toMatchObject({
+        user: null,
+        isAuthenticated: false,
+        isLoading,
+        mfaRequired: true,
+        mfaToken: "pending-password-mfa",
+      });
+      expect(telemetryReset).toHaveBeenCalledOnce();
+      expect(telemetryIdentify).not.toHaveBeenCalled();
+      expect(getAssistantIdentityUserId()).toBeNull();
+      expect(useConsentStore.getState().accountId).toBeNull();
+      expect(useConsentStore.getState().enabled).toBe(false);
+      expect(useServiceCardView.getState()).toMatchObject({
+        accountId: undefined,
+        filters: undefined,
+        expanded: [],
+        savedViewId: undefined,
+      });
+      expect(useAssistantContextStore.getState()).toMatchObject({
+        ownerUserId: null,
+        lastScreen: null,
+      });
+      expect(useAssistantDraftStore.getState()).toMatchObject({
+        ownerUserId: null,
+        drafts: {},
+      });
+      expect(useAssistantWireLogStore.getState()).toMatchObject({
+        entries: [],
+        captureEnabled: false,
+        totalBytes: 0,
+        captureBytes: 0,
+      });
+      expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
+      expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();
+
+      const nextAccount = {
+        ...previousAccount,
+        id: "qr-person",
+        email: "qr@example.com",
+      };
+      finishProfile(
+        new Response(
+          JSON.stringify(
+            status === 200
+              ? nextAccount
+              : {
+                  error: "profile_unavailable",
+                  error_code: 1001,
+                  message: "Profile unavailable",
+                },
+          ),
+          { status },
+        ),
+      );
+      expect(await restoration).toBe(status === 200);
+      expect(useAuthStore.getState()).toMatchObject({
+        user: status === 200 ? nextAccount : null,
+        isAuthenticated: status === 200,
+        isLoading,
+        mfaRequired: status !== 200,
+        mfaToken: status === 200 ? null : "pending-password-mfa",
+      });
+      expect(telemetryReset).toHaveBeenCalledTimes(status === 503 ? 1 : 2);
+      expect(useConsentStore.getState().accountId).toBe(
+        status === 200 ? nextAccount.id : null,
+      );
+      if (status === 200) {
+        expect(telemetryIdentify).toHaveBeenCalledExactlyOnceWith(
+          nextAccount.id,
+        );
+        expect(getAssistantIdentityUserId()).toBe(nextAccount.id);
+      } else {
+        expect(telemetryIdentify).not.toHaveBeenCalled();
+        expect(getAssistantIdentityUserId()).toBeNull();
+      }
+    },
+  );
+
+  it("does not begin a cancelled handoff or clear its newer identity", async () => {
+    useAuthStore.getState().setUser(previousAccount);
+    useAuthStore.getState().setMfaRequired(true, "newer-password-mfa");
+    const state = useAuthStore.getState();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(telemetryIdentify).mockClear();
+    vi.mocked(telemetryReset).mockClear();
+    const consent = useConsentStore.getState();
+    expect(await state.checkAuth({ isCurrent: () => false })).toBe(false);
+    expect(useAuthStore.getState()).toBe(state);
+    expect(useConsentStore.getState()).toBe(consent);
+    expect(getAssistantIdentityUserId()).toBe(previousAccount.id);
+    expect(telemetryReset).not.toHaveBeenCalled();
+    expect(telemetryIdentify).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("ephemeral profile restoration", () => {
+  it.each([200, 401, 503])(
+    "preserves its existing identity/loading/telemetry semantics through status %s",
+    async (status) => {
+      useAuthStore.getState().setUser(previousAccount);
+      useAuthStore.getState().setMfaRequired(true, "pending-password-mfa");
+      useAuthStore.setState({ isLoading: false });
+      useAssistantContextStore
+        .getState()
+        .recordScreen(previousAccount.id, "/keys");
+      const accountContext = useAssistantContextStore.getState();
+      vi.mocked(telemetryIdentify).mockClear();
+      vi.mocked(telemetryReset).mockClear();
+      let finishProfile!: (response: Response) => void;
+      const response = new Promise<Response>((resolve) => {
+        finishProfile = resolve;
+      });
+      vi.stubGlobal("fetch", vi.fn().mockReturnValue(response));
+      const restoration = useAuthStore
+        .getState()
+        .checkAuth({ ephemeral: true });
+      expect(useAuthStore.getState()).toMatchObject({
+        user: previousAccount,
+        isAuthenticated: true,
+        isLoading: true,
+      });
+      finishProfile(
+        new Response(
+          JSON.stringify(
+            status === 200
+              ? previousAccount
+              : {
+                  error: "profile_unavailable",
+                  error_code: 1001,
+                  message: "Profile unavailable",
+                },
+          ),
+          { status },
+        ),
+      );
+      expect(await restoration).toBe(status === 200);
+      expect(useAuthStore.getState()).toMatchObject({
+        user: status === 401 ? null : previousAccount,
+        isAuthenticated: status !== 401,
+        isLoading: false,
+        mfaRequired: status !== 200,
+        mfaToken: status === 200 ? null : "pending-password-mfa",
+      });
+      expect(useAssistantContextStore.getState()).toBe(accountContext);
+      expect(telemetryReset).not.toHaveBeenCalled();
+      expect(telemetryIdentify).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("required session restoration", () => {
+  it("rethrows a failed fresh profile for MFA completion", async () => {
+    const apiMock = await getApiMock();
+    const error = new ApiError(503, {
+      error: "unavailable",
+      error_code: 1001,
+      message: "Unavailable",
+    });
+    apiMock.get.mockRejectedValueOnce(error);
+    await expect(
+      useAuthStore.getState().checkAuth({ requireSession: true }),
+    ).rejects.toBe(error);
+    expect(useAuthStore.getState().isLoading).toBe(false);
   });
 });

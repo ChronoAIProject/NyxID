@@ -56,6 +56,8 @@ pub struct OracleWorkerEnrollment {
     pub owner_user_id: String,
     pub credential_hash: String,
     pub pool_token_hash: String,
+    #[serde(default)]
+    pub installation_epoch: i64,
     pub membership_id: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub membership_created_at: Option<DateTime<Utc>>,

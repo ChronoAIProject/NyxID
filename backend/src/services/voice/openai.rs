@@ -15,6 +15,7 @@ pub const MAX_FRAME: usize = 256 * 1024;
 pub type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct OpenAi {
+    pub(super) delegation_model: Option<String>,
     client: reqwest::Client,
     key: Zeroizing<String>,
     http_origin: String,
@@ -48,16 +49,62 @@ impl From<AppError> for CreateError {
 
 impl OpenAi {
     pub fn new(key: Zeroizing<String>) -> AppResult<Self> {
+        // Pool only transport, never credentials or per-call state. Calls still
+        // resolve their own authorized credential and set Bearer on each request.
+        static CLIENT: std::sync::OnceLock<Result<reqwest::Client, reqwest::Error>> =
+            std::sync::OnceLock::new();
+        let client = CLIENT
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()
+            })
+            .as_ref()
+            .cloned()
+            .map_err(|_| AppError::VoiceProviderUnavailable)?;
         Ok(Self {
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|_| AppError::VoiceProviderUnavailable)?,
+            delegation_model: None,
+            client,
             key,
             http_origin: "https://api.openai.com".into(),
             ws_origin: "wss://api.openai.com".into(),
         })
+    }
+
+    pub(super) fn with_delegation_model(mut self, model: Option<String>) -> Self {
+        self.delegation_model = model;
+        self
+    }
+
+    /// Reconcile a known native inference after a sideband error omitted its
+    /// terminal event. Fixed provider origin, own credential, bounded read only.
+    pub(super) async fn response(&self, id: &str) -> AppResult<Value> {
+        if !valid_provider_id(id) {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        let mut url = url::Url::parse(&format!("{}/v1/responses/", self.http_origin))
+            .map_err(|_| AppError::VoiceProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|_| AppError::VoiceProviderUnavailable)?
+            .pop_if_empty()
+            .push(id);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut response = self
+                .client
+                .get(url)
+                .bearer_auth(self.key.as_str())
+                .send()
+                .await
+                .map_err(|_| AppError::VoiceProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(AppError::VoiceProviderUnavailable);
+            }
+            let bytes = bounded_body(&mut response, MAX_FRAME).await?;
+            serde_json::from_slice(&bytes).map_err(|_| AppError::VoiceProviderUnavailable)
+        })
+        .await
+        .map_err(|_| AppError::VoiceProviderUnavailable)?
     }
 
     pub async fn create(
@@ -66,12 +113,20 @@ impl OpenAi {
         instructions: &str,
         voice: &str,
         model: &str,
+        delegation_instructions: Option<&str>,
     ) -> Result<Created, CreateError> {
         let mut response = self
             .client
             .post(format!("{}/v1/live/sessions", self.http_origin))
             .bearer_auth(self.key.as_str())
-            .json(&start_payload(sdp, instructions, voice, model))
+            .json(&start_payload(
+                sdp,
+                instructions,
+                voice,
+                model,
+                self.delegation_model.as_deref(),
+                delegation_instructions,
+            ))
             .send()
             .await
             .map_err(|_| Stage::Transport.error(AppError::VoiceProviderUnavailable))?;
@@ -149,7 +204,7 @@ impl OpenAi {
             .max_frame_size(Some(MAX_FRAME));
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+            tokio_tungstenite::connect_async_with_config(request, Some(config), true),
         )
         .await
         .map_err(|_| AppError::VoiceProviderUnavailable)?
@@ -184,9 +239,16 @@ pub fn valid_provider_id(id: &str) -> bool {
         && !id.chars().any(char::is_control)
 }
 
-pub fn start_payload(sdp: &str, instructions: &str, voice: &str, model: &str) -> Value {
+pub fn start_payload(
+    sdp: &str,
+    instructions: &str,
+    voice: &str,
+    model: &str,
+    delegation_model: Option<&str>,
+    delegation_instructions: Option<&str>,
+) -> Value {
     json!({"session":{"model":model,"store":false,"instructions":instructions,
-        "delegation":{"type":"client"},"audio":{"output":{"voice":voice}},
+        "delegation":delegation_model.map(|model| super::responses::configuration(model, delegation_instructions)).unwrap_or_else(|| json!({"type":"client"})),"audio":{"output":{"voice":voice}},
         "client":{"data_channel":{"allowed_client_events":[],"allowed_server_events":[
             {"type":"session.started"},{"type":"session.closed"},{"type":"error"}
         ]}}},"transport":{"type":"webrtc","sdp":sdp}})
@@ -238,6 +300,13 @@ pub async fn receive(socket: &mut Socket) -> AppResult<Option<Value>> {
 impl OpenAi {
     pub(super) fn fixture(key: Zeroizing<String>, address: std::net::SocketAddr) -> Self {
         let mut adapter = Self::new(key).unwrap();
+        // Ordinary fixtures can reuse a port after its previous server drops.
+        adapter.client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
         adapter.http_origin = format!("http://{address}");
         adapter.ws_origin = format!("ws://{address}");
         adapter
@@ -283,4 +352,60 @@ pub(super) fn completed_seconds(raw: &str) -> AppResult<i64> {
         return Err(invalid());
     }
     Ok(whole)
+}
+
+#[cfg(test)]
+mod pooling_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_reuse_keeps_each_calls_credential() {
+        use axum::{Json, Router, extract::ConnectInfo, http::HeaderMap, routing::post};
+        use std::{
+            net::SocketAddr,
+            sync::{Arc, Mutex},
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let app = Router::new().route("/v1/live/sessions", post(move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push((peer, headers["authorization"].to_str().unwrap().to_owned()));
+                Json(json!({"session":{"id":"live_pool"},"transport":{"sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"}}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        for key in ["fixture-first", "fixture-second"] {
+            let mut provider = OpenAi::new(Zeroizing::new(key.into())).unwrap();
+            provider.http_origin = format!("http://{address}");
+            provider
+                .create(
+                    "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+                    "fixture",
+                    "marin",
+                    "fixture-model",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0].0, seen[1].0,
+            "The second call must reuse the TCP connection"
+        );
+        assert_eq!(seen[0].1, "Bearer fixture-first");
+        assert_eq!(seen[1].1, "Bearer fixture-second");
+        server.abort();
+    }
 }

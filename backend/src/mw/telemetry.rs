@@ -18,24 +18,14 @@ use axum::{extract::Request, middleware::Next, response::Response};
 
 use crate::telemetry::TelemetryContext;
 
+#[cfg(test)]
 const CLIENT_HEADER: &str = "x-nyxid-client";
+#[cfg(test)]
 const CLIENT_VERSION_HEADER: &str = "x-nyxid-client-version";
 
 /// Header-only `TelemetryContext` builder. Runs on every request.
 pub async fn telemetry_mw(mut req: Request, next: Next) -> Response {
-    let client = req
-        .headers()
-        .get(CLIENT_HEADER)
-        .and_then(|v| v.to_str().ok());
-    let version = req
-        .headers()
-        .get(CLIENT_VERSION_HEADER)
-        .and_then(|v| v.to_str().ok())
-        // Cap at 64 chars: semver strings are short; an absurdly long
-        // header is likely malformed or an attacker probing.
-        .filter(|v| v.len() <= 64);
-
-    let ctx = TelemetryContext::from_headers(client, version);
+    let ctx = TelemetryContext::from_request_headers(req.headers());
     req.extensions_mut().insert(ctx);
 
     next.run(req).await

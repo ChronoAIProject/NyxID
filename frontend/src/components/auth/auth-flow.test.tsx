@@ -181,7 +181,7 @@ describe("AuthFlow — login", () => {
     expect(screen.getAllByText("or")).toHaveLength(1);
   });
 
-  it("submits credentials and navigates to the dashboard on success", async () => {
+  it("submits credentials and navigates to the Assistant on success", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={0} />);
@@ -194,15 +194,20 @@ describe("AuthFlow — login", () => {
         password: "correct horse",
       });
     });
-    expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+    expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" });
   });
 
-  it("preserves the approval code query when redirecting to a same-origin return_to", async () => {
+  it.each([
+    "/login/device?user_code=2ABCDEFGH",
+    "/dashboard?explicit=1",
+    "/oauth/authorize?client_id=app&state=review&scope=openid",
+    "/orgs/join/invitation",
+  ])("preserves the explicit same-origin return_to %s", async (path) => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => {});
-    const returnTo = `${window.location.origin}/login/device?user_code=2ABCDEFGH`;
+    const returnTo = `${window.location.origin}${path}`;
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={0} returnTo={returnTo} />);
 
@@ -212,7 +217,7 @@ describe("AuthFlow — login", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it("ignores an untrusted-origin return_to and falls back to the dashboard", async () => {
+  it("ignores an untrusted-origin return_to and falls back to the Assistant", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const assignSpy = vi
       .spyOn(window.location, "assign")
@@ -224,7 +229,7 @@ describe("AuthFlow — login", () => {
     await fillLoginAndSubmit(user);
 
     await waitFor(() =>
-      expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" }),
+      expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" }),
     );
     expect(assignSpy).not.toHaveBeenCalled();
   });
@@ -317,7 +322,7 @@ describe("AuthFlow — register", () => {
       screen.queryByPlaceholderText("NYX-XXXXXXXX"),
     ).not.toBeInTheDocument();
 
-    registerFn.mockResolvedValue({ message: "Check your email." });
+    registerFn.mockResolvedValue({ message: "Registration processed. You can now sign in." });
     const nameInput = screen.getByPlaceholderText("John Doe");
     // Wait for the panel transition's delayed autofocus before typing fields.
     await waitFor(() => expect(nameInput).toHaveFocus());
@@ -366,7 +371,7 @@ describe("AuthFlow — register", () => {
   });
 
   it("submits the registration with the normalized invite code on the happy path", async () => {
-    registerFn.mockResolvedValue({ message: "Check your email." });
+    registerFn.mockResolvedValue({ message: "Registration processed. You can now sign in." });
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={1} initialInviteCode="nyx-abcd1234" />);
 
@@ -393,7 +398,7 @@ describe("AuthFlow — register", () => {
         invite_code: "NYX-ABCD1234",
       });
     });
-    expect(toastFns.info).toHaveBeenCalledWith("Check your email.");
+    expect(toastFns.info).toHaveBeenCalledWith("Registration processed. You can now sign in.");
     // The success path slides back to the login view via a timed fade —
     // flush those pending timers inside act() so they don't leak.
     await act(async () => {

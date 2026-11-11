@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   cleanup,
   render,
@@ -10,12 +11,14 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { RemoteMachineAgentAccess } from "./remote-machine-agent-access";
 import { useAuthStore } from "@/stores/auth-store";
 import type { MachineAccess } from "@/schemas/machine-access";
+import type { NodeInfo } from "@/types/nodes";
 
 const state = vi.hoisted(() => ({
   setGrants: vi.fn(),
   setCapabilities: vi.fn(),
   refetch: vi.fn(),
   feature: true,
+  assigned: false,
   machine: undefined as MachineAccess | undefined,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
@@ -30,7 +33,9 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
           kind: "specialist",
           status: "idle",
           can_maintain: true,
-          machines: ["other-machine"],
+          machines: state.assigned
+            ? ["other-machine", "machine-1"]
+            : ["other-machine"],
           services: ["my-service"],
           account_read: true,
           logins: ["existing-login"],
@@ -58,6 +63,7 @@ const auth = useAuthStore.getState();
 beforeEach(() => {
   useAuthStore.setState({ user: { ...auth.user!, id: "owner" } });
   state.feature = true;
+  state.assigned = false;
   state.machine = {
     node_id: "machine-1",
     name: "Hosted machine",
@@ -84,6 +90,7 @@ beforeEach(() => {
   };
   state.setGrants.mockResolvedValue({});
   state.setCapabilities.mockResolvedValue({});
+  state.refetch.mockResolvedValue({ error: null });
 });
 afterEach(() => {
   cleanup();
@@ -91,31 +98,115 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 async function show() {
-  render(<RemoteMachineAgentAccess machineId="machine-1" />);
+  const view = render(<RemoteMachineAgentAccess machineId="machine-1" />);
   await userEvent.click(
     screen.getByRole("combobox", { name: "Agent for machine access" }),
   );
   await userEvent.click(screen.getByRole("option", { name: "Researcher" }));
+  return view;
 }
+
+it("renders Node machine_confirm as read-only detail data", async () => {
+  const node = { id: "node-1", machine_confirm: "changes" } as NodeInfo;
+  render(<RemoteMachineAgentAccess machineId="machine-1" node={node} />);
+  expect(screen.getByText("Confirm changes")).toBeInTheDocument();
+  expect(
+    screen.getByText(/does not save confirmation settings/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Save confirmation policy" }),
+  ).not.toBeInTheDocument();
+});
 
 it("updates specialist membership through existing grants while preserving services and other machines", async () => {
   await show();
   const form = screen.getByRole("form", {
     name: "Specialist machine membership",
   });
-  await userEvent.click(within(form).getByRole("checkbox"));
-  await userEvent.click(
-    within(form).getByRole("button", { name: "Save assignment" }),
-  );
+  await userEvent.click(within(form).getByRole("switch"));
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setGrants).toHaveBeenCalledWith({
       id: "agent-1",
       services: ["my-service"],
       account_read: true,
+      logins: ["existing-login"],
       machines: ["other-machine", "machine-1"],
     }),
   );
-  expect(state.setGrants.mock.calls[0]![0]).not.toHaveProperty("logins");
+  expect(state.setGrants.mock.calls[0]![0]).toHaveProperty("logins", [
+    "existing-login",
+  ]);
+});
+
+it("keeps a successful assignment when the separate capability save fails", async () => {
+  const view = await show();
+  const membership = screen.getByRole("form", {
+    name: "Specialist machine membership",
+  });
+  await userEvent.click(within(membership).getByRole("switch"));
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  await waitFor(() => expect(state.setGrants).toHaveBeenCalled());
+  // The real grants mutation invalidates and refreshes the Agent list.
+  state.assigned = true;
+  view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
+  expect(
+    await screen.findByText(/Machine assignment saved/),
+  ).toBeInTheDocument();
+  state.setCapabilities.mockRejectedValueOnce(new Error("capability failed"));
+  const capabilities = screen.getByRole("form", { name: /capabilities$/ });
+  await userEvent.click(
+    within(capabilities).getByRole("checkbox", { name: "Shell commands" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  expect(
+    await screen.findByText(
+      /Assignment succeeded, but capability changes failed/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(
+      screen.getByRole("form", { name: "Specialist machine membership" }),
+    ).getByRole("switch"),
+  ).toBeChecked();
+  expect(state.setGrants).toHaveBeenCalledTimes(1);
+  state.assigned = false;
+  view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("form", { name: "Specialist machine membership" }),
+      ).getByRole("switch"),
+    ).not.toBeChecked(),
+  );
+  expect(
+    screen.queryByText(/Assignment succeeded, but capability changes failed/),
+  ).not.toBeInTheDocument();
+});
+
+it("refreshes authoritative membership without keeping another Machine's feedback", async () => {
+  const view = await show();
+  state.assigned = true;
+  view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("form", { name: "Specialist machine membership" }),
+      ).getByRole("switch"),
+    ).toBeChecked(),
+  );
+  view.rerender(<RemoteMachineAgentAccess machineId="different-machine" />);
+  expect(
+    within(
+      screen.getByRole("form", { name: "Specialist machine membership" }),
+    ).getByRole("switch"),
+  ).not.toBeChecked();
+  expect(
+    screen.queryByText(/Machine assignment saved/),
+  ).not.toBeInTheDocument();
 });
 
 it("uses the observed revision and live capability ceiling for shell/file edits", async () => {
@@ -137,9 +228,8 @@ it("uses the observed revision and live capability ceiling for shell/file edits"
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Shell commands" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -162,7 +252,10 @@ it("does not enable editing when the existing capability feature is unavailable"
   state.feature = false;
   await show();
   expect(
-    screen.getByRole("button", { name: /^Save (agent )?capabilities$/ }),
+    screen.queryByRole("button", { name: "Save changes" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("checkbox", { name: "Shell commands" }),
   ).toBeDisabled();
   expect(
     screen.getByText(/Capability editing is unavailable/),
@@ -184,9 +277,8 @@ it("preserves existing Browser, Computer, developer browser and saved-login gran
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Shell commands" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -217,9 +309,8 @@ it("lets the owner explicitly grant Browser then Computer within the Node ceilin
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Full computer control" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -251,9 +342,8 @@ it("removes Computer explicitly without revoking Browser or developer browser", 
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Full computer control" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -297,9 +387,8 @@ it("removes only Browser-dependent capability grants when Browser is unchecked",
   expect(
     within(form).getByRole("checkbox", { name: "Developer browser" }),
   ).not.toBeChecked();
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -331,10 +420,10 @@ it.each(["can_edit", "protocol_v2"] as const)(
     for (const checkbox of within(form).getAllByRole("checkbox"))
       expect(checkbox).toBeDisabled();
     expect(
-      within(form).getByRole("button", {
-        name: /^Save (agent )?capabilities$/,
+      within(form).queryByRole("button", {
+        name: "Save changes",
       }),
-    ).toBeDisabled();
+    ).not.toBeInTheDocument();
     expect(state.setCapabilities).not.toHaveBeenCalled();
   },
 );

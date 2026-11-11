@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { AppWindow, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -77,7 +77,7 @@ export function AssistantDeveloperAppActionDialog({
   readonly params: Record<string, unknown>;
   readonly onComplete: (clientId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [name, setName] = useState(textParam(params, "name"));
   const [redirectUris, setRedirectUris] = useState(
     Array.isArray(params.redirectUris) ? params.redirectUris.join("\n") : "",
@@ -238,21 +238,21 @@ export function AssistantDeveloperAppActionDialog({
           </DialogTitle>
           <DialogDescription>
             {result?.secret
-              ? t("Save this secret now. It will not be shown again.")
+              ? translateUi("Save this secret now. It will not be shown again.")
               : result?.unavailable
-                ? t("The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value.")
+                ? translateUi("The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value.")
                 : result
-                  ? t("The canonical developer-app projection confirms the change.")
+                  ? translateUi("The canonical developer-app projection confirms the change.")
                   : destructive
-                    ? t("Deleting the app revokes OAuth access and must be confirmed every time.")
-                    : t("NyxID keeps client secrets out of chat.")}
+                    ? translateUi("Deleting the app revokes OAuth access and must be confirmed every time.")
+                    : translateUi("NyxID keeps client secrets out of chat.")}
           </DialogDescription>
         </DialogHeader>
         {result ? (
           <div className="space-y-3 border-y border-border py-4">
             {result.secret ? (
               <div className="space-y-2">
-                <Label htmlFor="developer-secret">{t("One-time client secret")}</Label>
+                <Label htmlFor="developer-secret">{translateUi("One-time client secret")}</Label>
                 <Input
                   id="developer-secret"
                   readOnly
@@ -261,7 +261,7 @@ export function AssistantDeveloperAppActionDialog({
                 />
               </div>
             ) : null}
-            <p className="font-mono text-xs text-muted-foreground">
+            <p className="font-mono text-13 text-muted-foreground">
               {result.id}
             </p>
           </div>
@@ -270,7 +270,7 @@ export function AssistantDeveloperAppActionDialog({
             {action === "create" || action === "update" ? (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="developer-name">{t("Application name")}</Label>
+                  <Label htmlFor="developer-name">{translateUi("Application name")}</Label>
                   <Input
                     id="developer-name"
                     value={name}
@@ -278,34 +278,34 @@ export function AssistantDeveloperAppActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="developer-redirects">{t("Redirect URIs")}</Label>
+                  <Label htmlFor="developer-redirects">{translateUi("Redirect URIs")}</Label>
                   <textarea
                     id="developer-redirects"
                     value={redirectUris}
                     onChange={(event) => setRedirectUris(event.target.value)}
-                    className="min-h-20 w-full border border-input bg-background px-3 py-2 text-sm"
+                    className="min-h-20 w-full border border-input bg-background px-3 py-2 text-14"
                   />
                 </div>
               </>
             ) : (
-              <p className="font-mono text-xs text-muted-foreground">
+              <p className="font-mono text-13 text-muted-foreground">
                 {clientId}
               </p>
             )}
             {destructive ? (
-              <label className="flex items-start gap-2 text-xs">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
                 />
                 <span className="flex items-center gap-1">
-                  <ShieldAlert className="size-3" />{t("I understand this revokes OAuth access.")}</span>
-              </label>
+                  <ShieldAlert className="size-3" />{translateUi("I understand this revokes OAuth access.")}</span>
+              </Label>
             ) : null}
           </div>
         )}
         {error ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
@@ -318,11 +318,11 @@ export function AssistantDeveloperAppActionDialog({
                 close();
               }}
             >
-              {result.unavailable ? t("Acknowledge") : t("Done")}
+              {result.unavailable ? translateUi("Acknowledge") : translateUi("Done")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant={destructive ? "destructive" : "primary"}
@@ -330,7 +330,7 @@ export function AssistantDeveloperAppActionDialog({
                 disabled={pending || (destructive && !confirmed)}
                 onClick={() => void submit()}
               >
-                {destructive ? t("Delete app") : t("Continue")}
+                {destructive ? translateUi("Delete app") : translateUi("Continue")}
               </Button>
             </>
           )}

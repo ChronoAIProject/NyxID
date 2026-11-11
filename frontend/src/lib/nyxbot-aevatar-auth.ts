@@ -8,7 +8,7 @@ const REDIRECT_URI = `${AEVATAR_ORIGIN}/auto/callback`;
 const SCOPE = "openid profile email proxy";
 const authConfigSchema = z.object({
   clientId: z.string().uuid(),
-  baseUrl: z.literal("https://nyx-api.chrono-ai.fun"),
+  baseUrl: z.string().url(),
 });
 const tokenSchema = z.object({
   access_token: z.string().min(1),
@@ -58,6 +58,28 @@ async function authorize(userId: string): Promise<Access> {
       signal: AbortSignal.timeout(15_000),
     }),
   );
+  const metadataResponse = await fetch("/.well-known/openid-configuration", {
+    credentials: "omit",
+    cache: "no-store",
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!metadataResponse.ok) throw new AevatarAuthError("channelAuthRequired");
+  const metadata = z
+    .object({
+      issuer: z.string(),
+      token_endpoint: z.string().url(),
+      nyxid_api_origins: z.array(z.string().url()).optional(),
+    })
+    .parse(await metadataResponse.json());
+  // Trust our own same-origin discovery, never origins supplied by Aevatar.
+  // The token endpoint fallback supports old backend replicas during rollout.
+  const allowed = metadata.nyxid_api_origins ?? [
+    new URL(metadata.token_endpoint).origin,
+  ];
+  const base = new URL(config.baseUrl);
+  if (base.origin !== config.baseUrl || !allowed.includes(config.baseUrl))
+    throw new AevatarAuthError("channelAuthRequired");
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const state = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const challenge = base64url(
@@ -109,7 +131,7 @@ async function authorize(userId: string): Promise<Access> {
     !redirect.searchParams.get("code") ||
     redirect.searchParams.has("error") ||
     (redirect.searchParams.has("iss") &&
-      redirect.searchParams.get("iss") !== config.baseUrl)
+      redirect.searchParams.get("iss") !== metadata.issuer)
   )
     throw new AevatarAuthError("channelAuthRequired");
 

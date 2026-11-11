@@ -22,6 +22,8 @@ pub enum Error {
     Protocol,
     #[error("IFTTT tool outcome is unknown; check IFTTT before retrying")]
     OutcomeUnknown,
+    #[error("Execution authority changed before the IFTTT operation was dispatched")]
+    PreDispatchRejected,
     #[error("IFTTT rejected the MCP request (code {0})")]
     Rpc(i64),
     #[error("IFTTT request outcome is unknown; check IFTTT before retrying")]
@@ -89,6 +91,11 @@ fn operation(
     }
     Err(Error::Request)
 }
+
+pub type DispatchGuard<'a> = dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
+    + Send
+    + Sync
+    + 'a;
 
 pub struct Client(reqwest::Client);
 
@@ -158,6 +165,21 @@ impl Client {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<Response, Error> {
+        self.forward_with_guard(base_url, method, path, query, token, body, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_with_guard(
+        &self,
+        base_url: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        token: &str,
+        body: Option<&[u8]>,
+        guard: Option<&DispatchGuard<'_>>,
+    ) -> Result<Response, Error> {
         let (rpc_method, params) = operation(base_url, method, path, query, body)?;
         let response = self
             .request(
@@ -223,6 +245,11 @@ impl Client {
                 .map_err(transport_error)?;
             if !notification.status().is_success() {
                 return Ok(rejection(notification.status()));
+            }
+            if let Some(guard) = guard
+                && !guard().await
+            {
+                return Err(Error::PreDispatchRejected);
             }
             operation_dispatched = true;
             let response = self
@@ -428,6 +455,51 @@ mod tests {
     fn request_json(request: &[u8]) -> Value {
         let end = request.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
         serde_json::from_slice(&request[end + 4..]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn revoked_guard_during_delayed_initialize_prevents_tool_call_and_closes_session() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (mut server, entered, release) = crate::test_support::scripted_fixture_paused(
+            "ifttt.com",
+            vec![initialized(), accepted(), accepted()],
+        )
+        .await;
+        let client = Client::new(server.builder.take().unwrap()).unwrap();
+        let allowed = AtomicBool::new(true);
+        let validate =
+            || -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+                Box::pin(async { allowed.load(Ordering::SeqCst) })
+            };
+        let mut request = Box::pin(client.forward_with_guard(
+            BASE_URL,
+            &Method::POST,
+            "tools/create_applet",
+            None,
+            "token",
+            Some(b"{}"),
+            Some(&validate),
+        ));
+        tokio::select! {
+            result=&mut request=>panic!("initialize should be delayed: {result:?}"),
+            ()=entered.notified()=>{},
+        }
+        allowed.store(false, Ordering::SeqCst);
+        release.notify_one();
+        assert!(matches!(request.await, Err(Error::PreDispatchRejected)));
+        assert_eq!(
+            request_json(&server.requests.recv().await.unwrap())["method"],
+            "initialize"
+        );
+        assert_eq!(
+            request_json(&server.requests.recv().await.unwrap())["method"],
+            "notifications/initialized"
+        );
+        assert!(
+            String::from_utf8_lossy(&server.requests.recv().await.unwrap())
+                .starts_with("DELETE /mcp ")
+        );
+        assert!(server.requests.try_recv().is_err());
     }
 
     #[tokio::test]

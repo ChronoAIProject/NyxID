@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::default_request_header::StoredDefaultRequestHeader;
 use crate::models::ssh_auth_mode::{SshAuthMode, default_ssh_auth_mode};
 use crate::models::ws_frame_injection::WsFrameInjection;
 
@@ -96,7 +96,7 @@ pub struct UserService {
     /// `crate::models::default_request_header` for merge semantics and
     /// denylist rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_request_headers: Option<Vec<DefaultRequestHeader>>,
+    pub default_request_headers: Option<Vec<StoredDefaultRequestHeader>>,
 
     /// WebSocket frame-auth injection rules. Orthogonal to HTTP
     /// `auth_method`; existing documents default to no frame injection.

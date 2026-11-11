@@ -1,6 +1,15 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { AllocateDialog } from "@/components/admin-credits/allocate-dialog";
+import { useAllocationOverview } from "@/hooks/use-billing-credits";
+import {
+  exactCredits,
+  formatExactCredits,
+  parseCredits,
+  CREDIT_SCALE,
+} from "@/lib/credits";
 import { normalizedBillingTargets } from "@/lib/billing-targets";
 import {
   changedFields,
@@ -11,7 +20,11 @@ import {
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
+import {
+  ADMIN_CREDITS_TABS,
+  ADMIN_CREDITS_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -108,13 +121,24 @@ const SCHEDULE_DEFAULTS: ScheduleForm = {
 const GRANTS_PER_PAGE = 50;
 
 export function AdminCreditsPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const search = useSearch({ strict: false });
   const navigate = useNavigate();
-  const tab = parseTab(search.tab, ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT);
+  const tab = parseTab(
+    search.tab,
+    ADMIN_CREDITS_TABS,
+    ADMIN_CREDITS_TAB_DEFAULT,
+  );
   const currentUser = useAuthStore((state) => state.user);
   const canWrite = canAdminWrite(currentUser);
   const canManageGrants = canManageCreditGrants(currentUser);
+  const overview = useAllocationOverview();
+  const allocationPolicies =
+    overview.data?.allocations_v1 === true && !overview.isError;
+  const [allocationRecurrence, setAllocationRecurrence] = useState<
+    "one_time" | "monthly"
+  >("one_time");
+  const [allocateOpen, setAllocateOpen] = useState(false);
   const [grantPage, setGrantPage] = useState(1);
   const grantsQuery = useAdminCreditGrants(grantPage, GRANTS_PER_PAGE);
   const allowancesQuery = useAdminAllowances();
@@ -153,7 +177,10 @@ export function AdminCreditsPage() {
 
   function openGrantDialog() {
     grantForm.reset(GRANT_DEFAULTS);
-    setGrantOpen(true);
+    if (allocationPolicies) {
+      setAllocationRecurrence("one_time");
+      setAllocateOpen(true);
+    } else setGrantOpen(true);
   }
 
   function openAllowanceDialog(allowance?: AllowanceBundle) {
@@ -168,6 +195,16 @@ export function AdminCreditsPage() {
       schedule
         ? {
             amount_credits: schedule.amount_credits,
+            amount: exactScheduleEdit(schedule)
+              ? (schedule.amount ??
+                exactCredits(undefined, schedule.amount_credits, "whole") ??
+                "0")
+              : undefined,
+            service_limits: schedule.service_limits?.map((r) => ({
+              label: r.label ?? "",
+              amount: r.limit,
+              service_refs: r.service_ids,
+            })),
             recurrence: schedule.recurrence,
             expiry: schedule.expiry,
             target_kind: schedule.target_kind,
@@ -186,12 +223,12 @@ export function AdminCreditsPage() {
       const result = await issueGrant.mutateAsync(value);
       const recipientLabel = `${String(result.created_count)} owner${result.created_count === 1 ? "" : "s"}`;
       toast.success(
-        result.pending_activation_count > 0
+        translateUi(result.pending_activation_count > 0
           ? `Issued credits to ${recipientLabel}; ${String(result.pending_activation_count)} pending activation`
-          : `Issued credits to ${recipientLabel}`,
+          : `Issued credits to ${recipientLabel}`),
       );
       const rolloutWarning = rolloutWarningMessage(result.recipients);
-      if (rolloutWarning) toast.warning(rolloutWarning);
+      if (rolloutWarning) toast.warning(translateUi(rolloutWarning));
       setGrantPage(1);
       setGrantOpen(false);
     } catch (error) {
@@ -199,9 +236,33 @@ export function AdminCreditsPage() {
     }
   }
 
+  function exactScheduleEdit(row: CreditSchedule) {
+    return (
+      allocationPolicies ||
+      Boolean(row.service_limits?.length) ||
+      (row.amount !== undefined &&
+        parseCredits(row.amount) % CREDIT_SCALE !== 0n)
+    );
+  }
   function scheduleProjection(row: CreditSchedule) {
     return {
-      amount_credits: row.amount_credits,
+      ...(!exactScheduleEdit(row)
+        ? { amount_credits: row.amount_credits }
+        : {}),
+      ...(exactScheduleEdit(row)
+        ? {
+            amount:
+              row.amount ??
+              exactCredits(undefined, row.amount_credits, "whole") ??
+              "0",
+            service_limits:
+              row.service_limits?.map((r) => ({
+                label: r.label ?? "",
+                amount: r.limit,
+                service_refs: r.service_ids,
+              })) ?? [],
+          }
+        : {}),
       expiry: row.expiry,
       target_kind: row.target_kind,
       ...normalizedBillingTargets(row),
@@ -321,7 +382,12 @@ export function AdminCreditsPage() {
       const serviceRefs = value.all_services ? [] : value.service_refs;
       if (editingSchedule) {
         const normalize = (data: ScheduleForm) => ({
-          amount_credits: data.amount_credits,
+          ...(data.amount === undefined
+            ? { amount_credits: data.amount_credits }
+            : {}),
+          ...(data.amount !== undefined
+            ? { amount: data.amount, service_limits: data.service_limits ?? [] }
+            : {}),
           expiry: data.expiry,
           target_kind: data.target_kind,
           ...normalizedBillingTargets(data),
@@ -357,11 +423,17 @@ export function AdminCreditsPage() {
   async function handleRevoke() {
     if (!grantToRevoke) return;
     try {
-      await revokeGrant.mutateAsync(grantToRevoke.id);
-      toast.success(translateUi("Grant revoked"));
+      await revokeGrant.mutateAsync(
+        allocationPolicies
+          ? { id: grantToRevoke.id, allocation: true }
+          : grantToRevoke.id,
+      );
+      toast.success(
+        translateUi("Reclaim requested. Any held requests finish before the unused remainder is reclaimed."),
+      );
       setGrantToRevoke(null);
     } catch (error) {
-      toast.error(translateErrorMessage(errorMessage(error, "Failed to revoke credit grant")));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to reclaim credits")));
     }
   }
 
@@ -375,13 +447,13 @@ export function AdminCreditsPage() {
       if (kind === "allowance") await toggleBundle.mutateAsync(variables);
       else await updateSchedule.mutateAsync(variables);
       toast.success(
-        kind === "allowance"
+        translateUi(kind === "allowance"
           ? wasActive
             ? "Allowance disabled"
             : "Allowance enabled"
           : wasActive
             ? "Schedule paused"
-            : "Schedule resumed",
+            : "Schedule resumed"),
       );
     },
     ({ kind, id, wasActive }) => {
@@ -425,27 +497,96 @@ export function AdminCreditsPage() {
       {scheduleReview.dialog}
       {statusReview.dialog}
       <PageHeader
-        title={t("Credits")}
-        description={t("Manage promotional credit grants, recurring credit schedules, and free usage allowances.")}
+        title={translateUi("Credits")}
+        description={translateUi("Allocate credits, set optional service ceilings, and reclaim unused amounts.")}
       />
 
-      <Tabs value={tab} onValueChange={(value) => {
-        void navigate({ to: "/admin/credits", search: { tab: value }, replace: true });
-      }}>
+      <section
+        aria-label={translateUi("Issued credit balance")}
+        className="min-w-0 rounded-lg border border-border p-4"
+      >
+        <p className="text-14 text-muted-foreground">{translateUi("Remaining issued credits")}</p>
+        {overview.data ? (
+          <>
+            <p className="min-w-0 break-all type-metric tabular-nums">
+              {formatExactCredits(overview.data.summary.remaining, 12)}{translateUi(" credits")}</p>
+            {overview.isError ? (
+              <p role="alert" className="text-14 text-warning">{translateUi("This total is stale. The refresh failed.")}</p>
+            ) : null}
+            <details className="mt-2 text-14">
+              <summary className="cursor-pointer">{translateUi("Balance details")}</summary>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                {[
+                  ["Unreserved", overview.data.summary.unreserved],
+                  ["Held for requests", overview.data.summary.held],
+                  [
+                    "Pending activation",
+                    overview.data.summary.pending_activation,
+                  ],
+                  ["Pending reclaim", overview.data.summary.pending_reclaim],
+                  [
+                    "Expired, awaiting processing (excluded)",
+                    overview.data.summary.expired_awaiting_cleanup,
+                  ],
+                  [
+                    "With restrictions (subset of unreserved)",
+                    overview.data.summary.restricted,
+                  ],
+                ].map(([label, amount]) => (
+                  <div key={label} className="min-w-0">
+                    <dt>{label}</dt>
+                    <dd className="break-all tabular-nums">
+                      {formatExactCredits(amount ?? "0", 12)}{translateUi(" credits")}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-3">{translateUi("Unreserved values reflect allocation eligibility, before recipient account or plan checks. Service ceilings may limit how much of the remaining total can be used. Held and pending values are included in remaining credits; expired unheld credits are excluded.")}</p>
+              <p>{translateUi("Updated")}{" "}
+                {new Date(overview.data.summary.generated_at).toLocaleString(getFormattingLocale())}
+              </p>
+            </details>
+          </>
+        ) : (
+          <p className="text-14 text-muted-foreground">
+            {overview.isLoading
+              ? translateUi("Loading credit balance…")
+              : translateUi("Balance summary unavailable. Individual allocations and existing actions remain available below.")}
+          </p>
+        )}
+        {overview.isError ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void overview.refetch()}
+          >{translateUi("Retry balance")}</Button>
+        ) : null}
+      </section>
+
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          void navigate({
+            to: "/admin/credits",
+            search: { tab: value },
+            replace: true,
+          });
+        }}
+      >
         <TabsList>
-          <TabsTrigger value="grants">{t("Credit grants")}</TabsTrigger>
-          <TabsTrigger value="allowances">{t("Free allowances")}</TabsTrigger>
-          <TabsTrigger value="schedules">{t("Schedules")}</TabsTrigger>
+          <TabsTrigger value="grants">{translateUi("Credit grants")}</TabsTrigger>
+          <TabsTrigger value="allowances">{translateUi("Free allowances")}</TabsTrigger>
+          <TabsTrigger value="schedules">{translateUi("Schedules")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="grants" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">{t("Promotional credits are consumed before purchased wallet credits.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Promotional credits are consumed before purchased wallet credits.")}</p>
             {canManageGrants ? (
               <Button size="sm" variant="primary" onClick={openGrantDialog}>
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
-                </ButtonIcon>{t("Issue grant")}</Button>
+                </ButtonIcon>{translateUi("Allocate credits")}</Button>
             ) : null}
           </div>
           {grantsQuery.isError ? (
@@ -460,6 +601,7 @@ export function AdminCreditsPage() {
               grants={grantsQuery.data?.grants ?? []}
               canWrite={canManageGrants}
               revokePending={revokeGrant.isPending}
+              allocationPolicies={allocationPolicies}
               page={grantsQuery.data?.page ?? grantPage}
               perPage={grantsQuery.data?.per_page ?? GRANTS_PER_PAGE}
               total={grantsQuery.data?.total ?? 0}
@@ -472,7 +614,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="allowances" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">{t("Free metric units reset on UTC recurrence windows and settle against actual usage.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Free metric units reset on UTC recurrence windows and settle against actual usage.")}</p>
             {canWrite ? (
               <Button
                 size="sm"
@@ -481,7 +623,7 @@ export function AdminCreditsPage() {
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
-                </ButtonIcon>{t("Create allowance")}</Button>
+                </ButtonIcon>{translateUi("Create allowance")}</Button>
             ) : null}
           </div>
           {allowancesQuery.isError ? (
@@ -508,16 +650,21 @@ export function AdminCreditsPage() {
 
         <TabsContent value="schedules" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">{t("Disburse wallet credits on recurring UTC periods. These are credits, not metered service units.")}</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Recurring allocations issue a fresh credit total and fresh service ceilings each UTC period. Pausing stops future issuance.")}</p>
             {canWrite ? (
               <Button
                 size="sm"
                 variant="primary"
-                onClick={() => openScheduleDialog()}
+                onClick={() => {
+                  if (allocationPolicies) {
+                    setAllocationRecurrence("monthly");
+                    setAllocateOpen(true);
+                  } else openScheduleDialog();
+                }}
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
-                </ButtonIcon>{t("Create schedule")}</Button>
+                </ButtonIcon>{translateUi("Create schedule")}</Button>
             ) : null}
           </div>
           {schedulesQuery.isError ? (
@@ -542,6 +689,16 @@ export function AdminCreditsPage() {
         </TabsContent>
       </Tabs>
 
+      <AllocateDialog
+        initialRecurrence={allocationRecurrence}
+        open={allocateOpen}
+        onOpenChange={setAllocateOpen}
+        services={services}
+        servicesError={servicesQuery.isError}
+        servicesLoading={servicesQuery.isLoading}
+        retryServices={() => void servicesQuery.refetch()}
+        canRecurring={canWrite}
+      />
       <GrantDialog
         open={grantOpen}
         onOpenChange={setGrantOpen}
@@ -566,6 +723,10 @@ export function AdminCreditsPage() {
         services={services}
         pending={createSchedule.isPending || updateSchedule.isPending}
         editingSchedule={editingSchedule}
+        allocationPolicies={allocationPolicies}
+        servicesError={servicesQuery.isError}
+        servicesLoading={servicesQuery.isLoading}
+        retryServices={() => void servicesQuery.refetch()}
         onSubmit={submitSchedule}
       />
       <Dialog
@@ -576,7 +737,7 @@ export function AdminCreditsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("Revoke credit grant")}</DialogTitle>
+            <DialogTitle>{translateUi("Reclaim remaining credits")}</DialogTitle>
             {grantToRevoke ? (
               <GrantRevokeDescription grant={grantToRevoke} />
             ) : null}
@@ -587,13 +748,13 @@ export function AdminCreditsPage() {
               variant="outline"
               disabled={revokeGrant.isPending}
               onClick={() => setGrantToRevoke(null)}
-            >{t("Cancel")}</Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               type="button"
               variant="destructive"
               isLoading={revokeGrant.isPending}
               onClick={() => void handleRevoke()}
-            >{t("Revoke grant")}</Button>
+            >{translateUi("Reclaim remaining credits")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

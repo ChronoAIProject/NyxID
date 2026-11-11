@@ -1,11 +1,13 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useRef, useState } from "react";
 import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { useTelegramNew } from "@/hooks/use-telegram-new";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
+import { TelegramPromptStatus } from "./telegram-prompt-status";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
 export function TelegramNew({
@@ -27,8 +29,8 @@ export function TelegramNew({
   readonly onCancelled?: () => void | Promise<void>;
   readonly onConnected: (id: string, username?: string | null) => void;
 }) {
-  const { t } = useUiTranslation();
-  const { configuration, begin, launch, cancel, connect } =
+  useUiTranslation();
+  const { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect, getCurrentRequest } =
     useTelegramNew(requestId);
   const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
@@ -41,24 +43,38 @@ export function TelegramNew({
     url: string;
   } | null>(null);
   const request = configuration.data?.request;
+  const requestExpiresAt = request?.expires_at;
+  const canOpenCreationForm = request?.can_open_creation_form;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const expiry = requestExpiresAt ? Date.parse(requestExpiresAt) : NaN;
+    if (!canOpenCreationForm || !Number.isFinite(expiry)) return;
+    const timer = window.setTimeout(() => setNow(Date.now()), Math.min(2_147_483_647, Math.max(0, expiry - Date.now() + 1)));
+    return () => window.clearTimeout(timer);
+  }, [requestExpiresAt, canOpenCreationForm]);
+  const recoveryUnexpired = Boolean(request && Date.parse(request.expires_at) > now);
+  const [recovery, setRecovery] = useState<{ actor: string; id: string; revision: number; username?: string; url: string } | null>(null);
   const terminal = Boolean(
     request && ["cancelled", "expired", "suspended"].includes(request.status),
   );
   const preparing = begin.isPending || launch.isPending;
-  const pending = preparing || cancel.isPending || connect.isPending;
+  const pending = preparing || creationLink.isPending || regenerateUsername.isPending || cancel.isPending || connect.isPending;
   const error =
+    regenerateUsername.error ??
+    creationLink.error ??
     begin.error ??
     launch.error ??
     cancel.error ??
     connect.error ??
     configuration.error;
   const canLaunch =
-    !request ||
-    request.status === "cancelled" ||
-    request.status === "expired" ||
-    ["waiting_telegram", "waiting_bot", "waiting_consent"].includes(
-      request.status,
-    );
+    !request?.setup_notice &&
+    (!request ||
+      request.status === "cancelled" ||
+      request.status === "expired" ||
+      ["waiting_telegram", "waiting_bot", "waiting_consent"].includes(
+        request.status,
+      ));
   const launchUrl =
     handoff && handoff.actor === actor && handoff.id === request?.id
       ? handoff.url
@@ -87,6 +103,9 @@ export function TelegramNew({
     // Opening the tab in the click preserves browser popup permission across the API call.
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
+    creationLink.reset();
+    regenerateUsername.reset();
+    setRecovery(null);
     begin.reset();
     launch.reset();
     cancel.reset();
@@ -116,6 +135,46 @@ export function TelegramNew({
     }
   }
 
+  async function openCreationForm(index = 0) {
+    if (!request?.can_open_creation_form || !actor || Date.parse(request.expires_at) <= Date.now()) return;
+    const captured = request;
+    const tab = window.open("about:blank", "_blank");
+    if (tab) tab.opener = null;
+    creationLink.reset();
+    setRecovery(null);
+    try {
+      const result = await creationLink.mutateAsync(captured.id);
+      const latest = getCurrentRequest();
+      if (!active.current || currentActor.current !== actor || latest?.id !== captured.id
+        || latest.revision !== captured.revision || latest.status !== "waiting_bot"
+        || !latest.can_open_creation_form || Date.parse(latest.expires_at) <= Date.now()
+        || Date.parse(result.request.expires_at) <= Date.now() || result.request.id !== captured.id
+        || result.request.revision !== captured.revision || result.request.status !== "waiting_bot") {
+        tab?.close();
+        return;
+      }
+      const choice = result.username_suggestions?.[index];
+      const expectedUsername = captured.username_suggestions?.[index];
+      if ((index > 0 && !choice) || (choice && expectedUsername && (choice.username !== expectedUsername
+        || (latest.username_suggestions && latest.username_suggestions[index] !== expectedUsername)))) {
+        tab?.close();
+        return;
+      }
+      const url = choice?.creation_url ?? result.creation_url;
+      setRecovery({ actor, id: captured.id, revision: captured.revision, username: choice?.username, url });
+      if (tab && !tab.closed) tab.location.replace(url);
+    } catch {
+      tab?.close();
+    }
+  }
+
+  async function regenerate() {
+    if (!request || pending) return;
+    creationLink.reset();
+    setRecovery(null);
+    try { await regenerateUsername.mutateAsync(request.id); } catch { /* Displayed below. */ }
+  }
+
   async function finishLegacyRequest() {
     if (!request) return;
     try {
@@ -134,7 +193,7 @@ export function TelegramNew({
 
   if (configuration.isPending)
     return (
-      <p role="status" className="text-sm text-muted-foreground">{t("Checking Telegram setup…")}</p>
+      <p role="status" className="text-14 text-muted-foreground">{translateUi("Checking Telegram setup…")}</p>
     );
   if (configuration.error && !configuration.data)
     return (
@@ -144,19 +203,19 @@ export function TelegramNew({
           type="button"
           variant="outline"
           onClick={() => void configuration.refetch()}
-        >{t("Check progress")}</Button>
+        >{translateUi("Check progress")}</Button>
       </div>
     );
-  if (!configuration.data?.available)
+  if (!configuration.data?.available && !request?.setup_notice)
     return (
       <div className="space-y-3">
         {error && <ErrorBanner message={error.message} />}
-        <p className="text-sm text-muted-foreground">{t("An administrator needs to configure a manager bot in Admin → Platform Credentials → Telegram — bot creation. You can use Telegram bot token to connect an existing bot.")}</p>
+        <p className="text-14 text-muted-foreground">{translateUi("An administrator needs to configure a manager bot in Admin → Platform Credentials → Telegram — bot creation. You can use Telegram bot token to connect an existing bot.")}</p>
         <Button
           type="button"
           variant="outline"
           onClick={() => void configuration.refetch()}
-        >{t("Check configuration")}</Button>
+        >{translateUi("Check configuration")}</Button>
       </div>
     );
 
@@ -168,20 +227,40 @@ export function TelegramNew({
     <div className={fullPage ? "space-y-4 break-words" : "space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5"}>
       {error && <ErrorBanner message={error.message} />}
       {link && begin.error && (
-        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-sm underline underline-offset-4">{t("Open existing Telegram setup")}</a>
+        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="type-row-title underline underline-offset-4">{translateUi("Open existing Telegram setup")}</a>
       )}
-      {(connecting && request?.auto_connect) || connected ? (
+      {request?.setup_notice && (
+        <div className="space-y-3 type-secondary text-muted-foreground">
+          <p role="status">{request.setup_notice.message}</p>
+          {request.connection_error && <p role="status">{request.connection_error}</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline">
+              <a href={request.setup_notice.status_url}>{translateUi("Check status")}</a>
+            </Button>
+            <Button asChild variant="outline">
+              <a href={request.setup_notice.new_setup_url}>{translateUi("Start a new setup")}</a>
+            </Button>
+            {request.setup_notice.agent_url && (
+              <Button asChild variant="outline">
+                <a href={request.setup_notice.agent_url}>{translateUi("Open the agent")}</a>
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {request?.setup_notice ? null : (connecting && request?.auto_connect) || connected ? (
         <div className="space-y-3">
-          <p role="status" className="flex items-center gap-2 text-sm">
+          <p role="status" className="flex items-center gap-2 text-14">
             {connected ? <Check className="size-3 text-success" /> : <Loader2 className="size-3 animate-spin" />}
-            {connected ? t("@{{bot_username}} is connected.", { bot_username: request?.bot_username }) : t("Connecting @{{bot_username}}…", { bot_username: request?.bot_username })}
+            {connected ? translateUi("@{{value1}} is connected.", { value1: request?.bot_username }) : translateUi("Connecting @{{value1}}…", { value1: request?.bot_username })}
           </p>
-          <p className="text-xs text-muted-foreground">{t("You can close this ")}{stayInPlace ? t("dialog") : t("page")}{t(". NyxID will finish connecting your bot and send a message in the Telegram setup chat.")}</p>
-          {request?.connection_error && <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>}
+          <p className="text-13 text-muted-foreground">{translateUi("You can close this ")}{stayInPlace ? translateUi("dialog") : translateUi("page")}. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
+          </p>
+          {request?.connection_error && <p role="status" className="text-13 text-muted-foreground">{request.connection_error}</p>}
         </div>
       ) : fullPage ? (
         <div className="space-y-4">
-          <p className="text-xs leading-relaxed text-muted-foreground">{t("Choose your bot’s name and username in Telegram. NyxID connects it automatically when you finish.")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Choose your bot’s name and username in Telegram. NyxID connects it automatically when you finish.")}</p>
           {canLaunch && (
             <Button
               type="button"
@@ -191,36 +270,36 @@ export function TelegramNew({
               disabled={pending || ((!request || terminal) && !label.trim())}
               onClick={() => void prepare()}
             >
-              {request && !terminal ? t("Reopen Telegram") : t("Continue in Telegram")}
+              {request && !terminal ? translateUi("Reopen Telegram") : translateUi("Continue in Telegram")}
               <ExternalLink className="size-3" aria-hidden="true" />
             </Button>
           )}
           {launchUrl && canLaunch && (
-            <p className="text-xs text-muted-foreground">{t("Telegram didn’t open?")}{" "}
-              <a className="ph-no-capture underline" href={launchUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{t("Open Telegram")}</a>
+            <p className="text-13 text-muted-foreground">{translateUi("Telegram didn’t open?")}{" "}
+              <a className="ph-no-capture underline" href={launchUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{translateUi("Open Telegram")}</a>
             </p>
           )}
-          {creating && (
-            <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+          {connecting && (
+            <p role="status" className="flex items-center gap-2 text-13 text-muted-foreground">
               <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
-              {connecting ? t("Connecting @{{bot_username}}…", { bot_username: request?.bot_username }) : t("Waiting for you to create your bot in Telegram…")}
+              {translateUi("Connecting @{{value1}}…", { value1: request?.bot_username })}
             </p>
           )}
           {connecting && request?.connection_error && (
-            <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>
+            <p role="status" className="text-13 text-muted-foreground">{request.connection_error}</p>
           )}
         </div>
-      ) : <ol aria-label={t("Telegram setup steps")} className="space-y-4">
+      ) : <ol aria-label={translateUi("Telegram setup steps")} className="space-y-4">
         <li className="flex gap-3">
           <span
-            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-xs"
+            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-13"
             aria-hidden="true"
           >
             {creating ? <Check className="size-3 text-success" /> : "1"}
           </span>
           <div className="space-y-2">
-            <p className="text-sm font-medium">{t("Continue in Telegram")}</p>
-            <p className="text-xs text-muted-foreground">{t("Create a new bot for the account selected above. NyxID will connect it automatically when you finish Telegram’s form.")}</p>
+            <p className="type-row-title">{translateUi("Continue in Telegram")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Create a new bot for the account selected above. NyxID will connect it automatically when you finish Telegram’s form.")}</p>
             {canLaunch && (
               <Button
                 type="button"
@@ -231,19 +310,19 @@ export function TelegramNew({
               >
                 <ExternalLink className="size-3" />
                 {request && !terminal
-                  ? t("Reopen Telegram")
-                  : t("Continue in Telegram")}
+                  ? translateUi("Reopen Telegram")
+                  : translateUi("Continue in Telegram")}
               </Button>
             )}
             {launchUrl && canLaunch && (
-              <p className="text-xs text-muted-foreground">{t("Telegram didn’t open?")}{" "}
+              <p className="text-13 text-muted-foreground">{translateUi("Telegram didn’t open?")}{" "}
                 <a
                   className="ph-no-capture underline"
                   href={launchUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   referrerPolicy="no-referrer"
-                >{t("Open Telegram")}</a>
+                >{translateUi("Open Telegram")}</a>
               </p>
             )}
           </div>
@@ -253,40 +332,38 @@ export function TelegramNew({
           aria-current={creating && !connected ? "step" : undefined}
         >
           <span
-            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-xs"
+            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-13"
             aria-hidden="true"
           >
             {connected ? <Check className="size-3 text-success" /> : "2"}
           </span>
           <div className="space-y-2">
-            <p className="text-sm font-medium">{t("Create your bot")}</p>
-            <p className="text-xs text-muted-foreground">{t("In the setup chat, tap ")}<strong>{t("Create bot")}</strong>{t(" and finish Telegram’s name and username form. Tap ")}<strong>{t("Start")}</strong>{" "}{t("first if Telegram asks.")}</p>
-            <p className="text-xs text-muted-foreground">{t("You can stay in Telegram. This page updates automatically when the connection is complete.")}</p>
-            {creating && (
-              <p role="status" className="flex items-center gap-2 text-sm">
-                {connected ? (
-                  <Check className="size-3 text-success" />
-                ) : (
-                  <Loader2 className="size-3 animate-spin" />
-                )}
-                {connected
-                  ? t("@{{bot_username}} is connected.", { bot_username: request?.bot_username })
-                  : connecting
-                    ? t("Connecting @{{bot_username}}…", { bot_username: request?.bot_username })
-                    : t("Waiting for you to create your bot in Telegram…")}
+            <p className="type-row-title">{translateUi("Create your bot")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("In the setup chat, tap ")}<strong>{translateUi("Create bot")}</strong>{translateUi(" and finish Telegram’s name and username form. Tap ")}<strong>{translateUi("Start")}</strong>{" "}{translateUi("first if Telegram asks.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("You can stay in Telegram. This page updates automatically when the connection is complete.")}</p>
+            {connecting && (
+              <p role="status" className="flex items-center gap-2 text-14">
+                <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                {translateUi("Connecting @{{value1}}…", { value1: request?.bot_username })}
               </p>
             )}
             {connecting && request?.connection_error && (
-              <p role="status" className="text-xs text-muted-foreground">
+              <p role="status" className="text-13 text-muted-foreground">
                 {request.connection_error}
               </p>
             )}
           </div>
         </li>
       </ol>}
+      {request && !request.setup_notice && ["waiting_telegram", "waiting_bot"].includes(request.status) && (
+        <TelegramPromptStatus request={request} recoveryUnexpired={recoveryUnexpired} pending={pending} recovering={creationLink.isPending}
+          onRecover={(index) => void openCreationForm(index)}
+          onRegenerate={() => void regenerate()} regenerating={regenerateUsername.isPending}
+          recoveryUrl={recovery && recovery.actor === actor && recovery.id === request.id && recovery.revision === request.revision && (!recovery.username || request.username_suggestions?.includes(recovery.username)) && request.can_open_creation_form && recoveryUnexpired ? recovery.url : undefined} />
+      )}
       {request && !request.auto_connect && !terminal && (
-        <div className="space-y-2 rounded-lg border border-border p-3 text-xs">
-          <p>{t("This setup was started with the previous flow. Finish its Telegram approval, then complete the saved connection below")}{fullPage ? "." : t(", or cancel and start again.")}
+        <div className="space-y-2 rounded-lg border border-border p-3 text-13">
+          <p>{translateUi("This setup was started with the previous flow. Finish its Telegram approval, then complete the saved connection below")}{fullPage ? "." : translateUi(", or cancel and start again.")}
           </p>
           {connecting && (
             <Button
@@ -295,25 +372,26 @@ export function TelegramNew({
               disabled={pending}
               onClick={() => void finishLegacyRequest()}
             >
-              {connect.isPending ? t("Connecting…") : t("Finish saved connection")}
+              {connect.isPending ? translateUi("Connecting…") : translateUi("Finish saved connection")}
             </Button>
           )}
         </div>
       )}
-      {terminal && (
-        <p role="status" className="text-sm text-muted-foreground">
+      {terminal && !request?.setup_notice && (
+        <p role="status" className="text-14 text-muted-foreground">
           {request?.status === "expired"
-            ? t("This setup expired. Start again to create a new bot.")
+            ? translateUi("This setup expired. Start again to create a new bot.")
             : request?.status === "suspended"
-              ? t("This bot’s management changed. Manage the saved bot from Channel Bots.")
-              : t("Setup cancelled. You can start again.")}
+              ? translateUi("This bot’s management changed. Manage the saved bot from Channel Bots.")
+              : translateUi("Setup cancelled. You can start again.")}
         </p>
       )}
       {!fullPage && request && !terminal && !connected && (
         <div className="space-y-2 border-t border-border pt-3">
-          <p className="text-xs text-muted-foreground">{t("Setting up: ")}{request.label}.{" "}
-            {request.status !== "provisioning" && (
-              <>{t("Saved until")}{" "}
+          <p className="text-13 text-muted-foreground">
+            {request.setup_notice ? translateUi("Saved setup") : translateUi("Setting up")}: {request.label}.{" "}
+            {request.status !== "provisioning" && !request.setup_notice && (
+              <>{translateUi("Saved until")}{" "}
                 <time dateTime={request.expires_at}>
                   {new Date(request.expires_at).toLocaleTimeString(getFormattingLocale(), {
                     hour: "numeric",
@@ -330,7 +408,7 @@ export function TelegramNew({
             size="sm"
             disabled={pending}
             onClick={() => void configuration.refetch()}
-          >{t("Check progress")}</Button>
+          >{translateUi("Check progress")}</Button>
           {request.status !== "provisioning" && (
             <Button
               type="button"
@@ -347,7 +425,7 @@ export function TelegramNew({
                   })
                   .catch(() => {});
               }}
-            >{t("Cancel setup")}</Button>
+            >{translateUi("Cancel setup")}</Button>
           )}
         </div>
       )}

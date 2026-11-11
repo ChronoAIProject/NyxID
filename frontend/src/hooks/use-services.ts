@@ -6,6 +6,7 @@ import type {
   OidcCredentials,
   RedirectUrisResponse,
   RegenerateSecretResponse,
+  ResyncIdentityResponse,
   UpdateServicePayload,
   UserServiceConnection,
 } from "@/types/api";
@@ -82,6 +83,22 @@ export function useDeleteService() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
       void queryClient.invalidateQueries({ queryKey: ["provider-services"] });
+    },
+  });
+}
+
+export function useResyncServiceIdentity() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (serviceId: string): Promise<ResyncIdentityResponse> => {
+      return api.post<ResyncIdentityResponse>(
+        `/services/${serviceId}/resync-identity`,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["user-services"] });
     },
   });
 }

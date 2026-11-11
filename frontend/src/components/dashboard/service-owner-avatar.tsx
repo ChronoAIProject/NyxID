@@ -22,7 +22,7 @@ export function ServiceOwnerAvatar({
         displayName={name}
         avatarUrl={avatarUrl}
         className={cn(
-          "size-5 rounded-full [&>*]:rounded-full [&>*]:text-10",
+          "size-5 rounded-full [&>*]:rounded-full [&>*]:text-12",
           className,
         )}
       />

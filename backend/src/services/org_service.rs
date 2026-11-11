@@ -91,6 +91,7 @@ pub async fn create_org_user_with_id(
         .unwrap_or_else(|| synthetic_org_email(id));
 
     let org = User {
+        execution_permission_enrollment: None,
         id: id.to_string(),
         email,
         password_hash: None,
@@ -342,6 +343,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // use which.
     let now_bson = bson::DateTime::from_chrono(Utc::now());
     let blocker_specs: Vec<(&str, mongodb::bson::Document, &str)> = vec![
+        (
+            crate::models::assistant_conversation::COLLECTION_NAME,
+            doc! {"channel.org_execution.org_id":org_user_id,"active_turn":{"$ne":null}},
+            "active organization channel turns",
+        ),
+        (
+            crate::models::org_channel::HOLDS,
+            doc! {"org_id":org_user_id,"state":"reserved"},
+            "unsettled organization channel usage",
+        ),
         (
             crate::models::user_service::COLLECTION_NAME,
             // Soft-deleted UserServices stay in the collection with
@@ -666,6 +677,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
+    super::org_channel_service::lifecycle::erase_org(db, org_user_id).await?;
     // User-provided OAuth client credentials (per-user override of the
     // service-level OAuth app). Hard-deleted, no platform-side cleanup,
     // no DELETE handler that would let the admin clear them ahead of
@@ -795,9 +807,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // Cascade memberships
     crate::services::org_role_scope_service::delete_all_for_org(db, org_user_id).await?;
     crate::services::feature_flag_service::delete_all_for_org(db, org_user_id).await?;
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .delete_many(doc! { "org_user_id": org_user_id })
-        .await?;
+    super::execution_permission_enrollment::jobs::delete_org_memberships(db, org_user_id).await?;
     // Cascade invites
     db.collection::<bson::Document>(crate::models::org_invite::COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
@@ -922,6 +932,14 @@ pub async fn create_membership(
         ));
     }
 
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<OrgMembership> = async {
+    super::org_membership_authority::fence_live_member(db, member_user_id, &mut transaction).await?;
+    super::org_membership_authority::fence_org(db, org_user_id, &mut transaction).await?;
     let collection = db.collection::<OrgMembership>(ORG_MEMBERSHIPS);
 
     // Look up any existing row (active or revoked) for this pair.
@@ -930,6 +948,7 @@ pub async fn create_membership(
             "org_user_id": org_user_id,
             "member_user_id": member_user_id,
         })
+        .session(&mut transaction)
         .await?;
 
     if let Some(row) = existing {
@@ -958,12 +977,14 @@ pub async fn create_membership(
                     "created_at": now_bson,
                 }},
             )
+            .session(&mut transaction)
             .await?;
         if changed.matched_count != 1 {
             return Err(AppError::Conflict(
                 "Membership changed; retry the invitation".into(),
             ));
         }
+        super::execution_permission_enrollment::lifecycle::apply(db, member_user_id, super::execution_permission_enrollment::lifecycle::Change::Membership { org: org_user_id, role: Some(role) }, &mut transaction).await?;
         return Ok(OrgMembership {
             id: row.id,
             org_user_id: org_user_id.to_string(),
@@ -988,13 +1009,18 @@ pub async fn create_membership(
         revoked_at: None,
     };
 
-    match collection.insert_one(&membership).await {
-        Ok(_) => Ok(membership),
+    match collection.insert_one(&membership).session(&mut transaction).await {
+        Ok(_) => {
+            super::execution_permission_enrollment::lifecycle::apply(db, member_user_id, super::execution_permission_enrollment::lifecycle::Change::Membership { org: org_user_id, role: Some(role) }, &mut transaction).await?;
+            Ok(membership)
+        },
         Err(e) if is_duplicate_key_error(&e) => Err(AppError::Conflict(
             "User is already a member of this org".to_string(),
         )),
         Err(e) => Err(AppError::DatabaseError(e)),
     }
+    }.await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// List the memberships of a given member user. Active by default;
@@ -1101,17 +1127,79 @@ pub async fn update_membership(
         return Err(AppError::BadRequest("No fields to update".to_string()));
     }
 
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .update_one(
-            doc! { "_id": membership_id, "revoked_at": bson::Bson::Null },
-            doc! { "$set": update },
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<OrgMembership> = async {
+        let current = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! {"_id":membership_id,"revoked_at":null})
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
+        super::org_membership_authority::fence_org(db, &current.org_user_id, &mut transaction)
+            .await?;
+        if role.is_some_and(|role| role != OrgRole::Admin) && current.role == OrgRole::Admin {
+            super::org_membership_authority::ensure_other_admin(
+                db,
+                &current.org_user_id,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+            super::node_service::retire_org_registrations_in_session(
+                db,
+                &current.org_user_id,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        if role.is_some_and(|r| !r.can_proxy()) {
+            super::org_channel_service::lifecycle::revoke_member_in_session(
+                db,
+                &mut transaction,
+                &current.org_user_id,
+                &current.member_user_id,
+            )
+            .await?;
+        }
+        if role == Some(OrgRole::Admin) {
+            super::org_membership_authority::fence_live_member(
+                db,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        let updated = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one_and_update(
+                doc! {"_id": membership_id,"revoked_at":null},
+                doc! {"$set":update},
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict("Membership changed; reload before editing".into())
+            })?;
+        super::execution_permission_enrollment::lifecycle::apply(
+            db,
+            &current.member_user_id,
+            super::execution_permission_enrollment::lifecycle::Change::Membership {
+                org: &current.org_user_id,
+                role: Some(updated.role),
+            },
+            &mut transaction,
         )
         .await?;
-
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .find_one(doc! { "_id": membership_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("membership {membership_id}")))
+        Ok(updated)
+    }
+    .await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// Soft-delete a membership by setting `revoked_at`.
@@ -1120,25 +1208,71 @@ pub async fn revoke_membership(
     org_user_id: &str,
     member_user_id: &str,
 ) -> AppResult<()> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let result = db
-        .collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .update_one(
-            doc! {
-                "org_user_id": org_user_id,
-                "member_user_id": member_user_id,
-                "revoked_at": bson::Bson::Null,
-            },
-            doc! { "$set": { "revoked_at": now } },
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        super::org_membership_authority::fence_org(db, org_user_id, &mut transaction).await?;
+        let current = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! {
+                "org_user_id":org_user_id,"member_user_id":member_user_id,"revoked_at":null
+            })
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
+        if current.role == OrgRole::Admin {
+            super::org_membership_authority::ensure_other_admin(
+                db,
+                org_user_id,
+                member_user_id,
+                &mut transaction,
+            )
+            .await?;
+            super::node_service::retire_org_registrations_in_session(
+                db,
+                org_user_id,
+                member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        let result = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! {"_id":&current.id,"revoked_at":null},
+                doc! {"$set":{"revoked_at":bson::DateTime::now()}},
+            )
+            .session(&mut transaction)
+            .await?;
+        if result.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Membership changed; reload before removal".into(),
+            ));
+        }
+        super::org_channel_service::lifecycle::revoke_member_in_session(
+            db,
+            &mut transaction,
+            org_user_id,
+            member_user_id,
         )
         .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound(
-            "active membership not found".to_string(),
-        ));
+        super::execution_permission_enrollment::lifecycle::apply(
+            db,
+            member_user_id,
+            super::execution_permission_enrollment::lifecycle::Change::Membership {
+                org: org_user_id,
+                role: None,
+            },
+            &mut transaction,
+        )
+        .await?;
+        Ok(())
     }
-    Ok(())
+    .await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// True when the actor is an active admin of the given org.
@@ -1191,7 +1325,8 @@ pub async fn list_admin_user_ids(
 /// Find all active memberships for `member_user_id`, bounded by a wall-clock
 /// timeout (see [`ORG_FALLBACK_TIMEOUT`]). The result is **already ordered**
 /// for proxy resolution: the user's `primary_org_id` (if set) comes first,
-/// then the rest by ascending `created_at` (earliest membership wins).
+/// then the rest by ascending `created_at` (earliest membership wins), with
+/// `org_user_id` as the deterministic tie-breaker.
 ///
 /// Returns `OrgQueryTimeout` if the underlying MongoDB query exceeds the
 /// timeout. Returns `Ok(vec![])` when the user has no memberships.
@@ -1210,7 +1345,7 @@ pub async fn find_active_memberships_with_timeout(
     let primary_org_id = user.primary_org_id.clone();
 
     let opts = FindOptions::builder()
-        .sort(doc! { "created_at": 1 })
+        .sort(doc! { "created_at": 1, "org_user_id": 1 })
         .build();
 
     let query = async {
@@ -1687,6 +1822,7 @@ mod tests {
         use chrono::Utc;
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: "11111111-2222-3333-4444-555555555555".to_string(),
             email: email.to_string(),
             password_hash: None,

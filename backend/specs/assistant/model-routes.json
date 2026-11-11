@@ -1,0 +1,17 @@
+{
+  "nyxagent/chat": {
+    "service_slug": "chrono-llm-public",
+    "model": "gpt-5.6-sol",
+    "path": "responses"
+  },
+  "nyxagent/research": {
+    "service_slug": "chrono-llm-public",
+    "model": "gpt-6-astra",
+    "path": "responses"
+  },
+  "nyxagent/channel": {
+    "service_slug": "llm-deepseek",
+    "model": "deepseek-flash",
+    "path": "responses"
+  }
+}

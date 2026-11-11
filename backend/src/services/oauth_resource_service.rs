@@ -43,17 +43,17 @@ pub fn mcp_resource_uri(config: &AppConfig) -> String {
 /// True when `resource` identifies the NyxID MCP endpoint (trailing-slash
 /// tolerant; comparison is on the canonical form).
 pub fn is_mcp_resource(config: &AppConfig, resource: &str) -> bool {
-    resource.trim_end_matches('/') == mcp_resource_uri(config)
+    config.canonical_base_url(resource.trim_end_matches('/')) == mcp_resource_uri(config)
 }
 
 /// Canonicalize a requested resource for narrowing comparison: MCP-endpoint
-/// variants collapse to the canonical `{BASE_URL}/mcp`; everything else is
-/// returned unchanged (user-service URIs are already exact-match).
+/// variants collapse to the canonical `{BASE_URL}/mcp`; other resources only
+/// normalize explicitly configured API aliases (paths remain exact-match).
 fn canonicalize_resource(config: &AppConfig, resource: &str) -> String {
     if is_mcp_resource(config, resource) {
         mcp_resource_uri(config)
     } else {
-        resource.to_string()
+        config.canonical_base_url(resource).into_owned()
     }
 }
 
@@ -79,7 +79,9 @@ pub fn filter_resource_narrowing(
     for resource in requested {
         validate_resource_uri(resource)?;
         let resource = canonicalize_resource(config, resource);
-        if granted_resources.iter().any(|granted| granted == &resource)
+        if granted_resources
+            .iter()
+            .any(|granted| config.canonical_base_url(granted) == resource)
             && !narrowed.iter().any(|existing| existing == &resource)
         {
             narrowed.push(resource.clone());
@@ -233,7 +235,7 @@ pub async fn resolve_token_resource_scope(
         }
 
         return Ok(OAuthTokenResourceScope {
-            resource_uris: grant_resource_uris.to_vec(),
+            resource_uris: config.canonical_resources(grant_resource_uris),
             allowed_service_ids: grant_allowed_service_ids.to_vec(),
             allow_all_services: grant_allow_all_services,
         });
@@ -370,6 +372,7 @@ async fn resolve_single_resource(
     actor_user_id: &str,
     resource: &str,
 ) -> AppResult<UserService> {
+    let resource = config.canonical_base_url(resource);
     let base = config.base_url.trim_end_matches('/');
     let prefix = format!("{base}/api/v1/proxy/s/");
     let Some(rest) = resource.strip_prefix(&prefix) else {
@@ -446,6 +449,48 @@ async fn resolve_org_service_by_slug(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_alias_resources_narrow_in_both_directions_without_widening() {
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        for path in ["/mcp", "/api/v1/proxy/s/test"] {
+            let old = vec![format!("https://old.example{path}")];
+            let new = vec![format!("https://new.example{path}")];
+            assert_eq!(filter_resource_narrowing(&config, &old, &new).unwrap(), new);
+            assert_eq!(filter_resource_narrowing(&config, &new, &old).unwrap(), new);
+            let foreign = vec![format!("https://old.example.evil{path}")];
+            assert!(filter_resource_narrowing(&config, &foreign, &old).is_err());
+        }
+        assert!(is_mcp_resource(&config, "https://old.example/mcp/"));
+        config.domain_aliases.base_urls.clear();
+        assert!(!is_mcp_resource(&config, "https://old.example/mcp"));
+    }
+
+    #[tokio::test]
+    async fn domain_alias_resources_resolve_mcp_and_mint_current_base() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let mut config = state.config;
+        config.base_url = "https://new.example".into();
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        let actor = uuid::Uuid::new_v4().to_string();
+        let old = vec!["https://old.example/mcp".into()];
+        let resolved = resolve_requested_resources(&state.db, &config, &actor, Some(&old))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resolved.mcp_resource_uri.as_deref(),
+            Some("https://new.example/mcp")
+        );
+        let scope = resolve_token_resource_scope(&state.db, &config, &actor, None, &old, &[], true)
+            .await
+            .unwrap();
+        assert_eq!(scope.resource_uris, ["https://new.example/mcp"]);
+        assert!(scope.allow_all_services);
+    }
+
     use mongodb::bson::doc;
     use uuid::Uuid;
 

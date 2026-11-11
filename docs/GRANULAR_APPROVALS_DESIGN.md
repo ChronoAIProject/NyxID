@@ -1,10 +1,63 @@
 # Granular Approvals Design
 
-Status: Proposal (no code yet)
+Status: Implemented in stages; historical proposal and baseline below. Current code includes operation descriptors, scoped grants, exact authority validation and MCP preparation/approval gates. Consult `approval_service`, `execution_authority` and MCP preparation/redeem paths for the live contract.
 Author: design exploration, 2026-05-29
+
+## Current implementation status (2026-10-19)
+
+The original proposal is retained below as dated design history, including its old call-site table and decisions. It is not a description of current enforcement. MCP now has preparation and approval enforcement, and exact grants bind live execution authority. Current details are defined by `approval_service`, `execution_authority` and MCP preparation/redeem code. This status does not assert every original proposal item is shipped or enabled; feature gates and rollout requirements remain applicable.
+
+## Current global default contract
+
+The unset global preference is **Writes only (default)**. **All requests** is
+stored `approval_required=true`; **Off** is stored false. An absent preference
+is represented separately, never converted to true by lazy notification-channel
+or tool-approval creation. API clients use `global_approval_mode` (`writes_only`,
+`all`, `off`); the legacy boolean response indicates whether any verbs are gated.
+Existing stored booleans, including unmarked unreleased W9.3 lazy true rows,
+keep their exact semantics. Owners explicitly reset to writes-only; no automatic
+migration guesses which true rows were intentional.
+
+| Execution path | Approval verb source |
+| --- | --- |
+| HTTP proxy | GET/HEAD/OPTIONS read; DELETE destructive; other/unknown methods write. POST classification consults trusted stored catalog operation marks for read-only or destructive effects; other raw methods retain method classification without additional endpoint reads. Method overrides cannot establish a read. |
+| MCP service tool | The exact prepared HTTP request plus trusted catalog metadata, using the same operation-effects contract as guest/webhook authorization. Remote-spec read hints cannot promote POSTs to reads. Meta discovery remains read-only. |
+| Catalog inference / LLM gateway | Catalog `inference` metadata plus the existing closed stateless-inference payload contract. Supported generation endpoints are read-class; storage, account/resource handles, provider-hosted effects and unknown extensions remain writes. No service-name inference. |
+| NyxAgent engine transport | The internal server-admitted POST `/v1/responses` marker plus the validated engine row contract marks the outer turn transport read-class. A caller header or arbitrary raw POST cannot acquire this marker. Tool callbacks have independent approval checks. |
+| SSH | Exec and tunnel remain write-class. |
+| Machine | Native machine access keeps its signed authority, lease and owner-confirmation checks. Service gateway calls use the HTTP/MCP descriptor; smart-HTTP upload-pack remains read-class, receive-pack write-class. |
+
+Default inference metadata is provided by `inference_service::default_inference`
+and backfill for supported model catalogs. Admin clears remain authoritative.
+The assistant consent layer's `stateless_inference` contract already distinguishes
+account-independent model generation from provider resource changes; approval
+classification reuses it. Normal inference does not grant permission to execute
+model-proposed tools. Unknowns remain writes.
+
+Method overrides in headers, query parameters or request fields remain writes,
+including overrides attached to GET/HEAD/OPTIONS on the LLM gateway. An already
+destructive operation retains its destructive classification.
+
+Machine Git fetch POSTs qualify as reads only with a single exact
+`application/x-git-upload-pack-request` content type and no method overrides.
+JSON/form Git bodies retain bounded override inspection; receive-pack is a write.
+
+The verb default applies only after explicit per-service/granular and org policy
+resolution. Explicit true still gates reads, explicit false allows writes, Deny
+still wins over Session bypass, and guests are refused whenever approval would
+be required. Auto-connected behavior and scheduled/durable authorization remain
+unchanged. See [the all-replica cutover](SECURITY_ROLLOUT_READINESS.md#required-approval-and-delivery)
+before relying on new-user write approval. The design history below describes
+the original granular-policy work.
+
+---
+
+## Historical proposal begins (2026-05-29)
+
+The original design statements, tables, line numbers, implementation gates and future-tense decisions below belong to that baseline, ending at the explicitly marked current execution-authority section.
 Related: per-service approval config (`ServiceApprovalConfig`), `approval_service`, proxy paths
 
-## Problem
+## Historical problem (2026-05-29 baseline)
 
 AI-service approval is currently **binary per (user, service)**. A `ServiceApprovalConfig`
 row carries only `approval_required: bool` and `approval_mode` (`per_request` | `grant`).
@@ -30,7 +83,7 @@ degenerates for MCP/SSH/LLM, where "everything is `POST /`" and one rule matches
 GitHub itself avoids raw-path rules by mapping many endpoints onto a **small set of
 named permissions** (Contents: read/write, Issues: read/write, ...).
 
-## Decisions (locked)
+## Historical decisions (2026-05-29 proposal)
 
 1. **Rule model: hybrid.** Semantic `read` / `write` / `destructive` classification
    (derived from the request, overridable) PLUS optional path-glob rules for power
@@ -38,13 +91,13 @@ named permissions** (Contents: read/write, Issues: read/write, ...).
 2. **Protocol scope: generalized now.** Introduce a protocol-agnostic
    `OperationDescriptor` and populate it for **HTTP, MCP, SSH, and LLM gateway** from
    the start, rather than retrofitting later.
-3. Deliverable: this design doc. Implementation gated on review.
+3. Deliverable: this design doc. Historical proposal: implementation was gated on review.
 
-## Current state (verified against code)
+## Historical state (verified for the 2026-05-29 proposal)
 
-Approval call sites today (`approval_service` fns: `approval_service.rs`):
+Approval call sites at the historical baseline (`approval_service` fns: `approval_service.rs`):
 
-| Path        | Handler / fn                                   | resolve | check | create | operation_summary today |
+| Path        | Handler / fn                                   | resolve | check | create | operation_summary at baseline |
 |-------------|------------------------------------------------|---------|-------|--------|-------------------------|
 | HTTP proxy  | `proxy.rs::execute_proxy_inner` (~1050)        | 1321    | 1367  | 1427   | `proxy:{METHOD} {path}` |
 | LLM gateway | `llm_gateway.rs::check_llm_approval` (1099)    | 1111    | 1137  | 1182   | `llm:{METHOD} {path}`   |
@@ -62,13 +115,13 @@ Key facts that shape the plan:
 - **SSH** captures no command/principal in the approval request (`operation_summary =
   "ssh:tunnel"`, `action_description = None`). Granular SSH approval requires
   threading the command/principal through first.
-- **MCP has no approval checks at all.** Adding the descriptor here is also adding the
+- **At the historical baseline, MCP had no approval checks.** Current MCP preparation/redeem paths enforce approvals and live authority; the following described the original gap.  Adding the descriptor here is also adding the
   *first* approval enforcement to MCP -- treat as a distinct, higher-risk workstream.
 - Grants (`ApprovalGrant`) are **service-scoped** (+ optional org-scoped). They carry
   no method/path scope, so any granularity on the request side would leak through a
   grant unless grants are also scoped.
 
-## Proposed design
+## Historical proposed design (2026-05-29)
 
 ### 1. `OperationDescriptor` (protocol-agnostic operation identity)
 
@@ -295,7 +348,13 @@ endpoint.
 - Approval prompt (history + Telegram/push + mobile) shows structured method/resource
   from the new `ApprovalRequest` fields.
 
-## Execution authority binding
+---
+
+## Current execution authority binding
+
+The dated historical proposal ends here. The following implementation contract describes subsequent execution-authority work.
+
+### Execution authority binding
 
 Approval fences bind *what* operation was approved. They do not bind *where the
 effect goes* or *which credential pays for it*. Those are the execution inputs,
@@ -402,6 +461,32 @@ fence.
 `ws_frame_injections` is not projected because it is unreachable from the HTTP
 exact-approval execution path.
 
+### Optional-provider authority on automatic no-auth connections
+
+Exact approvals separately persist `optional_provider_authority_digest` for the
+automatic no-auth optional-inheritance path. Its contract is
+`nyxid-exact-optional-provider-authority.v1`; the real execution-authority v1/v2
+projections and their rolling compatibility remain unchanged.
+
+The canonical metadata projection binds owner, connection and catalog identity,
+requirements in deterministic order, their scopes, normalized injection policy,
+provider slug/active state, and selectable legacy token identity,
+`state_version`, type and material presence. No credential bytes or secret-derived
+hashes enter this projection. Token absence is bound, so adding a token or changing
+optional policy cannot silently expand a pending approval's authority.
+
+Create and observe use a metadata-only snapshot: no decryption, refresh or
+`last_used_at` updates. After the shared read-only gates pass, redemption materializes
+the captured policy using the pinned token ID and lineage, then rechecks live
+eligibility and authority after any refresh. It compares the materialized
+resolution's authority before effects and passes the frozen delegated vector to
+MCP execution without resolving optional credentials again.
+
+User credential replacement advances `UserProviderToken.state_version`; normal
+OAuth refresh within the same lineage does not. Historical approvals lacking the
+additive fence cannot authorize new optional inheritance. Routes with no optional
+provider authority retain the existing v1/v2 compatibility behavior.
+
 ### Shared live evaluator
 
 Observe and redeem do not maintain independent catalog, generation, policy, or
@@ -437,7 +522,7 @@ on the row for audit. No automatic retry follows because the provider may have
 committed a non-idempotent effect; provider-specific read-back or human
 reconciliation must resolve the ambiguity outside this approval identity.
 
-## Security notes
+## Original proposal security notes (historical; execution-authority contract above is current)
 
 - `Deny` rules must short-circuit **before** credential resolution and before the
   downstream request is built.
@@ -460,7 +545,7 @@ reconciliation must resolve the ambiguity outside this approval identity.
   (`ssh_auth_mode = proxy_only`, or omit terminal access) and allow only `ssh exec`,
   where the command is visible to the rule engine.
 
-## Resolved decisions
+## Original proposal decisions (historical)
 
 1. **SSH tunnel stays coarse.** Per-command approval inside a live tunnel is infeasible
    (opaque interactive byte stream after handshake). Granular command matching applies

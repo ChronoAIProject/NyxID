@@ -363,7 +363,7 @@ Mask-on-blur, visibility-driven remask, and rotation-flow heartbeat behavior nee
 
 ### 10.3 api-key create + scope picker (v3.1) — ✅ shipped
 
-Scope picker lives in `#step-scope-picker` (wizard.html) with `initApiKeyCreateFlow` in wizard.js. Layout: name, owner (personal or org, hidden when no orgs), platform, read/write scopes, expiry in days, service-access radio + multi-select, node-access radio + multi-select, rate-limit pair, callback URL. Multi-select lists fetched lazily on "Select specific". Proxy allowlist at `server.rs::allowlist_for(FlowKind::ApiKeyCreate)` covers `GET /orgs`, `GET /user-services`, `GET /nodes`, `POST /api-keys` (body allowlist: 12 fields including `target_org_id`).
+Scope picker lives in `#step-scope-picker` (wizard.html) with `initApiKeyCreateFlow` in wizard.js. Layout: name, owner (personal or org, hidden when no orgs), platform, read/write scopes, expiry in days, service-access radio + multi-select, node-access radio + multi-select, rate-limit pair, callback URL. Multi-select lists fetched lazily on "Select specific". Proxy allowlist at `server.rs::allowlist_for(FlowKind::ApiKeyCreate)` covers `GET /orgs`, `GET /user-services`, `GET /nodes`, `POST /api-keys` (body allowlist includes `target_org_id` and explicit `never_expires`).
 
 ### 10.4 node register-token (v3.1) — ✅ shipped
 
@@ -454,3 +454,19 @@ tampered browser cannot smuggle the secret through the ack.
 ### 10.7 Server-side ack enforcement
 
 If real users hit the "tab died before ack" path often, revisit the `WizardPhase::AwaitingAck` design from §9. Would restore the explicit ack-before-close guarantee at the cost of a server state machine. Don't build until there's evidence it's needed.
+
+
+## New API-key lifetime and scope contract
+
+API-key creation starts with restricted service/node lists and a 90-day lifetime.
+`nyxid api-key create --expires-in-days 0` explicitly selects nonexpiry; omitting
+that option selects the finite server default. Local and hosted pairing prefill
+carry this intent, and confirmation shows the selected lifetime. Missing service
+or node CSV inputs never imply an allow-all grant. Switching owners clears broad
+grants and resets the lifetime to its finite default.
+
+The create success screen shows the server's stored `expires_at` value. A missing
+field from an old server is reported as unavailable rather than interpreted as
+nonexpiry. Rotation preserves the stored expiry and permissions. Rebuild the
+embedded wizard and verify its final composition seal whenever this flow changes.
+See [deployment and compatibility](API_KEY_ISSUANCE.md#deployment-and-compatibility).

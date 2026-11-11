@@ -126,16 +126,41 @@ pub async fn record_usage_settled(
     if credits == Credits::ZERO {
         return Ok(());
     }
+    let saved_tax = row
+        .funding
+        .as_ref()
+        .and_then(|funding| funding.wallet_tax_credits)
+        .unwrap_or(Credits::ZERO);
+    // Recovery callers may still hold the reservation-time row. Load the committed split.
+    let tax = if row.funding.as_ref().is_some_and(|funding| funding.settled) {
+        saved_tax
+    } else {
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "_id": &row.id })
+            .await?
+            .and_then(|saved| saved.funding)
+            .and_then(|funding| funding.wallet_tax_credits)
+            .unwrap_or(Credits::ZERO)
+    };
+    if tax < Credits::ZERO || tax > credits {
+        return Err(AppError::Internal("Invalid usage tax split".into()));
+    }
+    let mut postings = transfer(
+        format!("usage:{}", row.id),
+        format!("wallet:{}", row.billing_owner_id),
+        credits.checked_sub(tax)?,
+    );
+    postings.extend(transfer(
+        format!("tax:usage:{}", row.billing_owner_id),
+        format!("wallet:{}", row.billing_owner_id),
+        tax,
+    ));
     let entry = exact_entry(
         &row.billing_owner_id,
         &row.id,
         "usage_settled",
         format!("usage-settled:{}", row.id),
-        transfer(
-            format!("usage:{}", row.id),
-            format!("wallet:{}", row.billing_owner_id),
-            credits,
-        ),
+        postings,
         Some(row),
     );
     if append_and_confirm_dedupe(db, entry).await {
@@ -1561,6 +1586,8 @@ mod tests {
             return;
         };
         crate::services::audit_service::init_audit_chain_hmac_key(Zeroizing::new(*AUDIT_TEST_KEY));
+        let audit_key =
+            crate::services::audit_service::audit_chain_hmac_key().expect("audit key initialized");
 
         for reference in ["req-1", "req-2", "req-3"] {
             append_chained_entry(&db, entry(reference), TEST_KEY)
@@ -1572,7 +1599,7 @@ mod tests {
         // Re-anchoring an unchanged head is a no-op.
         assert_eq!(anchor_head(&db).await.expect("re-anchor"), None);
 
-        let check = check_head_anchor(&db, AUDIT_TEST_KEY)
+        let check = check_head_anchor(&db, audit_key)
             .await
             .expect("check anchored");
         assert_eq!(check.anchor_seq, Some(3));
@@ -1583,9 +1610,7 @@ mod tests {
         append_chained_entry(&db, entry("req-4"), TEST_KEY)
             .await
             .expect("append after anchor");
-        let check = check_head_anchor(&db, AUDIT_TEST_KEY)
-            .await
-            .expect("check lag");
+        let check = check_head_anchor(&db, audit_key).await.expect("check lag");
         assert!(check.break_info.is_none());
 
         // Truncating the tail past the anchor leaves a shorter chain that
@@ -1602,7 +1627,7 @@ mod tests {
             BillingLedgerStatus::Ok,
             "walk alone is blind"
         );
-        let check = check_head_anchor(&db, AUDIT_TEST_KEY)
+        let check = check_head_anchor(&db, audit_key)
             .await
             .expect("check truncated");
         let break_info = check.break_info.expect("truncation break");

@@ -7,9 +7,10 @@ export default defineConfig({
   base: "/credential-accept/",
   publicDir: false,
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: /^zod$/, replacement: path.resolve(__dirname, "./src/lib/zod-csp.ts") },
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+    ],
   },
   build: {
     outDir: "dist/credential-accept",

@@ -20,6 +20,13 @@ struct FakeLago {
 }
 #[async_trait::async_trait]
 impl LagoApi for FakeLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -111,6 +118,7 @@ pub(crate) async fn enable_billing_with_entitlement(
     service.slug = "api-twitter".into();
     service.billing = Some(ServiceBilling {
         byok_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "2".into(),
             lago_metric_code: "platform_svc_api-twitter_byok".into(),
@@ -121,6 +129,7 @@ pub(crate) async fn enable_billing_with_entitlement(
         }),
         // A very different master-key price proves shared OAuth picks its own lane.
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "99".into(),
             lago_metric_code: "platform_svc_api-twitter_pk".into(),
@@ -542,6 +551,7 @@ async fn x_billing_no_agent_route_still_accounts_for_received_event() {
             "sender_id": "20", "target": {"recipient_id": "10"}, "message_data": {"text": "private content"}
         }}]}}}).to_string().into_bytes()).await.unwrap();
     crate::services::channel_inbound_service::process_inbound_messages(
+        crate::services::channel_inbound_service::InboundSource::Webhook,
         crate::services::channel_inbound_service::InboundDeps::from(&state),
         &bot,
         &adapter,
@@ -659,6 +669,7 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
         }}]}}}).to_string().into_bytes()).await.unwrap();
     assert!(
         crate::services::channel_inbound_service::process_inbound_messages(
+            crate::services::channel_inbound_service::InboundSource::Webhook,
             crate::services::channel_inbound_service::InboundDeps::from(&state),
             &bot,
             &adapter,

@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::State,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -37,6 +37,7 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
 
     Json(serde_json::json!({
         "issuer": state.config.jwt_issuer,
+        "nyxid_api_origins": state.config.accepted_base_urls().collect::<Vec<_>>(),
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "pushed_authorization_request_endpoint": format!("{base}/oauth/par"),
@@ -120,12 +121,29 @@ pub async fn oauth_authorization_server_metadata(
 ///
 /// RFC 9728 Protected Resource Metadata. MCP clients use this to discover
 /// where to authenticate (NyxID's OAuth endpoints) before connecting.
-pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn oauth_protected_resource(
+    State(state): State<AppState>,
+    request_origin: Option<Extension<crate::mw::cookie_domain::McpResourceOrigin>>,
+) -> Json<serde_json::Value> {
     let base = &state.config.base_url;
+    // RFC 9728 §3.3: `resource` must be the identifier the client used. A
+    // client still configured with an API alias keeps that origin's `/mcp`;
+    // every other request keeps the canonical base.
+    let resource_base = request_origin
+        .as_ref()
+        .map_or(base.as_str(), |Extension(origin)| origin.0.as_str());
+    // An issuer pinned to a configured API alias must still be the discovery
+    // identity (RFC 8414), whichever API origin names the resource.
+    // Preserve the existing base for unrelated/custom issuers and unset aliases.
+    let authorization_server = state
+        .config
+        .accepted_base_urls()
+        .find(|origin| *origin == state.config.jwt_issuer)
+        .unwrap_or(base);
 
     Json(serde_json::json!({
-        "resource": format!("{base}/mcp"),
-        "authorization_servers": [base],
+        "resource": format!("{}/mcp", resource_base.trim_end_matches('/')),
+        "authorization_servers": [authorization_server],
         // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
         // use this list to decide which scopes to request.
         "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "machine", "offline_access"],
@@ -139,7 +157,7 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
 /// so relying parties can verify token signatures.
 pub async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "keys": [state.jwk_json]
+        "keys": state.jwt_keys.public_keys(&state.jwk_json)
     }))
 }
 
@@ -158,15 +176,141 @@ pub async fn openai_apps_challenge(State(state): State<AppState>) -> Response {
     }
 }
 
+/// GET /.well-known/apple-app-site-association
+///
+/// Apple fetches this file without authentication. Keep the response
+/// independent of the request host so both API origins in a migration overlap
+/// advertise the same released mobile application. The app identity comes
+/// from the existing APNs configuration; without it, claiming links would be
+/// worse than returning a cacheable 404.
+pub async fn apple_app_site_association(State(state): State<AppState>) -> Response {
+    let team_id = state
+        .config
+        .apns_team_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let bundle_id = state
+        .config
+        .apns_topic
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let (Some(team_id), Some(bundle_id)) = (team_id, bundle_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let app_id = format!("{team_id}.{bundle_id}");
+    let body = serde_json::json!({
+        "applinks": {
+            "details": [{
+                "appID": app_id,
+                "paths": [
+                    "/login/device",
+                    "/login/agent-key",
+                    "/assistant/machines",
+                    "/assistant/machines/*",
+                    "/chat",
+                    "/chat/*",
+                    "/groups/*",
+                    "/search",
+                    "/recents",
+                    "/automations",
+                    "/automations/*",
+                    "/assistant/automations",
+                    "/agents",
+                    "/agents/*",
+                    "/plugins",
+                    "/services",
+                    "/activity",
+                    "/account",
+                    "/account/*",
+                    "/terms",
+                    "/privacy"
+                ]
+            }]
+        }
+    });
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        Json(body),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED, OPENID_CONFIGURATION_SCOPES_SUPPORTED,
-        oauth_authorization_server_metadata, oauth_protected_resource, openai_apps_challenge,
-        openid_configuration,
+        apple_app_site_association, oauth_authorization_server_metadata, oauth_protected_resource,
+        openai_apps_challenge, openid_configuration,
     };
     use crate::services::oauth_broker_service::{BROKER_BINDING_SCOPE, BROKER_SUBJECT_TOKEN_TYPE};
-    use axum::extract::State;
+    use axum::{extract::State, http::header};
+
+    #[tokio::test]
+    async fn jwks_http_handler_publishes_active_and_retained_spki_keys_then_retires() {
+        use tower::ServiceExt;
+        let (old, current) = crate::crypto::jwt::test_rotation_keys();
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.jwt_keys = current;
+        // A stale legacy snapshot must not replace the validated active JWK.
+        state.jwk_json = serde_json::json!({"kid":"stale-legacy-snapshot"});
+        async fn fetch(state: crate::AppState) -> serde_json::Value {
+            let response = axum::Router::new()
+                .route("/.well-known/jwks.json", axum::routing::get(super::jwks))
+                .with_state(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/.well-known/jwks.json")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 16_384)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        let overlap = fetch(state.clone()).await;
+        let keys = overlap["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        for signer in [&old, &state.jwt_keys] {
+            let jwk = keys.iter().find(|key| key["kid"] == signer.kid).unwrap();
+            assert_eq!(jwk["kty"], "RSA");
+            assert_eq!(jwk["alg"], "RS256");
+            assert!(jwk.get("d").is_none());
+            assert!(jwk["n"].as_str().unwrap().len() >= 512);
+            let token = crate::crypto::jwt::generate_access_token(
+                signer,
+                &state.config,
+                &uuid::Uuid::new_v4(),
+                "openid",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let decoding =
+                jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_value(jwk.clone()).unwrap())
+                    .unwrap();
+            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+            validation.set_issuer(&[&state.config.jwt_issuer]);
+            validation.set_audience(&[&state.config.base_url]);
+            jsonwebtoken::decode::<crate::crypto::jwt::Claims>(&token, &decoding, &validation)
+                .unwrap();
+        }
+        state.jwt_keys.retained.clear();
+        let retired = fetch(state.clone()).await;
+        assert_eq!(retired["keys"].as_array().unwrap().len(), 1);
+        assert_eq!(retired["keys"][0]["kid"], state.jwt_keys.kid);
+    }
 
     #[test]
     fn public_discovery_scopes_do_not_include_broker_binding_scope() {
@@ -203,13 +347,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apple_app_site_association_uses_apns_identity_and_is_host_independent() {
+        use axum::{Router, body::Body, http::Request, routing::get};
+        use tower::ServiceExt;
+
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.apns_team_id = Some("TEAM123".into());
+        state.config.apns_topic = Some("fun.chrono-ai.nyxid".into());
+        let app = Router::new()
+            .route(
+                "/.well-known/apple-app-site-association",
+                get(apple_app_site_association),
+            )
+            .with_state(state);
+
+        let mut bodies = Vec::new();
+        for host in ["api.nyxid.ai", "nyx-api.chrono-ai.fun"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/.well-known/apple-app-site-association")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=300"
+            );
+            bodies.push(
+                axum::body::to_bytes(response.into_body(), 16_384)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        let value: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(
+            value["applinks"]["details"][0]["appID"],
+            "TEAM123.fun.chrono-ai.nyxid"
+        );
+        assert!(
+            value["applinks"]["details"][0]["paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "/login/device")
+        );
+    }
+
+    #[tokio::test]
+    async fn apple_app_site_association_is_not_found_without_apns_identity() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let response = apple_app_site_association(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn protected_resource_metadata_advertises_mcp_default_scopes() {
         // NyxID#1226: clients pick their requested scopes from this list, so
         // it must cover everything a defaulted MCP DCR client is granted.
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.base_url = "https://id.example.test".to_string();
 
-        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        let axum::Json(value) = oauth_protected_resource(State(state), None).await;
         assert_eq!(value["resource"], "https://id.example.test/mcp");
         let scopes: Vec<&str> = value["scopes_supported"]
             .as_array()
@@ -225,6 +431,34 @@ mod tests {
                 "protected-resource metadata missing MCP default scope: {scope}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn domain_alias_discovery_keeps_pinned_issuer_and_advertises_api_origins() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://new.example".into();
+        state.config.jwt_issuer = "https://old.example".into();
+        state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        state.config.domain_aliases.frontend_urls = vec!["https://old-app.example".into()];
+        let axum::Json(value) = openid_configuration(State(state.clone())).await;
+        assert_eq!(value["issuer"], "https://old.example");
+        assert_eq!(value["token_endpoint"], "https://new.example/oauth/token");
+        assert_eq!(
+            value["nyxid_api_origins"],
+            serde_json::json!(["https://new.example", "https://old.example"])
+        );
+        let axum::Json(resource) = oauth_protected_resource(State(state.clone()), None).await;
+        assert_eq!(resource["resource"], "https://new.example/mcp");
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["https://old.example"])
+        );
+        state.config.domain_aliases.base_urls.clear();
+        let axum::Json(resource) = oauth_protected_resource(State(state), None).await;
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["https://new.example"])
+        );
     }
 
     #[tokio::test]
@@ -350,7 +584,7 @@ mod tests {
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.base_url = "https://api.example.test".to_string();
 
-        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        let axum::Json(value) = oauth_protected_resource(State(state), None).await;
 
         assert_eq!(value["resource"], "https://api.example.test/mcp");
         assert_eq!(

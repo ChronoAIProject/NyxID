@@ -1,4 +1,5 @@
-import { useAppTranslation } from "@/i18n/use-app-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useCallback, useState, useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -50,125 +51,33 @@ export interface CommandItem {
 }
 
 export const ALL_ITEMS: readonly CommandItem[] = [
-  {
-    icon: Bot,
-    label: "Bot Setups",
-    to: "/onboarding/setups",
-    group: "navigation",
-  },
-  {
-    icon: Bot,
-    label: "Platform BotFather",
-    to: "/admin/platform-bots",
-    group: "admin",
-    requiresAdminWrite: true,
-  },
+  {icon: Bot, label: "Bot Setups", to: "/onboarding/setups", group: "navigation"},
+  {icon: Bot, label: "Platform BotFather", to: "/admin/platform-bots", group: "admin", requiresAdminWrite: true},
   { icon: Bot, label: "Assistant", to: "/assistant", group: "navigation" },
-  {
-    icon: CalendarClock,
-    label: "Automations",
-    to: "/assistant/automations",
-    group: "navigation",
-  },
-  {
-    icon: Server,
-    label: "Machines",
-    to: "/assistant/machines",
-    group: "navigation",
-  },
-  {
-    icon: KeyRound,
-    label: "Saved logins",
-    to: "/assistant/machines",
-    search: { tab: "logins" },
-    group: "navigation",
-  },
-  {
-    icon: LayoutDashboard,
-    label: "Dashboard",
-    to: "/dashboard",
-    group: "navigation",
-  },
+  { icon: CalendarClock, label: "Automations", to: "/assistant/automations", group: "navigation" },
+  { icon: Server, label: "Machines", to: "/assistant/machines", group: "navigation" },
+  { icon: KeyRound, label: "Saved logins", to: "/assistant/machines", search: { tab: "logins" }, group: "navigation" },
+  { icon: LayoutDashboard, label: "Dashboard", to: "/dashboard", group: "navigation" },
   { icon: Cable, label: "AI Services", to: "/keys", group: "navigation" },
   { icon: Building2, label: "Organizations", to: "/orgs", group: "navigation" },
   { icon: HardDrive, label: "Nodes", to: "/nodes", group: "navigation" },
-  {
-    icon: Radio,
-    label: "Channel Bots",
-    to: "/channel-bots",
-    group: "navigation",
-  },
-  {
-    icon: Bell,
-    label: "Notifications",
-    to: "/approvals/settings",
-    group: "navigation",
-  },
-  {
-    icon: ClipboardList,
-    label: "Approval History",
-    to: "/approvals/history",
-    group: "navigation",
-  },
-  {
-    icon: Lock,
-    label: "Active Grants",
-    to: "/approvals/grants",
-    group: "navigation",
-  },
-  {
-    icon: Code,
-    label: "Developer Apps",
-    to: "/developer/apps",
-    group: "navigation",
-  },
+  { icon: Radio, label: "Channel Bots", to: "/channel-bots", group: "navigation" },
+  { icon: Bell, label: "Notifications", to: "/approvals/settings", group: "navigation" },
+  { icon: ClipboardList, label: "Approval History", to: "/approvals/history", group: "navigation" },
+  { icon: Lock, label: "Active Grants", to: "/approvals/grants", group: "navigation" },
+  { icon: Code, label: "Developer Apps", to: "/developer/apps", group: "navigation" },
   { icon: Webhook, label: "Triggers", to: "/triggers", group: "navigation" },
   { icon: Sparkles, label: "AI Setup", to: "/ai-setup", group: "navigation" },
-  {
-    icon: BookMarked,
-    label: "Integration Guide",
-    to: "/integration-guide",
-    group: "navigation",
-  },
+  { icon: BookMarked, label: "Integration Guide", to: "/integration-guide", group: "navigation" },
   { icon: BookOpen, label: "Docs", to: "/docs", group: "navigation" },
   { icon: Settings, label: "Settings", to: "/settings", group: "navigation" },
-  {
-    icon: KeyRound,
-    label: "Authorized Apps",
-    to: "/settings/consents",
-    group: "navigation",
-  },
+  { icon: KeyRound, label: "Authorized Apps", to: "/settings/consents", group: "navigation" },
   { icon: Users, label: "Users", to: "/admin/users", group: "admin" },
-  {
-    icon: Ticket,
-    label: "Invite Codes",
-    to: "/admin/invite-codes",
-    group: "admin",
-  },
-  {
-    icon: ClipboardList,
-    label: "Audit Log",
-    to: "/admin/audit-log",
-    group: "admin",
-  },
-  {
-    icon: ChartNoAxesCombined,
-    label: "Usage",
-    to: "/admin/usage",
-    group: "admin",
-  },
-  {
-    icon: Bot,
-    label: "Service Accounts",
-    to: "/admin/service-accounts",
-    group: "admin",
-  },
-  {
-    icon: KeyRound,
-    label: "OAuth Clients",
-    to: "/admin/oauth-clients",
-    group: "admin",
-  },
+  { icon: Ticket, label: "Invite Codes", to: "/admin/invite-codes", group: "admin" },
+  { icon: ClipboardList, label: "Audit Log", to: "/admin/audit-log", group: "admin" },
+  { icon: ChartNoAxesCombined, label: "Usage", to: "/admin/usage", group: "admin" },
+  { icon: Bot, label: "Service Accounts", to: "/admin/service-accounts", group: "admin" },
+  { icon: KeyRound, label: "OAuth Clients", to: "/admin/oauth-clients", group: "admin" },
   { icon: ShieldCheck, label: "Roles", to: "/admin/roles", group: "admin" },
   { icon: Layers, label: "Groups", to: "/admin/groups", group: "admin" },
   { icon: Server, label: "Services", to: "/services", group: "admin" },
@@ -187,12 +96,7 @@ export const ALL_ITEMS: readonly CommandItem[] = [
     search: { tab: "nyxid", action: "create-key" },
     group: "action",
   },
-  {
-    icon: ShieldCheck,
-    label: "Review approvals",
-    to: "/approvals/history",
-    group: "action",
-  },
+  { icon: ShieldCheck, label: "Review approvals", to: "/approvals/history", group: "action" },
 ];
 
 export function CommandPalette({
@@ -202,7 +106,7 @@ export function CommandPalette({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useAppTranslation();
+  useUiTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const [query, setQueryRaw] = useState("");
@@ -221,11 +125,10 @@ export function CommandPalette({
     const q = query.toLowerCase();
     return visibleItems.filter(
       (item) =>
-        t(item.label).toLowerCase().includes(q) ||
         item.label.toLowerCase().includes(q) ||
         (item.to?.toLowerCase().includes(q) ?? false),
     );
-  }, [query, user, t]);
+  }, [query, user]);
 
   const handleSelect = useCallback(
     (item: CommandItem) => {
@@ -278,11 +181,7 @@ export function CommandPalette({
 
   useEffect(() => {
     function handleGlobalKey(e: KeyboardEvent) {
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement
-      )
-        return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         onOpenChange(!open);
@@ -302,20 +201,11 @@ export function CommandPalette({
     <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[18vh]">
       <div
         className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-        onClick={() => {
-          onOpenChange(false);
-          setQuery("");
-          setSelectedIndex(0);
-        }}
+        onClick={() => { onOpenChange(false); setQuery(""); setSelectedIndex(0); }}
         role="button"
         tabIndex={-1}
-        aria-label={t("Close search")}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") {
-            onOpenChange(false);
-            setQuery("");
-          }
-        }}
+        aria-label={translateUi("Close search")}
+        onKeyDown={(e) => { if (e.key === "Escape") { onOpenChange(false); setQuery(""); } }}
       />
 
       <div className="relative z-10 w-full max-w-[640px] flex flex-col">
@@ -326,13 +216,11 @@ export function CommandPalette({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("Search pages, actions, or keywords...")}
+            placeholder={translateUi("Search pages, actions, or keywords...")}
             className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
             autoFocus
           />
-          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 text-12 font-medium text-text-tertiary">
-            {t("esc")}
-          </kbd>
+          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 type-row-title text-text-tertiary">{translateUi("esc")}</kbd>
         </div>
 
         {/* Results */}
@@ -354,16 +242,12 @@ export function CommandPalette({
                 <item.icon
                   className={cn(
                     "h-4 w-4 shrink-0",
-                    i === selectedIndex
-                      ? "text-nyx-secondary-400"
-                      : "text-text-tertiary",
+                    i === selectedIndex ? "text-nyx-secondary-400" : "text-text-tertiary",
                   )}
                 />
-                <span className="flex-1">{t(item.label)}</span>
+                <span className="flex-1">{translateUi(item.label)}</span>
                 {item.group === "action" && (
-                  <span className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                    {t("Action")}
-                  </span>
+                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Action")}</span>
                 )}
               </button>
             ))}
@@ -371,8 +255,7 @@ export function CommandPalette({
         )}
 
         {query.trim() && filtered.length === 0 && (
-          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] py-8 text-center text-14 text-text-tertiary">
-            {t("No results for “{{query}}”", { query })}
+          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] py-8 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}&rdquo;
           </div>
         )}
       </div>

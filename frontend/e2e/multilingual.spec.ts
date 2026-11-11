@@ -102,7 +102,7 @@ test("Studio translates open forms across tabs without translating drafts", asyn
   await page.screenshot({ path: testInfo.outputPath("studio-service-draft-zh-TW.png") });
 
   await page.goto("/billing?mock=1");
-  await expect(page.getByRole("heading", { name: "帳單與用量", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "計費與用量", exact: true })).toBeVisible();
   await page.goto("/admin/users?mock=1");
   await expect(page.getByRole("heading", { name: "使用者管理", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "建立使用者", exact: true })).toBeVisible();

@@ -9,7 +9,7 @@ import onboardingEn from "@/features/nyxbot-onboarding/locales/en.json";
 import onboardingZhCN from "@/features/nyxbot-onboarding/locales/zh-CN.json";
 import onboardingZhTW from "@/features/nyxbot-onboarding/locales/zh-TW.json";
 import en from "./locales/en-overrides.json";
-import { registerCatalogLoader } from "./catalog-loader";
+import { registerCatalogLoader, waitForCatalogs } from "./catalog-loader";
 
 appI18n.addResourceBundle("en", "app", en);
 registerCatalogLoader("app", async (language) => {
@@ -28,7 +28,7 @@ for (const [language, namespaces] of Object.entries({
   }
 }
 
-export const appLanguageReady = appI18n.loadNamespaces("app");
+export const appLanguageReady = waitForCatalogs(appI18n.loadNamespaces("app"));
 
 /** Translate app-owned copy only; server data and user content stay verbatim. */
 export function translate(key: string, options?: TOptions): string {

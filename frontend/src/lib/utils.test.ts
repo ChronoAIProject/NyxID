@@ -22,6 +22,18 @@ describe("cn", () => {
     expect(cn("p-4", "p-2")).toBe("p-2");
   });
 
+  it("replaces a semantic text role as a whole while preserving color", () => {
+    expect(cn("type-input text-foreground", "type-secondary"))
+      .toBe("text-foreground type-secondary");
+    expect(cn("text-14 font-medium leading-none", "type-field-label"))
+      .toBe("type-field-label");
+  });
+
+  it("keeps responsive and public text assignments scoped", () => {
+    expect(cn("type-body sm:type-card-title unthemed:text-12", "sm:type-section-heading"))
+      .toBe("type-body unthemed:text-12 sm:type-section-heading");
+  });
+
   it("handles empty input", () => {
     expect(cn()).toBe("");
   });

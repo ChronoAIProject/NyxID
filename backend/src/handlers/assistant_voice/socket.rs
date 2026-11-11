@@ -19,8 +19,46 @@ use axum::{
 };
 use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+enum Authority {
+    Human(String),
+    Key,
+}
+
+/// Dedicated bounded wire projection; persisted model fields are never serialized directly.
+#[derive(Serialize)]
+struct FragmentResponse {
+    text: String,
+    start_ms: i64,
+    end_ms: i64,
+}
+fn fragments_response(
+    voice: Option<&crate::models::assistant_message::VoiceTranscript>,
+) -> Vec<FragmentResponse> {
+    let Some(voice) = voice else {
+        return Vec::new();
+    };
+    let mut bytes = 0usize;
+    voice
+        .fragments
+        .iter()
+        .take(crate::services::voice::transcript::MAX_FRAGMENTS)
+        .take_while(|f| {
+            bytes = bytes.saturating_add(f.text.len());
+            bytes <= crate::services::voice::transcript::MAX_TEXT_BYTES
+                && f.start_ms >= 0
+                && f.end_ms >= f.start_ms
+                && f.end_ms <= 1_830_000
+        })
+        .map(|f| FragmentResponse {
+            text: f.text.clone(),
+            start_ms: f.start_ms,
+            end_ms: f.end_ms,
+        })
+        .collect()
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -42,29 +80,60 @@ pub async fn stream(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    super::super::login_client_context::require_first_party_human(&auth)?;
+    open(state, auth, id, sid, headers, upgrade).await
+}
+
+pub(super) async fn open(
+    state: AppState,
+    auth: AuthUser,
+    id: String,
+    sid: String,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> AppResult<Response> {
     use crate::errors::voice_start::Stage;
     let prepared = async {
-        super::super::login_client_context::require_first_party_human(&auth)
-            .map_err(|e| Stage::Origin.error(e))?;
-        super::require_origin(&state, &headers).map_err(|e| Stage::Origin.error(e))?;
-        let human_session = auth
-            .session_id
-            .ok_or_else(|| {
-                Stage::Origin.error(AppError::Forbidden(
-                    "An active browser session is required".into(),
-                ))
-            })?
-            .to_string();
+        super::client_key::origin(&state, &auth, &headers).map_err(|e| Stage::Origin.error(e))?;
+        let authority = if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
+            Authority::Key
+        } else {
+            super::super::login_client_context::require_first_party_human(&auth)
+                .map_err(|e| Stage::Origin.error(e))?;
+            Authority::Human(
+                auth.session_id
+                    .ok_or_else(|| {
+                        Stage::Origin.error(AppError::Forbidden(
+                            "An active browser session is required".into(),
+                        ))
+                    })?
+                    .to_string(),
+            )
+        };
         let call =
             crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
                 .await
                 .map_err(|e| Stage::Thread.error(e))?;
+        crate::services::voice::client_key::access_call(
+            &state.db,
+            &auth,
+            &call,
+            "GET",
+            &format!("/voice/sessions/{sid}/stream"),
+            true,
+        )
+        .await?;
+        if call.dictation {
+            return Err(AppError::Forbidden(
+                "Dictation has a dedicated audio-only stream".into(),
+            ));
+        }
         let socket_id = uuid::Uuid::new_v4().to_string();
         crate::services::voice::session::claim_stream(&state.db, &call, &socket_id).await?;
-        Ok((human_session, call, socket_id))
+        Ok((authority, call, socket_id))
     }
     .await;
-    let (human_session, call, socket_id) = crate::services::voice::diagnostics::finish(
+    let (authority, call, socket_id) = crate::services::voice::diagnostics::finish(
         &state.db,
         &auth.user_id.to_string(),
         prepared,
@@ -109,7 +178,7 @@ pub async fn stream(
                     &state,
                     call.clone(),
                     socket,
-                    &human_session,
+                    &authority,
                     &socket_id,
                     input,
                     output,
@@ -126,7 +195,7 @@ async fn serve(
     state: &AppState,
     mut call: VoiceSession,
     mut socket: WebSocket,
-    human_session: &str,
+    authority: &Authority,
     socket_id: &str,
     input: Option<tokio::sync::mpsc::Sender<crate::services::voice::grok::ClientInput>>,
     mut output: Option<tokio::sync::mpsc::Receiver<crate::services::voice::grok::Output>>,
@@ -167,6 +236,11 @@ async fn serve(
                 let Some(audio)=audio else {return Ok(());};
                 let result=tokio::time::timeout(std::time::Duration::from_secs(2),async {
                     match audio {
+                        Output::Ready => {
+                            // Wake the authenticated snapshot path as soon as setup commits.
+                            tick.reset_immediately();
+                            Ok(())
+                        },
                         Output::StartFailed(error) => {
                             startup_reported = true; // Grok startup boundary already audited it.
                             socket.send(Message::Text(json!({"type":"start_failed","error":error}).to_string().into())).await
@@ -182,9 +256,21 @@ async fn serve(
             },
             _=tick.tick()=>{
                 crate::services::voice::session::refresh_stream(&state.db,&call,socket_id).await?;
-                if state.db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
-                    .find_one(doc! {"_id":human_session,"user_id":&call.user_id,"revoked":false,"expires_at":{"$gt":mongodb::bson::DateTime::now()}})
-                    .await?.is_none() { return Err(AppError::Unauthorized("Voice session expired".into())); }
+                match authority {
+                    Authority::Human(human_session) => {
+                        if state.db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
+                            .find_one(doc! {"_id":human_session,"user_id":&call.user_id,"revoked":false,"expires_at":{"$gt":mongodb::bson::DateTime::now()}})
+                            .await?.is_none() { return Err(AppError::Unauthorized("Voice session expired".into())); }
+                    }
+                    Authority::Key => {
+                        if let Err(error) = Box::pin(crate::services::voice::client_key::revalidate(&state.db,&call)).await {
+                            if crate::services::voice::client_key::permanent_authority_failure(&error) {
+                                crate::services::voice::client_key::end(&state.db,&call).await?;
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
                 crate::services::assistant_voice::require_enabled(&state.db,&call.user_id).await.map_err(|e|crate::errors::voice_start::Stage::Flag.error(e))?;
                 call=crate::services::voice::session::get(&state.db,&call.user_id,&call.conversation_id,&call.id).await?;
                 let captions:Vec<AssistantMessage>=state.db.collection(MESSAGES).find(doc!{"user_id":&call.user_id,
@@ -194,10 +280,17 @@ async fn serve(
                 let source_ids:Vec<_>=tasks.iter().map(|r|r.message_id.clone()).collect();
                 let sources:Vec<AssistantMessage>=state.db.collection(MESSAGES).find(doc!{"_id":{"$in":&source_ids},"user_id":&call.user_id}).await?.try_collect().await?;
                 let source_titles:std::collections::HashMap<_,_>=sources.into_iter().map(|m|(m.id,m.text.chars().take(120).collect::<String>())).collect();
-                let value=json!({"type":"snapshot","session":super::SessionResponse::from(call.clone()),
+                let notices:Vec<crate::services::voice::announcements::Announcement>=state.db.collection(crate::services::voice::announcements::COLLECTION)
+                    .find(doc!{"session_id":&call.id,"user_id":&call.user_id}).sort(doc!{"created_at":-1}).limit(8).await?.try_collect().await?;
+                let notice_states:Vec<_>=notices.iter().map(|n|json!({"request_id":n.request_id,
+                    "state":if n.state=="queued" && n.not_after.timestamp_millis()<chrono::Utc::now().timestamp_millis(){"expired"}else{n.state.as_str()}})).collect();
+                let value=json!({"type":"snapshot","session":super::SessionResponse::from(call.clone()),"announcements":notice_states,
                     "captions":captions.into_iter().rev().map(|m|json!({"id":m.id,"speaker":m.role,"text":m.text,
+                        "start_ms":m.voice.as_ref().map(|v|v.start_ms),"end_ms":m.voice.as_ref().map(|v|v.end_ms),
+                        "fragments":fragments_response(m.voice.as_ref()),
                         "sealed":m.voice.as_ref().is_some_and(|v|v.sealed),"complete":m.voice.as_ref().is_some_and(|v|v.complete)})).collect::<Vec<_>>(),
-                    "tasks":tasks.into_iter().rev().map(|r|json!({"id":r.id,"state":r.state,"turn_id":r.turn_id,
+                    "tasks":tasks.into_iter().rev().map(|r|json!({"id":r.id,"state":r.state,"outcome":crate::services::assistant_voice::request_outcome(&r),"turn_id":r.turn_id,
+                        "progress":r.progress.as_ref().map(|p|json!({"stage":p.stage,"detail":p.detail,"last_completed_step":p.last_completed_step,"completed_steps":p.completed_steps,"updated_at":p.updated_at})),
                         "pending_acknowledgement_ids":r.pending_acknowledgement_ids,
                         "title":source_titles.get(&r.message_id),"result_message_id":r.result_message_id})).collect::<Vec<_>>()});
                 tokio::time::timeout(std::time::Duration::from_secs(2),socket.send(Message::Text(value.to_string().into())))

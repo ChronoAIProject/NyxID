@@ -1,8 +1,9 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCatalogEntry } from "@/hooks/use-keys";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
-import { ConnectionArc } from "@/components/shared/connection-arc";
-import { ServiceIcon } from "@/components/service-icon";
+import { ConnectionIdentityHeading } from "@/components/shared/connection-identity-heading";
+import { ConnectLinkDetailRow } from "@/components/shared/connection-detail-row";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
@@ -23,6 +24,7 @@ import {
   useAppForm,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   connectLinkStorageKey,
@@ -49,7 +51,11 @@ import {
   validateConnectOAuthForm,
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
-import { cn } from "@/lib/utils";
+import type { CredentialFieldSpec } from "@/types/keys";
+import {
+  composeTokenExchangeCredential,
+  parseTokenExchangeCredential,
+} from "@/lib/token-exchange-credential";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -61,18 +67,31 @@ interface DeviceChallenge {
   readonly status: string;
 }
 
-export function ConnectLinkContent({
-  token,
-  embedded = false,
-  redirectOnTerminal = true,
-}: {
+interface ConnectLinkContentProps {
   readonly token: string;
   /** Render inside an existing dialog instead of the standalone hosted page. */
   readonly embedded?: boolean;
   /** Hosted pages return to the requesting app; chat modals stay in place. */
   readonly redirectOnTerminal?: boolean;
-}) {
-  const { t } = useUiTranslation();
+}
+
+export function ConnectLinkContent(props: ConnectLinkContentProps) {
+  useUiTranslation();
+  const { user } = useAuthStore();
+  return (
+    <ConnectLinkSession
+      key={`${user?.id ?? "anonymous"}:${props.token}`}
+      {...props}
+    />
+  );
+}
+
+function ConnectLinkSession({
+  token,
+  embedded = false,
+  redirectOnTerminal = true,
+}: ConnectLinkContentProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   const { isAuthenticated, isLoading, user } = useAuthStore();
   const [deviceChallenge, setDeviceChallenge] =
@@ -100,7 +119,9 @@ export function ConnectLinkContent({
   );
   const usePlatformKey =
     platformAvailable &&
-    (platformChoice ?? preview.data?.use_platform_key ?? true);
+    (preview.data?.assistant_intent_locked
+      ? preview.data.use_platform_key === true
+      : (platformChoice ?? preview.data?.use_platform_key ?? true));
   const complete = useCompleteConnectLink();
   const completeConnect = complete.mutateAsync;
   const cancel = useCancelHostedConnectLink();
@@ -485,47 +506,25 @@ export function ConnectLinkContent({
                     disabled={actionPending}
                     isLoading={preview.isPending}
                     onClick={() => void handlePreview()}
-                  >{t("Try again")}</Button>
+                  >{translateUi("Try again")}</Button>
                 ) : null}
               </div>
             ) : (
               <>
-                <div className="connection-card-heading space-y-5 text-center">
-                  <div
-                    className="flex items-start justify-center"
-                    role="img"
-                    aria-label={t("NyxID connects to {{service_name}}", { service_name: preview.data.service_name })}
-                  >
-                    <div className="flex w-20 flex-col items-center gap-2.5">
-                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        <NyxidIcon className="size-9" alt="" />
-                      </div>
-                      <span className="text-xs font-medium">{t("NyxID")}</span>
-                    </div>
-                    <ConnectionArc />
-                    <div className="flex w-20 flex-col items-center gap-2.5">
-                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        <ServiceIcon
-                          slug={preview.data.service_slug}
-                          iconUrl={catalog?.icon_url}
-                          size="xl"
-                          className="text-foreground"
-                        />
-                      </div>
-                      <span className="text-xs font-medium">
-                        {preview.data.service_name}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <h1 className="text-xl font-semibold leading-tight text-foreground sm:text-2xl">{t("NyxID wants to connect to your ")}{preview.data.service_name}
-                    </h1>
-                    <p className="text-sm text-muted-foreground">{t("Add your connection details and approve the request.")}</p>
-                  </div>
-                </div>
+                {preview.data.assistant_intent_locked ? (
+                  <p className="text-14 text-muted-foreground">{preview.data.use_platform_key ? translateUi("Use the NyxID platform connection. This link's intent is fixed.") : translateUi("Connect your own personal account. This link's intent is fixed.")}</p>
+                ) : null}
+                <ConnectionIdentityHeading
+                  className="connection-card-heading"
+                  serviceSlug={preview.data.service_slug}
+                  serviceName={preview.data.service_name}
+                  iconUrl={catalog?.icon_url}
+                  title={translateUi("NyxID wants to connect to your {{value1}}", { value1: preview.data.service_name })}
+                  subtitle={translateUi("Add your connection details and approve the request.")}
+                />
                 {submitError ? <ErrorBanner message={submitError} /> : null}
                 <RequestDetails preview={preview.data} />
-                {platformAvailable &&
+                {!preview.data.assistant_intent_locked && platformAvailable &&
                   catalog?.platform_key &&
                   preview.data.status === "pending" && (
                     <CredentialBindingChoice
@@ -540,14 +539,14 @@ export function ConnectLinkContent({
                   )}
                 {preview.data.status !== "pending" ? (
                   <ErrorBanner
-                    message={t("This connection request is {{status}}.", { status: preview.data.status })}
+                    message={translateUi("This connection request is {{value1}}.", { value1: preview.data.status })}
                   />
                 ) : null}
                 {oauthPopupOpen ? (
                   <p
-                    className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+                    className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-13 text-muted-foreground"
                     role="status"
-                  >{t("Finish authorization in the provider window, then return here.")}</p>
+                  >{translateUi("Finish authorization in the provider window, then return here.")}</p>
                 ) : null}
                 {preview.data.status === "pending" &&
                 !deviceChallenge &&
@@ -556,6 +555,11 @@ export function ConnectLinkContent({
                   preview.data.connect_method === "api_key" ? (
                     <CredentialForm
                       preview={preview.data}
+                      fields={
+                        preview.data.token_exchange_credential_fields ??
+                        catalog?.token_exchange_credential_fields ??
+                        []
+                      }
                       pending={actionPending}
                       onSubmit={handleCredentialSubmit}
                     />
@@ -576,7 +580,7 @@ export function ConnectLinkContent({
                       onClick={() => {
                         if (!withinCooldown()) void submitCompletion();
                       }}
-                    >{t("Approve connection")}{" "}
+                    >{translateUi("Approve connection")}{" "}
                       <ButtonIcon variant="primary">
                         <ArrowRight />
                       </ButtonIcon>
@@ -597,7 +601,7 @@ export function ConnectLinkContent({
                     variant="outline"
                     disabled={actionPending}
                     onClick={() => void submitCompletion()}
-                  >{t("Get a new code")}</Button>
+                  >{translateUi("Get a new code")}</Button>
                 ) : null}
                 {preview.data.status === "pending" ? (
                   <div className="flex justify-center">
@@ -607,14 +611,14 @@ export function ConnectLinkContent({
                       disabled={actionPending}
                       isLoading={cancel.isPending}
                       onClick={() => void handleCancel()}
-                    >{t("Decline")}</Button>
+                    >{translateUi("Decline")}</Button>
                   </div>
                 ) : null}
               </>
             )}
           </CardContent>
           {user?.email ? (
-            <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground">{t("Signed in as ")}<span className="text-foreground">{user.email}</span>
+            <div className="border-t border-border px-5 py-3 text-center text-13 text-muted-foreground">{translateUi("Signed in as ")}<span className="text-foreground">{user.email}</span>
             </div>
           ) : null}
         </Card>
@@ -624,7 +628,7 @@ export function ConnectLinkContent({
 }
 
 export function ConnectLinkReturnPage() {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const { linkId } = useParams({ strict: false }) as { linkId: string };
   const navigate = useNavigate();
   const { isAuthenticated, isLoading } = useAuthStore();
@@ -775,7 +779,7 @@ export function ConnectLinkReturnPage() {
               onClick={() =>
                 window.location.assign(`/connect/${encodeURIComponent(token)}`)
               }
-            >{t("Try again")}</Button>
+            >{translateUi("Try again")}</Button>
           </div>
         ) : null}
       </ConnectShell>
@@ -785,7 +789,7 @@ export function ConnectLinkReturnPage() {
     <ConnectShell>
       {recoveryError ? <ErrorBanner message={recoveryError} /> : null}
       <Card className="border-border/50">
-        <CardContent className="p-5 text-center text-12 text-muted-foreground">{t("Finishing the connection...")}</CardContent>
+        <CardContent className="p-5 text-center text-14 text-muted-foreground">{translateUi("Finishing the connection...")}</CardContent>
       </Card>
     </ConnectShell>
   );
@@ -793,14 +797,18 @@ export function ConnectLinkReturnPage() {
 
 function CredentialForm({
   preview,
+  fields,
   pending,
   onSubmit,
 }: {
   readonly preview: ConnectLinkPreview;
+  /** Declared token-exchange fields; when present each gets its own input
+   * and the values compose the JSON credential the backend validates. */
+  readonly fields: readonly CredentialFieldSpec[];
   readonly pending: boolean;
   readonly onSubmit: (values: ConnectCredentialForm) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [formError, setFormError] = useState<string | null>(null);
   const form = useAppForm<ConnectCredentialForm>({
     resolver: zodResolver(connectCredentialFormSchema),
@@ -812,19 +820,36 @@ function CredentialForm({
     },
   });
   const submit = form.handleSubmit((values) => {
-    const error = validateConnectCredentialForm(
-      values,
-      preview.requires_gateway_url,
+    const missing = fields.find(
+      (field) =>
+        !parseTokenExchangeCredential(values.credential)[field.name]?.trim(),
     );
+    const error = missing
+      ? `Enter ${missing.label}.`
+      : validateConnectCredentialForm(values, preview.requires_gateway_url);
     setFormError(error);
     if (!error) onSubmit(values);
   });
   const credential = form.watch("credential").trim();
   const endpointUrl = form.watch("endpoint_url").trim();
+  const structured = fields.length > 0;
+  const fieldValues = parseTokenExchangeCredential(credential);
   const submitDisabled =
     pending ||
     credential.length === 0 ||
+    (structured &&
+      fields.some((field) => !(fieldValues[field.name] ?? "").trim())) ||
     (preview.requires_gateway_url && endpointUrl.length === 0);
+  const setFieldValue = (name: string, value: string) =>
+    form.setValue(
+      "credential",
+      composeTokenExchangeCredential({
+        ...Object.fromEntries(
+          fields.map((field) => [field.name, fieldValues[field.name] ?? ""]),
+        ),
+        [name]: value,
+      }),
+    );
   const credentialLabel =
     preview.auth_key_name.trim() ||
     (preview.requires_gateway_url
@@ -837,31 +862,49 @@ function CredentialForm({
   return (
     <Form {...form}>
       <form className="space-y-4" onSubmit={(event) => void submit(event)}>
-        <FormField
-          control={form.control}
-          name="credential"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{credentialLabel}</FormLabel>
-              <FormControl>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  placeholder={credentialPlaceholder}
-                  {...field}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        {structured ? (
+          fields.map((spec) => (
+            <div key={spec.name} className="space-y-1.5">
+              <Label htmlFor={`connect-te-${spec.name}`}>{spec.label}</Label>
+              <Input
+                id={`connect-te-${spec.name}`}
+                type={spec.secret ? "password" : "text"}
+                autoComplete="off"
+                placeholder={
+                  spec.placeholder ?? translateUi("Enter {{value1}}", { value1: spec.label.toLowerCase() })
+                }
+                value={fieldValues[spec.name] ?? ""}
+                onChange={(event) => setFieldValue(spec.name, event.target.value)}
+              />
+            </div>
+          ))
+        ) : (
+          <FormField
+            control={form.control}
+            name="credential"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{credentialLabel}</FormLabel>
+                <FormControl>
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={credentialPlaceholder}
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
         {connectLinkShowsEndpointUrl(preview) ? (
           <FormField
             control={form.control}
             name="endpoint_url"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t("Service URL")}</FormLabel>
+                <FormLabel>{translateUi("Service URL")}</FormLabel>
                 <FormControl>
                   <Input type="url" placeholder="https://" {...field} />
                 </FormControl>
@@ -871,7 +914,7 @@ function CredentialForm({
           />
         ) : null}
         {preview.api_key_instructions ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {preview.api_key_instructions}
           </p>
         ) : null}
@@ -883,7 +926,7 @@ function CredentialForm({
             variant="primary"
             disabled={submitDisabled}
             isLoading={pending}
-          >{t("Approve & connect")}{" "}
+          >{translateUi("Approve & connect")}{" "}
             <ButtonIcon variant="primary">
               <ArrowRight />
             </ButtonIcon>
@@ -903,7 +946,7 @@ function OAuthSetupForm({
   readonly pending: boolean;
   readonly onSubmit: (values: ConnectOAuthForm) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const [formError, setFormError] = useState<string | null>(null);
   const requiresClientCredentials = connectLinkNeedsOAuthCredentials(preview);
   const form = useAppForm<ConnectOAuthForm>({
@@ -941,7 +984,7 @@ function OAuthSetupForm({
             name="endpoint_url"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t("Service URL")}</FormLabel>
+                <FormLabel>{translateUi("Service URL")}</FormLabel>
                 <FormControl>
                   <Input type="url" placeholder="https://" {...field} />
                 </FormControl>
@@ -957,7 +1000,7 @@ function OAuthSetupForm({
               name="oauth_client_id"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("OAuth client ID")}</FormLabel>
+                  <FormLabel>{translateUi("OAuth client ID")}</FormLabel>
                   <FormControl>
                     <Input autoComplete="off" {...field} />
                   </FormControl>
@@ -970,7 +1013,7 @@ function OAuthSetupForm({
               name="oauth_client_secret"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t("OAuth client secret")}</FormLabel>
+                  <FormLabel>{translateUi("OAuth client secret")}</FormLabel>
                   <FormControl>
                     <Input type="password" autoComplete="off" {...field} />
                   </FormControl>
@@ -988,7 +1031,7 @@ function OAuthSetupForm({
             variant="primary"
             disabled={submitDisabled}
             isLoading={pending}
-          >{t("Approve & continue")}{" "}
+          >{translateUi("Approve & continue")}{" "}
             <ButtonIcon variant="primary">
               <ArrowRight />
             </ButtonIcon>
@@ -1004,66 +1047,43 @@ export function RequestDetails({
 }: {
   readonly preview: ConnectLinkPreview;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="space-y-2 border-y border-border py-4">
       <div className="space-y-1">
         <ConnectLinkDetailRow
-          label={t("Requested by")}
+          label={translateUi("Requested by")}
           value={preview.requested_by ?? "Your NyxID account"}
         />
         {preview.label ? (
-          <ConnectLinkDetailRow label={t("Connection name")} value={preview.label} />
+          <ConnectLinkDetailRow label={translateUi("Connection name")} value={preview.label} />
         ) : null}
         {preview.scopes.length > 0 ? (
           <ConnectLinkDetailRow
-            label={t("Requested permissions")}
+            label={translateUi("Requested permissions")}
             value={preview.scopes.join(", ")}
           />
         ) : null}
       </div>
       {preview.api_key_url ? (
         <a
-          className="inline-flex items-center gap-1.5 px-4 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1.5 px-4 type-row-title text-muted-foreground hover:text-foreground"
           href={preview.api_key_url}
           target="_blank"
           rel="noreferrer"
-        >{t("Credential setup")}{" "}
+        >{translateUi("Credential setup")}{" "}
           <ExternalLink className="size-3" aria-hidden="true" />
         </a>
       ) : null}
       {preview.scopes.length > 0 &&
       (preview.connect_method === "oauth" ||
         preview.connect_method === "device_code") ? (
-        <p className="px-4 text-xs text-muted-foreground">{t("These additional permissions will be requested on top of the provider defaults.")}</p>
+        <p className="px-4 text-13 text-muted-foreground">{translateUi("These additional permissions will be requested on top of the provider defaults.")}</p>
       ) : null}
     </div>
   );
 }
 
-export function ConnectLinkDetailRow({
-  label,
-  value,
-  capitalizeValue = false,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly capitalizeValue?: boolean;
-}) {
-  return (
-    <div className="flex justify-between gap-4 px-4 py-1 text-xs">
-      <span className="text-muted-foreground">{label}</span>
-      <span
-        className={cn(
-          "min-w-0 break-words text-right font-medium text-foreground",
-          capitalizeValue && "capitalize",
-        )}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
 
 function DeviceCodePanel({
   code,
@@ -1076,21 +1096,21 @@ function DeviceCodePanel({
   readonly interval: number;
   readonly status: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   return (
     <div className="space-y-3 rounded-lg border border-border/50 p-4">
-      <p className="text-12 text-muted-foreground">{t("Enter this code at the provider. NyxID will finish the connection after authorization.")}</p>
-      <p className="font-mono text-15 font-semibold text-foreground">
+      <p className="text-14 text-muted-foreground">{translateUi("Enter this code at the provider. NyxID will finish the connection after authorization.")}</p>
+      <p className="font-mono type-card-title text-foreground">
         {code}
       </p>
-      <p className="text-11 text-muted-foreground" role="status">
+      <p className="text-13 text-muted-foreground" role="status">
         {status === "slow_down"
-          ? t("Provider requested a slower check. Checking again in {{interval}} seconds.", { interval: interval })
-          : t("Checking automatically every {{interval}} seconds.", { interval: interval })}
+          ? translateUi("Provider requested a slower check. Checking again in {{value1}} seconds.", { value1: interval })
+          : translateUi("Checking automatically every {{value1}} seconds.", { value1: interval })}
       </p>
       <div className="flex flex-wrap justify-end gap-2">
         <Button asChild variant="outline">
-          <a href={url} target="_blank" rel="noreferrer">{t("Open provider")}</a>
+          <a href={url} target="_blank" rel="noreferrer">{translateUi("Open provider")}</a>
         </Button>
       </div>
     </div>
@@ -1106,7 +1126,7 @@ export function TerminalPanel({
   readonly serviceName?: string;
   readonly callbackUrl: string | null;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const completed = status === "completed";
   return (
     <section
@@ -1121,25 +1141,25 @@ export function TerminalPanel({
         )}
       </div>
       {completed ? (
-        <p className="mb-3 flex items-center gap-2 text-sm font-medium text-success">
-          <CheckCircle2 className="size-4" />{t("Connection completed")}</p>
+        <p className="mb-3 flex items-center gap-2 type-row-title text-success">
+          <CheckCircle2 className="size-4" />{translateUi("Connection completed")}</p>
       ) : null}
-      <h1 className="text-28 font-semibold leading-tight text-foreground sm:text-36">
+      <h1 className="type-metric text-foreground sm:type-metric">
         {completed
-          ? t("{{value}} connected", { value: serviceName ?? t("Service") })
+          ? translateUi("{{value1}} connected", { value1: serviceName ?? "Service" })
           : status === "cancelled"
-            ? t("Connection cancelled")
-            : t("Connection request expired")}
+            ? translateUi("Connection cancelled")
+            : translateUi("Connection request expired")}
       </h1>
-      <p className="mt-8 text-sm text-muted-foreground sm:mt-12 sm:text-base">
+      <p className="mt-8 text-14 text-muted-foreground sm:mt-12 sm:text-14">
         {callbackUrl
-          ? t("Returning to the requesting application...")
+          ? translateUi("Returning to the requesting application...")
           : completed
-            ? t("You may now close this page.")
-            : t("You may now close this page or return to the requesting application.")}
+            ? translateUi("You may now close this page.")
+            : translateUi("You may now close this page or return to the requesting application.")}
       </p>
       {completed && !callbackUrl ? (
-        <p className="mt-2 text-xs text-muted-foreground">{t("Your agent can now retry the original request.")}</p>
+        <p className="mt-2 text-13 text-muted-foreground">{translateUi("Your agent can now retry the original request.")}</p>
       ) : null}
     </section>
   );
@@ -1152,6 +1172,7 @@ function ConnectShell({
   readonly children: React.ReactNode;
   readonly embedded?: boolean;
 }) {
+  useUiTranslation();
   if (embedded) {
     return <EmbeddedConnectShell>{children}</EmbeddedConnectShell>;
   }
@@ -1159,20 +1180,23 @@ function ConnectShell({
 }
 
 function EmbeddedConnectShell({ children }: { children: React.ReactNode }) {
+  useUiTranslation();
   return (
     <div className="flex w-full flex-col gap-5 text-foreground">{children}</div>
   );
 }
 
 function StandaloneConnectShell({ children }: { children: React.ReactNode }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   useApplyTheme();
   return (
     <main className="connect-link-shell flex min-h-dvh items-center justify-center px-4 py-8 text-foreground">
       <div className="relative z-10 flex w-full max-w-lg flex-col gap-5">
         {children}
-        <p className="text-center text-xs text-muted-foreground">{t("Service connection via NyxID")}</p>
+        <p className="text-center text-13 text-muted-foreground">{translateUi("Service connection via NyxID")}</p>
       </div>
     </main>
   );
 }
+
+export { ConnectLinkDetailRow };

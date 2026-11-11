@@ -24,6 +24,11 @@ use serde_json::{Value, json};
 
 #[derive(Clone)]
 pub(crate) struct OrnnSkillRead;
+/// Identity assertion for catalog/search/authoring reads. It retains the
+/// historical signed-person requirement without granting the bound-pin
+/// connection exception carried by `OrnnSkillRead`.
+#[derive(Clone)]
+pub(crate) struct OrnnIdentityRead;
 #[derive(Clone, Copy)]
 pub(crate) struct OrnnSkillPublication;
 /// Drafting's pre-review format check. Never worth an owner approval prompt:
@@ -88,23 +93,24 @@ struct OrnnFetch<'a> {
     chat: Option<std::sync::Arc<ChatAuthority>>,
     method: http::Method,
     body: Body,
+    bound_skill_read: bool,
 }
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
-        self.classified_request(http::Method::GET, path, Vec::new())
+        self.classified_request(http::Method::GET, path, Vec::new(), false)
             .await
             .into_app_result()
     }
 
     async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
-        self.classified_request(method, path, body)
+        self.classified_request(method, path, body, false)
             .await
             .into_app_result()
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
-        self.classified_request(method, path, body).await
+        self.classified_request(method, path, body, false).await
     }
 
     async fn classified_as_owner(
@@ -120,17 +126,28 @@ impl skills::OrnnReader for Reader<'_> {
             scopes: None,
             chat: None,
         }
-        .classified_request(method, path, body)
+        .classified_request(method, path, body, false)
         .await
     }
 }
 
 impl Reader<'_> {
+    fn bound_skill<'a>(
+        &'a self,
+        agent: &'a crate::models::assistant_agent::AssistantAgent,
+    ) -> BoundSkillReader<'a> {
+        BoundSkillReader {
+            reader: self,
+            agent,
+        }
+    }
+
     async fn classified_request(
         &self,
         method: http::Method,
         path: &str,
         body: Vec<u8>,
+        bound_skill_read: bool,
     ) -> OrnnOutcome {
         // A proxy request is a substantial state machine. Poll it as its own
         // task so nested native MCP dispatch does not accumulate its debug
@@ -151,6 +168,7 @@ impl Reader<'_> {
                 chat,
                 method,
                 body: Body::from(body),
+                bound_skill_read,
             }))
             .await
         }));
@@ -158,6 +176,65 @@ impl Reader<'_> {
             Ok(Ok(outcome)) => outcome,
             _ => OrnnOutcome::Uncertain,
         }
+    }
+}
+
+/// Reader used only after `agent_skill_service::read` has resolved and
+/// validated the agent's exact attached pin.  The marker is intentionally
+/// separate from `Reader` so catalog search, version previews and publication
+/// never receive the bound-skill grant exception.
+struct BoundSkillReader<'a> {
+    reader: &'a Reader<'a>,
+    agent: &'a crate::models::assistant_agent::AssistantAgent,
+}
+
+#[async_trait::async_trait]
+impl skills::OrnnReader for BoundSkillReader<'_> {
+    async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        self.classified(http::Method::GET, path, Vec::new())
+            .await
+            .into_app_result()
+    }
+
+    async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
+        self.classified(method, path, body).await.into_app_result()
+    }
+
+    async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
+        let bound = method == http::Method::GET
+            && body.is_empty()
+            && self
+                .agent
+                .skills
+                .iter()
+                .filter(|pin| !pin.disabled)
+                .any(|pin| {
+                    path == format!(
+                        "/api/v1/skills/{}/versions/{}/download",
+                        pin.skill_id, pin.version
+                    ) || pin.dependencies.iter().any(|dep| {
+                        path == format!(
+                            "/api/v1/skills/{}/versions/{}/download",
+                            dep.skill_id, dep.version
+                        )
+                    })
+                });
+        if !bound {
+            audit_skill_read_refusal(self.reader.state, self.reader.person, "skill_not_bound");
+            return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
+        }
+        self.reader
+            .classified_request(method, path, body, true)
+            .await
+    }
+
+    async fn classified_as_owner(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> OrnnOutcome {
+        self.classified(method, path, body).await
     }
 }
 
@@ -171,9 +248,13 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         chat,
         method,
         body,
+        bound_skill_read,
     } = request;
     let publication = method != http::Method::GET;
     if !ornn_operation_allowed(&method, path, publication) {
+        if bound_skill_read {
+            audit_skill_read_refusal(state, person, "operation_restriction");
+        }
         return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
     }
     // Fixed catalog selection; no caller-supplied destination, method or headers.
@@ -186,7 +267,12 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         .await
     {
         Ok(Some(service)) => service,
-        Ok(None) => return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable),
+        Ok(None) => {
+            if bound_skill_read {
+                audit_skill_read_refusal(state, person, "service_unavailable");
+            }
+            return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable);
+        }
         Err(error) => return OrnnOutcome::LocalError(error.into()),
     };
     let mut auth = match super::assistant_team::owner_auth(person) {
@@ -203,7 +289,7 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         auth.api_key_id = Some(key);
     }
     auth.assistant_operation_scopes = scopes;
-    auth.assistant_turn_fence = chat.as_ref().map(|chat| chat.turn_fence());
+    auth.assistant_turn_fence = chat.as_ref().map(|chat| Box::new(chat.turn_fence()));
     auth.assistant_chat = chat;
     let Ok(mut request) = Request::builder()
         .method(method)
@@ -221,7 +307,10 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     request
         .extensions_mut()
         .insert(super::assistant_nyxagent::SERVER_TURN_POLICY);
-    request.extensions_mut().insert(OrnnSkillRead);
+    request.extensions_mut().insert(OrnnIdentityRead);
+    if bound_skill_read {
+        request.extensions_mut().insert(OrnnSkillRead);
+    }
     if publication {
         request.extensions_mut().insert(OrnnSkillPublication);
         if path.split('?').next() == Some("/api/v1/skill-format/validate") {
@@ -241,12 +330,42 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     {
         Ok(response) => response,
         Err(AppError::ApiKeyScopeForbidden(message)) => {
+            if bound_skill_read {
+                let reason = if message.to_ascii_lowercase().contains("operation") {
+                    "operation_restriction"
+                } else {
+                    "grant_refused"
+                };
+                audit_skill_read_refusal(state, person, reason);
+            }
             return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ScopeForbidden(message));
         }
-        Err(_) => return OrnnOutcome::ProxyError,
+        Err(AppError::Forbidden(_) | AppError::Unauthorized(_)) => {
+            if bound_skill_read {
+                audit_skill_read_refusal(state, person, "grant_refused");
+            }
+            return OrnnOutcome::ProxyError;
+        }
+        Err(_) => {
+            if bound_skill_read {
+                audit_skill_read_refusal(state, person, "proxy_error");
+            }
+            return OrnnOutcome::ProxyError;
+        }
     };
     if !response.status().is_success() {
         let status = response.status().as_u16();
+        if bound_skill_read {
+            audit_skill_read_refusal(
+                state,
+                person,
+                if matches!(status, 401 | 403) {
+                    "grant_refused"
+                } else {
+                    "upstream_error"
+                },
+            );
+        }
         // The status is complete once headers arrive. The problem body is
         // bounded in size and time; a slow or oversized body yields `Unknown`.
         let body = tokio::time::timeout(
@@ -274,6 +393,19 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         Ok(bytes) => OrnnOutcome::Ok(bytes.to_vec()),
         Err(_) => OrnnOutcome::Interrupted,
     }
+}
+
+fn audit_skill_read_refusal(state: &AppState, person: &str, reason: &'static str) {
+    crate::services::audit_service::log_async(
+        state.db.clone(),
+        Some(person.to_owned()),
+        "assistant_skill_read_refused".into(),
+        Some(json!({"reason": reason})),
+        None,
+        None,
+        None,
+        None,
+    );
 }
 
 /// Ornn routes that publish skill content without NyxID's review: create
@@ -417,7 +549,94 @@ pub async fn set(
     ))
 }
 
-/// The result of testing one attached pin the way its agent reads it.
+pub async fn set_preload(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, skill_id)): Path<(String, String)>,
+    Json(selection): Json<crate::services::agent_skill_preload::Selection>,
+) -> AppResult<Json<skills::SkillsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &actor).await?;
+    Ok(Json(
+        crate::services::agent_skill_preload::set(
+            &state.db,
+            &Reader {
+                state: &state,
+                person: &actor,
+                thread_key: None,
+                scopes: None,
+                chat: None,
+            },
+            &actor,
+            &id,
+            &skill_id,
+            &selection,
+        )
+        .await?,
+    ))
+}
+
+/// Transport adapter for automatic reads: retain the live conversation key,
+/// operation restrictions and approval policy used by native skill_read.
+pub(crate) fn preload_context(
+    state: AppState,
+) -> std::sync::Arc<dyn crate::services::agent_skill_preload::ContextProvider> {
+    std::sync::Arc::new(PreloadContext(state))
+}
+
+struct PreloadContext(AppState);
+
+#[async_trait::async_trait]
+impl crate::services::agent_skill_preload::ContextProvider for PreloadContext {
+    async fn prepare(
+        &self,
+        row: &crate::models::assistant_conversation::AssistantConversation,
+        agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        preload_for_turn(&self.0, row, agent).await
+    }
+}
+
+pub(crate) async fn preload_for_turn(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) -> AppResult<String> {
+    if !crate::services::agent_skill_preload::enabled(agent, row.guest_turn) {
+        return Ok(String::new());
+    }
+    let chat = acks::for_key(&state.db, &row.user_id, Some(&row.credential_api_key_id))
+        .await?
+        .filter(|chat| {
+            chat.turn_live
+                && !chat.turn_stopped
+                && !chat.guest
+                && chat.agent_id == agent.id
+                && chat.conversation_id == row.id
+                && chat.turn_id.as_deref()
+                    == row.active_turn.as_ref().map(|turn| turn.turn_id.as_str())
+        })
+        .ok_or_else(|| {
+            AppError::Forbidden("Live owner turn required for skill preloading".into())
+        })?;
+    let reader = Reader {
+        state,
+        person: &row.user_id,
+        thread_key: Some(&row.credential_api_key_id),
+        scopes: Some(&agent.operation_scopes),
+        chat: Some(std::sync::Arc::new(chat)),
+    };
+    Ok(crate::services::agent_skill_preload::instructions(
+        &reader.bound_skill(agent),
+        agent,
+        row.guest_turn,
+    )
+    .await)
+}
+
+/// Owner-authenticated package/integrity preview of one attached pin. Runtime
+/// additionally checks the live thread's key, operation scope and policy.
 #[derive(Debug, Serialize)]
 pub struct SkillTestResponse {
     pub skill_id: String,
@@ -427,7 +646,7 @@ pub struct SkillTestResponse {
     pub disabled: bool,
     pub description: String,
     pub size_bytes: usize,
-    /// Whether the agent can read this pin now (false while disabled).
+    /// Whether this pin is enabled and readable by the signed-in owner now.
     pub readable: bool,
     /// The start of SKILL.md as the agent reads it.
     pub excerpt: String,
@@ -468,7 +687,15 @@ pub async fn preview_attached(
     let (readable, excerpt) = if pin.disabled {
         (false, String::new())
     } else {
-        let page = skills::read(&reader, &agent, &pin.skill_id, None, "SKILL.md", 0).await?;
+        let page = skills::read(
+            &reader.bound_skill(&agent),
+            &agent,
+            &pin.skill_id,
+            None,
+            "SKILL.md",
+            0,
+        )
+        .await?;
         let text: String = page["content"]
             .as_str()
             .unwrap_or_default()
@@ -666,15 +893,37 @@ pub(crate) async fn dispatch(
                 scopes: Some(&agent.operation_scopes),
                 chat: Some(std::sync::Arc::new(chat.clone())),
             };
-            skills::read(
-                &reader,
-                &agent,
-                arg(args, "skill"),
-                args["dependency"].as_str(),
-                args["path"].as_str().unwrap_or("SKILL.md"),
-                args["offset"].as_u64().unwrap_or(0) as usize,
-            )
-            .await?
+            let bound = agent.skills.iter().any(|pin| {
+                !pin.disabled
+                    && (pin.skill_id == arg(args, "skill") || pin.name == arg(args, "skill"))
+                    && args["dependency"].as_str().is_none_or(|dependency| {
+                        pin.dependencies.iter().any(|candidate| {
+                            candidate.skill_id == dependency || candidate.name == dependency
+                        })
+                    })
+            });
+            if !bound {
+                audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
+                skills::read(
+                    &reader,
+                    &agent,
+                    arg(args, "skill"),
+                    args["dependency"].as_str(),
+                    args["path"].as_str().unwrap_or("SKILL.md"),
+                    args["offset"].as_u64().unwrap_or(0) as usize,
+                )
+                .await
+            } else {
+                skills::read(
+                    &reader.bound_skill(&agent),
+                    &agent,
+                    arg(args, "skill"),
+                    args["dependency"].as_str(),
+                    args["path"].as_str().unwrap_or("SKILL.md"),
+                    args["offset"].as_u64().unwrap_or(0) as usize,
+                )
+                .await
+            }?
         }
         _ => {
             let target = args["agent"].as_str().unwrap_or("nyxbot");
@@ -933,6 +1182,18 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            platform_model_context: None,
+            automation_work: None,
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_voice_task: false,
+            execution_task: None,
+            execution_permission: None,
+            business_system_success: false,
+            collaboration_thread: false,
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
             platform_thread: false,
             platform_origin: None,
             report_to: None,

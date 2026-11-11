@@ -41,7 +41,6 @@ impl CanonicalPath {
         Ok(Self { segments })
     }
 
-    #[cfg(test)]
     pub fn as_policy_path(&self) -> String {
         if self.segments.is_empty() {
             "/".to_string()
@@ -316,7 +315,7 @@ pub(crate) fn match_path_arguments(
     for (template_index, template) in template_segments.iter().enumerate() {
         let (resource, verb) = split_template_segment(template);
         let Some(name) = parameter_name(resource) else {
-            if path.segments.get(actual_index)?.as_str() != resource {
+            if path.segments.get(actual_index)?.as_str() != *template {
                 return None;
             }
             actual_index += 1;
@@ -920,6 +919,37 @@ mod tests {
             rule_forwarding_path(&docs_policy().rules[1], "POST", &rest).unwrap(),
             rule_forwarding_path(&docs_policy().rules[1], "POST", &path).unwrap()
         );
+    }
+
+    #[test]
+    fn literal_colon_segments_match_the_entire_declared_segment() {
+        for (template, refused) in [
+            (
+                "/v4/spreadsheets/sheet/values/Sheet1!A1:B2",
+                [
+                    "/v4/spreadsheets/sheet/values/Sheet1!A1",
+                    "/v4/spreadsheets/sheet/values/Sheet1!A1:C2",
+                ],
+            ),
+            (
+                "/v4/spreadsheets:batchGet",
+                ["/v4/spreadsheets", "/v4/spreadsheets:batchUpdate"],
+            ),
+        ] {
+            let rule = ProxyOperationRule {
+                method: "GET".into(),
+                path_template: template.into(),
+                ..Default::default()
+            };
+            let path = CanonicalPath::from_rest_decoded(template).unwrap();
+            assert!(rule_matches(&rule, "GET", &path), "{template}");
+            assert!(match_path_arguments(&rule, &path).unwrap().is_empty());
+            assert!(!rule_matches(&rule, "POST", &path));
+            for refused in refused {
+                let path = CanonicalPath::from_rest_decoded(refused).unwrap();
+                assert!(!rule_matches(&rule, "GET", &path), "{refused}");
+            }
+        }
     }
 
     #[test]

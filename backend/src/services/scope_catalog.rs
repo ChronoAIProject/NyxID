@@ -1016,7 +1016,12 @@ const REDDIT: &[(&str, &str, &str, bool)] = &[
     ),
 ];
 
-// Lark / Feishu share the same scope grammar.
+// Lark / Feishu share the same scope grammar. This menu configures user OAuth
+// connections. For inbound downloads, configure the channel bot app in the
+// developer console with any one of `im:message`, `im:message:readonly`, or
+// `im:message.history:readonly`, per the official "Obtain resource files in
+// messages" API (/reference/im-v1/message-resource/get).
+// See docs/CHANNEL_BOT_RELAY.md; this menu does not configure the channel bot.
 const LARK: &[(&str, &str, &str, bool)] = &[
     (
         "contact:user.base:readonly",
@@ -1047,6 +1052,30 @@ const LARK: &[(&str, &str, &str, bool)] = &[
         "im:message:send_as_bot",
         "Send as bot",
         "Send messages as the bot.",
+        true,
+    ),
+    (
+        "base:field:read",
+        "Base field schema",
+        "Read Base field definitions and options.",
+        false,
+    ),
+    (
+        "base:record:create",
+        "Create Base records",
+        "Create records in Base tables.",
+        true,
+    ),
+    (
+        "bitable:app",
+        "Base (read/write)",
+        "View, comment on, edit and manage Base apps.",
+        true,
+    ),
+    (
+        "docs:document.media:upload",
+        "Upload document media",
+        "Upload images and attachments to cloud documents, including Base.",
         true,
     ),
     ("docs:doc:readonly", "Docs (read)", "Read documents.", false),
@@ -1210,6 +1239,56 @@ mod tests {
     #[test]
     fn lark_and_feishu_share_a_catalog() {
         assert_eq!(for_provider("lark"), for_provider("feishu"));
+    }
+
+    #[test]
+    fn lark_and_feishu_offer_optional_base_and_media_permissions_without_bot_resource_scope() {
+        for slug in ["lark", "feishu"] {
+            let catalog = for_provider(slug).unwrap();
+            for (scope, sensitive) in [
+                ("base:field:read", false),
+                ("base:record:create", true),
+                ("docs:document.media:upload", true),
+                ("bitable:app", true),
+            ] {
+                let entries: Vec<_> = catalog.iter().filter(|e| e.scope == scope).collect();
+                assert_eq!(entries.len(), 1, "{slug}: {scope}");
+                assert_eq!(entries[0].sensitive, sensitive, "{slug}: {scope}");
+                assert!(!entries[0].required, "{slug}: {scope} must stay optional");
+                assert!(!entries[0].label.is_empty());
+                assert!(!entries[0].description.is_empty());
+            }
+            assert!(
+                catalog.iter().all(|e| e.scope != "im:resource"),
+                "{slug}: inbound downloads do not require im:resource; outbound IM upload scopes are outside this expansion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lark_and_feishu_picker_expansion_preserves_seeded_oauth_defaults() {
+        use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
+        use mongodb::bson::doc;
+        let db = crate::test_utils::connect_transaction_test_database("lark_scope_picker_defaults")
+            .await;
+        let state = crate::test_utils::test_app_state(db);
+        super::super::provider_service::seed_default_providers(&state.db, &state.encryption_keys)
+            .await
+            .unwrap();
+        for slug in ["lark", "feishu"] {
+            let provider = state
+                .db
+                .collection::<ProviderConfig>(COLLECTION_NAME)
+                .find_one(doc! {"slug":slug})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                provider.default_scopes.unwrap(),
+                ["contact:user.base:readonly", "offline_access"]
+            );
+            assert_eq!(provider.credential_mode, "user");
+        }
     }
 
     #[test]

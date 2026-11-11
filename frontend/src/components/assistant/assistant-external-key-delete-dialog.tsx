@@ -1,5 +1,5 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -57,7 +57,7 @@ export function AssistantExternalKeyDeleteDialog({
   readonly params: AssistantExternalKeyDeleteParams;
   readonly onComplete: (externalKeyId: string) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -188,20 +188,20 @@ export function AssistantExternalKeyDeleteDialog({
         <DialogHeader>
           <DialogTitle>
             {result?.replayed
-              ? t("External credential already deleted")
-              : t("Delete external credential")}
+              ? translateUi("External credential already deleted")
+              : translateUi("Delete external credential")}
           </DialogTitle>
           <DialogDescription>
             {result
-              ? t("NyxID verified the credential is gone through its authorization evidence returning 404. This action is never remembered.")
-              : t("This permanently deletes the stored credential. Confirm every time — NyxID will not remember this choice.")}
+              ? translateUi("NyxID verified the credential is gone through its authorization evidence returning 404. This action is never remembered.")
+              : translateUi("This permanently deletes the stored credential. Confirm every time — NyxID will not remember this choice.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">{t("External key")}</span>
+              <span className="text-muted-foreground">{translateUi("External key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -213,26 +213,26 @@ export function AssistantExternalKeyDeleteDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-11 text-success">{t("External credential absence verified.")}</p>
+          <p className="text-13 text-success">{translateUi("External credential absence verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!result ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void deleteKey()}
-              >{t("Delete credential")}</Button>
+              >{translateUi("Delete credential")}</Button>
             </>
           ) : (
             <>
@@ -245,7 +245,7 @@ export function AssistantExternalKeyDeleteDialog({
                     void verifyAbsence(result.resource.externalKeyId)
                   }
                 >
-                  <RefreshCw />{t("Retry verification")}</Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -255,7 +255,7 @@ export function AssistantExternalKeyDeleteDialog({
                   onComplete(result.resource.externalKeyId);
                   close();
                 }}
-              >{t("Report deletion")}</Button>
+              >{translateUi("Report deletion")}</Button>
             </>
           )}
         </DialogFooter>

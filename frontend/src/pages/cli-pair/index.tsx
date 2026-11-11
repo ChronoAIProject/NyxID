@@ -1,4 +1,6 @@
-import { useWizardTranslation, translateWizard as t } from "@/i18n/wizard";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 // CLI pairing page. Mode B wizard endpoint (see docs / ADR when written).
 //
 // Flow:
@@ -65,6 +67,7 @@ import {
   type AiKeyPairingSuccess,
 } from "@/components/cli-wizard/ai-key-confirm-panel";
 import { parseAiKeyPrefill } from "@/schemas/cli-wizard";
+import { WizardHeading } from "@/components/cli-wizard/wizard-heading";
 
 type ActionResult =
   | AiKeyPairingSuccess
@@ -187,7 +190,8 @@ type Stage =
 type PostClaimStage = Exclude<Stage, { readonly phase: "enter-code" }>;
 
 export function CliPairPage() {
-  const { isAuthenticated, isLoading } = useAuthStore();
+  useUiTranslation();
+  const { user, isAuthenticated, isLoading } = useAuthStore();
 
   useEffect(() => {
     if (isLoading) return;
@@ -214,7 +218,7 @@ export function CliPairPage() {
     );
   }
 
-  return <StageRouter />;
+  return <StageRouter key={user?.id} />;
 }
 
 /**
@@ -247,7 +251,9 @@ function reconstructRotationAck(claim: ClaimResponse): AckPayload | null {
 }
 
 function StageRouter() {
+  useUiTranslation();
   const [stage, setStage] = useState<Stage>({ phase: "enter-code" });
+  const [slugPicked, setSlugPicked] = useState(false);
   // Pairing-side liveness. Once a claim lands, poll the backend
   // every 4s for status so we notice when the CLI cancels or the
   // record TTLs out without requiring the user to click a button.
@@ -396,7 +402,19 @@ function StageRouter() {
       : resolveStep(stage.phase, stageFlow(stage));
 
   return (
-    <WizardShell context="pair" step={step}>
+    <WizardShell
+      context="pair"
+      step={step}
+      // Only the service catalog grid needs the wide card.
+      narrow={
+        !(
+          stage.phase === "claimed" &&
+          stage.claim.kind === "ai-key" &&
+          !slugPicked &&
+          !stage.claim.prefill?.reconnect_key_id
+        )
+      }
+    >
       {pairingLost ? (
         <DisconnectBanner
           state="disconnected"
@@ -462,6 +480,9 @@ function StageRouter() {
       return (
         <ConfirmPanel
           claim={stage.claim}
+          onSlugPicked={(slug) => {
+            setSlugPicked(Boolean(slug));
+          }}
           onActionComplete={(result) => {
             // Show the notifying/acking UI immediately AND fire
             // the POST in the same tick. The fetch starts before
@@ -614,7 +635,7 @@ function EnterCodeForm({
 }: {
   readonly onClaim: (claim: ClaimResponse) => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [code, setCode] = useState(() => codeFromQueryString());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -649,7 +670,7 @@ function EnterCodeForm({
           // the same way it did before this guard.
         }
         setError(
-          t("Unsupported pairing kind from server: {{kind}}. Please update the NyxID web app, then re-run the CLI.", { kind: String(res.kind) }),
+          translateUi("Unsupported pairing kind from server: {{kind}}. Please update the NyxID web app, then re-run the CLI.", { kind: String(res.kind) }),
         );
         return;
       }
@@ -663,35 +684,35 @@ function EnterCodeForm({
 
   return (
     <form className="flex flex-col gap-4" onSubmit={(e) => void submit(e)}>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {prefilled
-          ? t("We've filled in the code from the URL. Confirm to continue.")
-          : t("Enter the pairing code shown in your terminal. The CLI running on your remote box is waiting for you to complete the wizard here.")}
+          ? translateUi("We've filled in the code from the URL. Confirm to continue.")
+          : translateUi("Enter the pairing code shown in your terminal. The CLI running on your remote box is waiting for you to complete the wizard here.")}
       </p>
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="pair-code">{t("Pairing code")}</Label>
+        <Label htmlFor="pair-code">{translateUi("Pairing code")}</Label>
         <Input
           id="pair-code"
           value={code}
           onChange={(e) => {
             setCode(e.target.value.toUpperCase());
           }}
-          placeholder={"ABCD-1234"}
+          placeholder="ABCD-1234"
           // Focus the input only when we couldn't prefill; otherwise
           // the submit button gets `autoFocus` below so Enter confirms.
           autoFocus={!prefilled}
           autoComplete="off"
           spellCheck={false}
-          className="font-mono text-lg tracking-widest"
+          className="font-mono text-14 tracking-widest"
         />
       </div>
       {error ? (
-        <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
-          {t(error)}
+        <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
+          {translateUi(error)}
         </p>
       ) : null}
       <Button variant="primary" type="submit" disabled={loading || !code.trim()} autoFocus={prefilled}>
-        {loading ? t("Verifying...") : t("Continue")}
+        {loading ? translateUi("Verifying...") : translateUi("Continue")}
       </Button>
     </form>
   );
@@ -729,11 +750,14 @@ function codeFromQueryString(): string {
 
 function ConfirmPanel({
   claim,
+  onSlugPicked,
   onActionComplete,
 }: {
   readonly claim: ClaimResponse;
+  readonly onSlugPicked: (slug: string) => void;
   readonly onActionComplete: (result: ActionResult) => void;
 }) {
+  useUiTranslation();
   // `claim.prefill` is `null` whenever the pairing was created without a
   // prefill (a valid backend state — the `prefill` field defaults to JSON
   // null). The ai-key branch guards this via `parseAiKeyPrefill`, but the
@@ -757,6 +781,7 @@ function ConfirmPanel({
           prefill={parseAiKeyPrefill(prefill) as AiKeyPrefill}
           pairingId={claim.id}
           onSuccess={onActionComplete}
+          onSlugPicked={onSlugPicked}
         />
       );
     case "api-key-create":
@@ -856,7 +881,7 @@ function ResumedCreateWarningPanel({
   readonly claim: ClaimResponse;
   readonly onAcknowledged: () => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const [cancelling, setCancelling] = useState(false);
   const [manageHref, manageLabel] = managementTargetFor(claim.kind);
 
@@ -888,14 +913,13 @@ function ResumedCreateWarningPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-xl font-semibold">{t("This pairing was already started")}</h2>
-      <p className="text-12 text-muted-foreground">{t("Another tab or window began the ")}{labelForKind(claim.kind)}{" "}{t("flow for this code. We can't safely replay it from here — that first tab may still be finishing, or it may have already created the resource.")}</p>
-      <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">{t("Check your ")}{t(manageLabel)}{t(" first — if a new entry is there, the first tab succeeded and you can close this tab. If nothing shows up after a minute, use \"Cancel Pairing\" below so the waiting CLI exits promptly.")}</p>
+      <WizardHeading title={translateUi("This pairing was already started")}>{translateUi("Another tab or window began the ")}{labelForKind(claim.kind)}{" "}{translateUi("flow for this code. We can't safely replay it from here — that first tab may still be finishing, or it may have already created the resource.")}</WizardHeading>
+      <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-13 text-muted-foreground">{translateUi("Check your ")}{translateUi(manageLabel)}{translateUi(" first — if a new entry is there, the first tab succeeded and you can close this tab. If nothing shows up after a minute, use \"Cancel Pairing\" below so the waiting CLI exits promptly.")}</p>
       <div className="flex flex-col gap-2 sm:flex-row">
         <a
           href={manageHref}
-          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-12 font-medium text-primary-foreground hover:bg-primary/90"
-        >{t("Open ")}{t(manageLabel)}
+          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 type-row-title text-primary-foreground hover:bg-primary/90"
+        >{translateUi("Open ")}{translateUi(manageLabel)}
         </a>
         <Button
           variant="outline"
@@ -903,7 +927,7 @@ function ResumedCreateWarningPanel({
           disabled={cancelling}
           className="flex-1"
         >
-          {cancelling ? t("Cancelling...") : t("Cancel Pairing")}
+          {cancelling ? translateUi("Cancelling...") : translateUi("Cancel Pairing")}
         </Button>
       </div>
     </div>
@@ -947,25 +971,25 @@ function managementTargetFor(
 function labelForKind(kind: PairingKind): string {
   switch (kind) {
     case "api-key-create":
-      return t("API key creation");
+      return translateUi("API key creation");
     case "api-key-rotate":
-      return t("API key rotation");
+      return translateUi("API key rotation");
     case "node-register-token":
-      return t("node registration");
+      return translateUi("node registration");
     case "node-rotate-token":
-      return t("node token rotation");
+      return translateUi("node token rotation");
     case "ai-key":
-      return t("service setup");
+      return translateUi("service setup");
     case "service-account-create":
-      return t("service account creation");
+      return translateUi("service account creation");
     case "service-account-rotate-secret":
-      return t("service account secret rotation");
+      return translateUi("service account secret rotation");
     case "developer-app-create":
-      return t("developer app creation");
+      return translateUi("developer app creation");
     case "developer-app-rotate-secret":
-      return t("developer app secret rotation");
+      return translateUi("developer app secret rotation");
     case "mfa-setup":
-      return t("MFA enrollment");
+      return translateUi("MFA enrollment");
   }
 }
 
@@ -1010,21 +1034,21 @@ function NotifyingCliPanel({
   readonly completeError: string | null;
   readonly onRetry: () => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-xl font-semibold">{t("Notifying CLI...")}</h2>
-        <p className="text-12 text-muted-foreground">{t("Your ")}{describeResultKind(result.kind)}{t(" is ready on the server. Once the CLI acknowledges, we'll show the secret here to copy. If this page closes before then, the CLI will time out cleanly — re-run the command to try again.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Notifying CLI...")}>{translateUi("Your ")}{describeResultKind(result.kind)}{translateUi(" is ready on the server. Once the CLI acknowledges, we'll show the secret here to copy. If this page closes before then, the CLI will time out cleanly — re-run the command to try again.")}</WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">{t("Couldn't notify CLI: ")}{completeError}{t(". The server-side action succeeded; retry to receive the secret, or run the CLI command again for a fresh pairing.")}</p>
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}. The server-side
+            action succeeded; retry to receive the secret, or run
+            the CLI command again for a fresh pairing.
+          </p>
           <button
             type="button"
             onClick={onRetry}
-            className="rounded-lg border bg-primary px-4 py-2 text-12 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
-          >{t("Retry")}</button>
+            className="rounded-lg border bg-primary px-4 py-2 type-row-title text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+          >{translateUi("Retry")}</button>
         </>
       ) : (
         <Skeleton className="h-9 w-full" />
@@ -1036,25 +1060,25 @@ function NotifyingCliPanel({
 function describeResultKind(kind: ActionResult["kind"]): string {
   switch (kind) {
     case "ai-key":
-      return t("service");
+      return translateUi("service");
     case "api-key-create":
-      return t("API key");
+      return translateUi("API key");
     case "api-key-rotate":
-      return t("rotated API key");
+      return translateUi("rotated API key");
     case "node-register-token":
-      return t("registration token");
+      return translateUi("registration token");
     case "node-rotate-token":
-      return t("rotated node credentials");
+      return translateUi("rotated node credentials");
     case "service-account-create":
-      return t("service account");
+      return translateUi("service account");
     case "service-account-rotate-secret":
-      return t("rotated service account secret");
+      return translateUi("rotated service account secret");
     case "developer-app-create":
-      return t("developer app");
+      return translateUi("developer app");
     case "developer-app-rotate-secret":
-      return t("rotated developer app secret");
+      return translateUi("rotated developer app secret");
     case "mfa-setup":
-      return t("MFA enrollment");
+      return translateUi("MFA enrollment");
   }
 }
 
@@ -1072,7 +1096,7 @@ function SecretPanel({
   readonly result: ActionResult;
   readonly onAcknowledged: () => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   const content = (() => {
     switch (result.kind) {
       case "ai-key":
@@ -1082,10 +1106,13 @@ function SecretPanel({
       case "api-key-create":
         return (
           <DisplayOncePanel
-            title={t("API key created")}
-            description={t("Copy this key into your CLI / agent environment. NyxID will never show it again.")}
+            title={translateUi("API key created")}
+            description={translateUi("Copy this key into your CLI / agent environment. NyxID will never show it again. {{value1}}", { value1: result.expires_at === undefined
+              ? "Refresh the key details to confirm its expiry."
+              : result.expires_at === null ? "This key has no expiry."
+              : `Expires ${new Date(result.expires_at).toLocaleString(getFormattingLocale())}.` })}
             secret={result.full_key}
-            ackButtonLabel={t("Close — I've saved the key")}
+            ackButtonLabel={translateUi("Close — I've saved the key")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1094,18 +1121,18 @@ function SecretPanel({
         return (
           <ApiKeyRotationResult
             result={result}
-            description={t("The previous key has been revoked. Update any callers using it.")}
-            ackButtonLabel={t("Close — I've saved the new key")}
+            description={translateUi("The previous key has been revoked. Update any callers using it.")}
+            ackButtonLabel={translateUi("Close — I've saved the new key")}
             onAcknowledge={onAcknowledged}
           />
         );
       case "node-register-token":
         return (
           <DisplayOncePanel
-            title={t("Registration token generated")}
-            description={t("Use this token once with nyxid node register, then it's gone.")}
+            title={translateUi("Registration token generated")}
+            description={translateUi("Use this token once with nyxid node register, then it's gone.")}
             secret={result.token}
-            ackButtonLabel={t("Close — I've saved the token")}
+            ackButtonLabel={translateUi("Close — I've saved the token")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1113,14 +1140,14 @@ function SecretPanel({
       case "node-rotate-token":
         return (
           <DisplayOncePanel
-            title={t("Node credentials rotated")}
-            description={t("Paste both values into the node agent config; the previous pair is revoked.")}
+            title={translateUi("Node credentials rotated")}
+            description={translateUi("Paste both values into the node agent config; the previous pair is revoked.")}
             secret={result.auth_token}
             secondarySecret={{
               label: "Signing secret",
               value: result.signing_secret,
             }}
-            ackButtonLabel={t("Close — I've saved both values")}
+            ackButtonLabel={translateUi("Close — I've saved both values")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1128,11 +1155,11 @@ function SecretPanel({
       case "service-account-create":
         return (
           <DisplayOncePanel
-            title={t("Service account created")}
-            description={t("Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow.")}
+            title={translateUi("Service account created")}
+            description={translateUi("Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow.")}
             secret={result.client_secret}
             secondarySecret={{ label: "Client ID", value: result.client_id }}
-            ackButtonLabel={t("Close — I've saved the secret")}
+            ackButtonLabel={translateUi("Close — I've saved the secret")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1140,11 +1167,11 @@ function SecretPanel({
       case "service-account-rotate-secret":
         return (
           <DisplayOncePanel
-            title={t("Service account secret rotated")}
-            description={t("All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again.")}
+            title={translateUi("Service account secret rotated")}
+            description={translateUi("All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again.")}
             secret={result.client_secret}
             secondarySecret={{ label: "Client ID", value: result.client_id }}
-            ackButtonLabel={t("Close — I've saved the new secret")}
+            ackButtonLabel={translateUi("Close — I've saved the new secret")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1152,10 +1179,10 @@ function SecretPanel({
       case "developer-app-create":
         return (
           <DisplayOncePanel
-            title={t("Developer app created")}
-            description={t("Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests.")}
+            title={translateUi("Developer app created")}
+            description={translateUi("Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests.")}
             secret={result.client_secret}
-            ackButtonLabel={t("Close — I've saved the secret")}
+            ackButtonLabel={translateUi("Close — I've saved the secret")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1163,10 +1190,10 @@ function SecretPanel({
       case "developer-app-rotate-secret":
         return (
           <DisplayOncePanel
-            title={t("Developer app secret rotated")}
-            description={t("The previous client_secret no longer authenticates. Update any deployments using it.")}
+            title={translateUi("Developer app secret rotated")}
+            description={translateUi("The previous client_secret no longer authenticates. Update any deployments using it.")}
             secret={result.client_secret}
-            ackButtonLabel={t("Close — I've saved the new secret")}
+            ackButtonLabel={translateUi("Close — I've saved the new secret")}
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
           />
@@ -1201,19 +1228,16 @@ function AiKeyAckPanel({
   readonly completeError: string | null;
   readonly onRetry: () => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-xl font-semibold">{t("Service created")}</h2>
-        <p className="text-12 text-muted-foreground">
-          <strong>{result.label}</strong>{t(" is now connected. Check your terminal — the CLI is printing the proxy URL and next steps.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Service created")}>
+        <strong>{result.label}</strong>{translateUi(" is now connected. Check your terminal — the CLI is printing the proxy URL and next steps.")}</WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">{t("Couldn't notify CLI: ")}{completeError}
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}
           </p>
-          <Button variant="primary" onClick={onRetry}>{t("Retry")}</Button>
+          <Button variant="primary" onClick={onRetry}>{translateUi("Retry")}</Button>
         </>
       ) : (
         <Skeleton className="h-9 w-full" />
@@ -1242,22 +1266,21 @@ function ResumedRotationChoicePanel({
   readonly onConfirmSuccess: () => void;
   readonly onCancel: () => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-xl font-semibold">{t("This pairing was already started")}</h2>
-      <p className="text-12 text-muted-foreground">{t("Another tab or window began the ")}{labelForKind(kind)}{t(" flow for this code but never finished notifying the CLI. We need to know what happened there so we don't tell the CLI something false:")}</p>
-      <ul className="ml-4 list-disc text-12 text-muted-foreground">
-        <li>{t("If the other tab ")}<strong>{t("showed you a new secret you saved")}</strong>{t(" (the rotation succeeded), click \"Notify CLI\" below so the CLI stops waiting.")}</li>
-        <li>{t("If you ")}<strong>{t("did not see a secret")}</strong>{t(" (the rotation may have failed), click \"Cancel Pairing\". The CLI will exit; re-run the original command to try again.")}</li>
+      <WizardHeading title={translateUi("This pairing was already started")}>{translateUi("Another tab or window began the ")}{labelForKind(kind)}{translateUi(" flow for this code but never finished notifying the CLI. We need to know what happened there so we don't tell the CLI something false:")}</WizardHeading>
+      <ul className="ml-4 list-disc text-14 text-muted-foreground">
+        <li>{translateUi("If the other tab ")}<strong>{translateUi("showed you a new secret you saved")}</strong>{translateUi(" (the rotation succeeded), click \"Notify CLI\" below so the CLI stops waiting.")}</li>
+        <li>{translateUi("If you ")}<strong>{translateUi("did not see a secret")}</strong>{translateUi(" (the rotation may have failed), click \"Cancel Pairing\". The CLI will exit; re-run the original command to try again.")}</li>
       </ul>
       <div className="flex flex-col gap-2 sm:flex-row">
-        <Button variant="primary" onClick={onConfirmSuccess} className="flex-1">{t("Notify CLI")}</Button>
+        <Button variant="primary" onClick={onConfirmSuccess} className="flex-1">{translateUi("Notify CLI")}</Button>
         <Button
           variant="outline"
           onClick={onCancel}
           className="flex-1"
-        >{t("Cancel Pairing")}</Button>
+        >{translateUi("Cancel Pairing")}</Button>
       </div>
     </div>
   );
@@ -1281,18 +1304,15 @@ function ResendingAckPanel({
   readonly completeError: string | null;
   readonly onRetry: () => void;
 }) {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-xl font-semibold">{t("Notifying CLI...")}</h2>
-        <p className="text-12 text-muted-foreground">{t("This ")}{labelForKind(kind)}{t(" was already completed on another tab. We couldn't find the secret here, but we can still tell the CLI so it stops waiting. The new credential should be in whichever tab finished the rotation; check there for the secret to save.")}</p>
-      </div>
+      <WizardHeading title={translateUi("Notifying CLI...")}>{translateUi("This ")}{labelForKind(kind)}{translateUi(" was already completed on another tab. We couldn't find the secret here, but we can still tell the CLI so it stops waiting. The new credential should be in whichever tab finished the rotation; check there for the secret to save.")}</WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">{t("Couldn't notify CLI: ")}{completeError}
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}
           </p>
-          <Button variant="primary" onClick={onRetry}>{t("Retry")}</Button>
+          <Button variant="primary" onClick={onRetry}>{translateUi("Retry")}</Button>
         </>
       ) : (
         <Skeleton className="h-9 w-full" />
@@ -1304,11 +1324,10 @@ function ResendingAckPanel({
 // ── Step 4: done ────────────────────────────────────────────────────
 
 function DonePanel() {
-  const { t } = useWizardTranslation();
+  useUiTranslation();
   return (
-    <div className="flex flex-col gap-3 text-center">
-      <h2 className="text-xl font-semibold">{t("Pairing complete")}</h2>
-      <p className="text-12 text-muted-foreground">{t("You can close this tab. Your CLI should now show a success message in the terminal.")}</p>
+    <div className="flex flex-col gap-3">
+      <WizardHeading title={translateUi("Pairing complete")}>{translateUi("You can close this tab. Your CLI should now show a success message in the terminal.")}</WizardHeading>
     </div>
   );
 }

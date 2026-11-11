@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@/hooks/use-agent-skills", () => ({
   useAgentSkills: mocks.current,
+  useSetSkillPreload: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useSetAgentSkills: () => ({ mutate: mocks.save, isPending: false }),
   useSkillSearch: mocks.search,
   useSkillVersions: mocks.versions,
@@ -65,7 +66,8 @@ beforeEach(() => {
 });
 it("shows pinned metadata, revision and an explicit update action without re-pinning", () => {
   render(<AgentSkills agentId="agent" />);
-  expect(screen.getByText("Research guide")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
+  expect(screen.getByText("Research guide", { selector: "[data-grouped-footer] p" })).toBeInTheDocument();
   expect(screen.getByText("1,000 bytes")).toBeInTheDocument();
   expect(screen.getByText(/Revision 4/)).toBeInTheDocument();
   expect(
@@ -75,6 +77,7 @@ it("shows pinned metadata, revision and an explicit update action without re-pin
 });
 it("removes immediately with the observed revision", () => {
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   fireEvent.click(screen.getByRole("button", { name: "Remove Research" }));
   expect(mocks.save).toHaveBeenCalledWith(
     { expected_revision: 4, skills: [] },
@@ -83,7 +86,8 @@ it("removes immediately with the observed revision", () => {
 });
 it("hides the enable toggle while assistant:skill-pin-disable is off", () => {
   render(<AgentSkills agentId="agent" />);
-  expect(screen.getByText("Research guide")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
+  expect(screen.getByText("Research guide", { selector: "[data-grouped-footer] p" })).toBeInTheDocument();
   expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
   expect(mocks.save).not.toHaveBeenCalled();
 });
@@ -92,12 +96,14 @@ it("still marks a disabled pin when the toggle is hidden", () => {
     data: { revision: 4, skills: [{ ...pin, disabled: true }], metadata: {} },
   });
   render(<AgentSkills agentId="agent" />);
-  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
+  expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
   expect(screen.getByText("Disabled")).toBeInTheDocument();
 });
 it("toggles a pin and sends disabled true in the PUT body", () => {
   signIn([FEATURE_FLAG.SKILL_PIN_DISABLE]);
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
   expect(mocks.save).toHaveBeenCalledWith({ expected_revision: 4, skills: [{ ...pin, disabled: true }] }, expect.anything());
 });
@@ -113,6 +119,7 @@ it("searches visible Ornn skills on submit", () => {
 it("requires version preview and an explicit re-pin click", async () => {
   const user = userEvent.setup();
   const view = render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   await user.click(
     screen.getByRole("button", { name: "Newer version available: 2.0" }),
   );
@@ -162,6 +169,7 @@ it("offers paging through older versions before re-pinning", () => {
     },
   });
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   fireEvent.click(
     screen.getByRole("button", { name: "Newer version available: 2.0" }),
   );
@@ -197,14 +205,26 @@ it("refuses a seventeenth attachment while retaining removal", () => {
     },
   });
   render(<AgentSkills agentId="agent" />);
-  fireEvent.click(screen.getByRole("button", { name: "Extra skill" }));
+  fireEvent.click(screen.getByRole("button", { name: /Extra skill/ }));
   expect(screen.getByRole("button", { name: "Attach skill" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Back to Skills" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Skill 0 / }));
   expect(screen.getByRole("button", { name: "Remove Skill 0" })).toBeEnabled();
 });
 
 it("never tests a pin until its Test button is clicked", () => {
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "");
   fireEvent.click(screen.getByRole("button", { name: "Test Research" }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "skill-id");
+});
+
+it("shows a history request failure on the pushed history page", () => {
+  mocks.history.mockReturnValue({ error: new Error("History request failed") });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  expect(screen.getByRole("heading", { name: "Skill history" })).toHaveFocus();
+  expect(screen.getByRole("alert")).toHaveTextContent("History request failed");
+  expect(screen.queryByText("No skill activity yet.")).toBeNull();
 });

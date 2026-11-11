@@ -1,5 +1,7 @@
-import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -8,7 +10,6 @@ import {
   useSetNyxBotAgentGrants,
 } from "@/hooks/use-nyxbot-agents";
 import { useMachineAccess } from "@/hooks/use-machine-access";
-import { useMachineSettings } from "@/hooks/use-machines";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
@@ -17,19 +18,30 @@ import { MachineCapabilityForm } from "@/components/assistant/machine-capabiliti
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 import type { NodeInfo } from "@/types/nodes";
 import { useAppForm } from "@/components/ui/form";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedSelectTrigger as SelectTrigger,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedFormScope,
+  GroupedFormActions,
+  GroupedFormBar,
+} from "@/components/ui/grouped-form";
+import {
+  GroupedDraftOwnerContext,
+  useGroupedDraftGuard,
+} from "@/lib/grouped-drafts";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
 const membershipSchema = z.object({ assigned: z.boolean() });
-const confirmSchema = z.object({ confirm: z.enum(["none", "changes", "all"]) });
 
 export function RemoteMachineAgentAccess({
   node,
@@ -38,10 +50,11 @@ export function RemoteMachineAgentAccess({
   readonly node?: NodeInfo;
   readonly machineId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const agents = useNyxBotAgents();
   const userId = useAuthStore((s) => s.user?.id);
   const [agentId, setAgentId] = useState<string>();
+  const guard = useGroupedDraftGuard();
   const options =
     agents.data?.agents.filter(
       (agent) =>
@@ -51,119 +64,98 @@ export function RemoteMachineAgentAccess({
     ) ?? [];
   const selected = options.find((agent) => agent.id === agentId);
   return (
-    <div className="space-y-4 px-4 py-3">
-      <p className="text-12 text-muted-foreground">{t("NyxBot and specialist access uses the existing Agent assignment policy. It remains bound to an owner turn; guests cannot use this machine. A grant does not bypass a paused runtime or funding requirement.")}</p>
-      {node ? (
-        <OwnerConfirmation
-          key={`${node.id}:${node.machine_confirm}`}
-          node={node}
-        />
-      ) : (
-        <p className="text-12 text-muted-foreground">{t("Confirmation settings will be available when the Node record can be loaded.")}</p>
-      )}
-      {agents.error ? (
-        <ErrorBanner
-          message={t("Agent assignments could not be loaded.")}
-          onRetry={() => void agents.refetch()}
-        />
-      ) : agents.isPending ? (
-        <p role="status" className="text-12">{t("Loading agents…")}</p>
-      ) : (
-        <>
-          <label className="block space-y-2 text-12">
-            <span>{t("Agent")}</span>
-            <Select value={selected?.id ?? ""} onValueChange={setAgentId}>
-              <SelectTrigger aria-label={t("Agent for machine access")}>
-                <SelectValue placeholder={t("Choose an existing agent")} />
-              </SelectTrigger>
-              <SelectContent>
-                {options.map((agent) => (
-                  <SelectItem key={agent.id} value={agent.id}>
-                    {agent.display_name ?? agent.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </label>
-          {!options.length ? (
-            <p className="text-12 text-muted-foreground">{t("No eligible personal agents are available.")}</p>
-          ) : null}
-          {selected ? (
-            <AgentAssignment
-              key={`${selected.id}:${selected.machines?.includes(machineId)}`}
-              machineId={machineId}
-              agent={selected}
-            />
-          ) : null}
-        </>
-      )}
-    </div>
+    <GroupedDraftOwnerContext value="machine-access">
+      <div className="space-y-6 px-4 py-3">
+        {node ? (
+          <OwnerConfirmation node={node} />
+        ) : (
+          <GroupedList
+            title={translateUi("Owner confirmation")}
+            footer={translateUi("Confirmation settings will be available when the Node record can be loaded.")}
+          >
+            <GroupedRow title={translateUi("Node record unavailable")} />
+          </GroupedList>
+        )}
+        {agents.error ? (
+          <GroupedList footer={<ErrorBanner
+            message={translateUi("Agent assignments could not be loaded.")}
+            onRetry={() => void agents.refetch()}
+          />} />
+        ) : agents.isPending ? (
+          <GroupedList><GroupedRow role="status" title={translateUi("Loading agents…")} /></GroupedList>
+        ) : (
+          <>
+            <GroupedList
+              title={translateUi("Agent access")}
+              footer={
+                <>{translateUi("NyxBot and specialist access uses the existing Agent assignment policy. It remains bound to an owner turn; guests cannot use this machine. A grant does not bypass a paused runtime or funding requirement.")}{!options.length && (
+                    <p>{translateUi("No eligible personal agents are available.")}</p>
+                  )}
+                </>
+              }
+            >
+              <GroupedRow
+                title={translateUi("Agent")}
+                accessory={
+                  <Select
+                    value={selected?.id ?? ""}
+                    onValueChange={async (id) => {
+                      if (
+                        !guard ||
+                        (await guard.confirmDiscard("machine-access"))
+                      )
+                        setAgentId(id);
+                    }}
+                  >
+                    <SelectTrigger aria-label={translateUi("Agent for machine access")}>
+                      <SelectValue placeholder={translateUi("Choose an existing agent")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {options.map((agent) => (
+                        <SelectItem key={agent.id} value={agent.id}>
+                          {agent.display_name ?? agent.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                }
+              />
+            </GroupedList>
+            {selected ? (
+              <AgentAssignment
+                key={`${userId}:${machineId}:${selected.id}`}
+                machineId={machineId}
+                agent={selected}
+              />
+            ) : null}
+          </>
+        )}
+      </div>
+    </GroupedDraftOwnerContext>
   );
 }
 
 function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
-  const { t } = useUiTranslation();
-  const mutation = useMachineSettings(node.id);
-  const form = useAppForm<z.infer<typeof confirmSchema>>({
-    resolver: zodResolver(confirmSchema),
-    defaultValues: { confirm: node.machine_confirm ?? "none" },
-  });
-  const [error, setError] = useState<string>();
+  useUiTranslation();
   return (
-    <form
-      aria-label={t("Remote machine owner confirmation")}
-      className="space-y-3 rounded-lg border border-border p-3"
-      onSubmit={form.handleSubmit(async (data) => {
-        setError(undefined);
-        try {
-          await mutation.mutateAsync({
-            machine_confirm: data.confirm,
-            allow_single_user_saved_logins: false,
-            acknowledge_single_user_risk: false,
-          });
-          form.reset(data);
-        } catch (cause) {
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : "Could not update confirmations.",
-          );
-        }
-      })}
+    <GroupedList
+      title={translateUi("Owner confirmation")}
+      aria-label={translateUi("Remote machine owner confirmation")}
+      footer={translateUi("Read from the current Node record. This hosted machine detail view does not save confirmation settings; applicable Assistant confirmation rules still apply to each operation.")}
     >
-      <label className="block space-y-2 text-12">
-        <span>{t("Owner confirmation policy")}</span>
-        <Select
-          value={form.watch("confirm")}
-          onValueChange={(value) =>
-            form.setValue(
-              "confirm",
-              value as z.infer<typeof confirmSchema>["confirm"],
-            )
-          }
-        >
-          <SelectTrigger aria-label={t("Remote machine owner confirmation policy")}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none">{t("No machine-specific confirmation")}</SelectItem>
-            <SelectItem value="changes">{t("Confirm changes")}</SelectItem>
-            <SelectItem value="all">{t("Confirm every operation")}</SelectItem>
-          </SelectContent>
-        </Select>
-      </label>
-      <p className="text-12 text-muted-foreground">{t("Only the owner changes this policy. Other applicable Assistant confirmation rules still apply. External work requiring confirmation must remain blocked until the server supports it.")}</p>
-      {error ? (
-        <p role="alert" className="text-12 text-destructive">
-          {translateUi(error)}
-        </p>
-      ) : null}
-      <Button
-        type="submit"
-        disabled={mutation.isPending || !form.formState.isDirty}
-        isLoading={mutation.isPending}
-      >{t("Save confirmation policy")}</Button>
-    </form>
+      <GroupedRow
+        title={translateUi("Owner confirmation policy")}
+        accessory={
+          node.machine_confirm === "changes"
+            ? "Confirm changes"
+            : node.machine_confirm === "all"
+              ? "Confirm every operation"
+              : node.machine_confirm === "none"
+                ? "No machine-specific confirmation"
+                : "Not reported"
+        }
+      />
+    </GroupedList>
   );
 }
 
@@ -174,111 +166,188 @@ function AgentAssignment({
   readonly agent: AssistantAgent;
   readonly machineId: string;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const mutation = useSetNyxBotAgentGrants();
   const query = useMachineAccess(agent.id);
+  const assigned = agent.machines?.includes(machineId) ?? false;
   const form = useAppForm<z.infer<typeof membershipSchema>>({
     resolver: zodResolver(membershipSchema),
-    defaultValues: { assigned: agent.machines?.includes(machineId) ?? false },
+    defaultValues: { assigned },
+    values: { assigned },
   });
   const [error, setError] = useState<string>();
+  const [savedAssignment, setSavedAssignment] = useState<boolean>();
+  const membershipSaved =
+    savedAssignment !== undefined && savedAssignment === assigned;
+  const [capabilitySaveFailed, setCapabilitySaveFailed] = useState(false);
   const assignment = query.data?.find((row) => row.node_id === machineId);
+  const save = form.handleSubmit(async (data) => {
+    setError(undefined);
+    setCapabilitySaveFailed(false);
+    try {
+      const grants = {
+        id: agent.id,
+        services: agent.services,
+        account_read: agent.account_read,
+        machines: data.assigned
+          ? [...new Set([...(agent.machines ?? []), machineId])]
+          : (agent.machines ?? []).filter((id) => id !== machineId),
+        ...(agent.logins !== undefined ? { logins: agent.logins } : {}),
+        ...(agent.guest_access
+          ? { guest_access: agent.guest_access }
+          : {}),
+      };
+      await mutation.mutateAsync(grants);
+      form.reset(data);
+      setSavedAssignment(data.assigned);
+      const refreshed = await query.refetch();
+      if (refreshed.error) {
+        setError(
+          "Assignment was saved, but the current capability state could not be refreshed.",
+        );
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not save assignment.",
+      );
+    }
+  });
   return (
-    <div className="space-y-3">
-      {agent.kind === "nyxbot" ? (
-        <p className="text-12 text-muted-foreground">{t("NyxBot has owner machine membership. Its capability policy and the live owner-turn gate still apply.")}</p>
-      ) : (
-        <form
-          className="space-y-3"
-          aria-label={t("Specialist machine membership")}
-          onSubmit={form.handleSubmit(async (data) => {
-            setError(undefined);
-            try {
-              await mutation.mutateAsync({
-                id: agent.id,
-                services: agent.services,
-                account_read: agent.account_read,
-                machines: data.assigned
-                  ? [...new Set([...(agent.machines ?? []), machineId])]
-                  : (agent.machines ?? []).filter((id) => id !== machineId),
-              });
-              form.reset(data);
-              await query.refetch();
-            } catch (cause) {
-              setError(
-                cause instanceof Error
-                  ? cause.message
-                  : "Could not save assignment.",
-              );
-            }
-          })}
-        >
-          <label className="flex items-start gap-2 text-12">
-            <Checkbox
-              checked={form.watch("assigned")}
-              onCheckedChange={(value) =>
-                form.setValue("assigned", value === true)
+    <GroupedFormScope>
+      <div className="space-y-6">
+        {agent.kind === "nyxbot" ? (
+          <GroupedList
+            title={translateUi("Machine membership")}
+            footer={translateUi("NyxBot has owner machine membership. Its capability policy and the live owner-turn gate still apply.")}
+          >
+            <GroupedRow title={translateUi("Owner machine membership")} />
+          </GroupedList>
+        ) : (
+          <form
+            className="space-y-3"
+            aria-label={translateUi("Specialist machine membership")}
+            onSubmit={save}
+          >
+            <GroupedList
+              title={translateUi("Machine membership")}
+              footer={
+                <>
+                  <p>{translateUi("With capability editing enabled, new assignments start with capabilities off. Review the current policy after assigning. Removing membership cancels this agent’s work on this machine.")}</p>
+                  {error ? (
+                    <p role="alert" className="text-14 text-destructive">
+                      {translateUi(error)}
+                    </p>
+                  ) : null}
+                  {membershipSaved && !error ? (
+                    <p role="status" className="text-14 text-success">{translateUi("Machine assignment saved. Review the capability state below; a capability save is a separate operation and does not roll back this assignment.")}</p>
+                  ) : null}
+                  {membershipSaved && capabilitySaveFailed ? (
+                    <p role="alert" className="text-14 text-warning">{translateUi("Assignment succeeded, but capability changes failed. The assignment remains in place; reload the current capability state and retry editing when it is available.")}</p>
+                  ) : null}
+                </>
               }
-            />{t("Assign this machine to ")}{agent.display_name ?? agent.name}
-          </label>
-          <p className="text-12 text-muted-foreground">{t("With capability editing enabled, new assignments start with capabilities off. Review the current policy after assigning. Removing membership cancels this agent’s work on this machine.")}</p>
-          {error ? (
-            <p role="alert" className="text-12 text-destructive">
-              {translateUi(error)}
-            </p>
-          ) : null}
-          <Button
-            type="submit"
-            disabled={
-              mutation.isPending ||
-              !form.formState.isDirty ||
-              agent.can_maintain === false
-            }
-            isLoading={mutation.isPending}
-          >{t("Save assignment")}</Button>
-        </form>
-      )}
-      {query.error ? (
-        <ErrorBanner
-          message={t("Could not load the current capability revision.")}
-          onRetry={() => void query.refetch()}
-        />
-      ) : assignment ? (
-        <HostedCapabilities
-          key={`${agent.id}:${assignment.revision}`}
-          agentId={agent.id}
-          machine={assignment}
-        />
-      ) : (
-        <p className="text-12 text-muted-foreground">{t("Capabilities are not yet available from this Node.")}</p>
-      )}
-    </div>
+            >
+              <GroupedRow asChild interactive>
+                <Label>
+                  <Switch
+                    className="order-last shrink-0"
+                    checked={form.watch("assigned")}
+                    onCheckedChange={(value) =>
+                      form.setValue("assigned", value === true)
+                    }
+                  />
+                  <span className="min-w-0 flex-1">{translateUi("Assign this machine to ")}{agent.display_name ?? agent.name}
+                  </span>
+                </Label>
+              </GroupedRow>
+            </GroupedList>
+            <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "assigned", label: "Machine membership" }])}
+              label={translateUi("machine membership")}
+              dirty={form.formState.isDirty}
+              pending={mutation.isPending}
+              disabled={agent.can_maintain === false}
+              save={save}
+              discard={() => {
+                form.reset();
+                setError(undefined);
+              }}
+              saveLabel={translateUi("Save assignment")}
+            />
+          </form>
+        )}
+        {query.error ? (
+          <ErrorBanner
+            message={translateUi("Could not load the current capability revision.")}
+            onRetry={() => void query.refetch()}
+          />
+        ) : assignment ? (
+          <HostedCapabilities
+            key={`${agent.id}:${assignment.revision}`}
+            agentId={agent.id}
+            machine={assignment}
+            onSaveError={() => {
+              setCapabilitySaveFailed(true);
+            }}
+            onSaveSuccess={() => {
+              setCapabilitySaveFailed(false);
+            }}
+          />
+        ) : (
+          <GroupedList title={translateUi("Capabilities")}>
+            <GroupedRow title={translateUi("Capabilities are not yet available from this Node.")} />
+          </GroupedList>
+        )}
+        <GroupedFormBar />
+      </div>
+    </GroupedFormScope>
   );
 }
 
 function HostedCapabilities({
   agentId,
   machine,
+  onSaveError,
+  onSaveSuccess,
 }: {
   readonly agentId: string;
   readonly machine: MachineAccess;
+  readonly onSaveError?: () => void;
+  readonly onSaveSuccess?: () => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   return (
-    <section aria-label={t("Hosted agent capabilities")} className="space-y-3">
-      <p className="text-12">{t("Policy revision ")}{machine.revision}</p>
-      <p className="text-12 text-muted-foreground">{t("Saving cancels this agent’s current work on this machine. Browser is required for Computer and Developer browser. Turning off Browser also removes Computer and Developer browser; other grants are preserved. External OAuth and Agent Key clients remain restricted to their existing shell/file tools and do not gain Browser or Computer access here.")}</p>
+    <section aria-label={translateUi("Hosted agent capabilities")} className="space-y-3">
+      <GroupedList
+        title={translateUi("Capability policy")}
+        footer={
+          <p>{translateUi("Saving cancels this agent’s current work on this machine. Browser is required for Computer and Developer browser. Turning off Browser also removes Computer and Developer browser; other grants are preserved. External OAuth and Agent Key clients remain restricted to their existing shell/file tools and do not gain Browser or Computer access here.")}</p>
+        }
+      >
+        <GroupedRow
+          title={translateUi("Policy revision")}
+          accessory={String(machine.revision)}
+        />
+      </GroupedList>
       {!enabled || !machine.protocol_v2 ? (
-        <p role="status" className="text-12 text-muted-foreground">{t("Capability editing is unavailable until the account feature and Node protocol support are enabled.")}</p>
+        <GroupedList footer={translateUi("Capability editing is unavailable until the account feature and Node protocol support are enabled.")}>
+          <GroupedRow role="status" title={translateUi("Capability editing unavailable")} />
+        </GroupedList>
       ) : null}
       <MachineCapabilityForm
         machine={machine}
         agentId={agentId}
         disabled={!enabled}
+        onSaveError={onSaveError}
+        onSaveSuccess={onSaveSuccess}
       />
       {machine.revocation_pending ? (
-        <p role="status" className="text-12 text-warning">{t("Revocation delivery is pending; this is not proof of physical runtime stop.")}</p>
+        <GroupedList footer={translateUi("Revocation delivery is pending; this is not proof of physical runtime stop.")}>
+          <GroupedRow role="status" title={translateUi("Revocation pending")} />
+        </GroupedList>
       ) : null}
     </section>
   );

@@ -1,5 +1,6 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Pencil } from "lucide-react";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { billingMetricLabel } from "@/lib/billing-units";
@@ -31,7 +32,7 @@ export function AllowancesTable({
   onEdit: (bundle: AllowanceBundle) => void;
   onToggle: (bundle: AllowanceBundle) => void;
 }) {
-  const { t } = useUiTranslation();
+  useUiTranslation();
   const name = (bundle: AllowanceBundle) =>
     services.find((s) => s.id === bundle.service_id)?.name ??
     bundle.service_slug;
@@ -45,7 +46,7 @@ export function AllowancesTable({
             {row.recurrence.replaceAll("_", " ")}
           </span>
           {!row.is_active && (
-            <span className="ml-2 text-muted-foreground">{t("Disabled")}</span>
+            <span className="ml-2 text-muted-foreground">{translateUi("Disabled")}</span>
           )}
         </div>
       ))}
@@ -61,7 +62,7 @@ export function AllowancesTable({
             : "secondary"
       }
     >
-      {t(bundleStatus(bundle))}
+      {translateUi(bundleStatus(bundle))}
     </Badge>
   );
   const actions = (bundle: AllowanceBundle) =>
@@ -71,8 +72,8 @@ export function AllowancesTable({
           type="button"
           size="icon"
           variant="ghost"
-          title={t("Edit allowance")}
-          aria-label={t("Edit {{service_slug}} allowance", { service_slug: bundle.service_slug })}
+          title={translateUi("Edit allowance")}
+          aria-label={translateUi("Edit {{value1}} allowance", { value1: bundle.service_slug })}
           onClick={() => onEdit(bundle)}
         >
           <Pencil className="h-4 w-4" />
@@ -84,13 +85,13 @@ export function AllowancesTable({
           disabled={pending}
           onClick={() => onToggle(bundle)}
         >
-          {bundle.is_active ? t("Disable") : t("Enable")}
+          {bundle.is_active ? translateUi("Disable") : translateUi("Enable")}
         </Button>
       </div>
     );
   if (!bundles.length)
     return (
-      <p className="py-10 text-center text-12 text-muted-foreground">{t("No usage allowances.")}</p>
+      <p className="py-10 text-center text-14 text-muted-foreground">{translateUi("No usage allowances.")}</p>
     );
   return (
     <>
@@ -100,9 +101,9 @@ export function AllowancesTable({
             key={bundle.id}
             className="relative rounded-xl border border-border/50 bg-card p-4"
           >
-            <div className="text-13 font-semibold">{name(bundle)}</div>
-            <div className="my-2 text-11">{units(bundle)}</div>
-            <div className="mb-2 text-11 text-muted-foreground">
+            <div className="type-card-title">{name(bundle)}</div>
+            <div className="my-2 text-13">{units(bundle)}</div>
+            <div className="mb-2 text-13 text-muted-foreground">
               {billingTargetLabel(bundle)}
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -116,12 +117,12 @@ export function AllowancesTable({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{t("Service")}</TableHead>
-              <TableHead>{t("Units")}</TableHead>
-              <TableHead>{t("Targets")}</TableHead>
-              <TableHead>{t("Status")}</TableHead>
+              <TableHead>{translateUi("Service")}</TableHead>
+              <TableHead>{translateUi("Units")}</TableHead>
+              <TableHead>{translateUi("Targets")}</TableHead>
+              <TableHead>{translateUi("Status")}</TableHead>
               {canWrite && (
-                <TableHead className="text-right">{t("Actions")}</TableHead>
+                <TableHead className="text-right">{translateUi("Actions")}</TableHead>
               )}
             </TableRow>
           </TableHeader>
@@ -130,7 +131,7 @@ export function AllowancesTable({
               <TableRow key={bundle.id}>
                 <TableCell>
                   <div className="font-medium">{name(bundle)}</div>
-                  <div className="text-11 text-muted-foreground">
+                  <div className="text-13 text-muted-foreground">
                     {bundle.service_slug}
                   </div>
                 </TableCell>

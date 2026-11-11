@@ -1,12 +1,24 @@
-import { useAppTranslation } from "@/i18n/use-app-translation";
-import { useEffect, useRef, useState, type ComponentProps } from "react";
-import { FileText, Paperclip, X } from "lucide-react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
+import { PreparedMicrophone, microphoneDevice, microphoneError } from "@/lib/microphone-capture";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
+import { FileText, Paperclip, Plus, X } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,41 +64,43 @@ type Pending = {
 };
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
-  readonly onVoice?: (conversationId: string) => Promise<void>;
+  readonly attachmentMenuItems?: ReactNode;
+  readonly imageWarning?: string;
+  readonly onVoiceSettings?: () => void;
+  readonly onVoicePrepare?: () => boolean;
+  readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
-  const { t } = useAppTranslation();
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, imageWarning, ...props }: Props) {
+  useUiTranslation();
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
   const attachmentStrip = useRef<HTMLUListElement>(null);
   const revealNewAttachment = useRef(false);
-  const [attachmentEdges, setAttachmentEdges] = useState({
-    left: false,
-    right: false,
-  });
+  const [attachmentEdges, setAttachmentEdges] = useState({ left: false, right: false });
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
   const uploadQueue = useRef(Promise.resolve());
-  const openingVoice = useRef(false);
+  const openingVoice = useRef<PreparedMicrophone | null>(null);
+  const [preparingVoice, setPreparingVoice] = useState(false);
+  const voiceGeneration = useRef(0);
   const scopeId = useRef<Promise<string> | undefined>(undefined);
   const resolved = useRef<UploadScope>(scope);
   const alive = useRef(true);
-  const handleCounts = useRef<Record<AttachmentKind, number>>({
-    image: 0,
-    file: 0,
-    "pasted-text": 0,
-  });
+  const handleCounts = useRef<Record<AttachmentKind, number>>({ image: 0, file: 0, "pasted-text": 0 });
   const locked = props.disabled || props.active || props.sending;
   useEffect(() => {
     alive.current = true;
     const entries = pending.current;
     return () => {
       alive.current = false;
+      const preparation = openingVoice.current;
+      if (!preparation?.isTransferred) preparation?.close();
+      openingVoice.current = null;
       for (const file of entries.values()) {
         file.controller.abort();
         if (file.preview) URL.revokeObjectURL(file.preview);
@@ -104,20 +118,13 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     }
     const updateEdges = () => {
       const left = strip.scrollLeft > 1;
-      const right =
-        strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 1;
-      setAttachmentEdges((previous) =>
-        previous.left === left && previous.right === right
-          ? previous
-          : { left, right },
-      );
+      const right = strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 1;
+      setAttachmentEdges((previous) => previous.left === left && previous.right === right
+        ? previous : { left, right });
     };
     updateEdges();
     strip.addEventListener("scroll", updateEdges, { passive: true });
-    const observer =
-      typeof ResizeObserver === "undefined"
-        ? undefined
-        : new ResizeObserver(updateEdges);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateEdges);
     observer?.observe(strip);
     return () => {
       strip.removeEventListener("scroll", updateEdges);
@@ -140,20 +147,14 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     requestAnimationFrame(() => attach.current?.focus());
   }
   /** Queues `incoming` for upload and returns the handles it was given. */
-  function add(
-    incoming: File[],
-    kind?: AttachmentKind,
-    text?: string,
-  ): string[] {
+  function add(incoming: File[], kind?: AttachmentKind, text?: string): string[] {
     if (locked) return [];
     setNotice(undefined);
     const handles: string[] = [];
     for (const file of incoming) {
       if (pending.current.size >= 10) {
         setNotice(
-          t(
-            "Up to 10 files fit in one message. Send the remaining files in another message.",
-          ),
+          translateUi("Up to 10 files fit in one message. Send the remaining files in another message."),
         );
         break;
       }
@@ -214,7 +215,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
           entry.progress = 100;
         } catch (error) {
           entry.error =
-            error instanceof Error ? error.message : t("Upload failed.");
+            error instanceof Error ? error.message : "Upload failed.";
           // A failed draft request can be retried by removing and adding again.
           if (!resolved.current.id) scopeId.current = undefined;
         }
@@ -223,39 +224,144 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     }
     return handles;
   }
-  async function openVoice() {
+  const getDictationThread = useCallback(async () => {
+    scopeId.current ??= scope.id
+      ? Promise.resolve(scope.id)
+      : createUploadDraft(scope.agentId);
+    try {
+      const id = await scopeId.current;
+      if (!alive.current) throw new Error("Composer closed");
+      resolved.current = { kind: scope.kind, agentId: scope.agentId, id };
+      return id;
+    } catch (error) {
+      if (!resolved.current.id) scopeId.current = undefined;
+      throw error;
+    }
+  }, [scope.id, scope.agentId, scope.kind]);
+  function cancelVoicePreparation() {
+    voiceGeneration.current++;
+    if (!openingVoice.current?.isTransferred) openingVoice.current?.close();
+    openingVoice.current = null;
+    setPreparingVoice(false);
+  }
+  const voiceAvailable = Boolean(onVoice);
+  useEffect(() => {
+    if (props.disabled || !voiceAvailable) cancelVoicePreparation();
+  }, [props.disabled, voiceAvailable]);
+  async function openVoice(configureOnly = false) {
+    if (configureOnly && onVoiceSettings) {
+      onVoiceSettings();
+      return;
+    }
+    if (openingVoice.current) {
+      cancelVoicePreparation();
+      return;
+    }
+    if ((props.voiceActive || configureOnly) && scope.id && onVoice) {
+      await onVoice(scope.id);
+      return;
+    }
     if (
       locked ||
-      openingVoice.current ||
       pending.current.size ||
       scope.kind !== "conversations" ||
       !onVoice
     )
       return;
-    openingVoice.current = true;
+    if (!configureOnly && onVoicePrepare && !onVoicePrepare()) return;
+    void loadVoicePanel().catch(() => {});
+    // Permission and AudioContext originate in the actual waveform activation,
+    // before lazy loading, draft creation or catalog requests.
+    const ticket = ++voiceGeneration.current;
+    let preparation: PreparedMicrophone | undefined;
+    let granted = false;
     try {
+      preparation = configureOnly
+        ? undefined
+        : new PreparedMicrophone(microphoneDevice(props.ownerUserId ?? ""));
+      openingVoice.current = preparation ?? null;
+      setPreparingVoice(!configureOnly);
+      setNotice(undefined);
+      await preparation?.ready;
+      granted = true;
+      if (
+        !alive.current ||
+        voiceGeneration.current !== ticket ||
+        preparation?.isClosed ||
+        openingVoice.current !== (preparation ?? null)
+      )
+        return;
       scopeId.current ??= scope.id
         ? Promise.resolve(scope.id)
         : createUploadDraft(scope.agentId);
       const id = await scopeId.current;
+      if (
+        !alive.current ||
+        voiceGeneration.current !== ticket ||
+        preparation?.isClosed ||
+        openingVoice.current !== (preparation ?? null)
+      )
+        return;
       resolved.current = { ...scope, id };
-      if (alive.current) await onVoice(id);
-    } catch {
+      if (!scope.id && props.ownerUserId && props.draftKey) {
+        const drafts = useAssistantDraftStore.getState();
+        if (drafts.ownerUserId === props.ownerUserId)
+          drafts.saveDraft(
+            props.ownerUserId,
+            `conv:${id}`,
+            drafts.getDraft(props.draftKey),
+          );
+      }
+      // The page explicitly marks transfer after its live navigation/account fence.
+      // Until then (including saved-model awaits), unmount still owns cleanup.
+      await onVoice(id, preparation);
+    } catch (error) {
+      preparation?.close();
       if (!resolved.current.id) scopeId.current = undefined;
-      if (alive.current)
-        setNotice(t("Voice could not open. Please try again."));
+      if (alive.current && voiceGeneration.current === ticket)
+        setNotice(
+          granted
+            ? "Voice could not open. Check your source and billing settings, then try again."
+            : microphoneError(error),
+        );
     } finally {
-      openingVoice.current = false;
+      if (openingVoice.current === preparation) openingVoice.current = null;
+      if (alive.current && voiceGeneration.current === ticket)
+        setPreparingVoice(false);
     }
   }
   return (
     <ChatComposer
       {...props}
+      voiceActive={props.voiceActive || preparingVoice}
+      voiceControls={
+        <>
+          {preparingVoice && (
+            <div
+              role="status"
+              className="flex items-center justify-between gap-2 pb-2 text-14 text-text-secondary"
+            >{translateUi("Allow microphone access…")}<Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={cancelVoicePreparation}
+              >{translateUi("Cancel")}</Button>
+            </div>
+          )}
+          {props.voiceControls}
+        </>
+      }
+      dictationThreadId={scope.id}
       onVoice={
         onVoice
-          ? () => {
-              void openVoice();
+          ? (configureOnly) => {
+              void openVoice(configureOnly);
             }
+          : undefined
+      }
+      getDictationThread={
+        onVoice && scope.kind === "conversations"
+          ? getDictationThread
           : undefined
       }
       hasAttachments={files.some((file) => file.item)}
@@ -292,65 +398,69 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       }
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
+          {imageWarning && files.some((file) => file.kind === "image" && !file.error) && (
+            <p role="status" className="text-14 text-muted-foreground">{imageWarning}</p>
+          )}
           {files.length > 0 && (
             <div className="relative min-w-0">
               <ul
                 ref={attachmentStrip}
-                aria-label={t("Attachments")}
+                aria-label={translateUi("Attachments")}
                 tabIndex={0}
+                data-scroll-fade=""
                 className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
               >
                 {files.map((file) => (
                   <li
                     key={file.key}
-                    title={t("{{name}} · Type @{{handle}} to refer to this file", { name: file.name, handle: file.handle })}
-                    className={`relative h-24 shrink-0 overflow-hidden rounded-xl border bg-card text-xs ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-24" : "w-44"}`}
+                    title={translateUi("{{value1}} · Type @{{value2}} to refer to this file", { value1: file.name, value2: file.handle })}
+                    className={`relative flex min-h-[8em] max-w-[75vw] shrink-0 flex-col overflow-hidden rounded-xl border bg-card text-14 ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-[8em]" : "w-[14em]"}`}
                   >
                     {file.preview ? (
                       <button
                         type="button"
-                        className="h-full w-full bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                        aria-label={t("Preview {{name}}", { name: file.name })}
+                        className="w-full flex-1 bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                        aria-label={translateUi("Preview {{value1}}", { value1: file.name })}
                         onClick={() => setPreview(file)}
                       >
                         <img
                           src={file.preview}
                           alt={file.name}
-                          className="h-full w-full object-cover"
+                          className="aspect-square max-h-[8em] w-full object-cover"
                         />
                       </button>
                     ) : (
-                      <div className="flex h-full flex-col justify-between p-3">
+                      <div className="flex flex-1 flex-col justify-between gap-2 p-3 pr-[calc(1.125em+1em*var(--display-density,1)+var(--spacing)*2)]">
                         {file.kind === "pasted-text" ? (
-                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">
+                          <p className="line-clamp-2 text-12 text-muted-foreground">
                             {file.text}
                           </p>
                         ) : (
                           <FileText
                             aria-hidden="true"
-                            className="h-6 w-6 text-muted-foreground"
+                            className="size-[2em] text-muted-foreground"
                             strokeWidth={1.5}
                           />
                         )}
                         <div className="min-w-0">
                           <p className="truncate font-medium">
                             {file.kind === "pasted-text"
-                              ? t("Pasted text")
+                              ? translateUi("Pasted text")
                               : (file.item?.label ?? file.name)}
                           </p>
                           {!file.error && file.item && (
-                            <p className="mt-0.5 text-[10px] text-muted-foreground">
+                            <p className="mt-0.5 text-12 text-muted-foreground">
                               {file.kind === "pasted-text"
-                                ? t("TEXT")
+                                ? translateUi("TEXT")
                                 : file.name.includes(".")
                                   ? file.name.split(".").pop()?.toUpperCase()
-                                  : t("FILE")}
+                                  : translateUi("FILE")}
                               {" · "}
                               {file.size < 1024
-                                ? t("{{size}} B", { size: file.size })
+                                ? translateUi("{{size}} B", { size: file.size })
                                 : file.size < 1024 * 1024
-                                  ? t("{{value}} KB", { value: Math.ceil(file.size / 1024) })
-                                  : t("{{value}} MB", { value: (file.size / (1024 * 1024)).toFixed(1) })}
+                                  ? translateUi("{{value1}} KB", { value1: Math.ceil(file.size / 1024) })
+                                  : translateUi("{{value1}} MB", { value1: (file.size / (1024 * 1024)).toFixed(1) })}
                             </p>
                           )}
                         </div>
@@ -360,7 +470,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                       <p
                         role="alert"
                         title={file.error}
-                        className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive"
+                        className="line-clamp-2 bg-card/95 px-2 py-1 text-12 text-destructive"
                       >
                         {file.error}
                       </p>
@@ -370,20 +480,20 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                         className={
                           file.item
                             ? "sr-only"
-                            : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"
+                            : "bg-card/95 px-2 py-1 text-12 text-muted-foreground"
                         }
                       >
                         {file.item
-                          ? t("Ready")
+                          ? translateUi("Ready")
                           : file.progress >= 99
-                            ? t("Checking file…")
-                            : t("Uploading {{progress}}%", { progress: file.progress })}
+                            ? translateUi("Checking file…")
+                            : translateUi("Uploading {{value1}}%", { value1: file.progress })}
                       </p>
                     )}
-                    <button
+                    <button data-icon-button=""
                       type="button"
-                      className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                      aria-label={t("Remove {{name}}", { name: file.name })}
+                      className="absolute right-1 top-1 flex items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      aria-label={translateUi("Remove {{value1}}", { value1: file.name })}
                       onClick={() => remove(file.key)}
                       disabled={props.sending}
                     >
@@ -405,7 +515,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             </div>
           )}
           {notice && (
-            <p role="status" className="text-xs text-muted-foreground">
+            <p role="alert" className="text-14 text-destructive">
               {notice}
             </p>
           )}
@@ -431,9 +541,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               )}
               <DialogFooter>
                 <DialogClose asChild>
-                  <Button type="button" variant="secondary">
-                    {t("Close preview")}
-                  </Button>
+                  <Button type="button" variant="secondary">{translateUi("Close preview")}</Button>
                 </DialogClose>
               </DialogFooter>
             </DialogContent>
@@ -451,14 +559,28 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             multiple
             className="sr-only"
             tabIndex={-1}
-            aria-label={t("Choose attachments")}
+            aria-label={translateUi("Choose attachments")}
             disabled={locked}
             onChange={(event) => {
               void add(Array.from(event.target.files ?? []));
               event.target.value = "";
             }}
           />
-          <TooltipProvider>
+          {attachmentMenuItems ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button ref={attach} type="button" variant="ghost" size="icon"
+                  className="shrink-0 text-muted-foreground" aria-label={translateUi("Add context")} disabled={locked}>
+                  <Plus aria-hidden className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label={translateUi("Add context")}>
+                <DropdownMenuItem disabled={files.length >= 10} onSelect={() => input.current?.click()}>
+                  <Paperclip aria-hidden className="size-4" />{translateUi("Attach files")}</DropdownMenuItem>
+                {attachmentMenuItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -467,20 +589,16 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   size="icon"
                   className="shrink-0 text-muted-foreground"
                   ref={attach}
-                  aria-label={t("Attach files")}
+                  aria-label={translateUi("Attach files")}
                   disabled={locked || files.length >= 10}
                   onClick={() => input.current?.click()}
                 >
                   <Paperclip className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent className="max-w-64">
-                {t(
-                  "PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON. Up to 20 MB each, 10 files per message.",
-                )}
-              </TooltipContent>
+              <TooltipContent className="max-w-64">{translateUi("PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON. Up to 20 MB each, 10 files per message.")}</TooltipContent>
             </Tooltip>
-          </TooltipProvider>
+          </TooltipProvider>}
         </>
       }
       onSend={async (text) => {
