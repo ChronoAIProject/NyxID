@@ -1,3 +1,4 @@
+import { parseHistoryResponse } from "../../features/assistant/assistantHistoryCompat";
 import { assistantTitleLanguage } from "../../features/assistant/titleLanguage";
 import {
   requestAuthenticatedResponse,
@@ -82,7 +83,7 @@ export const assistantApi = {
     const query = new URLSearchParams({ limit: "50" });
     if (cursor) query.set("cursor", cursor);
     if (agentId) query.set("agent_id", agentId);
-    return indexSchema.parse(
+    return parseHistoryResponse(indexSchema,
       await requestJson(`${ROOT}/conversations?${query}`, { signal }),
     );
   },
@@ -92,7 +93,7 @@ export const assistantApi = {
     signal?: AbortSignal,
     acknowledgementId?: string,
   ) {
-    const result = historySchema.parse(
+    const result = parseHistoryResponse(historySchema,
       await requestJson(
         assistantHistoryRequestPath(id, beforeSeq, acknowledgementId),
         { signal },

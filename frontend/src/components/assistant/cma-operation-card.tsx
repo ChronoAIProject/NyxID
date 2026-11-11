@@ -22,6 +22,8 @@ import { CmaCardDetails, CmaCardFrame } from "./cma-card-frame";
 
 function presentation(operation: CmaOperation) {
   const { state, reason, status, kind } = operation;
+  if (!["cma_response", "cma_agent", "cma_provisioning"].includes(kind))
+    return { label: "Activity details unavailable in this app version.", tone: "muted" };
   if (state === "cancelled")
     return { label: "Tracking stopped", tone: "muted" };
   if (state === "cancelling")
@@ -148,6 +150,8 @@ export function CmaOperationCard({
   const detailsId = useId();
   const scrollBody = useRef<HTMLDivElement>(null);
   const cmaUrl = safeCmaUrl(operation.cma_url);
+  if (!["cma_response", "cma_agent", "cma_provisioning"].includes(operation.kind))
+    return <p className="text-13 text-muted-foreground">{translateUi("Activity details unavailable in this app version.")}</p>;
   const title =
     operation.kind === "cma_provisioning" ? "CMA setup" : "CMA task";
   return (

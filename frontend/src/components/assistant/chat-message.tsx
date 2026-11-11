@@ -1,3 +1,4 @@
+import { activityPresentationStatus } from "@/schemas/assistant-history-compat";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -24,6 +25,7 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  Minus,
   Copy,
   MessageSquare,
   RotateCcw,
@@ -143,6 +145,10 @@ function toolFailureCopy(
     case "memory_internal_error": return "Internal error: the write could not be confirmed. Check current notes before retrying.";
   }
   switch (failure?.kind) {
+    case "retry_duplicate_action":
+      return translateUi("Already done in the previous attempt; skipped this time.");
+    case "resource_unavailable":
+      return translateUi("A resource needed for this step is unavailable.");
     case "service_status":
       return failure.status == null
         ? translateUi("The service returned an error. No HTTP status is available.")
@@ -218,6 +224,7 @@ function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"
   if (status === "stopped") {
     return <CircleAlert className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label={translateUi("Stopped")} />;
   }
+  if (status !== "complete") return <CircleAlert className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label={translateUi("Status unavailable")} />;
   return <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-label={translateUi("Completed")} />;
 }
 
@@ -229,17 +236,21 @@ function activitySummary(message: ChatMessage): string {
       return billingError(message.errorCode)?.title ?? translateUi("Turn failed");
     case "stopped":
       return translateUi("Stopped");
-    default:
+    case "complete":
       return translateUi("Completed");
+    default:
+      return translateUi("Status unavailable");
   }
 }
 
 function ToolStatusIcon({
   status,
 }: {
-  readonly status: RuntimeToolCallInfo["status"] | "waiting";
+  readonly status: RuntimeToolCallInfo["status"] | "waiting" | "skipped";
 }) {
   useUiTranslation();
+  if (status === "skipped") return <Minus aria-label={translateUi("Skipped")} className="h-3 w-3 shrink-0 text-muted-foreground" />;
+  if (status === "unknown") return <CircleAlert aria-label={translateUi("Status unavailable")} className="h-3 w-3 shrink-0 text-muted-foreground" />;
   if (status === "waiting") return <ShieldCheck aria-label={translateUi("Decision")} className="h-3 w-3 shrink-0 text-muted-foreground" />;
   if (status === "running") return <PulseDot className="mx-[3px]" />;
   if (status === "error") {
@@ -310,7 +321,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   const delivery = message.role === "assistant" ? message.channelDelivery : undefined;
   if (!count && !decisions.length && !waited && !delivery) return null;
   const failed = steps.filter((step) => step.status === "error").length
-    + tools.filter((tool) => (activityDecisionPresentation(tool.decision)?.status ?? tool.status) === "error").length;
+    + tools.filter((tool) => activityPresentationStatus(activityDecisionPresentation(tool.decision)?.status ?? tool.status, tool.failure?.kind) === "error").length;
   const onTool = new Map<string, NyxAgentAcknowledgement[]>();
   const loose: NyxAgentAcknowledgement[] = [];
   for (const row of decisions) {
@@ -385,12 +396,12 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
           ))}
           {tools.map((tool) => {
             const decision = activityDecisionPresentation(tool.decision);
-            const status = decision?.status ?? tool.status;
+            const status = activityPresentationStatus(decision?.status ?? tool.status, tool.failure?.kind);
             return (
             <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
             <details className="text-13 text-muted-foreground">
               <summary
-                data-tool-status={tool.decision?.state ?? tool.status}
+                data-tool-status={status === "skipped" || status === "unknown" ? status : tool.decision?.state ?? tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
               >
                 <span className="flex w-full min-w-0 items-center gap-2">
@@ -401,7 +412,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                       status === "error" && "text-destructive",
                     )}
                   >
-                    {decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
+                    {status === "skipped" ? toolFailureCopy(tool.failure) : status === "unknown" ? translateUi("Activity details unavailable in this app version.") : decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
                   <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", status === "error" ? "text-destructive" : "text-text-tertiary")}>
@@ -412,7 +423,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     /></span> : null}
                   </span>
                 </span>
-                {decision ? <span className="break-words pl-5">{decision.detail}</span> : status === "error" ? (
+                {decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{decision.detail}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
                     {toolFailureCopy(tool.failure)}{translateUi(" The assistant can continue after a failed step.")}</span>
                 ) : null}

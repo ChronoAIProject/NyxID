@@ -88,7 +88,7 @@ export function MachineToolCard({
       <p className="break-all text-12 text-muted-foreground">
         {receipt.machine_name?.trim() ||
           translateUi("Machine {{value1}}", { value1: receipt.node_id.slice(0, 8) })}{" "}
-        · {receipt.context_mode === "separated" ? translateUi("Separate workspace and browser for this agent") : translateUi("Shared workspace and browser")}
+        · {receipt.context_mode === "separated" ? translateUi("Separate workspace and browser for this agent") : receipt.context_mode === "unknown" ? translateUi("Workspace details unavailable") : translateUi("Shared workspace and browser")}
       </p>
       <details className="text-12 text-muted-foreground">
         <summary className="cursor-pointer">{translateUi("Correlation IDs")}</summary>
