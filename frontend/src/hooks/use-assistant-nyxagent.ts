@@ -226,7 +226,7 @@ export function useNyxAgentAssistantChat({
     // fallback without it and a slow backstop with it. A turn NyxID (not
     // this page) starts here reaches the thread row first: `streaming`.
     refetchInterval: (query) =>
-      streaming || query.state.data?.conversation.active_turn
+      streaming || nyxAgentTransport.hasUnsettledInterruption(selectedConversationId) || query.state.data?.conversation.active_turn
         ? (live ? 5000 : 2000)
         : query.state.data?.cma_operations.some(isCmaOperationPending)
           ? 5000
@@ -427,6 +427,7 @@ export function useNyxAgentAssistantChat({
     continuations: nyxAgentTransport.continuations(viewId),
     isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
+    interruption: nyxAgentTransport.getInterruption(viewId),
     error: history.error?.message ?? threads.threadsError?.message ?? agents.error?.message,
     send,
     retry: (id: string, messageId: string) =>

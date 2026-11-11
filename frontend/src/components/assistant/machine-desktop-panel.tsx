@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { ChatHeaderCompactContext } from "./chat-header-context";
 import {
@@ -47,6 +49,7 @@ const STATUS_DOT: Record<DesktopStatus, string> = {
 };
 
 function StatusDot({ status, label, pulse = false }: { readonly status: DesktopStatus; readonly label: string; readonly pulse?: boolean }) {
+  useUiTranslation();
   return (
     <span
       role="img"
@@ -86,6 +89,7 @@ export function MachineDesktopPanel({
   /** Reports the connection state so a tab can show it. */
   readonly onStatus?: (status: DesktopStatus) => void;
 }) {
+  useUiTranslation();
   const collapseKey = conversationId && !pane
     ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`
     : null;
@@ -436,7 +440,7 @@ export function MachineDesktopPanel({
         !pane && "rounded-xl border border-border/50 bg-card p-3",
         fullscreen && "overflow-auto bg-background p-4",
       )}
-      aria-label="Live machine desktop"
+      aria-label={translateUi("Live machine desktop")}
       data-private="true"
       data-ph-no-capture
     >
@@ -457,8 +461,8 @@ export function MachineDesktopPanel({
         <div className="flex min-w-0 flex-1 basis-60 items-center gap-2">
         <div
           role="group"
-          aria-label="Desktop display"
-          title={controls ? "Hand back to switch displays" : undefined}
+          aria-label={translateUi("Desktop display")}
+          title={controls ? translateUi("Hand back to switch displays") : undefined}
           className="flex shrink-0 rounded-lg border border-hairline p-0.5"
         >
           {(["secure", "dev"] as const).map((value) => (
@@ -467,8 +471,8 @@ export function MachineDesktopPanel({
               size="sm"
               variant="ghost"
               aria-pressed={display === value}
-              aria-label={value === "secure" ? "Secure browser" : "Dev browser"}
-              title={value === "secure" ? "Secure browser" : "Dev browser"}
+              aria-label={value === "secure" ? translateUi("Secure browser") : translateUi("Dev browser")}
+              title={value === "secure" ? translateUi("Secure browser") : translateUi("Dev browser")}
               disabled={controls && display !== value}
               className={cn(
                 "h-6 min-h-0 px-2 text-14",
@@ -479,7 +483,7 @@ export function MachineDesktopPanel({
                 setDisplay(value);
               }}
             >
-              {value === "secure" ? "Secure" : "Dev"}
+              {value === "secure" ? translateUi("Secure") : translateUi("Dev")}
             </Button>
           ))}
         </div>
@@ -488,7 +492,7 @@ export function MachineDesktopPanel({
             size="sm"
             variant="ghost"
             className="h-7 w-7 shrink-0 px-0"
-            aria-label={collapsed ? "Show desktop" : "Minimise desktop"}
+            aria-label={collapsed ? translateUi("Show desktop") : translateUi("Minimise desktop")}
             aria-expanded={!collapsed}
             onClick={() => collapse(!collapsed)}
           >
@@ -510,31 +514,31 @@ export function MachineDesktopPanel({
             disabled={controls}
           >
             <SelectTrigger
-              aria-label="Desktop context"
-              title={contexts.isError ? "Separated contexts are unavailable on this machine" : "Workspace and browser"}
+              aria-label={translateUi("Desktop context")}
+              title={contexts.isError ? translateUi("Separated contexts are unavailable on this machine") : translateUi("Workspace and browser")}
               className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-14 [&>span]:min-w-0 [&>span]:truncate"
             >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="legacy">Shared legacy desktop</SelectItem>
+              <SelectItem value="legacy">{translateUi("Shared legacy desktop")}</SelectItem>
               {(contexts.data ?? []).map((context) => (
                 <SelectItem key={context.context_id} value={context.context_id}>
                   {context.agent_name} · {context.actor_label}
-                  {context.group_id ? " · group task" : ""} · generation {context.generation}
+                  {context.group_id ? translateUi(" · group task") : ""}{translateUi(" · generation ")}{context.generation}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
           {contexts.isError ? (
-            <span role="status" className="sr-only">Separated contexts are unavailable on this machine.</span>
+            <span role="status" className="sr-only">{translateUi("Separated contexts are unavailable on this machine.")}</span>
           ) : null}
           <Button
             size="sm"
             variant="ghost"
             className="h-7 w-7 shrink-0 px-0"
-            aria-label={fullscreen ? "Exit fullscreen" : "Expand desktop"}
-            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            aria-label={fullscreen ? translateUi("Exit fullscreen") : translateUi("Expand desktop")}
+            title={fullscreen ? translateUi("Exit fullscreen") : translateUi("Fullscreen")}
             onClick={() => {
               if (fullscreen) void document.exitFullscreen();
               else void panel.current?.requestFullscreen();
@@ -546,8 +550,8 @@ export function MachineDesktopPanel({
             size="sm"
             variant="ghost"
             className="h-7 w-7 shrink-0 px-0"
-            aria-label="Pop out desktop"
-            title="Open in a new window"
+            aria-label={translateUi("Pop out desktop")}
+            title={translateUi("Open in a new window")}
             onClick={() =>
               window.open(
                 `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}${contextId ? `&context_id=${encodeURIComponent(contextId)}` : ""}`,
@@ -567,7 +571,7 @@ export function MachineDesktopPanel({
           width={1280}
           height={800}
           tabIndex={controls ? 0 : -1}
-          aria-label="Machine screen. Take control to use mouse and keyboard."
+          aria-label={translateUi("Machine screen. Take control to use mouse and keyboard.")}
           className={`block ${pane ? "" : "max-h-[65vh] "}w-full rounded-xl bg-background object-contain focus:outline-none focus:ring-1 focus:ring-primary ${controls ? "cursor-crosshair" : "cursor-default"}`}
           onPointerMove={(event) => {
             const position = point(event);
@@ -681,29 +685,25 @@ export function MachineDesktopPanel({
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/70 p-4 text-center backdrop-blur-[2px] dark:bg-black/60">
             {error ? (
               <>
-                <p role="alert" className="max-w-sm text-destructive">{error}</p>
+                <p role="alert" className="max-w-sm text-destructive">{translateUi(error)}</p>
               </>
             ) : (
               <p className="flex items-center gap-2 text-muted-foreground">
-                <span className="h-1.5 w-1.5 rounded-full bg-warning motion-safe:animate-pulse" aria-hidden="true" />
-                Connecting…
-              </p>
+                <span className="h-1.5 w-1.5 rounded-full bg-warning motion-safe:animate-pulse" aria-hidden="true" />{translateUi("Connecting…")}</p>
             )}
             {error || (!connected && stalled) ? (
-              <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>Reconnect</Button>
+              <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>{translateUi("Reconnect")}</Button>
             ) : null}
-            {reason ? <p role="status" className="max-w-sm text-warning">NyxBot needs you on this machine: {reason}</p> : null}
+            {reason ? <p role="status" className="max-w-sm text-warning">{translateUi("NyxBot needs you on this machine: ")}{reason}</p> : null}
           </div>
         ) : null}
         {connected && !error && (reason || controller === "requested") && !controls ? (
-          <p role="status" className="absolute inset-x-3 top-3 rounded-lg bg-warning/15 px-3 py-2 text-warning backdrop-blur-sm light:bg-warning light:text-white">
-            NyxBot needs you on this machine: {reason ?? "Please take control."}
+          <p role="status" className="absolute inset-x-3 top-3 rounded-lg bg-warning/15 px-3 py-2 text-warning backdrop-blur-sm light:bg-warning light:text-white">{translateUi("NyxBot needs you on this machine: ")}{reason ?? translateUi("Please take control.")}
           </p>
         ) : null}
       </div>
       {!collapsed && action && !controls && controller === "agent" ? (
-        <p className="text-muted-foreground" aria-live="polite">
-          Agent action: {action}
+        <p className="text-muted-foreground" aria-live="polite">{translateUi("Agent action: ")}{action}
         </p>
       ) : null}
       <DesktopControls
@@ -713,10 +713,7 @@ export function MachineDesktopPanel({
         control={control}
       />
       {controls ? (
-        <p className="text-muted-foreground">
-          The agent cannot use this machine while you control it. Screen frames
-          and input are not recorded.
-        </p>
+        <p className="text-muted-foreground">{translateUi("The agent cannot use this machine while you control it. Screen frames and input are not recorded.")}</p>
       ) : null}
     </section>
   );
@@ -732,6 +729,7 @@ function DesktopControls({
   readonly controller: string;
   readonly control: (type: string, note?: string) => void;
 }) {
+  useUiTranslation();
   const form = useAppForm({ defaultValues: { note: "" } });
   return (
     <div className="flex min-w-0 items-center justify-end gap-2">
@@ -742,9 +740,7 @@ function DesktopControls({
           variant="primary"
           disabled={!connected || controller === "taking"}
           onClick={() => control("take_control")}
-        >
-          Take control
-        </Button>
+        >{translateUi("Take control")}</Button>
       ) : (
         <form
           className="flex min-w-0 flex-1 gap-2"
@@ -755,14 +751,12 @@ function DesktopControls({
         >
           <Input
             className="h-8"
-            aria-label="Hand-back note"
-            placeholder="Optional note, e.g. logged in"
+            aria-label={translateUi("Hand-back note")}
+            placeholder={translateUi("Optional note, e.g. logged in")}
             maxLength={2000}
             {...form.register("note")}
           />
-          <Button type="submit" size="sm" className="shrink-0" variant="primary">
-            Hand back
-          </Button>
+          <Button type="submit" size="sm" className="shrink-0" variant="primary">{translateUi("Hand back")}</Button>
         </form>
       )}
       <Button
@@ -771,9 +765,7 @@ function DesktopControls({
         variant="destructive"
         disabled={!connected}
         onClick={() => control("stop")}
-      >
-        Stop
-      </Button>
+      >{translateUi("Stop")}</Button>
     </div>
   );
 }
@@ -794,6 +786,7 @@ function MachineDesktopSwitcher({
   readonly turnActive?: boolean;
   readonly pane: boolean;
 }) {
+  useUiTranslation();
   const nodes = useNodes();
   const [selected, setSelected] = useState<string>();
   const [shownStatus, setShownStatus] = useState<DesktopStatus>("attention");
@@ -812,7 +805,7 @@ function MachineDesktopSwitcher({
     return parts.join(" · ");
   };
   const tabs = desktops.length > 1 ? (
-    <div role="tablist" aria-label="Machines" className="flex min-w-0 max-w-full shrink-0 gap-1 overflow-x-auto">
+    <div role="tablist" aria-label={translateUi("Machines")} className="flex min-w-0 max-w-full shrink-0 gap-1 overflow-x-auto">
       {desktops.map((desktop) => {
         const key = conversationDesktopKey(desktop);
         const active = desktop === shown;
@@ -834,9 +827,9 @@ function MachineDesktopSwitcher({
             {active ? (
               <StatusDot status={shownStatus} label={STATUS_LABEL[shownStatus]} pulse={shownStatus === "live" && live} />
             ) : desktop.reason ? (
-              <StatusDot status="attention" label="Needs you" />
+              <StatusDot status="attention" label={translateUi("Needs you")} />
             ) : live ? (
-              <StatusDot status="live" label="Agent working" pulse />
+              <StatusDot status="live" label={translateUi("Agent working")} pulse />
             ) : null}
           </button>
         );
@@ -876,6 +869,7 @@ export function ConversationMachineDesktops({
   readonly desktops: readonly MachineDesktopMetadata[];
   readonly turnActive?: boolean;
 }) {
+  useUiTranslation();
   return desktops.length ? (
     <div className="mx-auto w-full max-w-[758px] px-4 pb-3">
       <MachineDesktopSwitcher conversationId={conversationId} desktops={desktops} turnActive={turnActive} pane={false} />
@@ -897,6 +891,7 @@ export function MachinePane({
   readonly desktops: readonly MachineDesktopMetadata[];
   readonly turnActive?: boolean;
 }) {
+  useUiTranslation();
   return <MachineDesktopSwitcher conversationId={conversationId} desktops={desktops} turnActive={turnActive} pane />;
 }
 
@@ -911,19 +906,20 @@ export function MachinePaneToggle({
   readonly live: boolean;
   readonly onToggle: () => void;
 }) {
+  useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <Button
       size={compact ? "icon" : "sm"}
       variant="ghost"
-      aria-label={open ? "Hide machine" : "Show machine"}
+      aria-label={open ? translateUi("Hide machine") : translateUi("Show machine")}
       aria-pressed={open}
-      title={open ? "Hide machine" : "Show machine"}
+      title={open ? translateUi("Hide machine") : translateUi("Show machine")}
       className={cn("relative", open && "bg-overlay-strong text-foreground")}
       onClick={onToggle}
     >
       <Monitor aria-hidden="true" />
-      <span className={compact ? "sr-only" : undefined}>Machine</span>
+      <span className={compact ? "sr-only" : undefined}>{translateUi("Machine")}</span>
       {live ? (
         <span aria-hidden="true" className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />
       ) : null}

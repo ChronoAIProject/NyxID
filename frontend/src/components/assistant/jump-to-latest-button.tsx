@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ArrowDown } from "lucide-react";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 
@@ -16,6 +18,7 @@ export function JumpToLatestButton({
   readonly bottomInset: number;
   readonly onJump: () => void;
 }) {
+  useUiTranslation();
   return (
     <div
       className="pointer-events-none absolute left-0 z-20 px-4 sm:px-6"
@@ -31,8 +34,8 @@ export function JumpToLatestButton({
               <motion.button
                 key="jump-to-latest"
                 type="button"
-                aria-label="Jump to latest message"
-                title="Jump to latest message"
+                aria-label={translateUi("Jump to latest message")}
+                title={translateUi("Jump to latest message")}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 8 }}

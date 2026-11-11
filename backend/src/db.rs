@@ -118,6 +118,15 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
+        .create_indexes(crate::services::assistant_cma_sandbox_service::indexes())
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
+        .create_indexes(crate::services::assistant_cma_agent_service::indexes())
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_cma_creation::COLLECTION_NAME)
+        .create_indexes(crate::services::assistant_cma_admission::indexes())
+        .await?;
     db.collection::<bson::Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -2539,6 +2548,30 @@ async fn ensure_feature_flag_indexes(db: &Database) -> Result<(), mongodb::error
 }
 
 async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    let invocation_diagnostics = db.collection::<mongodb::bson::Document>(
+        crate::models::invocation_diagnostic::COLLECTION_NAME,
+    );
+    invocation_diagnostics
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"handle_hash":1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    invocation_diagnostics
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::ZERO)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // Drop old sparse unique indexes that conflict with partial filter indexes
     // (MongoDB won't replace an index with different options on the same keys)
     let _ = db

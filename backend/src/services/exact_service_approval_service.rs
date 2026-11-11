@@ -2307,6 +2307,8 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: None,
             id: id.to_string(),

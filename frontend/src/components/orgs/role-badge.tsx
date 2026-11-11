@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Badge } from "@/components/ui/badge";
 import type { OrgRole } from "@/schemas/orgs";
 
@@ -7,10 +9,10 @@ interface RoleBadgeProps {
 }
 
 const ROLE_LABEL: Record<string, string> = {
-  admin: "Admin",
-  member: "Member",
-  viewer: "Viewer",
-  owner: "Owner",
+  get admin() { return translateUi("Admin"); },
+  get member() { return translateUi("Member"); },
+  get viewer() { return translateUi("Viewer"); },
+  get owner() { return translateUi("Owner"); },
 };
 
 /**
@@ -18,6 +20,7 @@ const ROLE_LABEL: Record<string, string> = {
  * they adapt to light/dark themes.
  */
 export function RoleBadge({ role, className }: RoleBadgeProps) {
+  useUiTranslation();
   const label = ROLE_LABEL[role] ?? role;
   if (!label) return null;
 

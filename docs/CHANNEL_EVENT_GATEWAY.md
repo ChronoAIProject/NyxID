@@ -738,6 +738,25 @@ unrelated asynchronous updates use the source-bound gateway reply endpoint.
 
 ### Discord transport and provider boundary
 
+**Health evidence (#2328 / #2323):** `selected` and `pending_discovery` confirm
+source selection only. They do not prove a connected Discord session. NyxID
+records optional `gateway_intake` at adoption (exact binding and hand-over time),
+then samples its last authenticated native event at most once per minute in the
+admission transaction (first/binding/hand-over changes bypass the interval). That
+transaction clears only the exact stored intake-unconfirmed state; real delivery
+failures remain. Bot inbound diagnostics share the existing admission fence write. Health
+and the channel aggregate use this evidence separately from activation and
+historical relay delivery; no event means `discord_native_intake_unconfirmed`.
+Existing native bots are not automatically returned to relay. Positive connection
+confirmation and automatic rollback require a negotiated CMA health contract,
+a default-off rollout and all-replica readiness; CMA#1586 tracks that contract.
+
+Failed setup is cleaned through the exact attempt fence, including errors before
+a reservation is returned. The bounded release sweep also repairs stale direct
+references after terminal cleanup. It never treats an uncertain create/DELETE
+as absence, and every existing native drain guard remains authoritative for
+old and new ingress readers. See [Discord intake health](CHANNEL_BOT_RELAY.md#discord-intake-health-and-failed-hand-overs-2328-2323).
+
 `channel:discord-gateway` controls NyxID's relay WebSocket ingress.
 `nyxbot:gateway-discord` selects **native Discord** only after authenticated
 `/channel-capabilities` discovery and a bot-token `/users/@me` identity check.
@@ -1393,7 +1412,7 @@ cross-service extension, not an endpoint implemented by this change.
 Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
 Provider/creator keys stay on the linking admin and route keys stay org-owned;
 CMA source contracts are unchanged. NyxID resolves each verified sender to a
-live org member or an explicitly delegated, budgeted org-paid guest. Optional
+live org member or an explicitly enabled org-paid guest under specialist Grants (or frozen legacy service limits). Optional
 versioned origins carry that actor through replay/queues/async replies. Native
 and relay events use the same authority checks and dedup namespace. There is no
 CMA-provided membership/payer and no fallback to a personal agent. See

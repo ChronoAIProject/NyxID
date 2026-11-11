@@ -347,10 +347,10 @@ pub async fn pool_aliases(
 /// Forward the request to the provider's API using the user's stored credential.
 /// This is a passthrough proxy -- no request/response translation.
 pub async fn llm_proxy_request(
-    state: State<AppState>,
+    State(state): State<AppState>,
     auth_user: AuthUser,
     path: Path<(String, String)>,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> AppResult<Response> {
     if let Some(context) = &auth_user.execution_permission {
         context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
@@ -363,12 +363,33 @@ pub async fn llm_proxy_request(
             .and_then(|chat| chat.turn_id.as_deref()),
     );
     trace
-        .response(
-            crate::turn_trace::Stage::Proxy,
-            Box::pin(llm_proxy_request_inner(state, auth_user, path, request)),
-        )
+        .response(crate::turn_trace::Stage::Proxy, async move {
+            let diagnostic =
+                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+            if diagnostic.is_none() {
+                return Box::pin(llm_proxy_request_inner(
+                    State(state),
+                    auth_user,
+                    path,
+                    request,
+                ))
+                .await;
+            }
+            let result = Box::pin(llm_proxy_request_inner(
+                State(state.clone()),
+                auth_user.clone(),
+                path,
+                request,
+            ))
+            .await;
+            super::invocation_diagnostics::HttpInvocation::finish(
+                diagnostic, &state, &auth_user, result,
+            )
+            .await
+        })
         .await
 }
+
 async fn llm_proxy_request_inner(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -400,6 +421,10 @@ async fn llm_proxy_request_inner(
     // Per-agent rate limit check
     crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user).await?;
 
+    let diagnostic_target = request
+        .extensions()
+        .get::<super::invocation_diagnostics::Target>()
+        .cloned();
     let user_id_str = auth_user.user_id.to_string();
 
     // Resolve the downstream service for this provider slug
@@ -537,6 +562,9 @@ async fn llm_proxy_request_inner(
         .await?
         {
             Some(resolution) => {
+                if let Some(target) = &diagnostic_target {
+                    target.record(Some(&resolution.user_service_id));
+                }
                 operation_user_service_id = Some(resolution.user_service_id.clone());
                 credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
@@ -1105,7 +1133,7 @@ pub fn gateway_request(
     state: State<AppState>,
     auth_user: AuthUser,
     path: Path<String>,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> futures::future::BoxFuture<'static, AppResult<Response>> {
     Box::pin(async move {
         if let Some(context) = &auth_user.execution_permission {
@@ -1119,10 +1147,24 @@ pub fn gateway_request(
                 .and_then(|chat| chat.turn_id.as_deref()),
         );
         trace
-            .response(
-                crate::turn_trace::Stage::Proxy,
-                Box::pin(gateway_request_inner(state, auth_user, path, request)),
-            )
+            .response(crate::turn_trace::Stage::Proxy, async move {
+                let diagnostic =
+                    super::invocation_diagnostics::HttpInvocation::start(&state.0, &mut request);
+                if diagnostic.is_none() {
+                    return Box::pin(gateway_request_inner(state, auth_user, path, request)).await;
+                }
+                let result = Box::pin(gateway_request_inner(
+                    state.clone(),
+                    auth_user.clone(),
+                    path,
+                    request,
+                ))
+                .await;
+                super::invocation_diagnostics::HttpInvocation::finish(
+                    diagnostic, &state.0, &auth_user, result,
+                )
+                .await
+            })
             .await
     })
 }
@@ -1256,6 +1298,9 @@ async fn gateway_request_inner(
         model,
         is_streaming,
         billing_egress_permit,
+        gateway_extensions
+            .get::<super::invocation_diagnostics::Target>()
+            .cloned(),
     ))
     .await
 }
@@ -1275,6 +1320,7 @@ async fn gateway_provider_request(
     model: String,
     is_streaming: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    diagnostic_target: Option<super::invocation_diagnostics::Target>,
 ) -> AppResult<Response> {
     if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
         && (method == Method::CONNECT || headers.contains_key(axum::http::header::UPGRADE))
@@ -1395,6 +1441,9 @@ async fn gateway_provider_request(
         .await?
         {
             Some(resolution) => {
+                if let Some(target) = &diagnostic_target {
+                    target.record(Some(&resolution.user_service_id));
+                }
                 operation_user_service_id = Some(resolution.user_service_id.clone());
                 credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
@@ -3341,6 +3390,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,

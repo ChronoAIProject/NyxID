@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { GroupedSelectTrigger } from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
@@ -46,16 +48,17 @@ export function AccessModeBadge({
   readonly overridden?: boolean;
   readonly className?: string;
 }) {
+  useUiTranslation();
   return (
     <Badge
       variant={mode === "autopilot" ? "warning" : "secondary"}
       className={cn("gap-1", className)}
       title={ACCESS_MODE_DESCRIPTION[mode]}
-      aria-label={`Access mode: ${ACCESS_MODE_LABEL[mode]}${overridden ? " (this agent)" : ""}`}
+      aria-label={translateUi("Access mode: {{value1}}{{value2}}", { value1: translateUi(ACCESS_MODE_LABEL[mode]), value2: overridden ? translateUi(" (this agent)") : "" })}
     >
       <ShieldCheck aria-hidden="true" className="h-3 w-3" />
       {ACCESS_MODE_LABEL[mode]}
-      {overridden ? " · agent" : ""}
+      {overridden ? translateUi(" · agent") : ""}
     </Badge>
   );
 }
@@ -69,6 +72,7 @@ export function AccessModeSwitcher({
   readonly agentOverride?: NyxAgentAccessMode | null;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [error, setError] = useState<string>();
@@ -91,7 +95,7 @@ export function AccessModeSwitcher({
             });
         }}
       >
-        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-14">
+        <SelectTrigger aria-label={translateUi("Access mode")} className="h-7 w-auto gap-1 px-2 text-14">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -104,7 +108,7 @@ export function AccessModeSwitcher({
       </Select>
       {error ? (
         <span role="alert" className="text-13 text-destructive">
-          {error}
+          {translateUi(error)}
         </span>
       ) : null}
     </div>
@@ -149,6 +153,7 @@ export function ModelSelect({
   readonly label?: string;
   readonly className?: string;
 }) {
+  useUiTranslation();
   const Trigger = grouped ? GroupedSelectTrigger : SelectTrigger;
   const models = useNyxAgentModels(true, { agentId, conversationId });
   const options = modelOptions(models.data, value);
@@ -161,7 +166,7 @@ export function ModelSelect({
       <Trigger aria-label={label} className={className}>
         <SelectValue
           placeholder={
-            models.isPending ? "Loading models..." : value === "" ? "Model unavailable" : "Choose a model"
+            models.isPending ? translateUi("Loading models...") : value === "" ? translateUi("Model unavailable") : translateUi("Choose a model")
           }
         />
       </Trigger>
@@ -170,14 +175,12 @@ export function ModelSelect({
           <SelectItem key={row.id} value={row.id} disabled={!row.available}>
             {row.available
               ? modelDisplayName(row)
-              : `${modelDisplayName(row)} (unavailable)`}
+              : translateUi("{{value1}} (unavailable)", { value1: modelDisplayName(row) })}
             {row.id.startsWith("nyxid/") && row.description && (
               <span className="block text-13 text-text-tertiary">{row.description}</span>
             )}
             {modelCannotViewImages(row) && (
-              <span className="ml-2 text-13 text-text-tertiary">
-                Can’t view images
-              </span>
+              <span className="ml-2 text-13 text-text-tertiary">{translateUi("Can’t view images")}</span>
             )}
           </SelectItem>
         ))}
@@ -196,6 +199,7 @@ export function ThreadModelSelect({
   readonly model: string | undefined;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const change = useChangeNyxAgentModel();
   const [error, setError] = useState<string>();
   return (
@@ -214,7 +218,7 @@ export function ThreadModelSelect({
       />
       {error ? (
         <span role="alert" className="text-13 text-destructive">
-          {error}
+          {translateUi(error)}
         </span>
       ) : null}
     </div>

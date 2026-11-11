@@ -267,3 +267,26 @@ test("real failure UI discloses metadata and original request without retrying u
   assert.match(x.text(), /Request copied/);
   x.h.unmount();
 });
+
+for (const [state, label, count] of [
+  ["waiting", "Waiting for approval", "1 waiting"],
+  ["allowed", "Allowed — waiting for execution", "1 allowed"],
+  ["completed", "Completed after approval", "1 allowed"],
+  ["denied", "Declined", "1 denied"],
+  ["expired", "Approval expired", "1 expired"],
+  ["cancelled", "Cancelled", "1 cancelled"],
+  ["unavailable", "Approval outcome unavailable", "1 outcome unavailable"],
+  ["failed", "Failed after approval", "1 allowed"],
+]) {
+  test(`server decision ${state} renders with truthful counts`, () => {
+    const activity = activitySchema.parse({ id: "gated", label: "nyxid__draft_agent_skill", status: "error", started_at: at, ended_at: at,
+      failure: { kind: "tool_error" }, decision: { kind: "acknowledgement", id: "card", state } });
+    const x = setup("./AssistantActivityDisclosure.tsx", "AssistantActivityDisclosure", { activities: [activity], onToggle: () => {} });
+    assert.ok(x.text().includes(count!));
+    const summary = `Turn details: Completed · 1 action · ${count}${state === "failed" ? " · 1 failed" : ""}`;
+    x.press(summary);
+    assert.ok(x.text().includes(label!));
+    assert.doesNotMatch(x.text(), /The tool reported an error|continue after a failed step/);
+    x.h.unmount();
+  });
+}

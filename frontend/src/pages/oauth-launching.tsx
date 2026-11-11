@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
@@ -20,6 +21,7 @@ function launchIdFromWindowName(name: string): string | null {
 }
 
 export function OAuthLaunchingPage() {
+  const { t } = useUiTranslation();
   const [launchContext] = useState(() => ({
     launchId: launchIdFromWindowName(window.name),
     opener: window.opener,
@@ -78,20 +80,14 @@ export function OAuthLaunchingPage() {
         <NyxidIcon className="mx-auto h-8 w-8" />
         {failed ? (
           <>
-            <h1 className="mt-4 text-15 font-semibold">
-              Unable to start connection
-            </h1>
-            <p className="mt-2 text-12 leading-5 text-muted-foreground">
-              Close this window and start the connection again from NyxID.
-            </p>
+            <h1 className="mt-4 text-15 font-semibold">{t("Unable to start connection")}</h1>
+            <p className="mt-2 text-12 leading-5 text-muted-foreground">{t("Close this window and start the connection again from NyxID.")}</p>
           </>
         ) : (
           <>
             <Loader2 className="mx-auto mt-5 h-5 w-5 animate-spin text-muted-foreground" />
-            <h1 className="mt-3 text-15 font-semibold">Connecting...</h1>
-            <p className="mt-2 text-12 text-muted-foreground">
-              Preparing secure authorization
-            </p>
+            <h1 className="mt-3 text-15 font-semibold">{t("Connecting...")}</h1>
+            <p className="mt-2 text-12 text-muted-foreground">{t("Preparing secure authorization")}</p>
           </>
         )}
       </section>

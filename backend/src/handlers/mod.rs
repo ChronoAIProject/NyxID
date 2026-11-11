@@ -149,6 +149,8 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod assistant_cma_agents;
+pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
@@ -236,6 +238,7 @@ pub mod cma_sessions;
 pub mod org_specialist_channels;
 
 pub(crate) mod execution_permission_resume;
+pub(crate) mod invocation_diagnostics;
 
 mod platform_model_gateway;
 pub mod platform_models;

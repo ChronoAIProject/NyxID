@@ -2,6 +2,148 @@
 use super::*;
 use crate::services::{catalog_spec_registry, mcp_service, openapi_parser};
 
+#[tokio::test]
+async fn dispatch_preserves_ordinary_rest_and_mcp_paths_without_operation_policy() {
+    let f = Box::pin(Fixture::new()).await;
+    for (endpoint_path, parameters, arguments, rest_path, rest_forwarded, mcp_forwarded) in [
+        (
+            "/v1/items/",
+            json!([]),
+            json!({}),
+            "/v1/items/",
+            "/v1/items/",
+            "/v1/items/",
+        ),
+        (
+            "/v1/files/{id}",
+            json!([{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]),
+            json!({"id":"100%"}),
+            "/v1/files/100%25",
+            "/v1/files/100%",
+            "/v1/files/100%25",
+        ),
+    ] {
+        f.state.db.collection::<bson::Document>("service_endpoints")
+            .update_one(doc! {"service_id":&f.catalog}, doc! {"$set":{
+                "method":"GET","path":endpoint_path,"parameters":bson::to_bson(&parameters).unwrap()
+            }}).await.unwrap();
+        for (mcp, universal) in [(false, false), (true, false), (true, true)] {
+            let params = if universal {
+                json!({"name":"nyx__call_tool","arguments":{
+                    "tool_name":"sandbox-alias__execute","arguments_json":arguments.to_string()
+                }})
+            } else {
+                json!({"name":"sandbox-alias__execute","arguments":arguments})
+            };
+            let mut request = Request::builder()
+                .method(if mcp { "POST" } else { "GET" })
+                .uri(if mcp {
+                    "/mcp".into()
+                } else {
+                    format!("/api/v1/proxy/s/sandbox-alias{rest_path}")
+                })
+                .body(if mcp {
+                    Body::from(
+                        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params})
+                            .to_string(),
+                    )
+                } else {
+                    Body::empty()
+                })
+                .unwrap();
+            *request.headers_mut() = f.key_headers();
+            request
+                .headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            let response = Box::pin(f.router().oneshot(request)).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 32768).await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "mcp={mcp} universal={universal} path={rest_path}: {}",
+                String::from_utf8_lossy(&body)
+            );
+            if mcp {
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["result"]["isError"], false, "{value}");
+            }
+            assert_eq!(
+                f.paths.lock().unwrap().pop().as_deref(),
+                Some(if mcp { mcp_forwarded } else { rest_forwarded })
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dispatch_protected_catalog_alias_cannot_use_ordinary_path_passthrough() {
+    let f = Box::pin(Fixture::new()).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(doc! {"_id":&f.catalog}, doc! {"$set":{"slug":"cma"}})
+        .await
+        .unwrap();
+    for path in ["/api/v1/agents/", "/api/v1/agents", "/api/v1/%61gents"] {
+        f.state
+            .db
+            .collection::<bson::Document>("service_endpoints")
+            .update_one(
+                doc! {"service_id":&f.catalog},
+                doc! {"$set":{"method":"POST","path":path,"parameters":[]}},
+            )
+            .await
+            .unwrap();
+        for (mcp, universal) in [(false, false), (true, false), (true, true)] {
+            let args = json!({});
+            let params = if universal {
+                json!({"name":"nyx__call_tool","arguments":{"tool_name":"sandbox-alias__execute","arguments_json":args.to_string()}})
+            } else {
+                json!({"name":"sandbox-alias__execute","arguments":args})
+            };
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(if mcp {
+                    "/mcp".into()
+                } else {
+                    format!("/api/v1/proxy/s/sandbox-alias{path}")
+                })
+                .body(Body::from(if mcp {
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params})
+                        .to_string()
+                } else {
+                    "{}".into()
+                }))
+                .unwrap();
+            *request.headers_mut() = f.key_headers();
+            request
+                .headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            let response = Box::pin(f.router().oneshot(request)).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 32768).await.unwrap();
+            if mcp {
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert!(
+                    value["result"]["isError"] == true || value.get("error").is_some(),
+                    "{value}"
+                );
+            } else {
+                assert!(
+                    status.is_client_error(),
+                    "{status}: {}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+            assert!(
+                f.paths.lock().unwrap().is_empty(),
+                "protected catalog alias reached provider: {path}"
+            );
+        }
+    }
+}
+
 async fn github_fixture() -> Fixture {
     let f = Box::pin(Fixture::new()).await;
     let spec = catalog_spec_registry::spec_for_key("github").unwrap();

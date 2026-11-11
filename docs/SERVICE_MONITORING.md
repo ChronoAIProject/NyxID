@@ -3,8 +3,9 @@
 The Monitoring card on `/keys/{id}` reads and manages one exact UserService
 through fixed NyxID routes. chrono-probe owns configuration, check resolution,
 latest check results, and discovered paths. NyxID stores no monitoring
-configuration or results, runs no status ingestion job, and adds no monitoring
-work to normal REST, LLM, or MCP invocations.
+configuration or raw check results and runs no status ingestion job. Successful
+REST, LLM and MCP invocations do not contact monitoring. Eligible failed
+invocations can add the bounded diagnostic evidence described below.
 
 ## Deployment
 
@@ -135,3 +136,168 @@ outages, incompatible responses, identity mismatches, oversized responses and
 timeouts return `monitoring_unavailable` (503). Audits contain only action,
 actor, exact UserService ID, optional revision, and existing request metadata;
 never body substrings, response bodies, or tokens.
+
+## Automatic failure diagnostics
+
+Automatic handle issuance is disabled by default, even when `CHRONO_PROBE_URL`
+is configured. Operators must explicitly set
+`INVOCATION_DIAGNOSTICS_ENABLED=true` and restart the API process to enable it.
+Issuance reads only that startup configuration snapshot, with no feature-flag
+database lookup on the invocation path. Redemption separately revalidates the
+live `services:monitoring` flag for the acting person before probing.
+
+For a rolling deployment, upgrade **every API replica** before enabling
+`INVOCATION_DIAGNOSTICS_ENABLED`: a handle issued by one replica can be redeemed
+on any replica. Enable the flag only after all replicas support issuance and
+redemption. Before rolling back, unset the flag on **every replica** and restart
+those processes so they stop issuing handles; allow the 60-second handle lifetime
+to elapse before rolling back any replica.
+
+Before enabling, verify that the **deployed** chrono-probe returns an explicit
+boolean `reachable` for each completed health/readiness check from
+chrono-probe's `POST /api/v1/monitoring/services/{user_service_id}/probes`. A healthy reachable
+check must include `"reachable": true`. Source compatibility alone does not
+verify the deployed version. NyxID requires `health.reachable == true` for a
+caller observation; a missing field leaves the diagnostic assessment `unknown`.
+Keep diagnostics disabled until this deployment check passes.
+
+When enabled and configured, downstream 5xx responses and eligible transport or
+broker failures from REST proxy, provider LLM, LLM gateway and MCP service-tool
+calls can carry a short-lived opaque diagnostic handle. Downstream 4xx
+responses, including authentication, validation, missing-resource and throttling
+responses, do not qualify. Only ordinary, unconstrained access-token callers
+receive handles. Agent Keys, NyxBot conversation keys, sessions, service
+accounts, delegated and relay callers receive no handle, make no diagnostic
+database write and add no MCP diagnostic content. Agent Key probing remains
+deferred to #2241. The original request does not run a probe. It returns its
+original status and body after one bounded MongoDB insert, preserving
+application headers and appending `Cache-Control: no-store` without replacing
+downstream cache directives; if handle issuance cannot finish within 250ms, the
+original error is returned without a handle. Local input, scope, approval,
+capacity, billing and cancellation errors do not issue handles. Transport or
+broker failures qualify only after execution resolved an exact UserService.
+Responses whose stream already started cannot be decorated. Within each server
+process, repeated eligible failures for the same caller identity and exact
+UserService are suppressed for ten seconds after the first handle is issued.
+Suppressed failures retain their original response without a handle and perform
+no diagnostic database write. The bounded in-memory table never stores paths,
+request data, response data, credentials or raw handles.
+
+REST and LLM failures use these NyxID-owned response headers:
+
+```text
+X-NyxID-Diagnostic-Handle: nyx_diag_<opaque 256-bit value>
+X-NyxID-Diagnostic-Expires-In: 60
+Cache-Control: no-store
+```
+
+These header names are NyxID-owned; matching downstream headers are stripped
+even when NyxID does not issue a handle.
+
+MCP errors retain their original content first and add the same handle under
+`structuredContent.nyxid_invocation_diagnostic` and a separate text content
+block. The progress digest is computed from the original tool result before
+adding either diagnostic field, for both JSON and SSE responses, so random
+handles do not weaken the continuation loop guard. The handle contains no
+UserService ID, path, token, request body or routing data. NyxID stores only its
+SHA-256 hash. The record expires after 60 seconds and binds the original actor,
+authentication class, API-key identity, acting or OAuth client and exact
+execution-selected UserService, including a concrete pool member.
+
+Clients may explicitly redeem the handle once with the current NyxID identity:
+
+```http
+POST /api/v1/monitoring/invocation-diagnostics
+Authorization: Bearer <current NyxID credential>
+Content-Type: application/json
+
+{"handle":"nyx_diag_..."}
+```
+
+The handle stays in the body so access logs and route metrics do not capture it.
+NyxID requires the same bound identity, then rechecks the current API-key
+purpose and execution scope, service allowlist, live ownership or organization
+access, resource ACL, active HTTP service state and exact UserService. A
+mismatch, expiry or revoked access returns the same not-found result and does
+not reveal which check failed.
+
+An ordinary access token can run a caller-scoped probe using only the bearer on
+the redemption request. chrono-probe receives that full bearer credential and
+must never log or persist it, including in request, error or tracing logs.
+Configure access-log and observability redaction at the probe and every
+intermediary hop. DPoP- and mTLS-bound tokens cannot be replayed by the probe:
+they receive no new handle, and redemption of an existing handle returns
+`observation: unknown` and `outcome: non_delegable` without forwarding the
+token. Historical handles for Agent Keys and bot/conversation keys, sessions,
+relay, delegated and service-account identities also complete as
+`unknown/non_delegable`; they never fall back to an owner, operator or system
+monitoring key. Agent Key-scoped probing requires a separate authority-
+preserving contract. There is no cached status fallback because the shared
+latest-status result is not bound to the current caller.
+
+Redemption atomically claims `pending` work before any probe. Concurrent
+redemptions cannot start a second probe; a completed result is retry-readable
+for transport recovery without probing again. A worker crash leaves the claim
+running until the handle expires rather than risking a duplicate probe. If the
+failed request's service-concurrency lease is still active, redemption returns
+`409 diagnostic_not_ready` with `Retry-After: 1` and leaves the handle pending.
+A client may retry that diagnostic once, but must not automatically retry the
+failed business request.
+
+When `services:monitoring` is enabled for the acting person, a bounded
+`GET /api/v1/monitoring/services/{id}/status` first establishes that a known
+health path exists. Its cached health result is not evidence. Without a known
+recipe, NyxID reports `no_health_path`; otherwise it makes at most one
+`POST /api/v1/monitoring/services/{id}/probes`. The exact service ID comes only
+from the server-side handle record. No business path or draft expectation is
+sent.
+
+The explicit probe work, including feature and ACL reads, rate admission, both
+upstream requests and response reads, has a three-second budget. Redirects and
+ambient HTTP proxies remain disabled, and responses retain the existing 64KiB
+bound. A MongoDB token bucket permits one probe per acting person and exact
+service per ten seconds across replicas; a process permits at most 32 concurrent
+probe futures. chrono-probe callbacks and services on the configured monitoring
+origin are excluded from recursive diagnostics.
+
+The existing probe API does not atomically pin the preflight configuration. If
+an owner clears a recipe between the status read and probe, chrono-probe can
+still discover candidate paths. NyxID rejects evidence whose returned health
+path differs from the preflight path, but cannot undo upstream discovery.
+
+Successful redemption returns only bounded enums:
+
+```json
+{"observation":"caller","assessment":"operation_specific_likely","outcome":"completed"}
+```
+
+The projection never contains paths, raw bodies, free-text reasons, hostnames,
+tokens, keys or internal errors.
+
+| Live caller evidence | `assessment` |
+| --- | --- |
+| Reachable and healthy; readiness ready or absent | `operation_specific_likely` |
+| Healthy; fresh reachable readiness assertion failed | `dependency_unavailable` |
+| Reachable; health assertion failed | `health_assertion_failed` |
+| Probe reports broker error | `broker_error` |
+| Probe reports selected node offline | `node_offline` |
+| Probe reports transport timeout | `timeout` |
+| Missing/stale/mismatched/incomplete check evidence | `unknown` |
+
+Monitoring timeout, outage, throttling and missing health paths also retain
+`observation: unknown`, `assessment: unknown`. Their `outcome` is respectively
+`timeout`, `unavailable`, `rate_limited` or `no_health_path`. The original
+invocation error always remains authoritative. A healthy check suggests an
+operation/path/input/permission-specific failure; it does not establish that
+the operation is valid or authorized. Eligible errors include `AppError::Internal`,
+which can originate inside NyxID. A healthy probe and
+`operation_specific_likely` never rule out a NyxID-side fault. An unhealthy check
+does not erase that operation's error.
+
+Operational log counter `service_invocation_diagnostics_total` is emitted only
+when a handle is freshly completed and has finite outcome, observation and
+assessment labels. The same projection uses canonical
+`monitoring.invocation_diagnostic` product telemetry under existing consent
+gates. Actual probe attempts write `service_invocation_diagnostic` audit rows
+with actor, exact UserService UUID and the bounded projection. Raw check results,
+paths, handles and tokens are never written to audit or telemetry.

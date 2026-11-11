@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { ExecutionPermissionCard } from "./blocks/execution-permission-card";
 import { Label } from "@/components/ui/label";
 import { describeChanges } from "@/lib/grouped-form-changes";
@@ -82,20 +85,21 @@ function QuickAdd({
   readonly busy: boolean;
   readonly onAdd: (person: string) => void;
 }) {
+  useUiTranslation();
   const orgs = useOrgs();
   const [org, setOrg] = useState("");
   const members = useOrgMembers(org);
   return (
     <GroupedList
-      title="Quick-add from your organization"
-      footer="New participants can read the full retained group history."
+      title={translateUi("Quick-add from your organization")}
+      footer={translateUi("New participants can read the full retained group history.")}
     >
       <GroupedRow
-        title="Organization"
+        title={translateUi("Organization")}
         accessory={
           <Select value={org} onValueChange={setOrg}>
-            <SelectTrigger aria-label="Shared organization">
-              <SelectValue placeholder="Choose organization" />
+            <SelectTrigger aria-label={translateUi("Shared organization")}>
+              <SelectValue placeholder={translateUi("Choose organization")} />
             </SelectTrigger>
             <SelectContent>
               {orgs.data?.map((row) => (
@@ -116,16 +120,14 @@ function QuickAdd({
         .map((person) => (
           <GroupedRow
             key={person.user_id}
-            title={person.display_name ?? "Member"}
+            title={person.display_name ?? translateUi("Member")}
             accessory={
               <Button
                 variant="ghost"
                 size="sm"
                 disabled={busy || (group.participants?.length ?? 0) >= 16}
                 onClick={() => onAdd(person.user_id)}
-              >
-                Add participant
-              </Button>
+              >{translateUi("Add participant")}</Button>
             }
           />
         ))}
@@ -142,6 +144,7 @@ function Rename({
   readonly save: (name: string) => Promise<boolean>;
   readonly busy: boolean;
 }) {
+  useUiTranslation();
   const form = useAppForm<z.infer<typeof renameSchema>>({
     mode: "onChange",
     resolver: zodResolver(renameSchema),
@@ -153,13 +156,13 @@ function Rename({
   return (
     <Form {...form}>
       <form onSubmit={submit} className="space-y-6">
-        <GroupedList title="Profile">
+        <GroupedList title={translateUi("Profile")}>
           <FormField
             control={form.control}
             name="name"
             render={({ field }) => (
               <GroupedField>
-                <GroupedLabel>Group name</GroupedLabel>
+                <GroupedLabel>{translateUi("Group name")}</GroupedLabel>
                 <FormControl>
                   <Input {...field} maxLength={60} />
                 </FormControl>
@@ -171,12 +174,12 @@ function Rename({
         <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }])}
           disabled={!form.formState.isValid}
-          label="group name"
+          label={translateUi("group name")}
           dirty={form.formState.isDirty}
           pending={busy}
           save={submit}
           discard={() => form.reset()}
-          saveLabel="Save"
+          saveLabel={translateUi("Save")}
         />
       </form>
     </Form>
@@ -194,6 +197,7 @@ export function CollaborationSettings({
   readonly onClose: () => void;
   readonly onLeft: () => void;
 }) {
+  useUiTranslation();
   const policy = group.collaboration!;
   const actor = useAuthStore((s) => s.user?.id);
   const mutation = useCollaborationChange(group.id, policy.membership_revision);
@@ -232,7 +236,7 @@ export function CollaborationSettings({
     >
       <GroupedDialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Group participants and agents</DialogTitle>
+          <DialogTitle>{translateUi("Group participants and agents")}</DialogTitle>
           <DialogDescription>{policy.history_disclosure}</DialogDescription>
         </DialogHeader>
         <GroupedFormScope>
@@ -245,12 +249,12 @@ export function CollaborationSettings({
               />
             )}
             <GroupedList
-              title={`Participants (${group.participants?.length ?? 0} of 16)`}
-              aria-label="Group participants"
+              title={translateUi("Participants ({{value1}} of 16)", { value1: group.participants?.length ?? 0 })}
+              aria-label={translateUi("Group participants")}
               footer={
                 policy.transfer_to_user_id &&
                 policy.transfer_to_user_id !== actor
-                  ? "Waiting for the proposed creator to accept management."
+                  ? translateUi("Waiting for the proposed creator to accept management.")
                   : undefined
               }
             >
@@ -260,9 +264,7 @@ export function CollaborationSettings({
                   title={`${person.display_name}${person.id === actor ? " (you)" : ""}`}
                   accessory={
                     person.id === policy.creator_user_id ? (
-                      <span className="text-13 text-text-tertiary">
-                        Creator
-                      </span>
+                      <span className="text-13 text-text-tertiary">{translateUi("Creator")}</span>
                     ) : policy.can_manage ? (
                       <>
                         <Button
@@ -278,9 +280,7 @@ export function CollaborationSettings({
                               },
                             })
                           }
-                        >
-                          Transfer
-                        </Button>
+                        >{translateUi("Transfer")}</Button>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -295,9 +295,7 @@ export function CollaborationSettings({
                               },
                             })
                           }
-                        >
-                          Remove
-                        </Button>
+                        >{translateUi("Remove")}</Button>
                       </>
                     ) : undefined
                   }
@@ -314,24 +312,18 @@ export function CollaborationSettings({
                         change: { action: "accept_transfer" },
                       })
                     }
-                  >
-                    Accept management
-                  </button>
+                  >{translateUi("Accept management")}</button>
                 </GroupedRow>
               )}
             </GroupedList>
             {policy.can_manage && (
               <>
                 <GroupedList
-                  title="Invitations"
-                  aria-label="Group invitations"
+                  title={translateUi("Invitations")}
+                  aria-label={translateUi("Group invitations")}
                   footer={
-                    <>
-                      Single use, expires after seven days. A NyxID account is
-                      required. Send the link yourself.
-                      {invite && (
-                        <p>
-                          Expires {new Date(invite.expires_at).toLocaleString()}
+                    <>{translateUi("Single use, expires after seven days. A NyxID account is required. Send the link yourself.")}{invite && (
+                        <p>{translateUi("Expires ")}{new Date(invite.expires_at).toLocaleString(getFormattingLocale())}
                         </p>
                       )}
                     </>
@@ -345,15 +337,13 @@ export function CollaborationSettings({
                         (group.participants?.length ?? 0) >= 16
                       }
                       onClick={() => void apply({ action: "invite" })}
-                    >
-                      Create invitation link
-                    </button>
+                    >{translateUi("Create invitation link")}</button>
                   </GroupedRow>
                   {invite && (
                     <>
                       <GroupedRow>
                         <Input
-                          aria-label="Invitation link"
+                          aria-label={translateUi("Invitation link")}
                           readOnly
                           value={`${window.location.origin}/assistant#group-invite=${invite.token}`}
                         />
@@ -366,17 +356,15 @@ export function CollaborationSettings({
                               `${window.location.origin}/assistant#group-invite=${invite.token}`,
                             )
                           }
-                        >
-                          Copy link
-                        </button>
+                        >{translateUi("Copy link")}</button>
                       </GroupedRow>
                     </>
                   )}
                   {policy.invites.map((item) => (
                     <GroupedRow
                       key={item.id}
-                      title="Invitation"
-                      description={`Expires ${new Date(item.expires_at).toLocaleDateString()}`}
+                      title={translateUi("Invitation")}
+                      description={translateUi("Expires {{value1}}", { value1: new Date(item.expires_at).toLocaleDateString(getFormattingLocale()) })}
                       accessory={
                         <Button
                           variant="ghost"
@@ -388,9 +376,7 @@ export function CollaborationSettings({
                               invite_id: item.id,
                             })
                           }
-                        >
-                          Cancel invitation
-                        </Button>
+                        >{translateUi("Cancel invitation")}</Button>
                       }
                     />
                   ))}
@@ -421,10 +407,10 @@ export function CollaborationSettings({
                   title={agentTitle(agent)}
                   footer={
                     guest?.lane === "guest"
-                      ? "Your requests use guest access and bill the agent owner."
+                      ? translateUi("Your requests use guest access and bill the agent owner.")
                       : agent.unavailable
                         ? groupAgentUnavailableReason(agent)
-                        : "Your requests use your access and billing rules."
+                        : translateUi("Your requests use your access and billing rules.")
                   }
                 >
                   <GroupedRow
@@ -438,10 +424,10 @@ export function CollaborationSettings({
                   />
                   {guest?.can_enable ? (
                     <GroupedRow
-                      title="Participants can use this agent"
+                      title={translateUi("Participants can use this agent")}
                       accessory={
                         <Switch
-                          aria-label={`Participants can use ${agentTitle(agent)}`}
+                          aria-label={translateUi("Participants can use {{value1}}", { value1: agentTitle(agent) })}
                           checked={guest.enabled}
                           disabled={mutation.isPending}
                           onCheckedChange={(enabled) => enabled
@@ -460,9 +446,7 @@ export function CollaborationSettings({
                         disabled={mutation.isPending}
                         onClick={() => void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })
                         }
-                      >
-                        Disable participant access
-                      </button>
+                      >{translateUi("Disable participant access")}</button>
                     </GroupedRow>
                   ) : null}
                   <GroupAgentAccessRequest
@@ -478,9 +462,7 @@ export function CollaborationSettings({
                         onClick={() =>
                           void apply({ action: "lead", agent_id: agent.id })
                         }
-                      >
-                        Set as default recipient
-                      </button>
+                      >{translateUi("Set as default recipient")}</button>
                     </GroupedRow>
                   )}
                   {policy.can_manage && (
@@ -497,22 +479,20 @@ export function CollaborationSettings({
                             agent_id: agent.id,
                           })
                         }
-                      >
-                        Remove agent
-                      </button>
+                      >{translateUi("Remove agent")}</button>
                     </GroupedRow>
                   )}
                 </GroupedList>
               );
             })}
             {(eligible.length > 0 || policy.proposals.length > 0) && (
-              <GroupedList title="More agents" aria-label="Group agents">
+              <GroupedList title={translateUi("More agents")} aria-label={translateUi("Group agents")}>
                 {eligible.length > 0 && (
                   <GroupedRow
                     title={
                       policy.can_manage
-                        ? "Add a specialist"
-                        : "Propose a specialist"
+                        ? translateUi("Add a specialist")
+                        : translateUi("Propose a specialist")
                     }
                     accessory={
                       <Select
@@ -524,12 +504,12 @@ export function CollaborationSettings({
                         }
                       >
                         <SelectTrigger
-                          aria-label="Add specialist"
+                          aria-label={translateUi("Add specialist")}
                           disabled={
                             mutation.isPending || group.members.length >= 8
                           }
                         >
-                          <SelectValue placeholder="Choose specialist" />
+                          <SelectValue placeholder={translateUi("Choose specialist")} />
                         </SelectTrigger>
                         <SelectContent>
                           {eligible.map((agent) => (
@@ -546,7 +526,7 @@ export function CollaborationSettings({
                 {policy.proposals.map((proposal) => (
                   <GroupedRow
                     key={proposal.id}
-                    title={`Proposed agent ${proposal.agent_id}`}
+                    title={translateUi("Proposed agent {{value1}}", { value1: proposal.agent_id })}
                     accessory={
                       policy.can_manage ? (
                         <Button
@@ -559,11 +539,9 @@ export function CollaborationSettings({
                               proposal_id: proposal.id,
                             })
                           }
-                        >
-                          Accept agent
-                        </Button>
+                        >{translateUi("Accept agent")}</Button>
                       ) : (
-                        <span>Awaiting creator</span>
+                        <span>{translateUi("Awaiting creator")}</span>
                       )
                     }
                   />
@@ -571,14 +549,10 @@ export function CollaborationSettings({
               </GroupedList>
             )}
             <GroupedList
-              title="Group actions"
+              title={translateUi("Group actions")}
               footer={
                 <>
-                  <p>
-                    Only the person who requested work can decide its cards or
-                    stop it. The creator must transfer management to an
-                    accepting participant before leaving, or delete the group.
-                  </p>
+                  <p>{translateUi("Only the person who requested work can decide its cards or stop it. The creator must transfer management to an accepting participant before leaving, or delete the group.")}</p>
                   {error && (
                     <p role="alert" className="text-destructive">
                       {error}
@@ -598,9 +572,7 @@ export function CollaborationSettings({
                       change: { action: "leave" },
                     })
                   }
-                >
-                  Leave group
-                </button>
+                >{translateUi("Leave group")}</button>
               </GroupedRow>
               {policy.can_manage && (
                 <GroupedRow asChild interactive>
@@ -614,9 +586,7 @@ export function CollaborationSettings({
                         change: { action: "delete" },
                       })
                     }
-                  >
-                    Delete group
-                  </button>
+                  >{translateUi("Delete group")}</button>
                 </GroupedRow>
               )}
             </GroupedList>
@@ -632,7 +602,7 @@ export function CollaborationSettings({
           >
             <DialogContent className="md:max-w-md">
               <DialogHeader>
-                <DialogTitle>Confirm group change</DialogTitle>
+                <DialogTitle>{translateUi("Confirm group change")}</DialogTitle>
                 <DialogDescription>{confirm.text}</DialogDescription>
               </DialogHeader>
               {error ? (
@@ -641,16 +611,14 @@ export function CollaborationSettings({
                 </p>
               ) : null}
               <DialogFooter>
-                <Button onClick={() => setConfirm(undefined)}>Cancel</Button>
+                <Button onClick={() => setConfirm(undefined)}>{translateUi("Cancel")}</Button>
                 <Button
                   variant="primary"
                   isLoading={mutation.isPending}
                   onClick={async () => {
                     if (await apply(confirm.change)) setConfirm(undefined);
                   }}
-                >
-                  Confirm
-                </Button>
+                >{translateUi("Confirm")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -667,6 +635,7 @@ export function CollaborationCards({
   readonly group: AssistantGroup;
   readonly decisions: readonly CollaborationDecision[];
 }) {
+  useUiTranslation();
   const mutation = useCollaborationDecision(group.id);
   return (
     <div className="mx-auto max-w-3xl space-y-2 px-4">
@@ -680,14 +649,13 @@ export function CollaborationCards({
           <p>
             {card.can_decide
               ? card.summary
-              : `Waiting for ${group.participants?.find((p) => p.id === card.requester_id)?.display_name ?? "participant"}`}
+              : translateUi("Waiting for {{value1}}", { value1: group.participants?.find((p) => p.id === card.requester_id)?.display_name ?? translateUi("participant") })}
           </p>
           {card.can_decide ? (
             <>
               <p className="text-muted-foreground">{card.audience}</p>
               {card.connection_id ? (
-                <p>
-                  Your connection: {card.connection_name ?? card.connection_id}
+                <p>{translateUi("Your connection: ")}{card.connection_name ?? card.connection_id}
                 </p>
               ) : null}
               <div className="flex gap-2">
@@ -740,6 +708,7 @@ export function GroupInviteDialog({
   readonly onClose: () => void;
   readonly onJoined: (group: AssistantGroup) => void;
 }) {
+  useUiTranslation();
   const [preview, setPreview] =
     useState<Awaited<ReturnType<typeof collaborationApi.preview>>>();
   const [disclosed, setDisclosed] = useState(false);
@@ -781,25 +750,25 @@ export function GroupInviteDialog({
         />
         <DialogHeader>
           <DialogTitle>
-            {preview ? `Join ${preview.group_name}` : "Group invitation"}
+            {preview ? translateUi("Join {{value1}}", { value1: preview.group_name }) : translateUi("Group invitation")}
           </DialogTitle>
           <DialogDescription>
             {preview?.history_disclosure ??
-              "Preview this invitation before joining. A NyxID account is required."}
+              translateUi("Preview this invitation before joining. A NyxID account is required.")}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3">
           {preview ? (
             <GroupedList
-              title="Invitation"
-              footer={`Expires ${new Date(preview.expires_at).toLocaleString()}`}
+              title={translateUi("Invitation")}
+              footer={translateUi("Expires {{value1}}", { value1: new Date(preview.expires_at).toLocaleString(getFormattingLocale()) })}
             >
               <GroupedRow
-                title="Created by"
+                title={translateUi("Created by")}
                 accessory={preview.creator_name ?? "a NyxID user"}
               />
               <GroupedRow
-                title="Participants"
+                title={translateUi("Participants")}
                 description={preview.participants
                   ?.map((p) => p.display_name)
                   .join(", ")}
@@ -811,8 +780,7 @@ export function GroupInviteDialog({
                     checked={disclosed}
                     onCheckedChange={(checked) => setDisclosed(checked === true)}
                   />
-                  <span className="min-w-0 flex-1">I understand everyone can read the full retained group
-                  history.</span>
+                  <span className="min-w-0 flex-1">{translateUi("I understand everyone can read the full retained group history.")}</span>
                 </Label>
               </GroupedRow>
             </GroupedList>
@@ -828,14 +796,14 @@ export function GroupInviteDialog({
           ) : null}
         </DialogBody>
         <DialogFooter>
-          <GroupedDialogCancel disabled={busy}>Cancel</GroupedDialogCancel>
+          <GroupedDialogCancel disabled={busy}>{translateUi("Cancel")}</GroupedDialogCancel>
           <Button
             variant="primary"
             isLoading={busy}
             disabled={Boolean(preview && !disclosed)}
             onClick={() => void proceed()}
           >
-            {preview ? "Accept invitation" : "Preview invitation"}
+            {preview ? translateUi("Accept invitation") : translateUi("Preview invitation")}
           </Button>
         </DialogFooter>
       </GroupedDialogContent>

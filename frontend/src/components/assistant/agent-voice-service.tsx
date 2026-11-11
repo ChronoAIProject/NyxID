@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,6 +28,7 @@ export function AgentVoiceService({
 }: {
   readonly agent: AssistantAgent;
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.VOICE_AGENT_KEY);
   const owner = useAuthStore((s) => s.user?.id);
   if (
@@ -48,6 +51,7 @@ function VoiceConnection({
   readonly agent: AssistantAgent;
   readonly owner: string;
 }) {
+  useUiTranslation();
   const client = useQueryClient();
   const queryKey = ["assistant", "voice-service", owner, agent.id];
   const path = `/assistant/nyxagent/agents/${encodeURIComponent(agent.id)}/voice-service`;
@@ -73,42 +77,30 @@ function VoiceConnection({
   });
   const error = query.error || publish.error;
   return (
-    <section aria-label="Device voice" className="space-y-3">
-      <h3 className="type-group-heading text-foreground">Device voice</h3>
-      <p className="text-12 text-muted-foreground">
-        Create a voice connection for {agentTitle(agent)}, then allow this
-        connection on your device’s Agent Key. It permits conversations with
-        this Bot using its existing access, history and billing. Actions requiring
-        owner confirmation are reviewed on their NyxID cards.
-        {agent.kind === "nyxbot"
-          ? " This NyxBot has full account and service access."
-          : " Other Bots require their own connections."}
+    <section aria-label={translateUi("Device voice")} className="space-y-3">
+      <h3 className="type-group-heading text-foreground">{translateUi("Device voice")}</h3>
+      <p className="text-12 text-muted-foreground">{translateUi("Create a voice connection for ")}{agentTitle(agent)}{translateUi(", then allow this connection on your device’s Agent Key. It permits conversations with this Bot using its existing access, history and billing. Actions requiring owner confirmation are reviewed on their NyxID cards.")}{agent.kind === "nyxbot"
+          ? translateUi(" This NyxBot has full account and service access.")
+          : translateUi(" Other Bots require their own connections.")}
       </p>
-      <p className="text-12 text-muted-foreground">
-        Creating the connection grants no Key explicitly. Keys set to all
-        services include it under their existing policy.
-      </p>
+      <p className="text-12 text-muted-foreground">{translateUi("Creating the connection grants no Key explicitly. Keys set to all services include it under their existing policy.")}</p>
       {error ? (
         <ErrorBanner
           message={
             error instanceof Error
               ? error.message
-              : "Could not load voice connection."
+              : translateUi("Could not load voice connection.")
           }
         />
       ) : null}
       {query.data?.service ? (
         <>
-          <p className="break-all text-12">
-            Voice connection: <code>{query.data.service.slug}</code>
+          <p className="break-all text-12">{translateUi("Voice connection: ")}<code>{query.data.service.slug}</code>
           </p>
           <Button variant="outline" size="sm" asChild>
-            <Link to="/api-keys">Manage Agent Key access</Link>
+            <Link to="/api-keys">{translateUi("Manage Agent Key access")}</Link>
           </Button>
-          <p className="text-12 text-muted-foreground">
-            Remove the connection from the Key to revoke access, or disable it
-            in Services.
-          </p>
+          <p className="text-12 text-muted-foreground">{translateUi("Remove the connection from the Key to revoke access, or disable it in Services.")}</p>
         </>
       ) : (
         <Button
@@ -119,7 +111,7 @@ function VoiceConnection({
           }
           onClick={() => publish.mutate()}
         >
-          {publish.isPending ? "Creating…" : "Create voice connection"}
+          {publish.isPending ? translateUi("Creating…") : translateUi("Create voice connection")}
         </Button>
       )}
     </section>

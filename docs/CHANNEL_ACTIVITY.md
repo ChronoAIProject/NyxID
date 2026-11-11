@@ -119,3 +119,55 @@ For diagnosis, a recorded activity exists before the agent callback runs: a rece
 Local signed fixtures and mock receivers validate NyxID's implementation. A successful public webhook HTTP 200 only acknowledges the request; it does not establish that X sent the intended event or that a subscribed agent received it. The original incident's screenshots identify encrypted X Chat alongside `dm.received` subscriptions, but production ingress still requires the post-deployment check above.
 
 Provider references: [X Activity API](https://docs.x.com/x-api/activity/introduction), [event payloads](https://docs.x.com/x-api/activity/event-payloads), [webhook signatures and CRC](https://docs.x.com/x-api/webhooks/quickstart). Related: [Channel Bot Relay](CHANNEL_BOT_RELAY.md), [HTTP Event Gateway / ADR-013](CHANNEL_EVENT_GATEWAY.md).
+
+## Authenticated inbound outcomes and X Chat limits
+
+X bot Health, the web Health card and `nyxid__get_channel_bot.health` expose
+`last_inbound_outcome` (`code`, `at`) and `inbound_outcomes` (fixed code → `count`,
+`at`). These are bounded stage observations, not a count of unique messages or
+completed replies. A single event may have several observations, and a duplicate
+may increment a filter counter without dispatching again. They retain no message
+content, ciphertext, sender names or provider error prose. Signature/account/tag
+failures still cannot write a bot's diagnostics. Authenticated receipt is stamped
+before parsing or billing; it proves neither readable content nor admission.
+
+The counters cover disabled bots, subscription/selection, invalid or filtered payloads, OAuth,
+billing, route/key/authority failures, admission/deduplication, callback acceptance
+or failure, private NyxBot policy and turn admission, and reply delivery. Private
+X DMs now retain the same per-message NyxBot admission evidence as group messages.
+A callback acceptance, queued/running turn, or historical verification receipt is
+not a confirmed reply. For X, even a confirmed historical receipt is labeled
+"Reply accepted", never general "Healthy" support for encrypted conversations.
+When the server recommends no action, other X outcomes use the neutral label
+"No problem detected". "Needs attention" is reserved for server-recommended
+actions. The latest inbound outcome stays visible; per-code counters are inside
+one collapsed "Inbound diagnostics" disclosure. A duplicate or a late callback acceptance does not erase a
+more specific refusal. Completed sends say only that X accepted them; unknown
+sends are never automatically resent.
+
+`x_encrypted_chat_unsupported` means an authenticated selected `chat.received`
+notification arrived, but this integration cannot decrypt or reply to its content.
+The first observation attempts one notification to the owner (or org admins)
+through their existing notification channels. The attempt is bounded durably
+across replicas and is best effort; Health remains the persistent explanation.
+No X reply authority is created and no plaintext reply is sent to ciphertext.
+Use an unencrypted DM if X offers it, otherwise use NyxID web or another supported
+channel. Enabling encrypted-chat notifications only enables metadata observation.
+With only `dm` selected, X Chat events may never arrive: NyxID cannot detect or
+count an event X did not send. Health explains that limit without inventing an
+observation. An empty plaintext payload uses `x_content_unavailable`, which does
+not assert encryption.
+
+Both documented encrypted notification shapes are supported: the Activity
+sample's UUID `payload.id`/colon-separated private conversation and the live Chat
+guide's UUID `data.event_uuid`/hyphen-separated private conversation. Signed
+subscription filter/tag binding remains mandatory. If both IDs exist, retain
+`payload.id` for compatibility with existing deduplication. Ciphertext and crypto
+material are discarded at parsing. These diagnostic fields and parser changes
+are additive; no in-flight rows need draining and no new environment variables
+are required. Existing event-selection rollout requirements above still apply.
+
+Official references checked 2026-11-11:
+[X Activity payloads](https://docs.x.com/x-api/activity/event-payloads),
+[X Chat live events](https://docs.x.com/xchat/real-time-events), and
+[X Chat introduction](https://docs.x.com/xchat/introduction).

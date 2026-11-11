@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useAccountPanel } from "@/hooks/use-account-panel";
@@ -28,6 +30,7 @@ import { ChatKindIcon } from "@/components/assistant/nyxbot-channel-chats";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import {
   Activity,
+  Box,
   Building2,
   ChevronRight,
   ChevronsUpDown,
@@ -93,6 +96,7 @@ const TITLE_FADE =
   "[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]";
 
 function GroupLabel({ children }: { readonly children: string }) {
+  useUiTranslation();
   return (
     <div className="shell-group-label">
       {children}
@@ -102,6 +106,7 @@ function GroupLabel({ children }: { readonly children: string }) {
 
 /** An owner's agents or crews: a top-level section label, flush with WORKSPACE. */
 function OwnerLabel({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   return (
     <p className="-ml-2 shell-group-label">
       {children}
@@ -119,6 +124,7 @@ function ComingSoonItem({
   readonly label: string;
   readonly trailing?: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -133,7 +139,7 @@ function ComingSoonItem({
           {trailing}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="right">Coming soon</TooltipContent>
+      <TooltipContent side="right">{translateUi("Coming soon")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -168,6 +174,7 @@ function ConversationRow({
   readonly onRequestDelete: () => void;
   readonly onRequestRename?: () => void;
 }) {
+  useUiTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
   const draft = useAssistantDraftStore((state) =>
     ownerUserId && state.ownerUserId === ownerUserId
@@ -216,7 +223,7 @@ function ConversationRow({
             className="mt-0.5 flex min-w-0 items-center gap-1 text-13 text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
-            <span className="sr-only">Draft: </span>
+            <span className="sr-only">{translateUi("Draft: ")}</span>
             <span className="min-w-0 flex-1 truncate">{draftPreview}</span>
           </span>
         )}
@@ -225,7 +232,7 @@ function ConversationRow({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            aria-label={`Options for ${shownTitle}`}
+            aria-label={translateUi("Options for {{value1}}", { value1: shownTitle })}
             data-icon-button=""
             data-keep-drawer-open=""
             className={cn(
@@ -246,17 +253,13 @@ function ConversationRow({
             <DropdownMenuItem
               onSelect={onRequestRename}
             >
-              <PencilLine aria-hidden="true" />
-              Rename
-            </DropdownMenuItem>
+              <PencilLine aria-hidden="true" />{translateUi("Rename")}</DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
             onSelect={onRequestDelete}
             className="text-destructive focus:text-destructive"
           >
-            <Trash2 aria-hidden="true" />
-            Delete
-          </DropdownMenuItem>
+            <Trash2 aria-hidden="true" />{translateUi("Delete")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
@@ -305,7 +308,7 @@ function agentAccessibleName(agent: AssistantAgent): string {
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
   const named = handle ? `${title} (${handle})` : title;
-  if (agent.kind === "nyxbot") return `${named} — your personal agent`;
+  if (agent.kind === "nyxbot") return translateUi("{{name}} — your personal agent", { name: named });
   const pending = agent.pending_acknowledgements;
   return `${named}, specialist, ${AGENT_STATUS_LABEL[agent.status]}${
     pending ? `, ${String(pending)} pending ${pending === 1 ? "request" : "requests"}` : ""
@@ -332,6 +335,7 @@ function ChannelThreadsGroup({
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
+  useUiTranslation();
   const holdsActive = group.threads.some((thread) => thread.id === activeThreadId);
   // A click opens or closes the section for the thread open at that moment;
   // opening another of its chats opens it again.
@@ -351,7 +355,7 @@ function ChannelThreadsGroup({
       <button
         type="button"
         aria-expanded={open}
-        aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
+        aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", { label: group.label, platform, count, status: running ? translateUi(", working") : "" })}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
         className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
@@ -376,7 +380,7 @@ function ChannelThreadsGroup({
             const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
             const followed = children.some((thread) => thread.channel?.thread_id);
             return <div key={chatId}>
-              {followed ? <p className="px-3 pt-1 text-13 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              {followed ? <p className="px-3 pt-1 text-13 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? translateUi("Channel chat")}</p> : null}
               <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
             </div>;
           })}
@@ -386,9 +390,7 @@ function ChannelThreadsGroup({
               onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
               data-keep-drawer-open=""
               className="w-full rounded-lg px-3 py-1 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
-            >
-              Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
-            </button>
+            >{translateUi("Show ")}{String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))}{translateUi(" more")}</button>
           ) : null}
         </div>
       ) : null}
@@ -398,6 +400,7 @@ function ChannelThreadsGroup({
 
 /** The @handle a display name hides, a hover away (agents keep one line). */
 function HandleTooltip({ handle, children }: { readonly handle?: string; readonly children: ReactNode }) {
+  useUiTranslation();
   if (!handle) return children;
   return (
     <TooltipProvider delayDuration={200}>
@@ -422,6 +425,7 @@ function AgentRow({
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
+  useUiTranslation();
   const nyxbot = agent.kind === "nyxbot";
   // Clicking the selected agent folds its threads away for the thread open at
   // that moment; opening another of its threads unfolds them again.
@@ -531,7 +535,7 @@ function AgentRow({
                   className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 type-group-label text-text-tertiary @min-[15rem]:inline"
                 >
                   {channelPlatformName(platform)}
-                  {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
+                  {platforms.length > 1 ? translateUi(" +{{value}}", { value: String(platforms.length - 1) }) : ""}
                 </span>
               ))}
               {pending > 0 ? (
@@ -548,7 +552,7 @@ function AgentRow({
               <button data-icon-button=""
                 ref={menuTrigger}
                 type="button"
-                aria-label={`Options for ${name}`}
+                aria-label={translateUi("Options for {{value1}}", { value1: name })}
                 data-keep-drawer-open=""
                 className={cn(
                   "absolute right-1 top-1/2 flex size-[1.5em] -translate-y-1/2 items-center justify-center rounded-md bg-card text-15 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
@@ -565,23 +569,17 @@ function AgentRow({
             <DropdownMenuContent align="end" className="min-w-[160px]">
               {canChat ? (
                 <DropdownMenuItem onSelect={() => model.onNewThread(agent.id)}>
-                  <Plus aria-hidden="true" />
-                  New chat
-                </DropdownMenuItem>
+                  <Plus aria-hidden="true" />{translateUi("New chat")}</DropdownMenuItem>
               ) : null}
               {model.onAgentDetails ? (
                 <DropdownMenuItem onSelect={() => model.onAgentDetails?.(agent.id)}>
-                  <Settings2 aria-hidden="true" />
-                  Agent details
-                </DropdownMenuItem>
+                  <Settings2 aria-hidden="true" />{translateUi("Agent details")}</DropdownMenuItem>
               ) : null}
               {nyxbot ? (
                 <DropdownMenuItem
                   onSelect={() => void openPanel("nyxbot", {}, menuTrigger.current ?? undefined)}
                 >
-                  <SlidersHorizontal aria-hidden="true" />
-                  NyxBot settings
-                </DropdownMenuItem>
+                  <SlidersHorizontal aria-hidden="true" />{translateUi("NyxBot settings")}</DropdownMenuItem>
               ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
@@ -591,14 +589,12 @@ function AgentRow({
         // The guide line runs down from the avatar's centre.
         <div
           role="group"
-          aria-label={`Threads with ${name}`}
+          aria-label={translateUi("Threads with {{value1}}", { value1: name })}
           className="mb-1 ml-[22px] mt-0.5 space-y-px border-l border-border/60 pl-1"
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-13 text-text-tertiary">
-              Loading threads...
-            </p>
+            <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading threads...")}</p>
           ) : null}
           {threads.bots.map((group) => (
             <ChannelThreadsGroup
@@ -612,12 +608,10 @@ function AgentRow({
             <button
               type="button"
               onClick={() => model.onNewThread(agent.id)}
-              aria-label={`New chat with ${name}`}
+              aria-label={translateUi("New chat with {{value1}}", { value1: name })}
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
-              <Plus aria-hidden="true" className="h-3 w-3" />
-              New chat
-            </button>
+              <Plus aria-hidden="true" className="h-3 w-3" />{translateUi("New chat")}</button>
           ) : null}
         </div>
       ) : null}
@@ -634,6 +628,7 @@ function AgentsSection({
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
+  useUiTranslation();
   const [showDestroyed, setShowDestroyed] = useState(false);
   const destroyed = model.agents.filter((agent) => agent.status === "destroyed");
   const visible = model.agents
@@ -644,8 +639,8 @@ function AgentsSection({
     <div className="shell-nav-stack">
       <AgentsLoadState model={model} />
       {agentOwnerSections(visible).map((section) => (
-        <section key={section.id} aria-label={`${section.label} agents`}>
-          <OwnerLabel>{section.label} agents</OwnerLabel>
+        <section key={section.id} aria-label={translateUi("{{value1}} agents", { value1: section.label })}>
+          <OwnerLabel>{section.label}{translateUi(" agents")}</OwnerLabel>
           {section.agents.map((agent) => (
         <AgentRow
           key={agent.id}
@@ -666,12 +661,10 @@ function AgentsSection({
             onClick={() => setShowDestroyed((value) => !value)}
             className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
           >
-            {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
+            {showDestroyed ? translateUi("Hide destroyed") : translateUi("Show destroyed ({{value1}})", { value1: String(destroyed.length) })}
           </button>
           {model.destroyedTruncated ? (
-            <p className="px-3 pb-1.5 type-secondary text-text-tertiary">
-              Older destroyed agents not shown.
-            </p>
+            <p className="px-3 pb-1.5 type-secondary text-text-tertiary">{translateUi("Older destroyed agents not shown.")}</p>
           ) : null}
         </div>
       ) : null}
@@ -684,10 +677,11 @@ function AgentsLoadState({ model, compact = false }: {
   readonly model: SidebarAgents;
   readonly compact?: boolean;
 }) {
+  useUiTranslation();
   if (model.loadError) {
     return compact ? (
-      <RailItem label={`${model.loadError} Retry`}>
-        <button data-icon-button="" type="button" aria-label={`${model.loadError} Retry`}
+      <RailItem label={translateUi("{{value1}} Retry", { value1: model.loadError })}>
+        <button data-icon-button="" type="button" aria-label={translateUi("{{value1}} Retry", { value1: model.loadError })}
           onClick={model.onRetry} disabled={model.loading} className={cn(RAIL_BUTTON, "text-destructive")}>
           <RefreshCw aria-hidden="true" className="h-4 w-4" />
         </button>
@@ -719,6 +713,7 @@ function CreateAgentMenu({
   /** An icon button for the sidebar rail. */
   readonly compact?: boolean;
 }) {
+  useUiTranslation();
   return (
     <>
       <DropdownMenu>
@@ -727,8 +722,8 @@ function CreateAgentMenu({
             <button data-icon-button=""
               data-tour="create-agent"
               type="button"
-              aria-label="Create new agent"
-              title="Create new agent"
+              aria-label={translateUi("Create new agent")}
+              title={translateUi("Create new agent")}
               className={RAIL_BUTTON}
             >
               <Plus aria-hidden="true" className="h-4 w-4" />
@@ -744,26 +739,20 @@ function CreateAgentMenu({
               className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left shell-nav-item text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
             >
               <Plus aria-hidden="true" className="h-4 w-4 shrink-0 text-text-tertiary" />
-              <span className="truncate">Create new agent</span>
+              <span className="truncate">{translateUi("Create new agent")}</span>
             </button>
           )}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side={compact ? "right" : undefined} className="min-w-[200px]">
           <DropdownMenuItem onSelect={() => agents.onNewAgent("personal")}>
-            <User aria-hidden="true" />
-            Personal agent
-          </DropdownMenuItem>
+            <User aria-hidden="true" />{translateUi("Personal agent")}</DropdownMenuItem>
           {agents.canCreateOrgAgent ? (
             <DropdownMenuItem onSelect={() => agents.onNewAgent("org")}>
-              <Building2 aria-hidden="true" />
-              Organization agent
-            </DropdownMenuItem>
+              <Building2 aria-hidden="true" />{translateUi("Organization agent")}</DropdownMenuItem>
           ) : null}
           {onNewCrew ? (
             <DropdownMenuItem onSelect={onNewCrew}>
-              <Users aria-hidden="true" />
-              Crew
-            </DropdownMenuItem>
+              <Users aria-hidden="true" />{translateUi("Crew")}</DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -772,6 +761,7 @@ function CreateAgentMenu({
 }
 
 function GroupsSection({ model }: { readonly model: SidebarGroups }) {
+  useUiTranslation();
   const sections = new Map<string, typeof model.groups>();
   for (const group of model.groups) {
     const key = group.owner?.type === "org" ? group.owner.id : "personal";
@@ -795,9 +785,9 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                   type="button"
                   onClick={() => model.onSelectGroup(group.id)}
                   aria-current={selected ? "page" : undefined}
-                  aria-label={`${group.name}, group with ${group.members
+                  aria-label={translateUi("{{value1}}, group with {{value2}}{{value3}}", { value1: group.name, value2: group.members
                     .map((member) => agentTitle(member))
-                    .join(", ")}${working ? `, ${String(working)} working` : ""}`}
+                    .join(", "), value3: working ? `, ${String(working)} working` : "" })}
                   className={cn(
                     "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors",
                     selected
@@ -818,7 +808,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
               );
             })}
             {owner === "personal" && model.loading && !model.groups.length ? (
-              <p className="px-3 py-1.5 text-13 text-text-tertiary">Loading crews...</p>
+              <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading crews...")}</p>
             ) : null}
             {owner === "personal" && !model.loading && !model.groups.length ? (
               <button
@@ -826,9 +816,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 onClick={model.onNewGroup}
                 data-keep-drawer-open=""
                 className="w-full rounded-lg px-3 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
-              >
-                Chat with several agents at once
-              </button>
+              >{translateUi("Chat with several agents at once")}</button>
             ) : null}
           </section>
         );
@@ -857,7 +845,8 @@ export function AssistantSidebar({
     | "plugins"
     | "approvals"
     | "automations"
-    | "machines";
+    | "machines"
+    | "sandboxes";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -869,11 +858,13 @@ export function AssistantSidebar({
   /** NyxBot group chats (NyxAgent engine). */
   readonly groups?: SidebarGroups;
 }) {
+  useUiTranslation();
   const { current: accountPanel } = useAccountPanel();
   const rail = useContext(SidebarRailContext);
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
   const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
+  const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
@@ -969,13 +960,11 @@ export function AssistantSidebar({
             className="w-full"
             onClick={onNewChat}
           >
-            <Plus />
-            New chat
-          </Button>
+            <Plus />{translateUi("New chat")}</Button>
         </div>
       )}
 
-      <GroupLabel>Workspace</GroupLabel>
+      <GroupLabel>{translateUi("Workspace")}</GroupLabel>
       <div className="shell-nav-stack px-2">
         {agents?.onHome ? (
           <button
@@ -991,31 +980,30 @@ export function AssistantSidebar({
             <HomeGlyph
               className={`h-4 w-4 shrink-0 ${agents.homeActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
             />
-            <span className="truncate">Home</span>
+            <span className="truncate">{translateUi("Home")}</span>
           </button>
         ) : (
           <Link
             to="/assistant"
             className="flex items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item text-muted-foreground hover:bg-overlay hover:text-foreground"
           >
-            <HomeGlyph className="h-4 w-4" />
-            Home
-          </Link>
+            <HomeGlyph className="h-4 w-4" />{translateUi("Home")}</Link>
         )}
         {(
           [
             {
               view: "automations",
               to: "/assistant/automations",
-              label: "Automations",
+              get label() { return translateUi("Automations"); },
               icon: AutomationsGlyph,
             },
             {
               view: "machines",
               to: "/assistant/machines",
-              label: "Machines",
+              get label() { return translateUi("Machines"); },
               icon: MachinesGlyph,
             },
+            ...(cmaEnabled ? [{ view: "sandboxes", to: "/assistant/sandboxes", label: "Sandboxes", icon: Box }] as const : []),
           ] as const
         ).map((item) => (
           <Link
@@ -1053,12 +1041,12 @@ export function AssistantSidebar({
           <PluginsGlyph
             className={`h-4 w-4 shrink-0 ${pluginsActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
           />
-          <span className="truncate">Plugins</span>
+          <span className="truncate">{translateUi("Plugins")}</span>
         </Link>
         {workspacePreview ? (
           <ComingSoonItem
             icon={FileText}
-            label="Artifacts"
+            label={translateUi("Artifacts")}
             trailing={
               <span className="font-mono text-12 text-text-tertiary">
                 {counts.data?.artifacts ?? 0}
@@ -1079,7 +1067,7 @@ export function AssistantSidebar({
           <ApprovalsGlyph
             className={`h-4 w-4 shrink-0 ${approvalsActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
           />
-          <span className="min-w-0 flex-1 truncate">Approvals</span>
+          <span className="min-w-0 flex-1 truncate">{translateUi("Approvals")}</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
             <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning">
               {counts.data?.pendingApprovals}
@@ -1087,7 +1075,7 @@ export function AssistantSidebar({
           )}
         </Link>
         {workspacePreview ? (
-          <ComingSoonItem icon={Activity} label="Activity" />
+          <ComingSoonItem icon={Activity} label={translateUi("Activity")} />
         ) : null}
       </div>
 
@@ -1099,7 +1087,7 @@ export function AssistantSidebar({
           {notice}
         </p>
       ) : null}
-      <nav aria-label="Agents and conversations" className="@container px-2 pb-3">
+      <nav aria-label={translateUi("Agents and conversations")} className="@container px-2 pb-3">
         {agents ? (
           <>
             <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} />
@@ -1115,7 +1103,7 @@ export function AssistantSidebar({
         {!agents ? (
           <>
             <div className="-mx-2">
-              <GroupLabel>Chats</GroupLabel>
+              <GroupLabel>{translateUi("Chats")}</GroupLabel>
             </div>
             <div className="shell-nav-stack">{conversations.map(renderRow)}</div>
           </>
@@ -1127,7 +1115,7 @@ export function AssistantSidebar({
         <AssistantAccountMenu align="start" side="top">
           <button
             type="button"
-            aria-label="Account menu"
+            aria-label={translateUi("Account menu")}
             data-keep-drawer-open=""
             data-assistant-account-fallback="menu"
             className={cn(
@@ -1140,7 +1128,7 @@ export function AssistantSidebar({
             </div>
             <div className="shell-user-copy">
               <p className="truncate shell-user-name">
-                {user?.display_name ?? "User"}
+                {user?.display_name ?? translateUi("User")}
               </p>
               <p className="truncate shell-user-email">
                 {user?.email ?? ""}
@@ -1159,11 +1147,11 @@ export function AssistantSidebar({
       >
         <DialogContent className="md:max-w-md">
           <DialogHeader>
-            <DialogTitle>Delete chat?</DialogTitle>
+            <DialogTitle>{translateUi("Delete chat?")}</DialogTitle>
             <DialogDescription>
               {deleteTarget?.active_turn
-                ? `The running reply will stop. “${deleteTarget.title}” and its history are removed permanently.`
-                : `“${deleteTarget?.title}” and its history are removed permanently.`}
+                ? translateUi("The running reply will stop. “{{value1}}” and its history are removed permanently.", { value1: deleteTarget.title })
+                : translateUi("“{{value1}}” and its history are removed permanently.", { value1: deleteTarget?.title })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1171,9 +1159,7 @@ export function AssistantSidebar({
               type="button"
               variant="ghost"
               onClick={() => setDeleteTarget(undefined)}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               type="button"
               variant="destructive"
@@ -1183,9 +1169,7 @@ export function AssistantSidebar({
                   deleteTarget.id === deletingId)
               }
               onClick={() => void confirmDelete()}
-            >
-              Delete
-            </Button>
+            >{translateUi("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1202,41 +1186,36 @@ function RenameChatInline({
   readonly onClose: () => void;
   readonly onRename: (id: string, title: string) => Promise<void>;
 }) {
+  useUiTranslation();
   const form = useAppForm({
     resolver: zodResolver(nyxAgentTitleSchema),
     defaultValues: { title: conversation.title },
   });
   const [error, setError] = useState<string>();
   return (
-        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label="Rename chat" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
+        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label={translateUi("Rename chat")} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
           try {
             await onRename(conversation.id, title);
             onClose();
           } catch {
-            setError("Could not rename this chat. Try again.");
+            setError(translateUi("Could not rename this chat. Try again."));
           }
         })}>
-          <Label htmlFor="chat-title">
-            Title
-          </Label>
+          <Label htmlFor="chat-title">{translateUi("Title")}</Label>
           <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
           {error ? (
             <p role="alert" className="mt-2 text-14 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           <div className="flex justify-end gap-1">
-            <Button type="button" variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
+            <Button type="button" variant="ghost" onClick={onClose}>{translateUi("Cancel")}</Button>
             <Button
               type="submit"
               variant="primary"
               isLoading={form.formState.isSubmitting}
               disabled={!form.formState.isDirty || !form.watch("title").trim()}
-            >
-              Save
-            </Button>
+            >{translateUi("Save")}</Button>
           </div>
         </form>
   );
@@ -1247,6 +1226,7 @@ const RAIL_BUTTON =
 
 /** One rail icon with its name in a tooltip. */
 function RailItem({ label, children }: { readonly label: string; readonly children: ReactNode }) {
+  useUiTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
@@ -1274,18 +1254,21 @@ function SidebarRail({
   readonly onNewChat: () => void;
   readonly agents?: SidebarAgents;
   readonly groups?: SidebarGroups;
-  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines";
+  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines" | "sandboxes";
   readonly activeConversationId: string | undefined;
   readonly pendingApprovals: number;
   readonly accountOpen: boolean;
   readonly onSelect: (conversationId: string) => void;
 }) {
+  useUiTranslation();
   const homeActive = agents ? Boolean(agents.homeActive) : false;
+  const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const iconClass = (active: boolean) => cn("h-4 w-4", active && "text-nyx-secondary-400");
   const linkClass = (active: boolean) => cn(RAIL_BUTTON, active && "bg-overlay-strong text-foreground");
   const destinations = [
-    { view: "automations", to: "/assistant/automations", label: "Automations", icon: AutomationsGlyph },
-    { view: "machines", to: "/assistant/machines", label: "Machines", icon: MachinesGlyph },
+    { view: "automations", to: "/assistant/automations", get label() { return translateUi("Automations"); }, icon: AutomationsGlyph },
+    { view: "machines", to: "/assistant/machines", get label() { return translateUi("Machines"); }, icon: MachinesGlyph },
+    ...(cmaEnabled ? [{ view: "sandboxes", to: "/assistant/sandboxes", label: "Sandboxes", icon: Box }] as const : []),
     { view: "plugins", to: "/assistant/plugins", label: "Plugins", icon: PluginsGlyph },
   ] as const;
   const liveAgents = (agents?.agents ?? []).filter((agent) => agent.status !== "destroyed");
@@ -1293,16 +1276,16 @@ function SidebarRail({
     <TooltipProvider delayDuration={200}>
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar">
         <nav
-          aria-label="Workspace and agents"
+          aria-label={translateUi("Workspace and agents")}
           className="shell-nav-stack min-h-0 w-full flex-1 items-center overflow-y-auto overscroll-contain py-1 [scrollbar-width:none]"
         >
-          <RailItem label="Home">
+          <RailItem label={translateUi("Home")}>
             {agents?.onHome ? (
-              <button type="button" aria-label="Home" aria-current={homeActive ? "page" : undefined} onClick={agents.onHome} className={linkClass(homeActive)}>
+              <button type="button" aria-label={translateUi("Home")} aria-current={homeActive ? "page" : undefined} onClick={agents.onHome} className={linkClass(homeActive)}>
                 <HomeGlyph className={iconClass(homeActive)} />
               </button>
             ) : (
-              <Link to="/assistant" aria-label="Home" className={linkClass(false)}>
+              <Link to="/assistant" aria-label={translateUi("Home")} className={linkClass(false)}>
                 <HomeGlyph className="h-4 w-4" />
               </Link>
             )}
@@ -1320,11 +1303,11 @@ function SidebarRail({
               </Link>
             </RailItem>
           ))}
-          <RailItem label={pendingApprovals ? `Approvals (${String(pendingApprovals)} waiting)` : "Approvals"}>
+          <RailItem label={pendingApprovals ? translateUi("Approvals ({{value1}} waiting)", { value1: String(pendingApprovals) }) : translateUi("Approvals")}>
             <Link
               to="/assistant/approvals"
               data-tour="approvals"
-              aria-label={pendingApprovals ? `Approvals, ${String(pendingApprovals)} waiting` : "Approvals"}
+              aria-label={pendingApprovals ? translateUi("Approvals, {{value1}} waiting", { value1: String(pendingApprovals) }) : translateUi("Approvals")}
               aria-current={activeView === "approvals" ? "page" : undefined}
               className={linkClass(activeView === "approvals")}
             >
@@ -1338,8 +1321,8 @@ function SidebarRail({
           {agents ? <AgentsLoadState model={agents} compact /> : null}
           {!agents ? (
             <>
-              <RailItem label="New chat">
-                <button data-icon-button="" type="button" aria-label="New chat" onClick={onNewChat} className={RAIL_BUTTON}><Plus className="h-4 w-4" /></button>
+              <RailItem label={translateUi("New chat")}>
+                <button data-icon-button="" type="button" aria-label={translateUi("New chat")} onClick={onNewChat} className={RAIL_BUTTON}><Plus className="h-4 w-4" /></button>
               </RailItem>
               <LegacyRailChats conversations={conversations} activeConversationId={activeConversationId} onSelect={onSelect} />
             </>
@@ -1363,7 +1346,7 @@ function SidebarRail({
               <RailItem key={group.id} label={group.name}>
                 <button
                   type="button"
-                  aria-label={`${group.name}, group`}
+                  aria-label={translateUi("{{value1}}, group", { value1: group.name })}
                   aria-current={selected ? "page" : undefined}
                   onClick={() => groups.onSelectGroup(group.id)}
                   className={linkClass(selected)}
@@ -1379,7 +1362,7 @@ function SidebarRail({
           <AssistantAccountMenu align="start" side="top">
             <button data-icon-button=""
               type="button"
-              aria-label="Account menu"
+              aria-label={translateUi("Account menu")}
               data-assistant-account-fallback="menu"
               className={cn(
                 "flex items-center justify-center rounded-lg border border-hairline bg-overlay-strong text-text-tertiary transition-colors hover:text-foreground",
@@ -1400,22 +1383,23 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
   readonly activeConversationId: string | undefined;
   readonly onSelect: (conversationId: string) => void;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button data-icon-button="" type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
+        <button data-icon-button="" type="button" aria-label={translateUi("Previous chats")} title={translateUi("Previous chats")} className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
       </PopoverTrigger>
       <PopoverContent side="right" align="start" className="w-72 p-2">
-        <p className="px-2 py-1 type-row-title">Previous chats</p>
-        <ul aria-label="Previous chats" className="max-h-80 shell-nav-stack overflow-y-auto">
+        <p className="px-2 py-1 type-row-title">{translateUi("Previous chats")}</p>
+        <ul aria-label={translateUi("Previous chats")} className="max-h-80 shell-nav-stack overflow-y-auto">
           {conversations.map((chat) => (
             <li key={chat.id}>
               <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
             </li>
           ))}
         </ul>
-        {!conversations.length ? <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p> : null}
+        {!conversations.length ? <p className="px-2 py-1.5 text-13 text-text-tertiary">{translateUi("No chats yet.")}</p> : null}
       </PopoverContent>
     </Popover>
   );
@@ -1436,6 +1420,7 @@ function RailAgent({
   readonly activeConversationId: string | undefined;
   readonly onSelect: (conversationId: string) => void;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const selected = agent.id === model.selectedAgentId;
   return (
@@ -1502,6 +1487,7 @@ function RailAgentChats({
   readonly onNewChat: () => void;
   readonly onAll: () => void;
 }) {
+  useUiTranslation();
   const userId = useAuthStore((state) => state.user?.id);
   const selected = agent.id === model.selectedAgentId;
   // The open agent's threads are already loaded; others load (and cache) on hover.
@@ -1522,16 +1508,14 @@ function RailAgentChats({
           onClick={onNewChat}
           className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
-          <Plus aria-hidden="true" className="h-3 w-3" />
-          New chat
-        </button>
+          <Plus aria-hidden="true" className="h-3 w-3" />{translateUi("New chat")}</button>
       </div>
       {loading && !chats.length ? (
-        <p className="px-2 py-1.5 text-13 text-text-tertiary">Loading chats...</p>
+        <p className="px-2 py-1.5 text-13 text-text-tertiary">{translateUi("Loading chats...")}</p>
       ) : !chats.length ? (
-        <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p>
+        <p className="px-2 py-1.5 text-13 text-text-tertiary">{translateUi("No chats yet.")}</p>
       ) : (
-        <ul aria-label={`${agentTitle(agent)} chats`} className="shell-nav-stack">
+        <ul aria-label={translateUi("{{value1}} chats", { value1: agentTitle(agent) })} className="shell-nav-stack">
           {chats.slice(0, RAIL_THREADS).map((chat) => (
             <li key={chat.id}>
               <button
@@ -1543,7 +1527,7 @@ function RailAgentChats({
                   chat.id === activeConversationId ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
                 )}
               >
-                {chat.title || "New conversation"}
+                {chat.title || translateUi("New conversation")}
               </button>
             </li>
           ))}
@@ -1554,8 +1538,7 @@ function RailAgentChats({
           type="button"
           onClick={onAll}
           className="w-full rounded-md px-2 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
-        >
-          All chats ({chats.length})
+        >{translateUi("All chats (")}{chats.length})
         </button>
       ) : null}
     </div>
@@ -1565,19 +1548,20 @@ function GroupUnread({ group, compact = false }: {
   readonly group: AssistantGroup;
   readonly compact?: boolean;
 }) {
+  useUiTranslation();
   const unread = group.collaboration?.unread_count ?? 0;
   const mentions = group.collaboration?.mention_count ?? 0;
   return (
     <>
       {unread > 0 ? (
         <span
-          aria-label="Unread messages"
+          aria-label={translateUi("Unread messages")}
           className={cn("h-1.5 w-1.5 shrink-0 rounded-full bg-primary", compact && "absolute top-0.5 right-0.5")}
         />
       ) : null}
       {mentions > 0 ? (
         <span
-          aria-label={`${mentions} mentions`}
+          aria-label={translateUi("{{value1}} mentions", { value1: mentions })}
           className={cn("rounded-full bg-primary/10 px-1.5 type-group-label text-primary", compact && "absolute -bottom-0.5 right-0 bg-primary px-1 text-primary-foreground")}
         >
           @{mentions > 99 ? "99+" : mentions}

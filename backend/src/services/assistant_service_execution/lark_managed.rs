@@ -2,7 +2,10 @@
 //! connection credentials (including overrides), never catalog master authority.
 use super::*;
 use crate::models::lark_base_write::{LarkBaseWrite, WritePrincipal, WriteState};
-use crate::services::{lark_attachment_tool as attachment, lark_base_writes as writes};
+use crate::services::{
+    lark_attachment_tool::eligibility::{self, Reason},
+    lark_base_writes as writes,
+};
 
 pub(crate) struct LarkManagedGuard<'a> {
     db: &'a Database,
@@ -34,7 +37,7 @@ impl<'a> LarkManagedGuard<'a> {
             || admission.chat.conversation_id != prepared.chat.conversation_id
             || prepared.chat.guest
         {
-            return Err(attachment::refused());
+            return Err(Reason::BindingChanged.error());
         }
         Ok(Self {
             db,
@@ -55,13 +58,13 @@ impl<'a> LarkManagedGuard<'a> {
         )
         .await?
         .filter(|row| row.is_active)
-        .ok_or_else(attachment::refused)?;
+        .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
         let key = self
             .db
             .collection::<ApiKey>("api_keys")
             .find_one(doc! {"_id":&self.prepared.chat.api_key_id,"is_active":true})
             .await?
-            .ok_or_else(attachment::refused)?;
+            .ok_or_else(|| Reason::KeyIneligible.error())?;
         let override_identity = if key
             .assistant_agent_owner_id
             .as_deref()
@@ -86,7 +89,10 @@ impl<'a> LarkManagedGuard<'a> {
                 epoch: identity.credential_epoch,
             });
         }
-        let id = row.api_key_id.as_ref().ok_or_else(attachment::refused)?;
+        let id = row
+            .api_key_id
+            .as_ref()
+            .ok_or_else(|| Reason::CredentialUnavailable.error())?;
         let credential = self
             .db
             .collection::<UserApiKey>("user_api_keys")
@@ -94,7 +100,7 @@ impl<'a> LarkManagedGuard<'a> {
                 "_id":id,"user_id":&row.user_id,"status":"active"
             })
             .await?
-            .ok_or_else(attachment::refused)?;
+            .ok_or_else(|| Reason::CredentialUnavailable.error())?;
         Ok(WritePrincipal {
             user_service_id: row.id,
             credential_id: credential.id,
@@ -118,7 +124,7 @@ impl<'a> LarkManagedGuard<'a> {
                     "_id":&self.prepared.chat.api_key_id,"is_active":true
                 })
                 .await?
-                .ok_or_else(attachment::refused)?;
+                .ok_or_else(|| Reason::KeyIneligible.error())?;
             let path =
                 crate::services::proxy_authorization::CanonicalPath::from_mcp_built(self.path)?;
             let catalog =
@@ -144,10 +150,16 @@ impl<'a> LarkManagedGuard<'a> {
                 self.body,
                 Some("application/json"),
             )?;
-            if writes::contracts(self.db, self.service, self.endpoint).await?
+            if eligibility::require_eligible(
+                self.db,
+                Some(&self.prepared.chat),
+                self.service,
+                self.endpoint,
+            )
+            .await?
                 != self.prepared.contract_digests
             {
-                return Err(attachment::refused());
+                return Err(Reason::ContractChanged.error());
             }
             // All preceding work can await remote KMS/DB providers. Close the
             // authority check again before the attempt gate at the actual send.
@@ -170,7 +182,7 @@ impl<'a> LarkManagedGuard<'a> {
     ) -> AppResult<()> {
         self.revalidate().await?;
         if self.principal().await? != row.principal {
-            return Err(attachment::refused());
+            return Err(Reason::CredentialChanged.error());
         }
         writes::effect_gate(self.db, row, phase).await
     }

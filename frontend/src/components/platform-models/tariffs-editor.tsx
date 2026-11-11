@@ -1,3 +1,13 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { ContractPicker } from "./contract-picker";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  type CertifiedContract,
+  type UsageContract,
+  attestation,
+  validSource,
+} from "@/schemas/model-contracts";
 import { titleCase } from "@/schemas/platform-models";
 import { useAdminBillingService } from "@/hooks/use-admin-billing";
 import { useState } from "react";
@@ -5,6 +15,7 @@ import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useModelTariffs,
+  useModelContracts,
   usePlatformModelChange,
   adminModelPath,
 } from "@/hooks/use-platform-models";
@@ -45,21 +56,69 @@ const component = z
     (c) => /^0(?:\.0+)?$/.test(c.credits_per_unit) === c.explicit_free,
     "Zero must be explicitly free; positive prices cannot be free",
   );
-const schema = z.object({
-  lane: z.enum(["platform_key", "byok"]),
-  source: z.string().min(1),
-  variant: objectJson,
-  contract: objectJson,
-  bounds: objectJson,
-  components: z.array(component).min(1),
-});
+const schema = z
+  .object({
+    certified: z.boolean(),
+    confirmed: z.boolean(),
+    reference: z.string(),
+    publicModel: z.string(),
+    lane: z.enum(["platform_key", "byok"]),
+    source: z.string(),
+    variant: objectJson,
+    contract: objectJson,
+    bounds: objectJson,
+    components: z.array(component).min(1),
+  })
+  .superRefine((v, ctx) => {
+    if (v.certified && !v.confirmed)
+      ctx.addIssue({
+        code: "custom",
+        path: ["confirmed"],
+        message: "Confirm your verification before creating a revision",
+      });
+    if (v.certified && !v.reference.trim())
+      ctx.addIssue({
+        code: "custom",
+        path: ["reference"],
+        message: "Enter a verification reference",
+      });
+    if (
+      !validSource(
+        v.certified ? attestation(v.publicModel, v.reference) : v.source,
+      )
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: [v.certified ? "reference" : "source"],
+        message:
+          "Verification source must be at most 1000 UTF-8 bytes with no control characters",
+      });
+  });
 type Values = z.infer<typeof schema>;
-function defaults(t?: Tariff): Values {
+function defaults(
+  model: AdminModel,
+  definitions: CertifiedContract[],
+  t?: Tariff,
+): Values {
+  const definition = definitions[0];
   return {
+    certified: !!definition,
+    confirmed: false,
+    reference: "",
+    publicModel: model.public_id,
     lane: t?.lane === "byok" ? "byok" : "platform_key",
     source: t?.source ?? "",
     variant: JSON.stringify(t?.variant ?? {}, null, 2),
-    contract: t ? JSON.stringify(t.contract, null, 2) : "",
+    contract: definition
+      ? JSON.stringify(
+          t?.contract.version === definition.version &&
+            t?.contract.fixture_sha256 === definition.fixture_sha256
+            ? t.contract
+            : definition.default_contract,
+        )
+      : t
+        ? JSON.stringify(t.contract, null, 2)
+        : "",
     bounds: t ? JSON.stringify(t.bounds, null, 2) : "",
     components:
       t?.components.map(
@@ -83,18 +142,21 @@ function defaults(t?: Tariff): Values {
 }
 function TariffForm({
   model,
+  definitions,
   template,
   done,
   reload,
 }: {
   readonly model: AdminModel;
+  readonly definitions: CertifiedContract[];
   readonly template?: Tariff;
   readonly done: () => void;
   readonly reload: () => void;
 }) {
+  useUiTranslation();
   const form = useAppForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: defaults(template),
+    defaultValues: defaults(model, definitions, template),
     mode: "onChange",
   });
   const change = usePlatformModelChange();
@@ -108,7 +170,10 @@ function TariffForm({
               path: `${adminModelPath(model.id)}/tariffs`,
               method: "post",
               body: {
-                ...v,
+                lane: v.lane,
+                source: v.certified
+                  ? attestation(model.public_id, v.reference)
+                  : v.source,
                 revision: model.revision,
                 components: v.components.map((c) => ({
                   ...c,
@@ -133,25 +198,49 @@ function TariffForm({
           }
         })}
       >
-        <h3 className="type-section-heading">New price revision</h3>
-        <p className="type-secondary text-muted-foreground">
-          Use a certified adapter usage contract, fixture digest and request
-          bounds. Prices are exact credits per base unit. A revision stays
-          pending until all rates sync; incomplete prices never fall back to a
-          base price.
-        </p>
+        <h3 className="type-section-heading">{translateUi("New price revision")}</h3>
+        <p className="type-secondary text-muted-foreground">{translateUi("Use a certified adapter usage contract, fixture digest and request bounds. Prices are exact credits per base unit. A revision stays pending until all rates sync; incomplete prices never fall back to a base price.")}</p>
         <fieldset disabled={change.isPending} className="space-y-4">
-          <Field title="Credential lane">
+          <Field title={translateUi("Credential lane")}>
             <NativeSelect {...form.register("lane")}>
-              <option value="platform_key">Platform key</option>
-              <option value="byok">BYOK</option>
+              <option value="platform_key">{translateUi("Platform key")}</option>
+              <option value="byok">{translateUi("BYOK")}</option>
             </NativeSelect>
           </Field>
-          <Field title="Verification source">
-            <Input {...form.register("source")} />
-          </Field>
-          {(["variant", "contract", "bounds"] as const).map((field) => (
-            <Field key={field} title={`${titleCase(field)} JSON`}>
+          {definitions.length > 0 ? (
+            <>
+              <ContractPicker
+                definitions={definitions}
+                value={JSON.parse(form.watch("contract")) as UsageContract}
+                onChange={(value) =>
+                  form.setValue("contract", JSON.stringify(value))
+                }
+              />
+              <Field title={translateUi("Verification reference (link or note)")}>
+                <Input {...form.register("reference")} />
+              </Field>
+              <Field title={translateUi("I verified this model's limits, features and prices")}>
+                <Checkbox
+                  checked={form.watch("confirmed")}
+                  onCheckedChange={(checked) =>
+                    form.setValue("confirmed", checked === true)
+                  }
+                />
+              </Field>
+            </>
+          ) : (
+            <Field title={translateUi("Verification source")}>
+              <Input {...form.register("source")} />
+            </Field>
+          )}
+          {(
+            [
+              "variant",
+              ...(definitions.length ? [] : ["contract"]),
+              "bounds",
+            ] as ("variant" | "contract" | "bounds")[]
+          ).map((field) => (
+            <Field key={field} title={translateUi("{{value1}} JSON", { value1: translateUi(titleCase(field)) })}>
               <Textarea
                 rows={field === "contract" ? 10 : 4}
                 {...form.register(field)}
@@ -163,16 +252,16 @@ function TariffForm({
               key={i}
               className="grid gap-3 rounded-lg border border-border/30 p-3 sm:grid-cols-2"
             >
-              <Field title={`Component ${i + 1} key`}>
+              <Field title={translateUi("Component {{value1}} key", { value1: i + 1 })}>
                 <Input {...form.register(`components.${i}.key`)} />
               </Field>
-              <Field title="Billing metric">
+              <Field title={translateUi("Billing metric")}>
                 <Input
                   {...form.register(`components.${i}.metric`)}
                   placeholder="input_tokens"
                 />
               </Field>
-              <Field title="Selector">
+              <Field title={translateUi("Selector")}>
                 <NativeSelect
                   {...form.register(`components.${i}.selector.kind`)}
                 >
@@ -191,13 +280,13 @@ function TariffForm({
                     "requests",
                   ].map((kind) => (
                     <option key={kind} value={kind}>
-                      {titleCase(kind)}
+                      {translateUi(titleCase(kind))}
                     </option>
                   ))}
                 </NativeSelect>
               </Field>
               {c.selector.kind === "cache_write" && (
-                <Field title="Cache TTL">
+                <Field title={translateUi("Cache TTL")}>
                   <NativeSelect
                     value={c.selector.ttl ?? ""}
                     onChange={(e) =>
@@ -207,7 +296,7 @@ function TariffForm({
                       )
                     }
                   >
-                    <option value="">Select TTL</option>
+                    <option value="">{translateUi("Select TTL")}</option>
                     {[
                       "five_minutes",
                       "one_hour",
@@ -215,14 +304,14 @@ function TariffForm({
                       "twelve_hours",
                     ].map((ttl) => (
                       <option key={ttl} value={ttl}>
-                        {titleCase(ttl)}
+                        {translateUi(titleCase(ttl))}
                       </option>
                     ))}
                   </NativeSelect>
                 </Field>
               )}
               {c.selector.kind === "cached_modality" && (
-                <Field title="Cached modality">
+                <Field title={translateUi("Cached modality")}>
                   <NativeSelect
                     value={c.selector.modality ?? ""}
                     onChange={(e) =>
@@ -232,19 +321,19 @@ function TariffForm({
                       )
                     }
                   >
-                    <option value="">Select modality</option>
-                    <option value="image">Image</option>
-                    <option value="audio">Audio</option>
+                    <option value="">{translateUi("Select modality")}</option>
+                    <option value="image">{translateUi("Image")}</option>
+                    <option value="audio">{translateUi("Audio")}</option>
                   </NativeSelect>
                 </Field>
               )}
-              <Field title="Credits per unit">
+              <Field title={translateUi("Credits per unit")}>
                 <Input
                   {...form.register(`components.${i}.credits_per_unit`)}
                   inputMode="decimal"
                 />
               </Field>
-              <Field title="Maximum quantity">
+              <Field title={translateUi("Maximum quantity")}>
                 <Input
                   type="number"
                   {...form.register(`components.${i}.max_quantity`, {
@@ -252,7 +341,7 @@ function TariffForm({
                   })}
                 />
               </Field>
-              <Field title="Explicitly free">
+              <Field title={translateUi("Explicitly free")}>
                 <NativeSelect
                   value={c.explicit_free ? "yes" : "no"}
                   onChange={(e) =>
@@ -262,8 +351,8 @@ function TariffForm({
                     )
                   }
                 >
-                  <option value="no">No</option>
-                  <option value="yes">Yes (zero price)</option>
+                  <option value="no">{translateUi("No")}</option>
+                  <option value="yes">{translateUi("Yes (zero price)")}</option>
                 </NativeSelect>
               </Field>
               <Button
@@ -275,8 +364,7 @@ function TariffForm({
                     form.getValues("components").filter((_, n) => n !== i),
                   )
                 }
-              >
-                Remove component {i + 1}
+              >{translateUi("Remove component ")}{i + 1}
               </Button>
             </div>
           ))}
@@ -296,22 +384,16 @@ function TariffForm({
                 },
               ])
             }
-          >
-            Add price component
-          </Button>
+          >{translateUi("Add price component")}</Button>
         </fieldset>
         <SaveError error={change.error} reload={reload} />
         <EditErrors />
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="outline" onClick={done}>
-            Cancel
-          </Button>
+          <Button type="button" variant="outline" onClick={done}>{translateUi("Cancel")}</Button>
           <Button
             variant="primary"
             disabled={!form.formState.isValid || change.isPending}
-          >
-            Create pending revision
-          </Button>
+          >{translateUi("Create pending revision")}</Button>
         </div>
       </form>
     </Form>
@@ -326,20 +408,22 @@ export function TariffsEditor({
   readonly readOnly: boolean;
   readonly reload: () => void;
 }) {
+  useUiTranslation();
   const tariffs = useModelTariffs(model.id);
+  const contracts = useModelContracts();
+  const definitions =
+    contracts.data?.filter((d) => d.family === model.family) ?? [];
   const billing = useAdminBillingService(model.billing_service_id ?? "");
   const change = usePlatformModelChange();
   const [editing, setEditing] = useState<{ template?: Tariff } | null>(null);
   const [retiring, setRetiring] = useState<string | null>(null);
   return (
     <section className="space-y-5">
-      <p className="type-body text-muted-foreground">
-        Immutable revisions, newest first (latest 100). Publishing synchronizes
-        the logical billing service; a revision becomes active only after every
-        rate is ready. Execution readiness is separate.
-      </p>
+      <p className="type-body text-muted-foreground">{translateUi("Immutable revisions, newest first (latest 100). Publishing synchronizes the logical billing service; a revision becomes active only after every rate is ready. Execution readiness is separate.")}</p>
       <SaveError
-        error={tariffs.error ?? billing.error ?? change.error}
+        error={
+          tariffs.error ?? billing.error ?? contracts.error ?? change.error
+        }
         reload={reload}
       />
       {billing.data?.effective.model_prices
@@ -350,50 +434,49 @@ export function TariffsEditor({
             className="rounded-lg border border-border/40 p-4 space-y-2"
           >
             <h3 className="type-card-title">
-              {titleCase(p.lane)} price readiness
-            </h3>
+              {translateUi(titleCase(p.lane))}{translateUi(" price readiness")}</h3>
             <p className="type-body">
               {p.available
-                ? "Prices ready"
-                : `Prices unavailable: ${titleCase(p.blocking_reason ?? "unknown")}`}
+                ? translateUi("Prices ready")
+                : translateUi("Prices unavailable: {{value1}}", { value1: translateUi(titleCase(p.blocking_reason ?? "unknown")) })}
             </p>
             <p className="type-secondary text-muted-foreground">
               {Object.entries(p.variant)
                 .map(([k, v]) => `${k}: ${v}`)
-                .join(" · ") || "Default variant"}
+                .join(" · ") || translateUi("Default variant")}
             </p>
-            <p className="type-secondary">
-              Active revision:{" "}
+            <p className="type-secondary">{translateUi("Active revision:")}{" "}
               {tariffs.data?.find((t) => t.id === p.active_tariff_id)
-                ?.revision ?? "None"}{" "}
-              · Pending revision:{" "}
+                ?.revision ?? translateUi("None")}{" "}{translateUi("· Pending revision:")}{" "}
               {tariffs.data?.find((t) => t.id === p.pending_tariff_id)
-                ?.revision ?? "None"}
+                ?.revision ?? translateUi("None")}
             </p>
           </div>
         ))}
       {!readOnly && !editing && (
         <Button
           variant="outline"
-          disabled={!model.billing_service_id}
+          disabled={
+            !model.billing_service_id ||
+            (model.family !== "open_model" && definitions.length === 0)
+          }
           onClick={() => setEditing({})}
-        >
-          New price revision
-        </Button>
+        >{translateUi("New price revision")}</Button>
       )}
-      {editing && !readOnly && (
-        <TariffForm
-          model={model}
-          template={editing.template}
-          done={() => setEditing(null)}
-          reload={reload}
-        />
-      )}
+      {editing &&
+        !readOnly &&
+        (model.family === "open_model" || definitions.length > 0) && (
+          <TariffForm
+            key={`${model.id}:${editing.template?.id ?? "new"}`}
+            definitions={definitions}
+            model={model}
+            template={editing.template}
+            done={() => setEditing(null)}
+            reload={reload}
+          />
+        )}
       {!model.billing_service_id && (
-        <p className="type-secondary text-muted-foreground">
-          Set the logical billing service in Public contract before adding
-          prices.
-        </p>
+        <p className="type-secondary text-muted-foreground">{translateUi("Set the logical billing service in Public contract before adding prices.")}</p>
       )}
       {model.billing_service_id && !readOnly && (
         <Button
@@ -408,17 +491,13 @@ export function TariffsEditor({
               })
               .catch(() => {});
           }}
-        >
-          Publish / retry rate sync
-        </Button>
+        >{translateUi("Publish / retry rate sync")}</Button>
       )}
       {tariffs.isLoading && (
-        <p className="type-body">Loading price revisions…</p>
+        <p className="type-body">{translateUi("Loading price revisions…")}</p>
       )}
       {tariffs.data?.length === 0 && (
-        <p className="type-body text-muted-foreground">
-          No price revisions. This model cannot be priced for execution.
-        </p>
+        <p className="type-body text-muted-foreground">{translateUi("No price revisions. This model cannot be priced for execution.")}</p>
       )}
       {tariffs.data?.map((tariff) => (
         <article
@@ -426,26 +505,22 @@ export function TariffsEditor({
           className="overflow-hidden rounded-xl border border-border/50"
         >
           <div className="space-y-2 p-4">
-            <h3 className="type-card-title">
-              Revision {tariff.revision} · {titleCase(tariff.status)} ·{" "}
-              {titleCase(tariff.lane)}
+            <h3 className="type-card-title">{translateUi("Revision ")}{tariff.revision} · {translateUi(titleCase(tariff.status))} ·{" "}
+              {translateUi(titleCase(tariff.lane))}
             </h3>
             <p className="type-secondary text-muted-foreground">
               {Object.entries(tariff.variant)
                 .map(([k, v]) => `${k}: ${v}`)
-                .join(" · ") || "Default variant"}
+                .join(" · ") || translateUi("Default variant")}
             </p>
             {tariff.sync_error && (
-              <p className="type-secondary text-destructive">
-                Sync: {tariff.sync_error}
+              <p className="type-secondary text-destructive">{translateUi("Sync: ")}{tariff.sync_error}
               </p>
             )}
           </div>
           <PriceRows components={tariff.components} />
           <details className="p-4">
-            <summary className="type-body cursor-pointer">
-              Verification and bounds (private)
-            </summary>
+            <summary className="type-body cursor-pointer">{translateUi("Verification and bounds (private)")}</summary>
             <pre className="mt-3 overflow-auto type-code">
               {JSON.stringify(
                 {
@@ -463,18 +538,12 @@ export function TariffsEditor({
               <Button
                 variant="outline"
                 onClick={() => setEditing({ template: tariff })}
-              >
-                Use as template
-              </Button>
+              >{translateUi("Use as template")}</Button>
               {tariff.status !== "retired" &&
                 (retiring === tariff.id ? (
                   <>
-                    <span className="type-secondary">
-                      Retiring removes this rate from new use.
-                    </span>
-                    <Button variant="outline" onClick={() => setRetiring(null)}>
-                      Cancel
-                    </Button>
+                    <span className="type-secondary">{translateUi("Retiring removes this rate from new use.")}</span>
+                    <Button variant="outline" onClick={() => setRetiring(null)}>{translateUi("Cancel")}</Button>
                     <Button
                       variant="destructive"
                       disabled={change.isPending}
@@ -488,17 +557,13 @@ export function TariffsEditor({
                           .then(() => setRetiring(null))
                           .catch(() => {});
                       }}
-                    >
-                      Confirm retire revision
-                    </Button>
+                    >{translateUi("Confirm retire revision")}</Button>
                   </>
                 ) : (
                   <Button
                     variant="outline"
                     onClick={() => setRetiring(tariff.id)}
-                  >
-                    Retire revision
-                  </Button>
+                  >{translateUi("Retire revision")}</Button>
                 ))}
             </div>
           )}

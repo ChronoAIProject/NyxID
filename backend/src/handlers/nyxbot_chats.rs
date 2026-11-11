@@ -199,11 +199,24 @@ pub(super) async fn note_owner_presence(
     } else {
         row.owner_sender_ids.iter().any(|id| id == sender_id)
     };
-    if is_group(&chat) && !chat.owner_seen && owner {
+    if owner
+        && ((is_group(&chat) && !chat.owner_seen)
+            || (chat.kind.as_deref() == Some("private") && (!chat.owner_chat || !chat.owner_seen)))
+    {
+        let mut set = doc! {"owner_seen":true};
+        if chat.kind.as_deref() == Some("private") {
+            set.insert("owner_chat", true);
+            set.insert("title", "You");
+            chat.owner_chat = true;
+            chat.title = Some("You".into());
+        }
         state
             .db
             .collection::<NyxbotThread>(THREADS)
-            .update_one(doc! {"_id": &chat.id}, doc! {"$set": {"owner_seen": true}})
+            .update_one(
+                doc! {"_id": &chat.id,"channel_id":&row.id},
+                doc! {"$set": set},
+            )
             .await?;
         chat.owner_seen = true;
     }
@@ -1675,6 +1688,27 @@ pub(crate) async fn set_private_chats(
     .await
 }
 
+/// Same authority as the write; used before an existing owner action card.
+pub(crate) async fn audience_readiness(
+    state: &AppState,
+    owner: &str,
+    channel_id: &str,
+) -> AppResult<crate::services::assistant_service_execution::readiness::AudienceReadiness> {
+    let row = load_channel(state, owner, channel_id).await?;
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !super::manages_bot_owner(state, owner, org).await?
+    {
+        return Err(AppError::Forbidden("org_access_lost".into()));
+    }
+    crate::services::assistant_service_execution::readiness::audience_readiness(
+        &state.db,
+        &state.encryption_keys,
+        owner,
+        row.agent_id.as_deref(),
+    )
+    .await
+}
+
 pub(crate) async fn update_access(
     state: &AppState,
     owner: &str,
@@ -1697,6 +1731,21 @@ pub(crate) async fn update_access(
         )
         .await?;
     }
+    // Read before mutation: diagnostics must not turn a committed change into a failure.
+    let mut audience =
+        if settings.private_chats.as_deref() == Some("everyone") && row.org_specialist.is_none() {
+            Some(
+                crate::services::assistant_service_execution::readiness::audience_readiness(
+                    &state.db,
+                    &state.encryption_keys,
+                    owner,
+                    row.agent_id.as_deref(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
     let applied =
         crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
             .await?;
@@ -1722,10 +1771,11 @@ pub(crate) async fn update_access(
         .as_deref()
         .filter(|_| row.org_specialist.is_none())
     {
-        if access == "everyone" {
-            super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None).await?;
-        }
-        result["guest_readiness"] = serde_json::to_value(
+        let prepared = access != "everyone"
+            || super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None)
+                .await
+                .is_ok();
+        let readiness = if prepared {
             crate::services::assistant_service_execution::guest_readiness(
                 &state.db,
                 &state.encryption_keys,
@@ -1733,9 +1783,26 @@ pub(crate) async fn update_access(
                 row.agent_id.as_deref(),
                 None,
             )
-            .await?,
-        )
-        .map_err(|_| AppError::Internal("Invalid readiness".into()))?;
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let readiness = readiness.unwrap_or(
+            crate::services::assistant_service_execution::GuestReadiness {
+                status: "not_ready",
+                reason: Some("readiness_unavailable".into()),
+                fix: Some(
+                    "Access was saved. Refresh customer model readiness before relying on replies."
+                        .into(),
+                ),
+            },
+        );
+        result["guest_readiness"] = json!(&readiness);
+        if let Some(facts) = &mut audience {
+            facts.guest_readiness = readiness;
+            result["audience_readiness"] = json!(facts);
+        }
     }
     Ok(result)
 }
@@ -2313,7 +2380,14 @@ async fn send_post_planned_impl(
             }
             journal::PartClaim::Send(attempt) => attempt,
         };
-        match send_post_one(state, target, part, fence).await {
+        match crate::services::telegram_formatting::scope(
+            &state.db,
+            journal::formatting_receipt(&delivery, index, &attempt),
+            Some(&target.bot.id),
+            send_post_one(state, target, part, fence),
+        )
+        .await
+        {
             Ok(sent) if sent.platform_message_id.is_some() => {
                 journal::finish(
                     &state.db,

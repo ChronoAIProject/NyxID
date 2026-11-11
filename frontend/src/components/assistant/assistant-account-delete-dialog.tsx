@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { useRef, useState } from "react";
@@ -24,6 +26,7 @@ export function AssistantAccountDeleteDialog({
   readonly actionRequestId: string;
   readonly onComplete: (userId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmEmail, setConfirmEmail] = useState("");
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
@@ -58,11 +61,11 @@ export function AssistantAccountDeleteDialog({
   return (
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
-        <DialogHeader><DialogTitle>{verifiedUserId ? "Account deletion accepted" : "Delete account"}</DialogTitle><DialogDescription>{verifiedUserId ? "NyxID accepted account deletion and closed sign-in. Local and remote cleanup continues until verified. Continue to clear your session." : "Type your account email to confirm deletion of your account and the Machine data described below."}</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>{verifiedUserId ? translateUi("Account deletion accepted") : translateUi("Delete account")}</DialogTitle><DialogDescription>{verifiedUserId ? translateUi("NyxID accepted account deletion and closed sign-in. Local and remote cleanup continues until verified. Continue to clear your session.") : translateUi("Type your account email to confirm deletion of your account and the Machine data described below.")}</DialogDescription></DialogHeader>
         {!verifiedUserId ? <AccountDeletionDisclosure /> : null}
-        {!verifiedUserId ? <div className="space-y-2 border-y border-border py-4"><Label htmlFor="assistant-account-delete-email">Account email</Label><Input id="assistant-account-delete-email" value={confirmEmail} onChange={(event) => setConfirmEmail(event.target.value)} placeholder={accountEmail ?? "you@example.com"} autoComplete="email" /></div> : null}
-        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
-        <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>Continue</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmEmail.trim()} onClick={() => void submit()}>Delete account</Button></>}</DialogFooter>
+        {!verifiedUserId ? <div className="space-y-2 border-y border-border py-4"><Label htmlFor="assistant-account-delete-email">{translateUi("Account email")}</Label><Input id="assistant-account-delete-email" value={confirmEmail} onChange={(event) => setConfirmEmail(event.target.value)} placeholder={accountEmail ?? translateUi("you@example.com")} autoComplete="email" /></div> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{translateUi(error)}</p> : null}
+        <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>{translateUi("Continue")}</Button> : <><Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmEmail.trim()} onClick={() => void submit()}>{translateUi("Delete account")}</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

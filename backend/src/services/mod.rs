@@ -22,6 +22,9 @@ pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
+pub mod assistant_cma_agent_service;
+pub mod assistant_cma_gateway;
+pub mod assistant_cma_sandbox_service;
 pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
@@ -71,6 +74,7 @@ pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
 pub mod channel_delivery_service;
 pub mod channel_event_service;
+pub(crate) mod channel_inbound_diagnostics;
 pub mod channel_inbound_service;
 pub mod channel_managed;
 pub mod channel_media_authority;
@@ -83,6 +87,7 @@ pub mod channel_poll_service;
 pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_reply_delivery;
+pub mod channel_reply_notice;
 pub mod channel_reply_plan;
 pub mod channel_routing_service;
 pub mod channel_send_service;
@@ -242,6 +247,8 @@ pub mod scope_catalog;
 pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
+pub(crate) mod service_dispatch_guard;
+pub(crate) mod service_dispatch_registry;
 pub mod service_endpoint_service;
 pub mod service_pool_health_service;
 pub mod service_pool_service;
@@ -253,6 +260,7 @@ pub mod social_token_exchange_service;
 pub mod sse_parser;
 pub(crate) mod ssh_ca_record_service;
 pub mod ssh_service;
+pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
 pub mod telegram_new_claims;
@@ -308,6 +316,7 @@ pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
 pub mod assistant_nyxagent_runtime;
+pub mod assistant_onboarding_connect;
 pub mod assistant_onboarding_service;
 pub mod assistant_platform_model;
 pub mod assistant_platform_reply_decision;
@@ -558,12 +567,20 @@ pub mod monitoring_service;
 
 pub mod assistant_delegated_images;
 
+pub mod assistant_cma_admission;
+
+pub mod assistant_cma_tools;
 pub mod cma_session_origin;
 pub mod org_channel_service;
 
 pub mod generated_artifacts;
+pub(crate) mod invocation_diagnostic_service;
 
 pub mod platform_model_execution;
 pub mod platform_model_service;
 
 pub(crate) mod execution_permission_channel;
+
+pub mod assistant_activity_decision;
+pub mod lark_wiki;
+pub mod platform_model_credentials;

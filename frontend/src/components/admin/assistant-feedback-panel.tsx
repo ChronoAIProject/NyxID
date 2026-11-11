@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { ApiError } from "@/lib/api-client";
 import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
@@ -32,29 +35,28 @@ function ReplyContext({
 }: {
   context: FeedbackReplyContext | null | undefined;
 }) {
+  useUiTranslation();
   if (!context)
     return (
-      <span className="text-13 text-text-tertiary">
-        Reply details unavailable
-      </span>
+      <span className="text-13 text-text-tertiary">{translateUi("Reply details unavailable")}</span>
     );
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-13 text-text-tertiary">
       <span>
         {context.agent_kind === "nyxbot"
-          ? "NyxBot"
+          ? translateUi("NyxBot")
           : context.agent_kind === "specialist"
-            ? "Specialist"
-            : "Agent unspecified"}
+            ? translateUi("Specialist")
+            : translateUi("Agent unspecified")}
       </span>
       {context.model && <span className="break-all">{context.model}</span>}
       {context.latency_ms != null && (
-        <span>{(context.latency_ms / 1000).toFixed(1)} s reply time</span>
+        <span>{(context.latency_ms / 1000).toFixed(1)}{translateUi(" s reply time")}</span>
       )}
       {Boolean(context.tool_calls) && (
         <span>
-          {context.tool_calls} recorded tools · {context.tool_errors ?? 0}{" "}
-          {context.tool_errors === 1 ? "error" : "errors"}
+          {context.tool_calls}{translateUi(" recorded tools · ")}{context.tool_errors ?? 0}{" "}
+          {context.tool_errors === 1 ? translateUi("error") : translateUi("errors")}
         </span>
       )}
       {context.error_code && (
@@ -65,9 +67,11 @@ function ReplyContext({
 }
 
 export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
+  useUiTranslation();
   return <FeedbackList key={range?.toString() ?? ""} range={range} />;
 }
 function FeedbackList({ range }: { range?: URLSearchParams }) {
+  useUiTranslation();
   const [vote, setVote] = useState("all");
   const [model, setModel] = useState("");
   const [agentKind, setAgentKind] = useState("all");
@@ -99,71 +103,57 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
     <Card aria-labelledby="assistant-feedback-heading">
       <div className="space-y-4 border-b border-border/50 p-4">
         <div>
-          <h2 id="assistant-feedback-heading" className="font-display type-card-title tracking-tight">
-            Recent feedback
-          </h2>
-          <p className="mt-1 text-14 text-muted-foreground">
-            Read what users found helpful and what needs attention.
-          </p>
+          <h2 id="assistant-feedback-heading" className="font-display type-card-title tracking-tight">{translateUi("Recent feedback")}</h2>
+          <p className="mt-1 text-14 text-muted-foreground">{translateUi("Read what users found helpful and what needs attention.")}</p>
         </div>
         {counts && (
           <div
             className="flex flex-wrap gap-4 text-12"
-            aria-label="Matching feedback totals"
+            aria-label={translateUi("Matching feedback totals")}
           >
             <span>
               <strong className="tabular-nums">
-                {counts.up.toLocaleString()}
-              </strong>{" "}
-              helpful
-            </span>
+                {counts.up.toLocaleString(getFormattingLocale())}
+              </strong>{" "}{translateUi("helpful")}</span>
             <span>
               <strong className="tabular-nums">
-                {counts.down.toLocaleString()}
-              </strong>{" "}
-              not helpful
-            </span>
-            <span className="text-text-tertiary">
-              All matching ratings in this period, across every page
-            </span>
+                {counts.down.toLocaleString(getFormattingLocale())}
+              </strong>{" "}{translateUi("not helpful")}</span>
+            <span className="text-text-tertiary">{translateUi("All matching ratings in this period, across every page")}</span>
           </div>
         )}
         <div className="flex flex-wrap items-end gap-3">
-          <Label className="w-36 space-y-1 text-muted-foreground">
-            Vote
-            <Select
+          <Label className="w-36 space-y-1 text-muted-foreground">{translateUi("Vote")}<Select
               value={vote}
               onValueChange={(value) => {
                 resetPage();
                 setVote(value);
               }}
             >
-              <SelectTrigger aria-label="Vote">
+              <SelectTrigger aria-label={translateUi("Vote")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All feedback</SelectItem>
-                <SelectItem value="up">Helpful</SelectItem>
-                <SelectItem value="down">Not helpful</SelectItem>
+                <SelectItem value="all">{translateUi("All feedback")}</SelectItem>
+                <SelectItem value="up">{translateUi("Helpful")}</SelectItem>
+                <SelectItem value="down">{translateUi("Not helpful")}</SelectItem>
               </SelectContent>
             </Select>
           </Label>
-          <Label className="w-36 space-y-1 text-muted-foreground">
-            Agent
-            <Select
+          <Label className="w-36 space-y-1 text-muted-foreground">{translateUi("Agent")}<Select
               value={agentKind}
               onValueChange={(value) => {
                 resetPage();
                 setAgentKind(value);
               }}
             >
-              <SelectTrigger aria-label="Agent">
+              <SelectTrigger aria-label={translateUi("Agent")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All agents</SelectItem>
-                <SelectItem value="nyxbot">NyxBot</SelectItem>
-                <SelectItem value="specialist">Specialist</SelectItem>
+                <SelectItem value="all">{translateUi("All agents")}</SelectItem>
+                <SelectItem value="nyxbot">{translateUi("NyxBot")}</SelectItem>
+                <SelectItem value="specialist">{translateUi("Specialist")}</SelectItem>
               </SelectContent>
             </Select>
           </Label>
@@ -176,19 +166,15 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
               setModel(typeof value === "string" ? value.trim() : "");
             }}
           >
-            <Label className="space-y-1 text-muted-foreground">
-              Model
-              <Input
+            <Label className="space-y-1 text-muted-foreground">{translateUi("Model")}<Input
                 key={model}
                 name="model"
-                placeholder="Any model"
+                placeholder={translateUi("Any model")}
                 defaultValue={model}
                 className="w-44"
               />
             </Label>
-            <Button type="submit" variant="outline">
-              Apply
-            </Button>
+            <Button type="submit" variant="outline">{translateUi("Apply")}</Button>
           </form>
           {filtered && (
             <Button
@@ -199,21 +185,14 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                 setAgentKind("all");
                 setModel("");
               }}
-            >
-              Clear filters
-            </Button>
+            >{translateUi("Clear filters")}</Button>
           )}
         </div>
-        <p className="text-13 text-text-tertiary">
-          These filters apply to the feedback list. Charts show all feedback in
-          the selected period.
-        </p>
+        <p className="text-13 text-text-tertiary">{translateUi("These filters apply to the feedback list. Charts show all feedback in the selected period.")}</p>
       </div>
       <div aria-busy={query.isFetching}>
         {query.isFetching && !query.isPending && (
-          <p role="status" className="px-4 pt-3 text-13 text-muted-foreground">
-            Updating feedback…
-          </p>
+          <p role="status" className="px-4 pt-3 text-13 text-muted-foreground">{translateUi("Updating feedback…")}</p>
         )}
         {query.isError ? (
           <div
@@ -222,15 +201,13 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
           >
             <span>
               {data
-                ? "Unable to load assistant feedback. Matching totals are from the previous successful refresh."
-                : "Unable to load assistant feedback."}
+                ? translateUi("Unable to load assistant feedback. Matching totals are from the previous successful refresh.")
+                : translateUi("Unable to load assistant feedback.")}
             </span>
-            <Button variant="outline" onClick={() => void query.refetch()}>
-              Retry
-            </Button>
+            <Button variant="outline" onClick={() => void query.refetch()}>{translateUi("Retry")}</Button>
           </div>
         ) : query.isPending ? (
-          <div aria-label="Loading feedback" className="space-y-3 p-4">
+          <div aria-label={translateUi("Loading feedback")} className="space-y-3 p-4">
             <Skeleton className="h-20" />
             <Skeleton className="h-20" />
           </div>
@@ -248,19 +225,19 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                       variant={row.vote === "up" ? "success" : "destructive"}
                     >
                       <Icon className="mr-1 size-3" aria-hidden="true" />
-                      {row.vote === "up" ? "Helpful" : "Not helpful"}
+                      {row.vote === "up" ? translateUi("Helpful") : translateUi("Not helpful")}
                     </Badge>
                     <time
                       dateTime={row.created_at}
                       className="font-mono text-13 text-text-tertiary"
                     >
-                      {new Date(row.created_at).toLocaleString()}
+                      {new Date(row.created_at).toLocaleString(getFormattingLocale())}
                     </time>
                   </div>
                   <p
                     className={`my-3 whitespace-pre-wrap break-words text-15 ${row.comment ? "text-foreground" : "text-text-tertiary"}`}
                   >
-                    {row.comment || "No comment provided"}
+                    {row.comment || translateUi("No comment provided")}
                   </p>
                   <ReplyContext context={row.context} />
                   {data.can_preview_threads && row.id && (
@@ -272,22 +249,18 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                     />
                   )}
                   {!data.can_preview_threads && (
-                    <p className="mt-2 text-13 text-text-tertiary">
-                      Thread previews require Admin or Operator access.
-                    </p>
+                    <p className="mt-2 text-13 text-text-tertiary">{translateUi("Thread previews require Admin or Operator access.")}</p>
                   )}
                   <details className="mt-2 text-13 text-text-tertiary">
-                    <summary className="w-fit cursor-pointer">
-                      Reply details
-                    </summary>
+                    <summary className="w-fit cursor-pointer">{translateUi("Reply details")}</summary>
                     <dl className="mt-2 space-y-1 break-all">
                       <div>
-                        <dt className="inline">Message ID: </dt>
+                        <dt className="inline">{translateUi("Message ID: ")}</dt>
                         <dd className="inline font-mono">{row.message_id}</dd>
                       </div>
                       {row.context?.turn_id && (
                         <div>
-                          <dt className="inline">Turn ID: </dt>
+                          <dt className="inline">{translateUi("Turn ID: ")}</dt>
                           <dd className="inline font-mono">
                             {row.context.turn_id}
                           </dd>
@@ -295,7 +268,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                       )}
                       {Boolean(row.context?.tool_labels?.length) && (
                         <div>
-                          <dt className="inline">Recorded tools: </dt>
+                          <dt className="inline">{translateUi("Recorded tools: ")}</dt>
                           <dd className="inline font-mono">
                             {row.context?.tool_labels?.join(", ")}
                           </dd>
@@ -315,31 +288,27 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
             />
             <p className="type-card-title">
               {filtered
-                ? "No feedback matches these filters."
-                : "No feedback in this period."}
+                ? translateUi("No feedback matches these filters.")
+                : translateUi("No feedback in this period.")}
             </p>
             <p className="mt-1 text-14 text-muted-foreground">
               {filtered
-                ? "Try another vote, agent, or model."
-                : "Votes and comments appear here when users rate a reply."}
+                ? translateUi("Try another vote, agent, or model.")
+                : translateUi("Votes and comments appear here when users rate a reply.")}
             </p>
           </div>
         )}
       </div>
       {(page > 0 || data?.next_cursor) && (
         <div className="flex items-center justify-between border-t border-border/50 px-4 py-3">
-          <span className="text-13 text-text-tertiary">
-            Page {page + 1} · up to 100 ratings per page
-          </span>
+          <span className="text-13 text-text-tertiary">{translateUi("Page ")}{page + 1}{translateUi(" · up to 100 ratings per page")}</span>
           <div className="flex gap-2">
             <Button
               variant="outline"
               disabled={page === 0 || query.isFetching}
               onClick={() => setPage(page - 1)}
             >
-              <ChevronLeft className="size-3" />
-              Previous page
-            </Button>
+              <ChevronLeft className="size-3" />{translateUi("Previous page")}</Button>
             <Button
               variant="outline"
               disabled={!data?.next_cursor || query.isFetching}
@@ -350,9 +319,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                 ]);
                 setPage(page + 1);
               }}
-            >
-              Next page
-              <ChevronRight className="size-3" />
+            >{translateUi("Next page")}<ChevronRight className="size-3" />
             </Button>
           </div>
         </div>
@@ -370,6 +337,7 @@ function FeedbackThread({
   revision: string;
   disabled: boolean;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-3">
@@ -379,13 +347,14 @@ function FeedbackThread({
         disabled={disabled}
         onClick={() => setOpen(!open)}
       >
-        {open ? "Hide message thread" : "Preview message thread"}
+        {open ? translateUi("Hide message thread") : translateUi("Preview message thread")}
       </Button>
       {open && <ThreadMessages id={id} revision={revision} />}
     </div>
   );
 }
 function ThreadMessages({ id, revision }: { id: string; revision: string }) {
+  useUiTranslation();
   const query = useFeedbackThread(id, revision, true);
   const inaccessible =
     query.error instanceof ApiError && [403, 404].includes(query.error.status);
@@ -399,29 +368,22 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
   );
   if (unavailable)
     return (
-      <p role="status" className="mt-3 text-12 text-muted-foreground">
-        This message thread is no longer available.
-      </p>
+      <p role="status" className="mt-3 text-12 text-muted-foreground">{translateUi("This message thread is no longer available.")}</p>
     );
   return (
     <section
       className="mt-3 space-y-3 rounded-lg border border-border/50 p-3"
-      aria-label="Feedback message thread"
+      aria-label={translateUi("Feedback message thread")}
       aria-busy={query.isFetching}
     >
-      <p className="type-secondary text-text-tertiary">
-        Conversation through the rated reply. Text excerpts only. Known secret
-        formats are redacted.
-      </p>
+      <p className="type-secondary text-text-tertiary">{translateUi("Conversation through the rated reply. Text excerpts only. Known secret formats are redacted.")}</p>
       {query.isPending && (
-        <Skeleton aria-label="Loading message thread" className="h-24" />
+        <Skeleton aria-label={translateUi("Loading message thread")} className="h-24" />
       )}
       {query.isError && (
         <div role="alert" className="text-12">
-          <p>
-            Could not load message context.
-            {unique.length
-              ? " Previously loaded excerpts may be out of date."
+          <p>{translateUi("Could not load message context.")}{unique.length
+              ? translateUi(" Previously loaded excerpts may be out of date.")
               : ""}
           </p>
           <Button
@@ -431,9 +393,7 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
                 ? query.fetchNextPage()
                 : query.refetch())
             }
-          >
-            Retry context
-          </Button>
+          >{translateUi("Retry context")}</Button>
         </div>
       )}
       {query.hasNextPage && (
@@ -443,8 +403,8 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
           onClick={() => void query.fetchNextPage()}
         >
           {query.isFetchingNextPage
-            ? "Loading previous messages…"
-            : "Load previous messages"}
+            ? translateUi("Loading previous messages…")
+            : translateUi("Load previous messages")}
         </Button>
       )}
       <ol className="space-y-3">
@@ -455,28 +415,24 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
           >
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2 type-secondary text-text-tertiary">
               <strong className="text-foreground">
-                {message.role === "user" ? "User" : "Assistant"}
-                {message.rated ? " · Rated reply" : ""}
+                {message.role === "user" ? translateUi("User") : translateUi("Assistant")}
+                {message.rated ? translateUi(" · Rated reply") : ""}
               </strong>
               <time dateTime={message.created_at}>
-                {new Date(message.created_at).toLocaleString()}
+                {new Date(message.created_at).toLocaleString(getFormattingLocale())}
               </time>
             </div>
             <p className="whitespace-pre-wrap break-words type-body">
-              {message.text || "No text available."}
+              {message.text || translateUi("No text available.")}
             </p>
             {message.truncated && (
-              <p className="mt-1 type-secondary text-text-tertiary">
-                Message excerpt truncated.
-              </p>
+              <p className="mt-1 type-secondary text-text-tertiary">{translateUi("Message excerpt truncated.")}</p>
             )}
           </li>
         ))}
       </ol>
       {query.isSuccess && !unique.length && (
-        <p className="text-12 text-muted-foreground">
-          No retained messages available.
-        </p>
+        <p className="text-12 text-muted-foreground">{translateUi("No retained messages available.")}</p>
       )}
     </section>
   );

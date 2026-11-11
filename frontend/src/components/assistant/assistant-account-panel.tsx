@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactChrome } from "@/components/ui/compact-title";
 import {
   GroupedDialog,
@@ -25,6 +27,7 @@ const panels = {
 };
 
 export function AssistantAccountPanel() {
+  useUiTranslation();
   const { current, close, opener } = useAccountPanel();
   const user = useAuthStore((s) => s.user);
   const loading = useAuthStore((s) => s.isLoading);
@@ -64,12 +67,12 @@ export function AssistantAccountPanel() {
         }}
       >
         <CompactChrome className="[[data-compact=true]]:border-b [[data-compact=true]]:border-border/50"><DialogHeader className="shrink-0 pr-6">
-          <DialogTitle className="[[data-compact=true]_&]:text-15">{panel.title}</DialogTitle>
-          <DialogDescription className="[[data-compact=true]_&]:hidden">{panel.description}</DialogDescription>
+          <DialogTitle className="[[data-compact=true]_&]:text-15">{translateUi(panel.title)}</DialogTitle>
+          <DialogDescription className="[[data-compact=true]_&]:hidden">{translateUi(panel.description)}</DialogDescription>
         </DialogHeader></CompactChrome>
         <PanelBody className={grouped ? "flex min-h-0 flex-1 flex-col" : undefined} style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
           <DialogFocusReturnContext value={true}>
-          <Suspense fallback={<p role="status" className="text-14 text-text-tertiary">Loading {panel.title}...</p>}>
+          <Suspense fallback={<p role="status" className="text-14 text-text-tertiary">{translateUi("Loading ")}{translateUi(panel.title)}...</p>}>
             {current.panel === "settings" ? <Settings presentation="panel" /> :
               current.panel === "billing" ? <Billing presentation="panel" /> : <NyxBot />}
           </Suspense>

@@ -2721,3 +2721,77 @@ Verified members execute as themselves; opt-in guests have explicit delegated
 services and an org-paid daily budget. Groups/topics share public transcript
 context while execution keys remain isolated per actor. See
 [the NyxBot contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
+
+### Telegram CommonMark opt-in
+
+For original, unescaped assistant Markdown, use `POST /reply/commonmark`,
+`/thread-reply/commonmark`, or `/reply/update/commonmark` under
+`/api/v1/channel-relay`. Bodies and authentication match the original routes.
+These distinct routes fail closed on old replicas. They opt into
+`metadata.text_format: "commonmark"` internally; that metadata form is also
+available to callers targeting a known upgraded replica. Do not combine it with
+`parse_mode` or `entities`. Send text before Markdown escaping or fragmentation;
+NyxID parses once and applies its shared platform budgets. Interactive metadata
+cannot be duplicated across multipart text; send long text separately.
+
+Opted-in Telegram sends and edits use explicit entities. Unopted legacy callers
+retain their text/default syntax, including this base's historical ignored
+metadata.parse_mode (Markdown default); ordinary sends already accept entities. Formatting fallback
+applies to explicit display text/entities only, never by guessing how to undo
+an external caller's Markdown. See [Telegram formatting](TELEGRAM_NEW.md#assistant-markdown-and-formatting-refusals-2317--2310)
+for receipts, definitive-refusal fallback, owner notices and rollout requirements.
+
+
+### Discord intake health and failed hand-overs (#2328, #2323)
+
+Owner/admin Health and NyxBot channel listings expose optional `discord_intake`:
+`receiving_side` (`nyxid_relay`, `native_gateway` or `interactions_only`), observed `state`, a stable
+`code`, optional `block_reason`, `handed_over_at` and `last_inbound_at`. For a
+native binding, last inbound is scoped to that binding; direct transport shows
+the bot's last authenticated inbound (the diagnostics also name its source). Native
+selection is configuration evidence, not authentication, socket health or
+successful delivery. An authenticated event is scoped to its current provider
+binding; a relay message or an event from a previous binding cannot confirm a
+native hand-over. Older bindings without that evidence remain unconfirmed until
+a new authenticated event arrives. This does not assert a misconfiguration.
+Legacy hand-over timestamps remain unknown; a new inbound is never presented as
+the time of the historical hand-over. NyxBot's `get_channel_bot` health uses the
+same live lease and release-fence checks.
+
+Unloaded health facts retain their legacy recommendation: intake advice requires
+`discord::load`. The loader applies the same owner flag precedence as ingress;
+when `channel:discord-gateway` is off, direct bots report `interactions_only`
+with no intake error. Flag-on with unavailable fleet readiness is a real block
+(`readiness_unavailable`). Loading uses at most seven batched reads independent
+of bot count: channels, releases and leases; two flag-resolution reads; and two
+fleet-readiness reads. Native-only lists skip relay flag/readiness reads.
+
+The first authenticated native admission changes only the exact
+`unconfirmed` / `discord_native_intake_unconfirmed` pair to `unknown` with no
+error, in the admission transaction. It does not claim successful outbound
+delivery or clear a real delivery failure. Binding intake timestamps refresh
+at most about once per minute, except first observation or changed hand-over.
+The bot's inbound diagnostic remains per-message, as on relay; native admission
+folds it into the existing bot fence write.
+
+- `discord_relay_stopped`: the relay reports stopped; check its feature flag,
+  replica readiness and retained releases. Eligible sessions restart on discovery.
+- `discord_relay_blocked`: setup/release fencing prevents a socket. `setup_pending`,
+  `native_draining`, `release_unresolved` and `gateway_owned` distinguish the
+  retained obligation; `readiness_unavailable` means the relay flag is on but
+  the fleet cannot safely run it. Administrators review unresolved releases through the
+  existing release-review API; never force a second IDENTIFY.
+- `discord_relay_unconfirmed`: the session is unknown, waiting, connecting,
+  disabled or disconnected, or its `connected` report has no live ingress lease.
+- `discord_native_intake_unconfirmed`: native intake owns the bot, but NyxID has
+  no authenticated event for this hand-over. Check CMA intake; `selected` alone
+  cannot make the bot healthy. The channel aggregate reports `unconfirmed`,
+  rather than preserving an old `ok`.
+
+The existing 30-second release sweep repairs up to ten stale direct setup rows
+per pass, rotating by its last repair check. It cleans only failed attempt keys
+and references, including legacy rows without the pending-agent marker. It does
+not resolve unknown creation/deletion, override operator review, switch existing
+native bots back to relay, or shorten the persisted 90-second post-delete drain.
+A missing release proof remains blocked for review. No message contents, tokens
+or upstream prose are added to health or repair metadata.

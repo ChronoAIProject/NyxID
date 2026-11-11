@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const conversationIdSchema = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 export const activitySchema = z.object({
+  decision: z.object({ kind: z.string(), id: z.string(), state: z.string() }).nullish(),
   id: z.string(),
   label: z.string(),
   status: z.enum(["running", "completed", "error"]),

@@ -3,6 +3,7 @@ import { z } from "zod";
 export const cmaOperationSchema = z.object({
   id: z.string(),
   turn_id: z.string(),
+  service_id: z.string().optional(),
   kind: z.enum(["cma_provisioning", "cma_response", "cma_agent"]),
   operation_id: z.string().nullable(),
   agent_id: z.string().nullable(),
@@ -15,6 +16,8 @@ export const cmaOperationSchema = z.object({
   created_at: z.string(),
   checked_at: z.string().nullable(),
   cma_url: z.string().nullish(),
+  agent_ref_id: z.string().uuid().nullish(),
+  response_id: z.string().max(256).nullish(),
 });
 
 export type CmaOperation = z.infer<typeof cmaOperationSchema>;

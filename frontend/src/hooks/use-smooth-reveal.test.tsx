@@ -327,6 +327,64 @@ describe("useSmoothReveal", () => {
     expect(result.current).toBe("**open");
   });
 
+  it.each([
+    "I am **checking the attachment",
+    "Open [the image](https://example.com/photo",
+    "The result is `still being prepared",
+  ])("releases a paused Markdown tail while the turn remains active: %s", (text) => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: text });
+    runFrames(10);
+    expect(result.current.length).toBeLessThan(text.length);
+    runFrames(60);
+    expect(result.current).toBe(text);
+
+    // A resumed producer must extend what the reader already saw.
+    const resumed = `${text} and continuing`;
+    rerender({ value: resumed });
+    const outputs = recordFrames(70, () => result.current);
+    expect(outputs.every((output) => output.startsWith(text))).toBe(true);
+    expect(result.current).toBe(resumed);
+  });
+
+  it("releases a paused replacement without reusing the previous text's idle deadline", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "First **unfinished reply" });
+    runFrames(70);
+    expect(result.current).toBe("First **unfinished reply");
+    rerender({ value: "Now **another unfinished reply 👩🏽‍💻" });
+    runFrames(10);
+    expect(result.current).toBe("Now ");
+    runFrames(60);
+    expect(result.current).toBe("Now **another unfinished reply 👩🏽‍💻");
+  });
+
+  it("starts a new idle deadline when a replacement restores previously flushed text", () => {
+    const text = "First **unfinished reply";
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: text });
+    runFrames(70);
+    expect(result.current).toBe(text);
+
+    rerender({ value: "A different **unfinished reply" });
+    runFrames(10);
+    rerender({ value: text });
+    expect(result.current).toBe("First ");
+    runFrames(49);
+    expect(result.current).toBe("First ");
+    runFrames(2);
+    expect(result.current).toBe(text);
+  });
+
   it("spreads later chunks over the observed arrival cadence", () => {
     const { result, rerender } = renderHook(
       ({ value }: { value: string }) => useSmoothReveal(value, true),

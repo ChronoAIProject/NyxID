@@ -1,3 +1,4 @@
+import "@/i18n";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import type { ComponentProps } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -100,6 +101,9 @@ beforeEach(() => {
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
     if (method !== "GET") writes.push({ method, endpoint, body });
     const id = String(agent.id);
+    if (endpoint === `/assistant/nyxagent/agents/${id}/org-guest-grants`) {
+      return new Response(JSON.stringify({ ready: true, pending: false, review: "none", bots: [], services: [] }));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/guest-readiness`) {
       readinessReads++;
       return new Response(JSON.stringify({ status: "not_ready", fix: "Send one message to this assistant yourself." }));
@@ -366,7 +370,7 @@ it("shows the server's refusal of a display name", async () => {
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const profile = await within(sheet).findByLabelText("Profile", { selector: "form" });
   globalThis.__nyxidAssistantHttpMock = () =>
-    new Response(JSON.stringify({ message: "A display name must not contain credentials" }), {
+    new Response(JSON.stringify({ error: "bad_request", message: "A display name must not contain credentials" }), {
       status: 400,
     });
   appendText(within(profile).getByLabelText("Display name", { selector: "input,textarea" }), "sk-live");
@@ -865,7 +869,7 @@ function machineAccessFixture() {
       writes.push({ endpoint, method: init.method!, body });
       if (control.fail === (machineWrite ? "machine access" : "grants")) {
         return new Response(
-          JSON.stringify({ message: "Access changed; review and retry." }),
+          JSON.stringify({ error: "conflict", message: "Access changed; review and retry." }),
           { status: 409 },
         );
       }

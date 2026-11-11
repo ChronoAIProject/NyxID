@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useAuthStore } from "@/stores/auth-store";
 import { canWriteTool } from "@/types/api";
 import { useEndpoints } from "@/hooks/use-endpoints";
@@ -13,6 +16,7 @@ export function PublicationOperations({
   tool: DownstreamService;
   disabled?: boolean;
 }) {
+  useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const admin = user?.is_admin === true;
   const writable = canWriteTool(user, tool);
@@ -21,9 +25,7 @@ export function PublicationOperations({
   return (
     <div className="space-y-2">
       {!admin && (
-        <p className="text-13 text-text-tertiary">
-          Admin publication and audience approval required before use.
-        </p>
+        <p className="text-13 text-text-tertiary">{translateUi("Admin publication and audience approval required before use.")}</p>
       )}
       {operations.map((op) => (
         <div
@@ -63,15 +65,15 @@ export function PublicationOperations({
                           ? "published"
                           : "validated",
                   },
-                  { onError: () => toast.error("Publication failed") },
+                  { onError: () => toast.error(translateErrorMessage("Publication failed")) },
                 )
               }
             >
               {op.publication === "published"
-                ? "Pause"
+                ? translateUi("Pause")
                 : admin
-                  ? "Publish"
-                  : "Validate"}
+                  ? translateUi("Publish")
+                  : translateUi("Validate")}
             </Button>
           </div>
         </div>

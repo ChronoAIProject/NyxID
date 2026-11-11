@@ -1,3 +1,4 @@
+import { activityDecisionPresentation, type ActivityDecision } from "../assistant/assistantActivityDecision";
 import { useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
@@ -26,11 +27,13 @@ type Receipt = NonNullable<AssistantMessage["activities"][number]["machine"]>;
 const policySchema = z.object({ enabled: z.boolean() });
 export function MachineToolCard({
   receipt,
+  decision,
   conversationId,
   groupId,
   attachments = [],
   onOpenDesktop,
 }: {
+  decision?: ActivityDecision | null;
   receipt: Receipt;
   conversationId?: string;
   groupId?: string;
@@ -64,6 +67,7 @@ export function MachineToolCard({
   const root = conversationId
     ? `/assistant/nyxagent/conversations/${encodeURIComponent(conversationId)}`
     : undefined;
+  const gated = activityDecisionPresentation(decision);
   const command = receipt.action.startsWith("command.");
   const policy = useQuery({
     queryKey: [
@@ -121,7 +125,7 @@ export function MachineToolCard({
       <SettingsGroup inset={false}>
         <SettingsRow
           label={receipt.action.replaceAll(".", " · ").replaceAll("_", " ")}
-          value={receipt.status}
+          value={gated?.label ?? receipt.status}
         />
         {receipt.exit_code != null ? (
           <SettingsRow label="Exit code" value={String(receipt.exit_code)} />
@@ -180,7 +184,8 @@ export function MachineToolCard({
           />
         ) : null}
       </SettingsGroup>
-      {receipt.error_code != null ? (
+      {gated ? <Notice message={gated.detail} /> : null}
+      {(!gated || gated.status === "error") && receipt.error_code != null ? (
         <Notice tone="error" message={`Machine error ${receipt.error_code}`} />
       ) : null}
       {image ? (

@@ -1,3 +1,4 @@
+import { buildApiError } from "../../lib/api/responseError";
 import {
   createAssistantDraftStore,
   assistantDraftKey,
@@ -125,6 +126,8 @@ function setup(
     models: [],
     model: "nyxagent/chat",
     agents: [agent],
+    agentsError: undefined as string | undefined,
+    reloadAgents: async () => { events.push(["reloadAgents"]); assistant.agentsError = undefined; },
     conversations: [],
     inputAttachments: [],
     online: true,
@@ -976,6 +979,40 @@ test("voice entry yields to text, attachments, upload work and the active turn's
   x.harness.unmount();
 });
 
+for (const kind of ["specialist", "nyxbot"] as const) {
+  test(`an empty ${kind} composer keeps voice after its first text exchange`, async () => {
+    const x = setup();
+    x.assistant.agent.kind = kind;
+    x.assistant.agent.name = kind === "specialist" ? "cake-shop" : "nyxbot";
+    x.harness.render();
+    assert.equal(x.button("Open voice call")?.props.disabled, false);
+    x.input().props.onChangeText("Hello");
+    x.harness.flush();
+    assert.equal(x.button("Send message")?.props.disabled, false);
+    x.button("Send message")!.props.onPress();
+    await x.harness.settle();
+    assert.equal(x.events.filter(([name]) => name === "send").length, 1);
+
+    x.assistant.openConversation(A);
+    x.adopt(A);
+    Object.assign(x.assistant.history!.conversation, {
+      role: kind === "specialist" ? "subagent" : "orchestrator",
+      message_count: 2,
+      active_turn: null,
+    });
+    x.harness.render();
+    assert.equal(x.input().props.value, "");
+    assert.equal(x.button("Open voice call")?.props.kind, "voice");
+    assert.equal(x.button("Open voice call")?.props.disabled, false);
+    assert.equal(x.button("Send message"), undefined);
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    assert.equal(x.voice()?.props.thread, A);
+    assert.equal(x.drafts.length, 0, "saved chat voice must reuse its thread");
+    x.harness.unmount();
+  });
+}
+
 test("private attachments send directly without mention aliases or rewriting the draft", async () => {
   const x = setup(A);
   const file = {
@@ -1029,7 +1066,6 @@ test("the server feature flag and eligible chat context determine whether voice 
   assert.ok(x.button("Open voice call"));
   for (const context of [
     { channel: { platform: "telegram" } },
-    { role: "subagent" },
     { agent: { ...x.assistant.agent, destroyed: true } },
   ]) {
     Object.assign(x.assistant.history!.conversation, context);
@@ -2136,4 +2172,22 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
     assert.equal(x.events.filter((e) => e[0] === "push").length, 1);
     x.harness.unmount();
   }
+});
+
+
+test("Home displays a friendly 503 beside Reload agents and clears it after retry", async () => {
+  const x = setup();
+  x.assistant.agentsError = buildApiError("<html><center>nginx</center></html>", 503).message;
+  x.harness.render();
+  assert.ok(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."));
+  assert.doesNotMatch(JSON.stringify(x.harness.value()), /<html>|nginx/);
+  const reload = x.all().find((node) => node.props.label === "Reload agents");
+  assert.ok(reload);
+  reload.props.onPress();
+  await x.harness.settle();
+  x.harness.render();
+  assert.ok(x.events.some(([name]) => name === "reloadAgents"));
+  assert.equal(x.all().some((node) => node.props.label === "Reload agents"), false);
+  assert.equal(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."), false);
+  x.harness.unmount();
 });

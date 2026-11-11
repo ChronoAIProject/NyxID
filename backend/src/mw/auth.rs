@@ -48,6 +48,10 @@ pub enum AuthMethod {
     Delegated,
 }
 
+/// Verified access token cannot be replayed from another sender (probe hop).
+#[derive(Clone, Copy)]
+pub struct SenderConstrainedToken;
+
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub(crate) execution_enrolled: bool,
@@ -1286,6 +1290,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         claims.cnf.as_ref().and_then(|c| c.x5t_s256.as_deref())
                     {
                         validate_mtls_bound_access(parts, state, claims_x5t)?;
+                    }
+
+                    if claims.cnf.is_some() {
+                        parts.extensions.insert(SenderConstrainedToken);
                     }
 
                     // Check if this is a service account token
@@ -2637,6 +2645,34 @@ mod tests {
     }
 
     #[test]
+    fn delegated_account_read_denies_cma_management_history_and_live_views() {
+        let headers = HeaderMap::new();
+        for suffix in [
+            "sandboxes",
+            "sandboxes/id",
+            "sandboxes/unregistered",
+            "sandboxes/id/events",
+            "cma-agents/id",
+            "cma-agents/id/transcript",
+            "cma-agents/id/events/snapshot",
+            "cma-agents/id/events",
+            "cma-agents/id/responses/response-id",
+            "cma-agents/id/responses/response-id/events",
+            "cma-agents/id/desktop",
+            "cma-agents/id/desktop/ws",
+        ] {
+            let path = format!("/api/v1/assistant/nyxagent/{suffix}");
+            assert!(delegated_read_denied_path(&path));
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                &path,
+                &headers,
+                ACCOUNT_READ_SCOPE
+            ));
+        }
+    }
+
+    #[test]
     fn delegated_account_read_denies_org_invite_bearer_material() {
         let headers = HeaderMap::new();
 
@@ -2776,6 +2812,14 @@ mod tests {
         assert!(!is_delegated_native_path(
             "/api/v1/approvals/requests/request-id"
         ));
+        for scope in [WIDE_PROXY_SCOPE, "proxy account:read"] {
+            assert!(!delegated_request_allowed(
+                &Method::POST,
+                "/api/v1/monitoring/invocation-diagnostics",
+                &HeaderMap::new(),
+                scope,
+            ));
+        }
     }
 
     #[test]
@@ -4334,6 +4378,7 @@ mod tests {
             );
         }
         for path in [
+            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/users/me",
             "/api/v1/assistant/agents",
             "/api/v1/channel-relay/conversations",
@@ -4617,6 +4662,7 @@ mod tests {
     fn api_key_management_write_routes_require_write_scope() {
         let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
         let write_routes = [
+            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/api/v1/api-keys"),
             (Method::POST, "/api/v1/api-keys/key-1/rotate"),
             (Method::POST, "/api/v1/keys"),

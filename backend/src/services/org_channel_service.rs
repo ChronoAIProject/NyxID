@@ -16,6 +16,7 @@ use crate::{
     },
 };
 
+pub(crate) mod adoption;
 pub(crate) mod budget;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
@@ -23,6 +24,8 @@ pub(crate) mod management;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod transcript;
+
+pub const GUEST_GRANTS_READINESS: &str = "nyxbot:org-guest-grants-v1";
 
 pub const FLAG: &str = "nyxbot:org-specialist-channels";
 pub const UNAVAILABLE: &str = "This assistant is unavailable right now. Please try again later.";
@@ -36,6 +39,32 @@ pub(crate) async fn enabled(db: &Database, admin: &str) -> AppResult<()> {
         return Err(denied());
     }
     super::security_readiness_service::require(db, FLAG).await
+}
+
+/// Readiness is checked only on organization guest paths, never ordinary billing.
+pub(crate) async fn guest_grants_ready(db: &Database) -> AppResult<bool> {
+    match super::security_readiness_service::report(db, GUEST_GRANTS_READINESS).await {
+        Ok(report) => Ok(report.ready),
+        Err(AppError::SecurityReadinessUnavailable) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Binding selection only: operation/guest classification remains in the shared
+/// operation-scope evaluators. A legacy digest mismatch never widens a key.
+pub(crate) fn guest_service_selected(
+    agent: &AssistantAgent,
+    policy: &GuestPolicy,
+    ready: bool,
+    id: &str,
+) -> bool {
+    agent.grants.service_ids.iter().any(|granted| granted == id)
+        && ((ready && policy.follows_agent_grants)
+            || (policy.service_ids.iter().any(|selected| selected == id)
+                && policy
+                    .service_authority
+                    .get(id)
+                    .is_some_and(|digest| *digest == management::service_digest(agent, id))))
 }
 
 /// Only this module can construct the billing exception. A public actor or an
@@ -68,6 +97,7 @@ pub struct Access {
     origin: ChannelOrigin,
     agent: AssistantAgent,
     member_private_source: bool,
+    guest_grants_ready: bool,
 }
 impl std::fmt::Debug for Access {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,12 +111,10 @@ impl Access {
     pub(crate) fn execution(&self) -> &Execution {
         &self.execution
     }
-    pub(crate) fn delegated_services(&self) -> &[String] {
-        self.channel
-            .org_specialist
-            .as_ref()
-            .map(|b| b.guests.service_ids.as_slice())
-            .unwrap_or_default()
+    pub(crate) fn guest_service_selected(&self, id: &str) -> bool {
+        self.channel.org_specialist.as_ref().is_some_and(|b| {
+            guest_service_selected(&self.agent, &b.guests, self.guest_grants_ready, id)
+        })
     }
     pub(crate) fn agent(&self) -> &AssistantAgent {
         &self.agent
@@ -113,21 +141,9 @@ impl Access {
             && (!self.execution.guest
                 || (service.node_id.is_none()
                     && service.service_type == "http"
-                    && self
-                        .channel
-                        .org_specialist
-                        .as_ref()
-                        .is_some_and(|b| b.guests.service_ids.contains(&service.id))
-                    && self.agent.grants.service_ids.contains(&service.id)
-                    && self
-                        .channel
-                        .org_specialist
-                        .as_ref()
-                        .and_then(|b| b.guests.service_authority.get(&service.id))
-                        .is_some_and(|digest| {
-                            *digest == management::service_digest(&self.agent, &service.id)
-                        })))
+                    && self.guest_service_selected(&service.id)))
     }
+
     pub(crate) fn check_conversation(&self, row: &AssistantConversation) -> AppResult<()> {
         let origin = row
             .channel
@@ -201,7 +217,12 @@ pub(crate) async fn link_target(
         version: 1,
         org_id: agent.user_id.clone(),
         revision: uuid::Uuid::new_v4().to_string(),
-        guests: GuestPolicy::default(),
+        guests: GuestPolicy {
+            follows_agent_grants: guest_grants_ready(db).await?,
+            // Conservative compatibility fields for an old reader.
+            daily_credits: Some(management::default_daily_credits()),
+            ..Default::default()
+        },
     }))
 }
 
@@ -448,15 +469,17 @@ pub(crate) async fn validate_in_session(
     {
         return Err(denied());
     }
+    let guest_grants_ready = execution.guest && guest_grants_ready(db).await?;
     if execution.guest {
         let policy = &channel.org_specialist.as_ref().ok_or_else(denied)?.guests;
         if actor != execution.org_id
             || !policy.enabled
             || execution.guest_revision.as_deref() != Some(policy.revision.as_str())
             || policy.revision.is_empty()
-            || policy
-                .daily_credits
-                .is_none_or(|c| c <= crate::models::credits::Credits::ZERO)
+            || (!guest_grants_ready
+                && policy
+                    .daily_credits
+                    .is_none_or(|c| c <= crate::models::credits::Credits::ZERO))
             || execution.link_id.is_some()
             || execution.link_revision.is_some()
             || (thread.kind.as_deref() == Some("private")
@@ -477,10 +500,12 @@ pub(crate) async fn validate_in_session(
         {
             return Err(denied());
         }
-        if policy.service_authority.iter().any(|(id, digest)| {
-            !agent.grants.service_ids.contains(id)
-                || management::service_digest(&agent, id) != *digest
-        }) {
+        if !(guest_grants_ready && policy.follows_agent_grants)
+            && policy.service_authority.iter().any(|(id, digest)| {
+                !agent.grants.service_ids.contains(id)
+                    || management::service_digest(&agent, id) != *digest
+            })
+        {
             return Err(denied());
         }
         budget::require_wallet(db, &execution.org_id).await?;
@@ -532,6 +557,7 @@ pub(crate) async fn validate_in_session(
     live_doc(db,session,crate::models::channel_conversation::COLLECTION_NAME,doc!{"_id":&channel.route_id,"user_id":&execution.org_id,
         "channel_bot_id":&channel.channel_bot_id,"agent_api_key_id":&channel.route_api_key_id,"is_active":true,"retired_by_transfer":{"$ne":true}},fence).await?;
     Ok(Access {
+        guest_grants_ready,
         member_private_source: !execution.guest
             && origin.thread.is_none()
             && thread.kind.as_deref() == Some("private"),

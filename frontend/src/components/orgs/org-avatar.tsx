@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Building2 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn, sanitizeAvatarUrl } from "@/lib/utils";
@@ -41,13 +42,14 @@ export function OrgAvatar({
   displayName,
   className,
 }: OrgAvatarProps) {
+  const { t } = useUiTranslation();
   const safeUrl = sanitizeAvatarUrl(avatarUrl);
   const initials = getInitials(displayName);
 
   return (
     <Avatar
       className={cn("rounded-lg border-border bg-muted/60", className)}
-      aria-label={displayName ?? "Organization"}
+      aria-label={displayName ?? t("Organization")}
     >
       {safeUrl ? (
         <AvatarImage

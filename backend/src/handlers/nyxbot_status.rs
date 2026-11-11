@@ -386,6 +386,21 @@ fn media_verdict(event: &NyxbotEvent) -> Verdict {
 
 /// Plain words for a delivery failure code, for the agent and the owner.
 pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
+    use crate::services::channel_bot_health::discord;
+    let intake = match code {
+        discord::NATIVE_UNCONFIRMED => Some(
+            "no authenticated native event is confirmed for this hand-over; selection does not prove a connected session",
+        ),
+        discord::RELAY_STOPPED => Some("NyxID's Discord relay session is stopped"),
+        discord::RELAY_BLOCKED => Some(
+            "NyxID's Discord relay intake is blocked; check channel health for the setup, release or readiness reason",
+        ),
+        discord::RELAY_UNCONFIRMED => Some("NyxID's Discord relay connection is not confirmed"),
+        _ => None,
+    };
+    if let Some(reason) = intake {
+        return reason.into();
+    }
     let receiver = if transport == "gateway" {
         "the Agent Event Gateway"
     } else {
@@ -594,6 +609,36 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
         super::OrgAccess::Lost => return super::release_org_channel(state, row).await,
         super::OrgAccess::Unavailable => {
             return Err(crate::errors::AppError::SecurityReadinessUnavailable);
+        }
+    }
+    if row.platform == "discord" {
+        let bot =
+            crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        let intake = crate::services::channel_bot_health::discord::load(&state.db, &[bot]).await?;
+        if let Some(intake) = intake.get(&row.channel_bot_id) {
+            if let Some(code) = intake.code {
+                let mut filter = doc! {"_id":&row.id,"status":"active","transport":&row.transport,"binding_id":&row.binding_id};
+                if code == crate::services::channel_bot_health::discord::NATIVE_UNCONFIRMED {
+                    // An admission after the health read must not be replaced
+                    // by this stale no-event observation.
+                    filter.insert("$or",bson::bson!([
+                        {"gateway_intake.binding_id":{"$ne":&row.binding_id}},
+                        {"gateway_intake.last_inbound_at":null},
+                        {"$expr":{"$lt":["$gateway_intake.last_inbound_at","$gateway_intake.handed_over_at"]}}
+                    ]));
+                }
+                state.db.collection::<NyxbotChannel>(CHANNELS).update_one(filter,
+                    doc! {"$set":{"delivery_status":if intake.receiving_side=="native_gateway" {"unconfirmed"}else{"failing"},"delivery_error":code}}).await?;
+                return Ok(());
+            }
+            if row
+                .delivery_error
+                .as_deref()
+                .is_some_and(crate::services::channel_bot_health::discord::is_intake_code)
+            {
+                state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"delivery_error":&row.delivery_error},
+                    doc! {"$set":{"delivery_status":"unknown"},"$unset":{"delivery_error":"","delivery_failed_at":""}}).await?;
+            }
         }
     }
     if row.transport == "gateway" && row.gateway_source.is_some() {

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 import type { StudioBreadcrumb } from "@/lib/studio-breadcrumbs";
@@ -7,6 +9,7 @@ function StudioBreadcrumbLink({
 }: {
   readonly crumb: StudioBreadcrumb & { to: string };
 }) {
+  useUiTranslation();
   const { to, search } = crumb;
   const props = {
     className:
@@ -80,11 +83,12 @@ export function StudioBreadcrumbTrail({
 }: {
   readonly crumbs: readonly StudioBreadcrumb[];
 }) {
+  useUiTranslation();
   if (crumbs.length === 0) return null;
 
   return (
     <nav
-      aria-label="Breadcrumb"
+      aria-label={translateUi("Breadcrumb")}
       className="hidden md:flex items-center gap-1 text-14 min-w-0"
     >
       {crumbs.map((crumb, i) => (

@@ -29,6 +29,11 @@ describe("eventNotices", () => {
 
 /** Texts as the backend writes them (handlers/assistant_team.rs, handlers/nyxbot.rs). */
 describe("describeEventNotice", () => {
+  it("separates cancelled work from a tracker deadline and completed work", () => {
+    expect(describeEventNotice("Asynchronous service operation finished: operation_cancelled. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "neutral", summary: "Background task cancelled" });
+    expect(describeEventNotice("Asynchronous service operation finished: timeout. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "warning", summary: "Background tracking timed out" });
+    expect(describeEventNotice("Asynchronous service operation finished: completed. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "success", summary: "Background task finished" });
+  });
   it("summarises a specialist's reply and keeps the excerpt as detail", () => {
     expect(
       describeEventNotice(

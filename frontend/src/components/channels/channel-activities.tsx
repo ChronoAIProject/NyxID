@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import {
   useChannelActivities,
@@ -42,9 +44,10 @@ export function LatestActivity({
   readonly unavailable?: boolean;
   readonly loading?: boolean;
 }) {
-  if (unavailable) return <span>Activity unavailable</span>;
-  if (loading) return <span>Loading activity…</span>;
-  if (!activity) return <span>No activity received</span>;
+  useUiTranslation();
+  if (unavailable) return <span>{translateUi("Activity unavailable")}</span>;
+  if (loading) return <span>{translateUi("Loading activity…")}</span>;
+  if (!activity) return <span>{translateUi("No activity received")}</span>;
   return (
     <span>
       {activityLabel(activity.kind, descriptors)} ·{" "}
@@ -56,17 +59,17 @@ export function LatestActivity({
 function callbackLabel(status: string | null) {
   switch (status) {
     case "delivered":
-      return "Callback accepted";
+      return translateUi("Callback accepted");
     case "failed":
-      return "Callback failed";
+      return translateUi("Callback failed");
     case "timeout":
-      return "Callback timed out";
+      return translateUi("Callback timed out");
     case "not_enabled":
-      return "Agent notification not enabled";
+      return translateUi("Agent notification not enabled");
     case "pending":
-      return "Callback pending";
+      return translateUi("Callback pending");
     default:
-      return "Callback status unavailable";
+      return translateUi("Callback status unavailable");
   }
 }
 
@@ -79,6 +82,7 @@ export function ChannelActivities({
   readonly id: string;
   readonly descriptors: readonly ChannelActivityDescriptor[];
 }) {
+  useUiTranslation();
   const [kind, setKind] = useState("all");
   const [page, setPage] = useState(1);
   const query = useChannelActivities(
@@ -89,15 +93,15 @@ export function ChannelActivities({
     page,
   );
   return (
-    <DetailSection title="Received activities">
+    <DetailSection title={translateUi("Received activities")}>
       <div className="space-y-4 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-13 text-muted-foreground">
             {query.error
-              ? "Activity count unavailable"
+              ? translateUi("Activity count unavailable")
               : query.isPending
-                ? "Loading activity count…"
-                : `${query.data.total} ${kind === "all" ? "received" : "matching"} ${query.data.total === 1 ? "activity" : "activities"} in the last ${query.data.retention_days} days`}
+                ? translateUi("Loading activity count…")
+                : kind === "all" ? translateUi("{{count}} received activities in the last {{days}} days", { count: query.data.total, days: query.data.retention_days }) : translateUi("{{count}} matching activities in the last {{days}} days", { count: query.data.total, days: query.data.retention_days })}
           </p>
           <Select
             value={kind}
@@ -106,36 +110,30 @@ export function ChannelActivities({
               setPage(1);
             }}
           >
-            <SelectTrigger aria-label="Activity type" className="w-48">
+            <SelectTrigger aria-label={translateUi("Activity type")} className="w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All activity types</SelectItem>
+              <SelectItem value="all">{translateUi("All activity types")}</SelectItem>
               {descriptors.map((entry) => (
                 <SelectItem key={entry.kind} value={entry.kind}>
                   {entry.label}
                 </SelectItem>
               ))}
-              <SelectItem value="message">Earlier messages</SelectItem>
+              <SelectItem value="message">{translateUi("Earlier messages")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <p className="text-13 text-muted-foreground">
-          Received means NyxID recorded the activity. Callback acceptance means
-          the agent acknowledged it; it does not confirm processing. Message
-          content is not stored here.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Received means NyxID recorded the activity. Callback acceptance means the agent acknowledged it; it does not confirm processing. Message content is not stored here.")}</p>
         {query.error ? (
           <ErrorBanner
-            message="Activities could not be loaded."
+            message={translateUi("Activities could not be loaded.")}
             onRetry={() => void query.refetch()}
           />
         ) : query.isPending ? (
-          <p className="text-13 text-muted-foreground">Loading activities…</p>
+          <p className="text-13 text-muted-foreground">{translateUi("Loading activities…")}</p>
         ) : !query.data.activities.length ? (
-          <p className="text-13 text-muted-foreground">
-            No matching activity received in this period.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("No matching activity received in this period.")}</p>
         ) : (
           <ul className="divide-y divide-border">
             {query.data.activities.map((activity) => (
@@ -151,31 +149,25 @@ export function ChannelActivities({
                     {callbackLabel(activity.callback_status)}
                   </span>
                 </div>
-                <p className="break-all text-13 text-muted-foreground">
-                  From {activity.sender_platform_id ?? "unknown sender"} ·{" "}
-                  {activity.platform_conversation_id ?? "unknown conversation"}
+                <p className="break-all text-13 text-muted-foreground">{translateUi("From ")}{activity.sender_platform_id ?? translateUi("unknown sender")} ·{" "}
+                  {activity.platform_conversation_id ?? translateUi("unknown conversation")}
                 </p>
                 {activity.nyxbot_admission && (
-                  <div className="space-y-1 break-all text-13 text-muted-foreground" aria-label="NyxBot admission">
-                    <p>NyxBot admission: {activity.nyxbot_admission.disposition.replaceAll("_", " ")}</p>
-                    <p>Bot mentioned: {activity.nyxbot_admission.bot_mentioned === null ? "unknown" : activity.nyxbot_admission.bot_mentioned ? "yes" : "no"}
-                      {activity.nyxbot_admission.managed_role_mentioned ? " (own managed role)" : ""} · Broadcast roles: {activity.nyxbot_admission.broadcast_roles ?? "unknown"}
-                      {activity.nyxbot_admission.broadcast_everyone_or_here ? " · @everyone/@here" : ""}</p>
-                    <p>Address: {activity.nyxbot_admission.address} · Thread follow: {activity.nyxbot_admission.thread_follow_selection ?? "not evaluated"}</p>
-                    {activity.nyxbot_admission.resolved_thread_id && <p>Thread: {activity.nyxbot_admission.resolved_thread_id}</p>}
-                    <p>{activity.nyxbot_admission.turn_id ? `Turn: ${activity.nyxbot_admission.turn_id}` : "No agent turn started."}</p>
+                  <div className="space-y-1 break-all text-13 text-muted-foreground" aria-label={translateUi("NyxBot admission")}>
+                    <p>{translateUi("NyxBot admission: ")}{activity.nyxbot_admission.disposition.replaceAll("_", " ")}</p>
+                    <p>{translateUi("Bot mentioned: ")}{activity.nyxbot_admission.bot_mentioned === null ? translateUi("unknown") : activity.nyxbot_admission.bot_mentioned ? translateUi("yes") : translateUi("no")}
+                      {activity.nyxbot_admission.managed_role_mentioned ? translateUi(" (own managed role)") : ""}{translateUi(" · Broadcast roles: ")}{activity.nyxbot_admission.broadcast_roles ?? translateUi("unknown")}
+                      {activity.nyxbot_admission.broadcast_everyone_or_here ? translateUi(" · @everyone/@here") : ""}</p>
+                    <p>{translateUi("Address: ")}{activity.nyxbot_admission.address}{translateUi(" · Thread follow: ")}{activity.nyxbot_admission.thread_follow_selection ?? translateUi("not evaluated")}</p>
+                    {activity.nyxbot_admission.resolved_thread_id && <p>{translateUi("Thread: ")}{activity.nyxbot_admission.resolved_thread_id}</p>}
+                    <p>{activity.nyxbot_admission.turn_id ? translateUi("Turn: {{value1}}", { value1: activity.nyxbot_admission.turn_id }) : translateUi("No agent turn started.")}</p>
                   </div>
                 )}
                 {activity.content_availability === "encrypted" && (
-                  <p className="text-13 text-muted-foreground">
-                    Encrypted message received. Text and replies are
-                    unavailable.
-                  </p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Encrypted message received. Text and replies are unavailable.")}</p>
                 )}
                 {activity.content_availability === "metadata_only" && (
-                  <p className="text-13 text-muted-foreground">
-                    Metadata notification. Replies are unavailable.
-                  </p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Metadata notification. Replies are unavailable.")}</p>
                 )}
               </li>
             ))}
@@ -188,9 +180,7 @@ export function ChannelActivities({
               variant="outline"
               disabled={page === 1 || query.isFetching}
               onClick={() => setPage(page - 1)}
-            >
-              Previous
-            </Button>
+            >{translateUi("Previous")}</Button>
             <Button
               variant="outline"
               disabled={
@@ -200,9 +190,7 @@ export function ChannelActivities({
                 !!query.error
               }
               onClick={() => setPage(page + 1)}
-            >
-              Next
-            </Button>
+            >{translateUi("Next")}</Button>
           </div>
         )}
       </div>
@@ -217,29 +205,23 @@ export function ActivityCallbackSettings({
   readonly id: string;
   readonly descriptors: readonly ChannelActivityDescriptor[];
 }) {
+  useUiTranslation();
   const query = useActivityCallback(id);
   const update = useSetActivityCallback(id);
   return (
-    <DetailSection title="Typed activity callbacks">
+    <DetailSection title={translateUi("Typed activity callbacks")}>
       <div className="space-y-3 p-4">
-        <p className="text-13 text-muted-foreground">
-          Enable activity types only after your agent declares support for this
-          route. Encrypted chat and own-post notifications contain metadata and
-          cannot be replied to. Enabling applies to new activity; earlier
-          notifications are not replayed.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Enable activity types only after your agent declares support for this route. Encrypted chat and own-post notifications contain metadata and cannot be replied to. Enabling applies to new activity; earlier notifications are not replayed.")}</p>
         {query.error ? (
-          <ErrorBanner message="Agent activity support could not be loaded." />
+          <ErrorBanner message={translateUi("Agent activity support could not be loaded.")} />
         ) : query.isPending ? (
-          <p className="text-13 text-muted-foreground">
-            Loading agent support…
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("Loading agent support…")}</p>
         ) : (
           <>
             <p className="text-13">
               {query.data.declared
-                ? `Agent supports: ${query.data.kinds.map((kind) => activityLabel(kind, descriptors)).join(", ")}`
-                : "The assigned agent has not declared support for its current callback. Existing callbacks continue normally."}
+                ? translateUi("Agent supports: {{value1}}", { value1: query.data.kinds.map((kind) => activityLabel(kind, descriptors)).join(", ") })
+                : translateUi("The assigned agent has not declared support for its current callback. Existing callbacks continue normally.")}
             </p>
             <Button
               disabled={
@@ -250,8 +232,8 @@ export function ActivityCallbackSettings({
               onClick={() => update.mutate(!query.data.enabled)}
             >
               {query.data.enabled
-                ? "Disable typed callbacks"
-                : "Enable typed callbacks"}
+                ? translateUi("Disable typed callbacks")
+                : translateUi("Enable typed callbacks")}
             </Button>
           </>
         )}

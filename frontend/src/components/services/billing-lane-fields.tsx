@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useFormContext } from "react-hook-form";
 import { useEndpoints } from "@/hooks/use-endpoints";
 import { SERVICE_BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
@@ -42,6 +44,7 @@ export function BillingLaneFields({
     "id" | "billing" | "declared_operations" | "x_channel_billing"
   >;
 }) {
+  useUiTranslation();
   const form = useFormContext<BillingLaneFormData>();
   const inference = form.watch("inference");
   const suggestedMetrics = SERVICE_BILLING_METRICS.filter(
@@ -67,18 +70,12 @@ export function BillingLaneFields({
   };
   return (
     <section className="space-y-3">
-      <h3 className="type-card-title">Billing lanes</h3>
+      <h3 className="type-card-title">{translateUi("Billing lanes")}</h3>
       {service?.x_channel_billing && (
-        <p className="text-14 text-muted-foreground">
-          X channels bill through the {service.x_channel_billing.lane} lane.
-          Configure a synced Requests price on that lane to enable paid X
-          channels.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("X channels bill through the ")}{service.x_channel_billing.lane}{translateUi(" lane. Configure a synced Requests price on that lane to enable paid X channels.")}</p>
       )}
       {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
-        <p className="text-13 text-muted-foreground">
-          No lane prices are configured. Legacy billing below still applies.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("No lane prices are configured. Legacy billing below still applies.")}</p>
       )}
       <div className="grid gap-3 sm:grid-cols-2">
         {(["byok_pricing", "platform_key_pricing"] as const).map((field) => {
@@ -96,12 +93,12 @@ export function BillingLaneFields({
             >
               <div className="type-secondary-emphasis">
                 {field === "byok_pricing"
-                  ? "Your own key"
-                  : "NyxID platform key"}
+                  ? translateUi("Your own key")
+                  : translateUi("NyxID platform key")}
               </div>
               <div className="flex items-center justify-between">
                 <Label htmlFor={`${field}-enabled`}>
-                  {lane ? "Charge" : "Free"}
+                  {lane ? translateUi("Charge") : translateUi("Free")}
                 </Label>
                 <Switch
                   id={`${field}-enabled`}
@@ -117,7 +114,7 @@ export function BillingLaneFields({
               </div>
               {lane && (
                 <>
-                  <Label htmlFor={`${field}-metric`}>Unit</Label>
+                  <Label htmlFor={`${field}-metric`}>{translateUi("Unit")}</Label>
                   <Select
                     value={lane.metric}
                     onValueChange={(metric) =>
@@ -151,7 +148,7 @@ export function BillingLaneFields({
                     name={`${field}.credits_per_unit`}
                     render={({ field: input }) => (
                       <FormItem>
-                        <FormLabel>Credits per unit</FormLabel>
+                        <FormLabel>{translateUi("Credits per unit")}</FormLabel>
                         <FormControl>
                           <Input {...input} inputMode="decimal" />
                         </FormControl>
@@ -178,10 +175,10 @@ export function BillingLaneFields({
                       variant={status === "synced" ? "success" : "warning"}
                     >
                       {status === "synced"
-                        ? "Synced"
+                        ? translateUi("Synced")
                         : status === "failed"
-                          ? "Failed"
-                          : "Pending"}
+                          ? translateUi("Failed")
+                          : translateUi("Pending")}
                     </Badge>
                   )}
                   {(lane.components ?? []).map((component, index) => {
@@ -198,14 +195,14 @@ export function BillingLaneFields({
                           name={`${field}.components.${index}.metric`}
                           render={({ field: input }) => (
                             <FormItem>
-                              <FormLabel>Component unit</FormLabel>
+                              <FormLabel>{translateUi("Component unit")}</FormLabel>
                               <Select
                                 value={input.value}
                                 onValueChange={input.onChange}
                               >
                                 <FormControl>
                                   <SelectTrigger
-                                    aria-label={`Component ${index + 1} unit`}
+                                    aria-label={translateUi("Component {{value1}} unit", { value1: index + 1 })}
                                   >
                                     <SelectValue />
                                   </SelectTrigger>
@@ -231,12 +228,12 @@ export function BillingLaneFields({
                           name={`${field}.components.${index}.credits_per_unit`}
                           render={({ field: input }) => (
                             <FormItem>
-                              <FormLabel>Credits per unit</FormLabel>
+                              <FormLabel>{translateUi("Credits per unit")}</FormLabel>
                               <FormControl>
                                 <Input
                                   {...input}
                                   inputMode="decimal"
-                                  aria-label={`Component ${index + 1} price`}
+                                  aria-label={translateUi("Component {{value1}} price", { value1: index + 1 })}
                                 />
                               </FormControl>
                               <FormMessage />
@@ -253,10 +250,10 @@ export function BillingLaneFields({
                               }
                             >
                               {saved.sync_status === "synced"
-                                ? "Synced"
+                                ? translateUi("Synced")
                                 : saved.sync_status === "failed"
-                                  ? "Failed"
-                                  : "Pending"}
+                                  ? translateUi("Failed")
+                                  : translateUi("Pending")}
                             </Badge>
                           )}
                           <Button
@@ -270,9 +267,7 @@ export function BillingLaneFields({
                                 ),
                               })
                             }
-                          >
-                            Remove component
-                          </Button>
+                          >{translateUi("Remove component")}</Button>
                         </div>
                       </div>
                     );
@@ -301,13 +296,8 @@ export function BillingLaneFields({
                           ],
                         });
                     }}
-                  >
-                    Add component
-                  </Button>
-                  <p className="text-13 text-muted-foreground">
-                    Prices support up to 12 decimal places. Each unit is charged
-                    separately.
-                  </p>
+                  >{translateUi("Add component")}</Button>
+                  <p className="text-13 text-muted-foreground">{translateUi("Prices support up to 12 decimal places. Each unit is charged separately.")}</p>
                 </>
               )}
             </div>
@@ -315,10 +305,7 @@ export function BillingLaneFields({
         })}
       </div>
       {(form.watch("byok_pricing") || form.watch("platform_key_pricing")) && (
-        <p className="text-13 text-muted-foreground">
-          Billing lanes supersede legacy platform billing below. A lane set to
-          Free has no lane charge. Resale billing remains separate.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Billing lanes supersede legacy platform billing below. A lane set to Free has no lane charge. Resale billing remains separate.")}</p>
       )}
     </section>
   );
@@ -347,14 +334,12 @@ function OperationPrices({
   readonly errorAt: (index: number) => string | undefined;
   readonly onChange: (prices: OperationPrice[]) => void;
 }) {
+  useUiTranslation();
   if (!operations.length) return null;
   return (
     <div className="space-y-2 border-t border-border/50 pt-3">
-      <div className="type-row-title">Operation prices</div>
-      <p className="text-13 text-muted-foreground">
-        A synced operation price replaces the base Requests price. Leave an
-        operation empty to use the base price.
-      </p>
+      <div className="type-row-title">{translateUi("Operation prices")}</div>
+      <p className="text-13 text-muted-foreground">{translateUi("A synced operation price replaces the base Requests price. Leave an operation empty to use the base price.")}</p>
       {operations.map(({ operation, label }) => {
         const index = prices.findIndex((item) => item.operation === operation);
         const price = prices[index];
@@ -373,10 +358,10 @@ function OperationPrices({
               {label}
             </span></Label>
             <Input
-              aria-label={`${label} operation price`}
+              aria-label={translateUi("{{value1}} operation price", { value1: label })}
               aria-invalid={Boolean(error)}
               inputMode="decimal"
-              placeholder="Base price"
+              placeholder={translateUi("Base price")}
               value={price?.credits_per_unit ?? ""}
               onChange={(event) => {
                 const value = event.target.value;
@@ -393,17 +378,17 @@ function OperationPrices({
             {status ? (
               <Badge variant={status === "synced" ? "success" : "warning"}>
                 {status === "synced"
-                  ? "Synced"
+                  ? translateUi("Synced")
                   : status === "failed"
-                    ? "Failed"
-                    : "Pending"}
+                    ? translateUi("Failed")
+                    : translateUi("Pending")}
               </Badge>
             ) : (
               <span />
             )}
             {error && (
               <p className="col-span-3 type-secondary-emphasis text-destructive">
-                {error}
+                {translateUi(error)}
               </p>
             )}
           </div>

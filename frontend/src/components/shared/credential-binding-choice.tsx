@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { KeyRound } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ChoiceCard, ChoiceCardGroup } from "@/components/shared/choice-card";
@@ -23,19 +25,18 @@ export function CredentialBindingChoice({
   /** The CLI wizard keeps cost out of this step and shows what each key means. */
   readonly showPricing?: boolean;
 }) {
+  useUiTranslation();
   const priceLabel = (price: LanePricingView | null | undefined) =>
     !platformPrice && !byokPrice && legacyBillable
       ? "Current service/plan pricing applies"
       : lanePriceLabel(price);
   return (
     <ChoiceCardGroup
-      label="Choose a key"
-      ariaLabel="Credential"
+      label={translateUi("Choose a key")}
+      ariaLabel={translateUi("Credential")}
       footer={
         showPricing && resaleBillable ? (
-          <p className="text-13 text-muted-foreground">
-            Platform-key use may also incur the separate resale fee.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("Platform-key use may also incur the separate resale fee.")}</p>
         ) : null
       }
     >
@@ -44,11 +45,11 @@ export function CredentialBindingChoice({
         disabled={disabled}
         onSelect={() => onChange(true)}
         icon={<NyxidIcon className="h-5 w-5" alt="" />}
-        title="Use NyxID's key"
+        title={translateUi("Use NyxID's key")}
         description={
           showPricing
             ? priceLabel(platformPrice)
-            : "NyxID supplies the key. Nothing to paste."
+            : translateUi("NyxID supplies the key. Nothing to paste.")
         }
       />
       <ChoiceCard
@@ -56,11 +57,11 @@ export function CredentialBindingChoice({
         disabled={disabled}
         onSelect={() => onChange(false)}
         icon={<KeyRound className="h-5 w-5" />}
-        title="Use your own key"
+        title={translateUi("Use your own key")}
         description={
           showPricing
             ? priceLabel(byokPrice)
-            : "Use a key from your own account."
+            : translateUi("Use a key from your own account.")
         }
       />
     </ChoiceCardGroup>

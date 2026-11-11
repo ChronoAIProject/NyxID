@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
   GroupedList,
@@ -31,6 +34,7 @@ export function AgentLearningReview({
   readonly proposalId?: string;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string | undefined>(proposalId);
@@ -58,29 +62,18 @@ export function AgentLearningReview({
   const proposals = review.data?.proposals ?? [];
 
   return (
-    <section aria-label="Learning" className="space-y-3">
+    <section aria-label={translateUi("Learning")} className="space-y-3">
       <GroupedList
-        title="Learning proposals"
+        title={translateUi("Learning proposals")}
         search={{ id: "learning-proposals", title: "Learning proposals", breadcrumb: "Skills", keywords: "Automatic learning private drafts" }}
         footer={
           <>
-            <p>
-              Completed work can produce private, untrusted Ornn skill drafts.
-              Full access publishes and attaches automatically; other modes
-              require your confirmation.
-            </p>
+            <p>{translateUi("Completed work can produce private, untrusted Ornn skill drafts. Full access publishes and attaches automatically; other modes require your confirmation.")}</p>
             {review.error ? (
-              <p role="alert" className="text-destructive">
-                Automatic learning is unavailable.
-              </p>
+              <p role="alert" className="text-destructive">{translateUi("Automatic learning is unavailable.")}</p>
             ) : null}
             {review.status.data?.publication_blocked ? (
-              <p role="alert" className="text-warning">
-                Publishing is unavailable for this organization because it has
-                no owner binding. Organization members may consent to learning,
-                but only the bound owner can publish private Ornn skills.
-                Contact an organization owner to publish.
-              </p>
+              <p role="alert" className="text-warning">{translateUi("Publishing is unavailable for this organization because it has no owner binding. Organization members may consent to learning, but only the bound owner can publish private Ornn skills. Contact an organization owner to publish.")}</p>
             ) : null}
             {[
               review.run.error,
@@ -99,7 +92,7 @@ export function AgentLearningReview({
       >
         <GroupedRow
           search={{ id: "automatic-learning", title: "Automatic learning", breadcrumb: "Skills › Learning proposals", keywords: learningEnabled ? "On" : "Off" }}
-          title="Automatic learning"
+          title={translateUi("Automatic learning")}
           accessory={
             readOnly ? (
               learningEnabled ? (
@@ -109,7 +102,7 @@ export function AgentLearningReview({
               )
             ) : (
               <Switch
-                aria-label="Enable automatic learning"
+                aria-label={translateUi("Enable automatic learning")}
                 checked={learningEnabled}
                 disabled={review.configure.isPending}
                 onCheckedChange={(checked) =>
@@ -125,10 +118,10 @@ export function AgentLearningReview({
         {!readOnly ? (
           <GroupedRow
             search={{ id: "learning-threshold", title: "Threshold", breadcrumb: "Skills › Learning proposals", keywords: String(threshold) }}
-            title="Threshold"
+            title={translateUi("Threshold")}
             accessory={
               <GroupedInput
-                aria-label="Learning threshold"
+                aria-label={translateUi("Learning threshold")}
                 className="w-16 text-right"
                 type="number"
                 min={1}
@@ -150,10 +143,10 @@ export function AgentLearningReview({
         ) : null}
         {review.status.data?.org_owned && !readOnly ? (
           <GroupedRow
-            title="I consent to learning proposals for this organization"
+            title={translateUi("I consent to learning proposals for this organization")}
             accessory={
               <Switch
-                aria-label="I consent to learning proposals for this organization"
+                aria-label={translateUi("I consent to learning proposals for this organization")}
                 checked={review.status.data.opted_in ?? false}
                 disabled={review.consent?.isPending}
                 onCheckedChange={(checked) => review.consent?.mutate(checked)}
@@ -162,7 +155,7 @@ export function AgentLearningReview({
           />
         ) : null}
         {!proposals.length ? (
-          <GroupedRow title="No pending proposals." />
+          <GroupedRow title={translateUi("No pending proposals.")} />
         ) : null}
         {!readOnly ? (
           <GroupedRow asChild interactive>
@@ -170,9 +163,7 @@ export function AgentLearningReview({
               type="button"
               disabled={review.run.isPending}
               onClick={() => review.run.mutate()}
-            >
-              Run learning now
-            </button>
+            >{translateUi("Run learning now")}</button>
           </GroupedRow>
         ) : null}
       </GroupedList>
@@ -205,7 +196,7 @@ export function AgentLearningReview({
             proposal.status === "publication_failed");
         const summary = (
           <GroupedList
-            title="Proposal"
+            title={translateUi("Proposal")}
             footer={
               <>
                 {proposal.failure_code ? (
@@ -223,27 +214,23 @@ export function AgentLearningReview({
                   </p>
                 ) : null}
                 {checkOnly ? (
-                  <p role="status" className="text-warning">
-                    Learning evidence or consent is no longer available. NyxID
-                    can only check whether this publication reached Ornn; it
-                    will not attach it to the agent.
-                  </p>
+                  <p role="status" className="text-warning">{translateUi("Learning evidence or consent is no longer available. NyxID can only check whether this publication reached Ornn; it will not attach it to the agent.")}</p>
                 ) : null}
               </>
             }
           >
             <GroupedRow
-              title={draft?.name ?? "Learning proposal"}
+              title={draft?.name ?? translateUi("Learning proposal")}
               description={draft?.description}
               accessory={proposal.status.replaceAll("_", " ")}
             />
             <GroupedRow
-              title="Evidence"
-              accessory={`${proposal.evidence_count} items · ${proposal.body_bytes.toLocaleString()} bytes`}
+              title={translateUi("Evidence")}
+              accessory={`${proposal.evidence_count} items · ${proposal.body_bytes.toLocaleString(getFormattingLocale())} bytes`}
             />
             {proposal.published_version ? (
               <GroupedRow
-                title="Published version"
+                title={translateUi("Published version")}
                 accessory={proposal.published_version}
               />
             ) : null}
@@ -259,8 +246,8 @@ export function AgentLearningReview({
               !readOnly ? (
                 <p className="text-warning">
                   {card
-                    ? "Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes."
-                    : "Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm."}
+                    ? translateUi("Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes.")
+                    : translateUi("Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm.")}
                 </p>
               ) : undefined
             }
@@ -270,7 +257,7 @@ export function AgentLearningReview({
                 type="button"
                 onClick={() => setOpen(isOpen ? undefined : proposal.id)}
               >
-                {isOpen ? "Hide draft" : "Review draft"}
+                {isOpen ? translateUi("Hide draft") : translateUi("Review draft")}
               </button>
             </GroupedRow>
             {proposal.source === "authored" && proposal.status !== "pinned" ? (
@@ -283,12 +270,10 @@ export function AgentLearningReview({
                       card: proposal.acknowledgement_id ?? undefined,
                     }}
                     className="type-row-title text-primary hover:underline"
-                  >
-                    Open the confirmation card
-                  </Link>
+                  >{translateUi("Open the confirmation card")}</Link>
                 </GroupedRow>
               ) : (
-                <GroupedRow title="Confirm this authored skill from its conversation card." />
+                <GroupedRow title={translateUi("Confirm this authored skill from its conversation card.")} />
               )
             ) : legacyPackage ? (
               <GroupedRow asChild interactive>
@@ -308,9 +293,7 @@ export function AgentLearningReview({
                       }));
                     }
                   }}
-                >
-                  Review updated package
-                </button>
+                >{translateUi("Review updated package")}</button>
               </GroupedRow>
             ) : !approvable ? null : (
               <GroupedRow asChild interactive>
@@ -345,17 +328,17 @@ export function AgentLearningReview({
                 >
                   {checkOnly
                     ? card
-                      ? "Confirm check"
-                      : "Check publication"
+                      ? translateUi("Confirm check")
+                      : translateUi("Check publication")
                     : recovering
                       ? card
-                        ? "Confirm finish publishing"
-                        : "Finish publishing"
+                        ? translateUi("Confirm finish publishing")
+                        : translateUi("Finish publishing")
                       : proposal.status === "publication_failed"
-                        ? "Retry publication"
+                        ? translateUi("Retry publication")
                         : card
-                          ? "Confirm publish & attach"
-                          : "Publish & request confirmation"}
+                          ? translateUi("Confirm publish & attach")
+                          : translateUi("Publish & request confirmation")}
                 </button>
               </GroupedRow>
             )}
@@ -385,8 +368,8 @@ export function AgentLearningReview({
                   }}
                 >
                   {proposal.auto_allowed && proposal.status === "pinned"
-                    ? "Discard and detach"
-                    : "Reject"}
+                    ? translateUi("Discard and detach")
+                    : translateUi("Reject")}
                 </button>
               </GroupedRow>
             ) : null}
@@ -402,10 +385,10 @@ export function AgentLearningReview({
             <GroupedDetail
               searchPage={`learning-${proposal.id}`}
               open={isOpen}
-              title={draft?.name ?? "Learning proposal"}
+              title={draft?.name ?? translateUi("Learning proposal")}
               info="Review this proposed skill and its supporting evidence before publishing or dismissing it."
               onReveal={() => setOpen(proposal.id)}
-              backLabel="Back to Skills"
+              backLabel={translateUi("Back to Skills")}
               onBack={() => setOpen(undefined)}
             >
               {isOpen ? <div data-drawer-search-target={`learning-${proposal.id}`}>{summary}</div> : null}

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect } from "react";
 import { Link, useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,7 @@ export function AppRouteError({ error, reset }: ErrorComponentProps) {
  * one of the causes, and asserting it is misleading for the others.
  */
 function AssetLoadError() {
+  const { t } = useUiTranslation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   // In an effect, never in render: recovery navigates away, and render must stay
@@ -56,22 +58,20 @@ function AssetLoadError() {
   return (
     <NotFoundPage
       code="Offline"
-      title="Couldn't load part of the app"
-      description="Some of the app's files didn't download. This usually clears on its own — try again, or head back and come at it from another angle."
+      title={t("Couldn't load part of the app")}
+      description={t("Some of the app's files didn't download. This usually clears on its own — try again, or head back and come at it from another angle.")}
       action={
         <div className="flex flex-wrap items-center justify-center gap-2">
           <Button
             type="button"
             variant="primary"
             onClick={() => retryAfterAssetError()}
-          >
-            Try again
-          </Button>
+          >{t("Try again")}</Button>
           <Button asChild variant="secondary">
             {isAuthenticated ? (
-              <Link to="/dashboard">Back to dashboard</Link>
+              <Link to="/dashboard">{t("Back to dashboard")}</Link>
             ) : (
-              <Link to="/">Go to homepage</Link>
+              <Link to="/">{t("Go to homepage")}</Link>
             )}
           </Button>
         </div>
@@ -82,6 +82,7 @@ function AssetLoadError() {
 
 /** Everything that is a genuine render error rather than a missing asset. */
 function RenderError({ error, reset }: ErrorComponentProps) {
+  const { t } = useUiTranslation();
   const router = useRouter();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
@@ -95,22 +96,20 @@ function RenderError({ error, reset }: ErrorComponentProps) {
   return (
     <NotFoundPage
       code="Error"
-      title="Something broke on this page"
+      title={t("Something broke on this page")}
       description={
         import.meta.env.DEV && error instanceof Error && error.message
           ? error.message
-          : "This part of the app hit an unexpected error. Your data is safe — try again, or head back and come at it from another angle."
+          : t("This part of the app hit an unexpected error. Your data is safe — try again, or head back and come at it from another angle.")
       }
       action={
         <div className="flex flex-wrap items-center justify-center gap-2">
-          <Button type="button" variant="primary" onClick={retry}>
-            Try again
-          </Button>
+          <Button type="button" variant="primary" onClick={retry}>{t("Try again")}</Button>
           <Button asChild variant="secondary">
             {isAuthenticated ? (
-              <Link to="/dashboard">Back to dashboard</Link>
+              <Link to="/dashboard">{t("Back to dashboard")}</Link>
             ) : (
-              <Link to="/">Go to homepage</Link>
+              <Link to="/">{t("Go to homepage")}</Link>
             )}
           </Button>
         </div>

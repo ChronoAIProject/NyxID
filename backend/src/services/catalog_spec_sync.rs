@@ -707,6 +707,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lark_wiki_sync_four_slugs_adds_lookup_without_changing_existing_contracts_or_generations()
+     {
+        use super::super::service_endpoint_service::endpoint_from_input;
+        use crate::models::service_endpoint::{COLLECTION_NAME, PublicationState, ServiceEndpoint};
+        let db =
+            crate::test_utils::connect_transaction_test_database("lark_wiki_catalog_sync").await;
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
+        let mut snapshots = Vec::new();
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = slug.into();
+            service.created_by = "system".into();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            for input in hosted_endpoint_inputs(&service)
+                .unwrap()
+                .into_iter()
+                .filter(|input| input.name != super::super::lark_wiki::OPERATION)
+            {
+                let row = endpoint_from_input(&service.id, input, PublicationState::Published);
+                db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                    .insert_one(&row)
+                    .await
+                    .unwrap();
+                snapshots.push(row);
+            }
+        }
+        sync_seeded_service_endpoints(&db).await.unwrap();
+        for before in &snapshots {
+            let after = db
+                .collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .find_one(doc! {"_id":&before.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.operation_generation, before.operation_generation);
+            assert_eq!(after.name, before.name);
+            // Timestamps can advance during sync; all execution and publication fields must match.
+            let mut before = mongodb::bson::to_document(before).unwrap();
+            let mut after = mongodb::bson::to_document(&after).unwrap();
+            before.remove("updated_at");
+            after.remove("updated_at");
+            assert_eq!(after, before);
+        }
+        let uploads: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .find(doc! {"name":super::super::lark_wiki::OPERATION})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(uploads.len(), 4);
+        assert!(
+            uploads
+                .iter()
+                .all(|row| row.publication == PublicationState::Published
+                    && row.operation_generation == 1
+                    && matches!(
+                        row.path.as_str(),
+                        "/wiki/v2/spaces/get_node" | "/open-apis/wiki/v2/spaces/get_node"
+                    ))
+        );
+        sync_seeded_service_endpoints(&db).await.unwrap();
+        assert_eq!(
+            db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            snapshots.len() as u64 + 4
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn lark_attachment_sync_four_slugs_adds_upload_without_changing_existing_contracts_or_generations()
      {
         use super::super::service_endpoint_service::endpoint_from_input;
@@ -1268,5 +1346,67 @@ mod tests {
         assert!(!refreshed.is_active);
         assert_eq!(refreshed.path, "/tweets/search/recent");
         assert!(refreshed.updated_at > old_updated_at);
+    }
+}
+
+#[cfg(test)]
+mod legacy_publication_tests {
+    use super::*;
+    use crate::models::service_endpoint::{COLLECTION_NAME, PublicationState, ServiceEndpoint};
+    use crate::services::{
+        lark_attachment_tool as attachment, service_endpoint_service::endpoint_from_input,
+    };
+
+    #[tokio::test]
+    async fn lark_legacy_missing_publication_and_admin_withdrawals_survive_repeated_startup_sync() {
+        let db = crate::test_utils::connect_transaction_test_database("lark_2327_sync").await;
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
+        let mut snapshots = Vec::new();
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = slug.into();
+            service.created_by = "system".into();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            for input in hosted_endpoint_inputs(&service).unwrap() {
+                let publication = match input.name.as_str() {
+                    attachment::COMPOSITE_OPERATION => PublicationState::Published,
+                    attachment::FIELDS_OPERATION => PublicationState::Draft,
+                    attachment::UPLOAD_OPERATION => PublicationState::Paused,
+                    attachment::CREATE_OPERATION => PublicationState::Validated,
+                    _ => continue,
+                };
+                let row = endpoint_from_input(&service.id, input, publication);
+                let mut document = mongodb::bson::to_document(&row).unwrap();
+                if row.name == attachment::COMPOSITE_OPERATION {
+                    document.remove("publication");
+                }
+                db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+                    .insert_one(&document)
+                    .await
+                    .unwrap();
+                snapshots.push((row, document));
+            }
+        }
+        for _ in 0..2 {
+            sync_seeded_service_endpoints(&db).await.unwrap();
+            for (row, original) in &snapshots {
+                let raw = db
+                    .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+                    .find_one(doc! {"_id":&row.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(raw.get("publication"), original.get("publication"));
+                let after: ServiceEndpoint = mongodb::bson::from_document(raw).unwrap();
+                assert_eq!(after.publication, row.publication);
+                assert_eq!(after.is_active, row.is_active);
+                assert_eq!(after.operation_generation, row.operation_generation);
+            }
+        }
+        db.drop().await.unwrap();
     }
 }

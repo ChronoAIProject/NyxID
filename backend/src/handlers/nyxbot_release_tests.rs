@@ -2971,3 +2971,340 @@ async fn release_native_discord_crash_and_old_replica_delete_preserve_drain_boun
     );
     upstream.abort();
 }
+
+async fn stuck_discord_move(
+    name: &str,
+) -> (
+    AppState,
+    NyxbotChannel,
+    Release,
+    MockServer,
+    tokio::task::JoinHandle<()>,
+) {
+    let (state, mut row, _, server, upstream) = fixture(name).await;
+    row.platform = "discord".into();
+    row.gateway_source = Some(crate::models::nyxbot_channel::GatewaySource::Discord {
+        bot_id: "100".into(),
+    });
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    let reserved = reserve(&state, &row).await;
+    let current_key = new_route_key(
+        &state,
+        OWNER,
+        "working relay",
+        "http://localhost:3001/callback",
+    )
+    .await
+    .unwrap();
+    state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc!{"_id":&row.id},doc!{"$set":{
+        "transport":"direct","status":"active","route_api_key_id":&current_key.id,
+        "pending_agent_api_key_id":&reserved.agent_api_key_id,"pending_route_api_key_id":&reserved.route_api_key_id,
+        "gateway_native_phase":"preparing","gateway_attempted_at":bson::DateTime::from_millis(0),"updated_at":bson::DateTime::from_millis(0)
+    },"$unset":{"agent_api_key_id":""}}).await.unwrap();
+    expire(&state, &reserved.id).await;
+    row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    (state, row, reserved, server, upstream)
+}
+
+#[tokio::test]
+async fn discord_repair_terminal_setup_without_pending_key_preserves_working_route_and_drain() {
+    for resolution in [
+        "not_created",
+        "cancelled",
+        "released",
+        "missing",
+        "confirmed_missing",
+    ] {
+        let (state, row, reserved, server, upstream) =
+            stuck_discord_move("discord_terminal_repair").await;
+        state
+            .db
+            .collection::<Release>(RELEASES)
+            .update_one(
+                doc! {"_id":&reserved.id},
+                doc! {"$set":{
+                "state":"settled","resolution":resolution,"settled_at":bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        // This is outside the old stale-move selector entirely.
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$unset":{"pending_agent_api_key_id":"","gateway_attempted_at":""}},
+            )
+            .await
+            .unwrap();
+        release::repair_direct_attempts(&state).await.unwrap();
+        let repaired = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(repaired.route_api_key_id, row.route_api_key_id);
+        assert!(repaired.gateway_setup_release_id.is_none());
+        assert!(repaired.gateway_source.is_none());
+        assert_retired_key(&state, &reserved.route_api_key_id).await;
+        assert_retired_key(&state, &reserved.agent_api_key_id).await;
+        assert!(
+            state
+                .db
+                .collection::<ApiKey>(KEYS)
+                .find_one(doc! {"_id":&row.route_api_key_id,"is_active":true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !crate::services::discord_gateway::transport::relay_allowed(
+                &state.db,
+                &row.channel_bot_id
+            )
+            .await
+            .unwrap()
+        );
+        release::settle_native_drains(&state.db).await.unwrap();
+        assert!(
+            !crate::services::discord_gateway::transport::relay_allowed(
+                &state.db,
+                &row.channel_bot_id
+            )
+            .await
+            .unwrap()
+        );
+        state
+            .db
+            .collection::<bson::Document>(RELEASES)
+            .update_many(
+                doc! {"native_drain_for":&reserved.id},
+                doc! {"$set":{"native_not_before":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        release::settle_native_drains(&state.db).await.unwrap();
+        assert!(
+            crate::services::discord_gateway::transport::relay_allowed(
+                &state.db,
+                &row.channel_bot_id
+            )
+            .await
+            .unwrap()
+        );
+        release::repair_direct_attempts(&state).await.unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty());
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn discord_repair_detaches_failed_local_attempt_but_never_resolves_remote_uncertainty() {
+    for (phase, error) in [
+        ("due", "create_not_observed"),
+        ("review_required", "create_outcome_unconfirmed"),
+        ("review_required", "live_reference"),
+    ] {
+        let (state, row, reserved, server, upstream) =
+            stuck_discord_move("discord_uncertain_repair").await;
+        state.db.collection::<Release>(RELEASES).update_one(doc!{"_id":&reserved.id},doc!{"$set":{"state":phase,"last_error":error,"dispatch_started_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+        let stale_worker = if phase == "due" {
+            immediate(&state, &reserved.id).await;
+            Some(
+                release::claim(&state.db, Some(&reserved.id))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        release::repair_direct_attempts(&state).await.unwrap();
+        assert!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .gateway_setup_release_id
+                .is_none()
+        );
+        let after = current(&state, &reserved.id).await;
+        assert_ne!(after.state, ReleaseState::Settled);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        if let Some(stale_worker) = stale_worker {
+            assert!(after.revision > stale_worker.revision);
+            assert!(after.claim_id.is_none());
+            // Observation is read-only and intentionally available without a
+            // worker claim. A matching remote must still not authorize DELETE
+            // or a state transition from the worker invalidated by repair.
+            let mut body = remote(&reserved, 1);
+            body["definition"]["sources"] = json!([{"type":"discord","bot_id":"100"}]);
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/channel-records/{}",
+                    reserved.record_id.as_deref().unwrap()
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert!(!release::execute(&state, stale_worker).await.unwrap());
+            assert_eq!(current(&state, &reserved.id).await.revision, after.revision);
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.method == "GET")
+            );
+        }
+        if error == "live_reference" {
+            assert_eq!(after.state, ReleaseState::Due);
+        }
+        release::settle_native_drains(&state.db).await.unwrap();
+        assert!(
+            !crate::services::discord_gateway::transport::relay_allowed(
+                &state.db,
+                &row.channel_bot_id
+            )
+            .await
+            .unwrap()
+        );
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn discord_failed_move_before_reservation_cleans_exact_attempt_only() {
+    let (state, row, reserved, _, upstream) =
+        stuck_discord_move("discord_before_reservation").await;
+    state
+        .db
+        .collection::<bson::Document>(RELEASES)
+        .delete_many(doc! {"channel_id":&row.id})
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$unset":{"gateway_setup_release_id":""}},
+        )
+        .await
+        .unwrap();
+    release::retire_failed_move(&state, &row, "different-key", &reserved.route_api_key_id)
+        .await
+        .unwrap();
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .pending_agent_api_key_id
+            .is_some()
+    );
+    release::retire_failed_move(
+        &state,
+        &row,
+        &reserved.agent_api_key_id,
+        &reserved.route_api_key_id,
+    )
+    .await
+    .unwrap();
+    let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert!(after.pending_agent_api_key_id.is_none());
+    assert!(after.gateway_source.is_none());
+    assert_eq!(after.route_api_key_id, row.route_api_key_id);
+    assert!(
+        crate::services::discord_gateway::transport::relay_allowed(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+    );
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn discord_repair_does_not_touch_adopted_or_fresh_attempts_or_missing_release_proof() {
+    for mode in ["adopted", "fresh", "missing"] {
+        let (state, row, reserved, _, upstream) = stuck_discord_move("discord_repair_fences").await;
+        match mode {
+            "adopted" => {
+                state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(doc! {"_id":&row.id}, doc! {"$set":{"transport":"gateway"}})
+                    .await
+                    .unwrap();
+            }
+            "fresh" => {
+                state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"_id":&row.id},
+                        doc! {"$set":{"gateway_attempted_at":bson::DateTime::now()}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                state
+                    .db
+                    .collection::<Release>(RELEASES)
+                    .delete_one(doc! {"_id":&reserved.id})
+                    .await
+                    .unwrap();
+            }
+        }
+        release::repair_direct_attempts(&state).await.unwrap();
+        let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(
+            after.gateway_setup_release_id.as_deref(),
+            Some(reserved.id.as_str())
+        );
+        assert!(after.pending_agent_api_key_id.is_some());
+        assert!(
+            !crate::services::discord_gateway::transport::relay_allowed(
+                &state.db,
+                &row.channel_bot_id
+            )
+            .await
+            .unwrap()
+        );
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn provider_refused_setup_never_overwrites_reserved_binding_with_missing_or_wrong_identity() {
+    let (state, row, _, _gateway, upstream) = fixture("provider_refusal_reserved_binding").await;
+    let reserved = reserve(&state, &row).await;
+    let expected = format!(
+        "bnd_{}",
+        Uuid::parse_str(reserved.record_id.as_deref().unwrap())
+            .unwrap()
+            .simple()
+    );
+    assert_eq!(reserved.binding_id, expected);
+    let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(saved.binding_id.as_deref(), Some(expected.as_str()));
+    let mut valid = remote(&reserved, 1);
+    valid["endpoints"] =
+        json!({"nyxid_callback_url":format!("{}/callbacks/test", reserved.gateway_base_url)});
+    assert!(release::validate_create(&reserved, &valid).is_ok());
+    for binding in [Value::Null, json!("bnd_other")] {
+        let mut invalid = valid.clone();
+        invalid["provider"]["binding_id"] = binding;
+        assert!(release::validate_create(&reserved, &invalid).is_err());
+    }
+    let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(saved.binding_id.as_deref(), Some(expected.as_str()));
+    assert_eq!(saved.status, "pending");
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}

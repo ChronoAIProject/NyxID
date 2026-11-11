@@ -821,6 +821,8 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
         "destination",
         "contract",
         "unpublish",
+        "flag",
+        "generation",
     ] {
         let u = setup("base_guard").await;
         let auth = authenticate(&u.f).await;
@@ -840,6 +842,7 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
         let (response, ()) = tokio::join!(call(&u, &auth, false, input), async {
             wait_upload(&u).await;
             match change {
+                "flag" => writes(&u.f, false).await,
                 "stop" => {
                     u.f.state
                         .db
@@ -957,6 +960,8 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
                             doc! {"service_id":&u.catalog.id,"name":"bitable_record_create"},
                             if change == "unpublish" {
                                 doc! {"$set":{"publication":"draft"}}
+                            } else if change == "generation" {
+                                doc! {"$set":{"operation_generation":2_i64}}
                             } else {
                                 doc! {"$set":{"path":"/different"}}
                             },
@@ -967,6 +972,18 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
             }
         });
         assert_error(&response);
+        if change == "flag" {
+            assert!(
+                text(&response).contains("attachment_write_flag_off"),
+                "{response}"
+            );
+        }
+        if change == "generation" {
+            assert!(
+                text(&response).contains("attachment_write_operation_generation_changed"),
+                "{response}"
+            );
+        }
         assert_no_create(&u).await;
         assert_eq!(
             requests(&u)
@@ -1009,6 +1026,10 @@ async fn lark_base_write_four_flag_combinations_both_dispatch_paths_and_discover
                     assert_eq!(payload(&response)["record_id"], "rec_receipt");
                 } else {
                     assert_error(&response);
+                    assert!(
+                        text(&response).contains("attachment_write_flag_off"),
+                        "{response}"
+                    );
                     assert!(requests(&u).await.is_empty());
                 }
                 let before = requests(&u).await.len();
@@ -1809,3 +1830,6 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
         cleanup(u).await;
     }
 }
+
+#[path = "mcp_lark_base_eligibility_tests.rs"]
+mod eligibility_tests;

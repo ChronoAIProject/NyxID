@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { CreditCard } from "lucide-react";
 import type { ServiceInsightsState } from "@/hooks/use-service-insights";
 import {
@@ -43,6 +44,7 @@ export function ServiceBillingSummary({
   readonly serviceName: string;
   readonly onOpen: (connectionId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const rows = connections.map((connection) => ({
     connection,
     billing: insights.connections.get(connection.id)?.billing,
@@ -132,7 +134,7 @@ export function ServiceBillingSummary({
         <TooltipTrigger asChild>
           <button
             type="button"
-            aria-label={`Show billing for ${serviceName}`}
+            aria-label={t("Show billing for {{serviceName}}", { serviceName: serviceName })}
             aria-description={notBillable ? "Not billable by NyxID" : undefined}
             className="flex min-h-6 w-fit min-w-0 max-w-full flex-col justify-center rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => {
@@ -165,16 +167,16 @@ export function ServiceBillingSummary({
           className="max-h-[90vh] min-w-56 max-w-[min(22rem,calc(100vw-2rem))] space-y-2 overflow-y-auto break-words [overflow-wrap:anywhere]"
         >
           {notBillable ? (
-            <p>Not billable by NyxID</p>
+            <p>{t("Not billable by NyxID")}</p>
           ) : (
             <>
-              <p className="font-medium">Connection billing</p>
+              <p className="font-medium">{t("Connection billing")}</p>
               {groups.map((group) => (
                 <div key={group.key}>
                   <p>
                     {connectionBillingLabels[group.category]} ·{" "}
                     {group.rows.length}{" "}
-                    {group.rows.length === 1 ? "connection" : "connections"}
+                    {group.rows.length === 1 ? t("connection") : t("connections")}
                   </p>
                   <p className="text-muted-foreground">{group.detail}</p>
                   <p className="text-muted-foreground">
@@ -182,12 +184,7 @@ export function ServiceBillingSummary({
                   </p>
                 </div>
               ))}
-              <p className="border-t border-border/60 pt-1.5 text-muted-foreground">
-                NyxID managed: uses NyxID&apos;s key or app, or a service that
-                needs no credential. Usage charges are shown for each connection.
-                BYOK: uses your or your organization&apos;s own key or app. —:
-                NyxID doesn&apos;t charge for it.
-              </p>
+              <p className="border-t border-border/60 pt-1.5 text-muted-foreground">{t("NyxID managed: uses NyxID's key or app, or a service that needs no credential. Usage charges are shown for each connection. BYOK: uses your or your organization's own key or app. —: NyxID doesn't charge for it.")}</p>
             </>
           )}
         </TooltipContent>

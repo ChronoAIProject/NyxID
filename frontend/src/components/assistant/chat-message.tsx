@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { activityDecisionPresentation } from "@/lib/assistant/activity-decision";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
@@ -23,6 +27,7 @@ import {
   Copy,
   MessageSquare,
   RotateCcw,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
@@ -50,7 +55,6 @@ import {
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { MachineToolCard } from "./machine-tool-card";
 import { MessageCopyAction } from "./message-copy-action";
-import { CmaOperationCard } from "./cma-operation-card";
 import { MessageTime } from "./message-time";
 import { useReplyFeedback } from "@/hooks/use-assistant-feedback";
 import { ReplyFeedbackFollowUp, ReplyFeedbackVotes } from "./reply-feedback";
@@ -63,20 +67,21 @@ const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
 function recoveryReason(reason: string): string {
   switch (reason) {
-    case "turn_active": return "Another turn is active. Check its result before retrying.";
-    case "already_retried": return "This reply was already retried. Review the newer result.";
-    case "agent_destroyed": return "This agent's threads are read-only.";
-    case "attachment_expired": return "An original attachment is no longer available.";
-    case "activity_outcome_uncertain": return "A tool may have taken effect. Check its result before another attempt.";
+    case "turn_active": return translateUi("Another turn is active. Check its result before retrying.");
+    case "already_retried": return translateUi("This reply was already retried. Review the newer result.");
+    case "agent_destroyed": return translateUi("This agent's threads are read-only.");
+    case "attachment_expired": return translateUi("An original attachment is no longer available.");
+    case "activity_outcome_uncertain": return translateUi("A tool may have taken effect. Check its result before another attempt.");
     case "activity_evidence_incomplete":
-    case "lineage_incomplete": return "Completed actions cannot be verified for this retry.";
-    case "input_unavailable": return "The original request is no longer available.";
-    case "status_unavailable": return "Retry availability could not be checked. Check again before retrying.";
-    default: return "This reply cannot be retried automatically.";
+    case "lineage_incomplete": return translateUi("Completed actions cannot be verified for this retry.");
+    case "input_unavailable": return translateUi("The original request is no longer available.");
+    case "status_unavailable": return translateUi("Retry availability could not be checked. Check again before retrying.");
+    default: return translateUi("This reply cannot be retried automatically.");
   }
 }
 
 function PulseDot({ className }: { readonly className?: string }) {
+  useUiTranslation();
   return (
     <span
       aria-hidden
@@ -95,10 +100,11 @@ function ThinkingBlock({
   readonly text: string;
   readonly streaming: boolean;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   if (!text) return null;
   return (
-    <div className="mb-2" role="status" aria-label="Assistant reasoning">
+    <div className="mb-2" role="status" aria-label={translateUi("Assistant reasoning")}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -108,9 +114,7 @@ function ThinkingBlock({
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
-        <Brain className="h-3 w-3" />
-        Thinking
-        {streaming ? <PulseDot /> : null}
+        <Brain className="h-3 w-3" />{translateUi("Thinking")}{streaming ? <PulseDot /> : null}
       </button>
       {open ? (
         <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-13 text-text-tertiary whitespace-pre-wrap">
@@ -141,16 +145,16 @@ function toolFailureCopy(
   switch (failure?.kind) {
     case "service_status":
       return failure.status == null
-        ? "The service returned an error. No HTTP status is available."
+        ? translateUi("The service returned an error. No HTTP status is available.")
         : `The service responded with HTTP ${failure.status}.`;
     case "refused":
-      return "NyxID refused this call.";
+      return translateUi("NyxID refused this call.");
     case "internal":
-      return "NyxID could not complete this call.";
+      return translateUi("NyxID could not complete this call.");
     case "tool_error":
-      return "The tool reported an error.";
+      return translateUi("The tool reported an error.");
     default:
-      return "This step did not complete. No additional error details are available.";
+      return translateUi("This step did not complete. No additional error details are available.");
   }
 }
 
@@ -181,37 +185,40 @@ function ToolElapsed({ startedAt, finishedAt, total = false }: {
   readonly finishedAt?: number;
   readonly total?: boolean;
 }) {
+  useUiTranslation();
   const now = useElapsedNow(finishedAt === undefined);
   const from = Date.parse(startedAt);
   if (!Number.isFinite(from)) return null;
   const seconds = Math.max(0, Math.floor(((finishedAt ?? now) - from) / 1000));
   if (seconds < 3) return null;
-  return <span aria-hidden title={total ? "Time since this turn started" : "Time spent on this tool call"}> · {formatElapsed(seconds)}{total ? " total" : ""}</span>;
+  return <span aria-hidden title={total ? translateUi("Time since this turn started") : translateUi("Time spent on this tool call")}> · {formatElapsed(seconds)}{total ? translateUi(" total") : ""}</span>;
 }
 
 function StatusLabel({ label, interrupted }: {
   readonly label: string;
   readonly interrupted?: boolean;
 }) {
+  useUiTranslation();
   return (
     <span role="status" aria-live="polite">
       {label}
       {interrupted ? (
-        <span> Connection interrupted; checking every few seconds</span>
+        <span>{translateUi(" Connection interrupted; checking every few seconds")}</span>
       ) : null}
     </span>
   );
 }
 
 function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"] }) {
+  useUiTranslation();
   if (status === "streaming") return <span className={BANNER_ICON}><PulseDot /></span>;
   if (status === "error") {
-    return <X className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label="Turn failed" />;
+    return <X className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label={translateUi("Turn failed")} />;
   }
   if (status === "stopped") {
-    return <CircleAlert className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label="Stopped" />;
+    return <CircleAlert className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label={translateUi("Stopped")} />;
   }
-  return <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-label="Completed" />;
+  return <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-label={translateUi("Completed")} />;
 }
 
 function activitySummary(message: ChatMessage): string {
@@ -219,27 +226,29 @@ function activitySummary(message: ChatMessage): string {
     case "streaming":
       return message.turnStatus?.label ?? "Working…";
     case "error":
-      return billingError(message.errorCode)?.title ?? "Turn failed";
+      return billingError(message.errorCode)?.title ?? translateUi("Turn failed");
     case "stopped":
-      return "Stopped";
+      return translateUi("Stopped");
     default:
-      return "Completed";
+      return translateUi("Completed");
   }
 }
 
 function ToolStatusIcon({
   status,
 }: {
-  readonly status: RuntimeToolCallInfo["status"];
+  readonly status: RuntimeToolCallInfo["status"] | "waiting";
 }) {
+  useUiTranslation();
+  if (status === "waiting") return <ShieldCheck aria-label={translateUi("Decision")} className="h-3 w-3 shrink-0 text-muted-foreground" />;
   if (status === "running") return <PulseDot className="mx-[3px]" />;
   if (status === "error") {
     return (
-      <X aria-label="Failed" className="h-3 w-3 shrink-0 text-destructive" />
+      <X aria-label={translateUi("Failed")} className="h-3 w-3 shrink-0 text-destructive" />
     );
   }
   return (
-    <Check aria-label="Succeeded" className="h-3 w-3 shrink-0 text-success" />
+    <Check aria-label={translateUi("Succeeded")} className="h-3 w-3 shrink-0 text-success" />
   );
 }
 
@@ -255,6 +264,7 @@ function deliveryText(delivery: NonNullable<ChatMessage["channelDelivery"]>): st
 
 /** A decision on its tool call: a short pill, the full receipt on hover. */
 function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
+  useUiTranslation();
   const denied = row.status === "denied";
   return (
     <span
@@ -279,8 +289,9 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
  * itself; the rest is on demand.
  */
 function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMessage; readonly selectedDecisionId?: string }) {
+  useUiTranslation();
   const steps = message.steps ?? [];
-  const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
+  const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine || tool.decision);
   const decisions = message.decisions ?? [];
   const count = steps.length + tools.length;
   const total = Math.max(count, message.activityTotal ?? 0);
@@ -299,7 +310,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   const delivery = message.role === "assistant" ? message.channelDelivery : undefined;
   if (!count && !decisions.length && !waited && !delivery) return null;
   const failed = steps.filter((step) => step.status === "error").length
-    + tools.filter((tool) => tool.status === "error").length;
+    + tools.filter((tool) => (activityDecisionPresentation(tool.decision)?.status ?? tool.status) === "error").length;
   const onTool = new Map<string, NyxAgentAcknowledgement[]>();
   const loose: NyxAgentAcknowledgement[] = [];
   for (const row of decisions) {
@@ -307,7 +318,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
     if (tool) onTool.set(tool.id, [...(onTool.get(tool.id) ?? []), row]);
     else loose.push(row);
   }
-  const counts = countDecisions(decisions);
+  const counts = countDecisions(decisions, tools.flatMap((tool) => tool.decision ? [tool.decision] : []));
   const parts = [
     activitySummary(message),
     total ? `${String(total)} ${total === 1 ? "action" : "actions"}` : "",
@@ -321,7 +332,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
         type="button"
         onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
-        aria-label={`Turn details: ${[...parts, failed ? `${String(failed)} failed` : "", deliveryFailed ? "delivery failed" : ""].filter(Boolean).join(", ")}`}
+        aria-label={translateUi("Turn details: {{value1}}", { value1: [...parts, failed ? translateUi("{{count}} failed", { count: failed }) : "", deliveryFailed ? translateUi("delivery failed") : ""].filter(Boolean).join(", ") })}
         className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
       >
         <ActivitySummaryIcon status={message.status} />
@@ -338,10 +349,10 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
             </span>
           ))}
           {message.activityTotal && message.activityTotal > count ? (
-            <span className="ml-1">· latest {count} of {message.activityTotal} shown</span>
+            <span className="ml-1">{translateUi("· latest ")}{count}{translateUi(" of ")}{message.activityTotal}{translateUi(" shown")}</span>
           ) : null}
-          {failed ? <span className="ml-1 text-warning">· {failed} failed</span> : null}
-          {deliveryFailed ? <span className="ml-1 text-warning">· delivery failed</span> : null}
+          {failed ? <span className="ml-1 text-warning">· {failed}{translateUi(" failed")}</span> : null}
+          {deliveryFailed ? <span className="ml-1 text-warning">{translateUi("· delivery failed")}</span> : null}
         </span>
         <ChevronRight
           aria-hidden="true"
@@ -360,12 +371,10 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                 <Check className="mt-0.5 h-3 w-3 text-success" />
               )}
               <span className={cn("min-w-0 flex-1 break-words", step.status === "error" ? "text-destructive" : "text-muted-foreground")}>
-                {step.name || "Processing"}
+                {step.name || translateUi("Processing")}
               </span>
               {step.status === "error" ? (
-                <span className="text-destructive opacity-70">
-                  Step failed. The assistant can continue after a failed step.
-                </span>
+                <span className="text-destructive opacity-70">{translateUi("Step failed. The assistant can continue after a failed step.")}</span>
               ) : null}
               {step.stepType ? (
                 <span className={cn("shrink-0 font-mono text-12", step.status === "error" ? "text-destructive" : "text-text-tertiary")}>
@@ -374,25 +383,28 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
               ) : null}
             </div>
           ))}
-          {tools.map((tool) => (
+          {tools.map((tool) => {
+            const decision = activityDecisionPresentation(tool.decision);
+            const status = decision?.status ?? tool.status;
+            return (
             <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
             <details className="text-13 text-muted-foreground">
               <summary
-                data-tool-status={tool.status}
+                data-tool-status={tool.decision?.state ?? tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
               >
                 <span className="flex w-full min-w-0 items-center gap-2">
-                  <ToolStatusIcon status={tool.status} />
+                  <ToolStatusIcon status={status} />
                   <span
                     className={cn(
                       "min-w-0 flex-1 truncate",
-                      tool.status === "error" && "text-destructive",
+                      status === "error" && "text-destructive",
                     )}
                   >
-                    {describeToolActivity(tool.name || tool.id, tool.status)}
+                    {decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
-                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", tool.status === "error" ? "text-destructive" : "text-text-tertiary")}>
+                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", status === "error" ? "text-destructive" : "text-text-tertiary")}>
                     <span className="truncate">{tool.name || tool.id}</span>
                     {Number.isFinite(tool.startedAt) ? <span className="shrink-0"><ToolElapsed
                       startedAt={new Date(tool.startedAt).toISOString()}
@@ -400,11 +412,9 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     /></span> : null}
                   </span>
                 </span>
-                {tool.status === "error" ? (
+                {decision ? <span className="break-words pl-5">{decision.detail}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
-                    {toolFailureCopy(tool.failure)} The assistant can continue
-                    after a failed step.
-                  </span>
+                    {toolFailureCopy(tool.failure)}{translateUi(" The assistant can continue after a failed step.")}</span>
                 ) : null}
               </summary>
               {tool.result ? (
@@ -414,9 +424,9 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
               ) : null}
             </details>
             </ReviewCardTarget>
-          ))}
+          );})}
           {loose.length ? (
-            <ul aria-label="Permissions used" className="space-y-1 pt-0.5">
+            <ul aria-label={translateUi("Permissions used")} className="space-y-1 pt-0.5">
               {groupDecisions(loose, selectedDecisionId).map(({ row, count: times }) => (
                 <li key={row.id} title={decisionTitle(row)}>
                 <ReviewCardTarget selected={row.id === selectedDecisionId}>
@@ -441,7 +451,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
           {waited || delivery ? (
             <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pt-0.5 text-12 text-text-tertiary">
               {waited ? <CapacityDetails attempts={message.turnMetadata?.attempts} capacityWaitMs={capacityWaitMs} /> : null}
-              {delivery ? <><dt>delivery</dt><dd className={cn(deliveryFailed && "text-warning")}>{deliveryText(delivery)}</dd></> : null}
+              {delivery ? <><dt>{translateUi("delivery")}</dt><dd className={cn(deliveryFailed && "text-warning")}>{deliveryText(delivery)}</dd></> : null}
             </dl>
           ) : null}
         </div>
@@ -453,25 +463,29 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
 type ErrorDetail = NonNullable<ChatMessage["errorDetail"]>;
 
 function BillingRemedy() {
+  useUiTranslation();
   const router = useRouter({ warn: false });
   return router ? <BillingRemedyWithRouter /> : null;
 }
 
 function BillingRemedyWithRouter() {
+  useUiTranslation();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const panel = useAccountPanel();
   if (!isAssistantShellRoute(pathname)) return null;
   return <button type="button" className="mt-2 block type-row-title underline"
-    onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
+    onClick={() => void panel.open("billing", { panelTab: "overview" })}>{translateUi("Open Billing & Usage")}</button>;
 }
 
 function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null }) {
-  return <>{attempts != null ? <><dt>attempts</dt><dd>{attempts}</dd></> : null}
-    {capacityWaitMs != null && capacityWaitMs > 0 ? <><dt>capacity</dt><dd>waited {formatCapacityWait(capacityWaitMs)} for capacity</dd></> : null}</>;
+  useUiTranslation();
+  return <>{attempts != null ? <><dt>{translateUi("attempts")}</dt><dd>{attempts}</dd></> : null}
+    {capacityWaitMs != null && capacityWaitMs > 0 ? <><dt>{translateUi("capacity")}</dt><dd>{translateUi("waited ")}{formatCapacityWait(capacityWaitMs)}{translateUi(" for capacity")}</dd></> : null}</>;
 }
 
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  useUiTranslation();
   const failure = detail.failureReason;
   const failureLabel = failure ? [failure.source, failure.stage, failure.code,
     failure.http_status != null ? `HTTP ${failure.http_status}` : null,
@@ -490,45 +504,45 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
     .join(" / ");
   return (
     <details className="mt-2 max-w-[900px] text-13 text-text-tertiary">
-      <summary className="cursor-pointer">Details</summary>
+      <summary className="cursor-pointer">{translateUi("Details")}</summary>
       {failure?.source === "nyxid" && (failure.code === "guest_model_route_required" || failure.stage === "guest_setup") ? (
         <p className="mt-1">{failure.model_route?.reason === "credits_unavailable"
-          ? "Add credits to the linking owner's account. Visitor setup retries automatically."
-          : "Check this assistant's configured model and model connection. Visitor setup retries automatically."}</p>
+          ? translateUi("Add credits to the linking owner's account. Visitor setup retries automatically.")
+          : translateUi("Check this assistant's configured model and model connection. Visitor setup retries automatically.")}</p>
       ) : null}
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
-        <dt>stage</dt>
+        <dt>{translateUi("stage")}</dt>
         <dd>{detail.stage}</dd>
-        {failureLabel ? <><dt>cause</dt><dd>{failureLabel}</dd></> : null}
+        {failureLabel ? <><dt>{translateUi("cause")}</dt><dd>{failureLabel}</dd></> : null}
         {detail.httpStatus != null ? (
           <>
-            <dt>http</dt>
+            <dt>{translateUi("http")}</dt>
             <dd>{detail.httpStatus}</dd>
           </>
         ) : null}
-        {detail.upstreamCode ? <><dt>upstream</dt><dd>{detail.upstreamCode}</dd></> : null}
-        <dt>turn</dt>
+        {detail.upstreamCode ? <><dt>{translateUi("upstream")}</dt><dd>{detail.upstreamCode}</dd></> : null}
+        <dt>{translateUi("turn")}</dt>
         <dd>{detail.turnId}</dd>
         {detail.responseId ? (
           <>
-            <dt>response</dt>
+            <dt>{translateUi("response")}</dt>
             <dd>{detail.responseId}</dd>
           </>
         ) : null}
         {detail.upstreamRequestId ? (
           <>
-            <dt>request</dt>
+            <dt>{translateUi("request")}</dt>
             <dd>{detail.upstreamRequestId}</dd>
           </>
         ) : null}
-        <dt>continuations</dt>
+        <dt>{translateUi("continuations")}</dt>
         <dd>{detail.continuations}</dd>
         {detail.occurredAt ? (
           <>
-            <dt>at</dt>
+            <dt>{translateUi("at")}</dt>
             <dd>
-              <time dateTime={detail.occurredAt}>{new Date(detail.occurredAt).toLocaleString()}</time>
+              <time dateTime={detail.occurredAt}>{new Date(detail.occurredAt).toLocaleString(getFormattingLocale())}</time>
             </dd>
           </>
         ) : null}
@@ -537,9 +551,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
         type="button"
         className="mt-1 underline"
         onClick={() => void navigator.clipboard?.writeText(diagnosticId)}
-      >
-        Copy diagnostic ID
-      </button>
+      >{translateUi("Copy diagnostic ID")}</button>
     </details>
   );
 }
@@ -558,6 +570,7 @@ function WaitingStatus({ label, interrupted, startedAt, capacity, queued, capaci
   readonly capacityStartedAt?: string | null;
   readonly capacityDeadline?: string | null;
 }) {
+  useUiTranslation();
   const [started] = useState(Date.now);
   const now = useElapsedNow();
   const fromTurn = Date.parse(startedAt ?? "");
@@ -570,17 +583,17 @@ function WaitingStatus({ label, interrupted, startedAt, capacity, queued, capaci
     const waited = Math.min(bound, Math.max(0, Math.floor((now - from) / 1000)));
     return (
       <span data-waiting-status>
-        <StatusLabel label={queued ? "Queued until another reply finishes" : "Waiting for the assistant"} interrupted={interrupted} />
+        <StatusLabel label={queued ? translateUi("Queued until another reply finishes") : translateUi("Waiting for the assistant")} interrupted={interrupted} />
         {Number.isFinite(from) && Number.isFinite(to)
-          ? <span aria-hidden> · {clock(waited)} of up to {clock(bound)}</span>
+          ? <span aria-hidden> · {clock(waited)}{translateUi(" of up to ")}{clock(bound)}</span>
           : seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
       </span>
     );
   }
   return (
     <span data-waiting-status={!label && seconds >= 3 ? true : undefined}>
-      <StatusLabel label={label ?? "Thinking"} interrupted={interrupted} />
-      {seconds >= 3 ? <span aria-hidden title={startedAt ? "Time since this turn started" : undefined}> · {formatElapsed(seconds)}{startedAt ? " total" : ""}</span> : null}
+      <StatusLabel label={label ?? translateUi("Thinking")} interrupted={interrupted} />
+      {seconds >= 3 ? <span aria-hidden title={startedAt ? translateUi("Time since this turn started") : undefined}> · {formatElapsed(seconds)}{startedAt ? translateUi(" total") : ""}</span> : null}
     </span>
   );
 }
@@ -602,6 +615,7 @@ export function ChatMessageBubble({
   readonly feedbackEnabled?: boolean;
   readonly selectedDecisionId?: string;
 }) {
+  useUiTranslation();
   const streaming = message.status === "streaming";
   const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
@@ -622,7 +636,7 @@ export function ChatMessageBubble({
     try {
       await onRetry();
     } catch (error) {
-      setRetryError(error instanceof Error && error.message ? error.message : "Retry failed. Try again.");
+      setRetryError(error instanceof Error && error.message ? error.message : translateUi("Retry failed. Try again."));
     } finally {
       setRetrying(false);
     }
@@ -644,16 +658,15 @@ export function ChatMessageBubble({
       }),
   });
   if (message.continuation_of) {
-    return <p role="status" className="px-[7px] text-13 text-muted-foreground">Continuing after your decision</p>;
+    return <p role="status" className="px-[7px] text-13 text-muted-foreground">{translateUi("Continuing after your decision")}</p>;
   }
   if (message.role === "user") {
     return (
       <div className="group/message ml-auto flex min-w-0 max-w-[90%] flex-col items-end gap-1 sm:max-w-[78%]">
         <UserMessageBubble className="max-w-full text-16 [overflow-wrap:anywhere]">
           {message.steering && (
-            <p className="mb-1 text-13" role="note">
-              Steering ·{" "}
-              {steeringNotice(message.steering.code, message.steering.outcome)}
+            <p className="mb-1 text-13" role="note">{translateUi("Steering ·")}{" "}
+              {translateUi(steeringNotice(message.steering.code, message.steering.outcome))}
             </p>
           )}
           {message.images?.length ? (
@@ -715,7 +728,7 @@ export function ChatMessageBubble({
   return (
     <article
       role={thinking ? "status" : undefined}
-      aria-label={capacityNote ? "Assistant is waiting for capacity" : thinking ? "Assistant is thinking" : undefined}
+      aria-label={capacityNote ? translateUi("Assistant is waiting for capacity") : thinking ? translateUi("Assistant is thinking") : undefined}
       data-system-note={capacityNote ? "capacity_wait" : undefined}
       className="group/message flex items-start gap-2.5"
     >
@@ -728,6 +741,7 @@ export function ChatMessageBubble({
             <MachineToolCard
               key={tool.id}
               receipt={tool.machine!}
+              decision={tool.decision}
               conversationId={tool.conversationId}
               images={message.images}
             />
@@ -743,7 +757,6 @@ export function ChatMessageBubble({
         {capacityNote ? (
           <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
-        {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
             <div className={BANNER_ROW}>
@@ -771,7 +784,7 @@ export function ChatMessageBubble({
                 ))}
               </ul>
             ) : null}
-            {!message.actionOutcome.complete ? <p>The action record may be incomplete.</p> : null}
+            {!message.actionOutcome.complete ? <p>{translateUi("The action record may be incomplete.")}</p> : null}
           </div>
         ) : null}
         {message.status === "error" && onRetry ? (
@@ -786,11 +799,11 @@ export function ChatMessageBubble({
               onClick={() => void retry()}
             >
               <RotateCcw className="size-3" aria-hidden />
-              {retrying ? "Retrying…" : retryConfirmed ? "Retry anyway" : "Retry"}
+              {retrying ? translateUi("Retrying…") : retryConfirmed ? translateUi("Retry anyway") : translateUi("Retry")}
             </button>
             {retryError ? (
               <p role="alert" className="mt-1 text-13 text-destructive">
-                {retryError}
+                {translateUi(retryError)}
               </p>
             ) : null}
           </div>
@@ -802,14 +815,12 @@ export function ChatMessageBubble({
               <>
                 <button type="button" className="inline-flex items-center gap-1 underline"
                   onClick={() => setReviewOpen((open) => !open)} aria-expanded={reviewOpen}>
-                  <ChevronRight className={cn("size-3", reviewOpen && "rotate-90")} aria-hidden />
-                  Review request
-                </button>
+                  <ChevronRight className={cn("size-3", reviewOpen && "rotate-90")} aria-hidden />{translateUi("Review request")}</button>
                 {reviewOpen ? (
                   <div data-scroll-fade="" className="max-h-56 overflow-auto rounded-md border border-border p-2">
                     <p className="whitespace-pre-wrap break-words text-foreground">{message.recovery.text}</p>
                     {message.recovery.attachments.length ? (
-                      <p className="mt-2 break-all">Attachments: {message.recovery.attachments.join(", ")}</p>
+                      <p className="mt-2 break-all">{translateUi("Attachments: ")}{message.recovery.attachments.join(", ")}</p>
                     ) : null}
                     <button type="button" className="mt-2 inline-flex items-center gap-1 underline"
                       onClick={() => {
@@ -824,10 +835,9 @@ export function ChatMessageBubble({
                           }
                         })();
                       }}>
-                      <Copy className="size-3" aria-hidden /> Copy request
-                    </button>
+                      <Copy className="size-3" aria-hidden />{translateUi(" Copy request")}</button>
                     {copyState ? <p role="status" className="mt-1">
-                      {copyState === "copied" ? "Request copied." : "Copy failed. Select the text above."}
+                      {copyState === "copied" ? translateUi("Request copied.") : translateUi("Copy failed. Select the text above.")}
                     </p> : null}
                   </div>
                 ) : null}
@@ -842,13 +852,13 @@ export function ChatMessageBubble({
                 setChecking(true);
                 setCheckError(undefined);
                 void Promise.resolve().then(onCheckRecovery).catch((error: unknown) => {
-                  setCheckError(error instanceof Error ? error.message : "Could not check retry availability.");
+                  setCheckError(error instanceof Error ? error.message : translateUi("Could not check retry availability."));
                 }).finally(() => setChecking(false));
               }}>
               <RotateCcw className="size-3" aria-hidden />
-              {checking ? "Checking…" : "Check retry availability"}
+              {checking ? translateUi("Checking…") : translateUi("Check retry availability")}
             </button>
-            {checkError ? <p role="alert" className="mt-1 text-destructive">{checkError}</p> : null}
+            {checkError ? <p role="alert" className="mt-1 text-destructive">{translateUi(checkError)}</p> : null}
           </div>
         ) : null}
         {interactiveCards
@@ -878,7 +888,7 @@ export function ChatMessageBubble({
               {toolStartedAt && !(capacityNote || message.waitingForCapacity) ? (
                 <>
                   <StatusLabel
-                    label={statusLabel ?? "Thinking"}
+                    label={statusLabel ?? translateUi("Thinking")}
                     interrupted={message.turnStatus?.interrupted}
                   />
                   <ToolElapsed startedAt={message.turnStatus?.startedAt ?? toolStartedAt} total={Boolean(message.turnStatus?.startedAt)} />
@@ -900,12 +910,10 @@ export function ChatMessageBubble({
         {message.status === "stopped" ? (
           <p
             role="status"
-            aria-label="Turn stopped"
+            aria-label={translateUi("Turn stopped")}
             className="flex min-h-5 items-center gap-1 text-13 text-muted-foreground"
           >
-            <CircleAlert aria-hidden="true" className="h-3 w-3" />
-            Stopped
-          </p>
+            <CircleAlert aria-hidden="true" className="h-3 w-3" />{translateUi("Stopped")}</p>
         ) : null}
         {/* The time joins the feedback line once the reply settles; a
             streaming reply has no settled instant yet. */}
@@ -943,6 +951,7 @@ export function ChatMessageEntry({
   readonly onCheckRecovery?: () => Promise<unknown> | void;
   readonly selectedDecisionId?: string;
 }) {
+  useUiTranslation();
   if (
     message.role === "system" &&
     message.id.startsWith("nyxagent-context-reset:")
@@ -950,7 +959,7 @@ export function ChatMessageEntry({
     return (
       <p
         role="note"
-        aria-label="Conversation context reset"
+        aria-label={translateUi("Conversation context reset")}
         className="text-13 text-text-tertiary"
       >
         {message.content}
@@ -987,13 +996,13 @@ export function ChatMessageEntry({
   const displayName = authorName || roleLabel;
   return (
     <article
-      aria-label={`${displayName} ${roleLabel} message`}
+      aria-label={translateUi("{{value1}} {{value2}} message", { value1: displayName, value2: roleLabel })}
       className="flex gap-2.5"
     >
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-text-tertiary">
         <MessageSquare className="h-3 w-3" />
       </div>
-      <div className="min-w-0 max-w-[84%] flex-1">
+      <div className="min-w-0 max-w-[84%] flex-1 wrap-anywhere">
         <div className="type-secondary-emphasis text-foreground">{displayName}</div>
         {message.thinking ? (
           <p className="mt-1 text-13 italic text-text-tertiary">
@@ -1011,10 +1020,11 @@ export function ChatMessageEntry({
 }
 
 function EmptyState({ children }: { readonly children?: ReactNode }) {
+  useUiTranslation();
   return (
     <div className="flex flex-1 items-center justify-center px-6 text-center text-14 text-text-tertiary">
       {children ??
-        "Ask NyxID to help with services, access, and account operations."}
+        translateUi("Ask NyxID to help with services, access, and account operations.")}
     </div>
   );
 }
@@ -1117,6 +1127,7 @@ export function ChatMessageList({
   /** A row to bring into view once (a linked review card), even when unmounted. */
   readonly focusMessageId?: string;
 }) {
+  useUiTranslation();
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);

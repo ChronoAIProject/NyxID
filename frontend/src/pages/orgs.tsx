@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Building2, Users } from "lucide-react";
@@ -23,6 +25,7 @@ import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { RoleBadge } from "@/components/orgs/role-badge";
 
 function OrgsLoading() {
+  useUiTranslation();
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {Array.from({ length: 3 }).map((_, i) => (
@@ -33,22 +36,21 @@ function OrgsLoading() {
 }
 
 function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="type-row-title text-muted-foreground">No organizations yet</p>
-        <p className="text-13 text-muted-foreground">
-          Create an organization to share services and credentials with
-          teammates.
-        </p>
+        <p className="type-row-title text-muted-foreground">{translateUi("No organizations yet")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Create an organization to share services and credentials with teammates.")}</p>
       </div>
-      <AddCtaButton label="Create your first organization" onClick={onCreate} />
+      <AddCtaButton label={translateUi("Create your first organization")} onClick={onCreate} />
     </div>
   );
 }
 
 export function OrgsPage() {
+  useUiTranslation();
   const { data: orgs, isLoading, error, refetch } = useOrgs();
   const [createOpen, setCreateOpen] = useState(false);
   const [viewMode, setViewMode] = useViewMode("orgs");
@@ -57,12 +59,12 @@ export function OrgsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Organizations"
-        description="Organizations let you share services and credentials with a team."
+        title={translateUi("Organizations")}
+        description={translateUi("Organizations let you share services and credentials with a team.")}
         actions={
           <div className="flex items-center gap-2">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
-            <AddCtaButton label="New Organization" onClick={() => setCreateOpen(true)} />
+            <AddCtaButton label={translateUi("New Organization")} onClick={() => setCreateOpen(true)} />
           </div>
         }
       />
@@ -70,14 +72,14 @@ export function OrgsPage() {
       {isLoading ? (
         <OrgsLoading />
       ) : error ? (
-        <ErrorBanner message="Failed to load organizations. Please try again." onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load organizations. Please try again.")} onRetry={refetch} />
       ) : !orgs || orgs.length === 0 ? (
         <OrgsEmptyState onCreate={() => setCreateOpen(true)} />
       ) : (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Building2 className="h-4 w-4 text-muted-foreground" />
-            <h3 className="type-card-title text-foreground">My Organizations</h3>
+            <h3 className="type-card-title text-foreground">{translateUi("My Organizations")}</h3>
           </div>
 
           {/* Cards - always on mobile, desktop only in grid mode */}
@@ -100,7 +102,7 @@ export function OrgsPage() {
                         />
                         <div className="min-w-0">
                           <p className="truncate type-row-title text-foreground">
-                            {org.display_name ?? "Untitled org"}
+                            {org.display_name ?? translateUi("Untitled org")}
                           </p>
                           <p className="truncate text-13 text-muted-foreground">
                             @{org.slug}
@@ -110,8 +112,7 @@ export function OrgsPage() {
                               {org.contact_email}
                             </p>
                           )}
-                          <p className="text-13 text-muted-foreground">
-                            Created {formatRelativeTime(org.created_at) ?? "—"}
+                          <p className="text-13 text-muted-foreground">{translateUi("Created ")}{formatRelativeTime(org.created_at) ?? "—"}
                           </p>
                         </div>
                       </div>
@@ -119,7 +120,7 @@ export function OrgsPage() {
                     </div>
                     <div className="flex items-center gap-2 text-13 text-muted-foreground">
                       <Users className="h-3.5 w-3.5" />
-                      <span>View members and invites</span>
+                      <span>{translateUi("View members and invites")}</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -133,11 +134,11 @@ export function OrgsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Slug</TableHead>
-                    <TableHead>Contact</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Created</TableHead>
+                    <TableHead>{translateUi("Name")}</TableHead>
+                    <TableHead>{translateUi("Slug")}</TableHead>
+                    <TableHead>{translateUi("Contact")}</TableHead>
+                    <TableHead>{translateUi("Role")}</TableHead>
+                    <TableHead>{translateUi("Created")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -155,7 +156,7 @@ export function OrgsPage() {
                             className="h-7 w-7"
                           />
                           <span className="truncate font-medium">
-                            {org.display_name ?? "Untitled org"}
+                            {org.display_name ?? translateUi("Untitled org")}
                           </span>
                         </div>
                       </TableCell>

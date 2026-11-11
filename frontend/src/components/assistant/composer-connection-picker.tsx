@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Check, Link2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -34,6 +36,7 @@ export function ComposerConnectionPicker({
   readonly onRetry: () => void;
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const query = search.trim().toLocaleLowerCase();
   const groups = groupServiceConnections(connections)
@@ -57,30 +60,23 @@ export function ComposerConnectionPicker({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Connection for this message</DialogTitle>
-          <DialogDescription>
-            Choose the account to use for this message. Manage your saved
-            connection order in Agent Details.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Connection for this message")}</DialogTitle>
+          <DialogDescription>{translateUi("Choose the account to use for this message. Manage your saved connection order in Agent Details.")}</DialogDescription>
         </DialogHeader>
         <Input
-          aria-label="Search connections"
-          placeholder="Search services or accounts…"
+          aria-label={translateUi("Search connections")}
+          placeholder={translateUi("Search services or accounts…")}
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
         <div className="assistant-scrollbar max-h-[50vh] space-y-4 overflow-y-auto">
           {loading && (
-            <p role="status" className="text-14 text-muted-foreground">
-              Loading connections…
-            </p>
+            <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading connections…")}</p>
           )}
           {error ? (
             <div role="alert" className="space-y-2 text-14">
-              <p>Could not load connections.</p>
-              <Button type="button" onClick={onRetry}>
-                Retry
-              </Button>
+              <p>{translateUi("Could not load connections.")}</p>
+              <Button type="button" onClick={onRetry}>{translateUi("Retry")}</Button>
             </div>
           ) : (
             groups.map((group) => (
@@ -120,15 +116,12 @@ export function ComposerConnectionPicker({
           {!loading && !error && !groups.length && (
             <p className="text-14 text-muted-foreground">
               {query
-                ? "No matching connections."
-                : "No enabled connections are available."}
+                ? translateUi("No matching connections.")
+                : translateUi("No enabled connections are available.")}
             </p>
           )}
         </div>
-        <p className="text-13 text-muted-foreground">
-          Organization connections still require approval in Auto and Ask every
-          time.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Organization connections still require approval in Auto and Ask every time.")}</p>
       </DialogContent>
     </Dialog>
   );
@@ -145,10 +138,11 @@ export function ComposerConnectionChip({
   readonly disabled: boolean;
   readonly onRemove: () => void;
 }) {
+  useUiTranslation();
   return (
     <div
       role="group"
-      aria-label="Connection for this message"
+      aria-label={translateUi("Connection for this message")}
       className="mb-2 ml-[30px] flex min-w-0 items-center gap-2 rounded-lg border border-border px-2 py-1 text-14"
     >
       <Link2 aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
@@ -164,8 +158,8 @@ export function ComposerConnectionChip({
           className={unavailable ? "text-destructive" : "text-muted-foreground"}
         >
           {unavailable
-            ? " · Unavailable — choose another connection or remove"
-            : " · This message"}
+            ? translateUi(" · Unavailable — choose another connection or remove")
+            : translateUi(" · This message")}
         </span>
       </span>
       <Button
@@ -173,7 +167,7 @@ export function ComposerConnectionChip({
         variant="ghost"
         size="icon"
         className="size-7 shrink-0"
-        aria-label="Remove connection for this message"
+        aria-label={translateUi("Remove connection for this message")}
         disabled={disabled}
         onClick={onRemove}
       >

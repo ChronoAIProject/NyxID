@@ -4,6 +4,7 @@ import { URL as NodeURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { ApiError } from "./ApiError";
+import * as responseError from "./responseError";
 import { createSessionRefresh } from "../auth/sessionRefresh";
 import { executeAuthenticatedRequest } from "./authenticatedTransport";
 import { guardedJsonTransport } from "./guardedTransport";
@@ -34,7 +35,7 @@ export function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fet
     "./guardedTransport": { guardedJsonTransport },
     "../analyticsConsentState": { analyticsDeviceHeaders: () => ({}) },
     "../auth/jwt": {},
-    "../auth/mfaChallenge": {},
+    "./responseError": responseError,
     "./ApiError": { ApiError },
     "./baseUrl": api,
     "expo-constants": { default: { expoConfig: { version: "test" } } },

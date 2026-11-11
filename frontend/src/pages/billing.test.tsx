@@ -1,3 +1,4 @@
+import "@/i18n";
 import { consumeBillingCheckoutReturn } from "@/lib/billing-checkout-return";
 import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { act, render, screen, within, waitFor } from "@testing-library/react";

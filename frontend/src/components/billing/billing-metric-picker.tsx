@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import {
   BillingMultiSelect,
   type BillingMultiSelectProps,
@@ -9,11 +10,12 @@ type BillingMetricPickerProps = Pick<
 >;
 
 export function BillingMetricPicker(props: BillingMetricPickerProps) {
+  const { t } = useUiTranslation();
   return (
     <BillingMultiSelect
       {...props}
-      label="Metrics"
-      itemLabel="Metric"
+      label={t("Metrics")}
+      itemLabel={t("Metric")}
       capitalize
     />
   );

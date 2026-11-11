@@ -1050,6 +1050,15 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
+            super::assistant_activity_decision::bind(
+                db,
+                chat,
+                "approval",
+                &request.id,
+                false,
+                None,
+            )
+            .await?;
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
@@ -1077,7 +1086,29 @@ pub(crate) fn prepare<'a>(
         )
         .await?
         {
+            if let Some(chat) = chat {
+                super::assistant_activity_decision::bind(
+                    db,
+                    chat,
+                    "approval",
+                    &request.id,
+                    false,
+                    None,
+                )
+                .await?;
+            }
             if proposals::v2::blocking::wait(state, context, &request).await? {
+                if let Some(chat) = chat {
+                    super::assistant_activity_decision::bind(
+                        db,
+                        chat,
+                        "approval",
+                        &request.id,
+                        true,
+                        None,
+                    )
+                    .await?;
+                }
                 return prepare(state, Some(context), chat, key, effect).await;
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));

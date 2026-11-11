@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ServiceIcon } from "@/components/service-icon";
 import { ConnectionArc } from "@/components/shared/connection-arc";
@@ -22,12 +24,13 @@ export function ConnectionIdentityHeading({
   readonly subtitle: string;
   readonly className?: string;
 }) {
+  useUiTranslation();
   return (
     <div className={cn("space-y-5 text-center", className)}>
       <div
         className="flex items-start justify-center"
         role="img"
-        aria-label={`NyxID connects to ${serviceName}`}
+        aria-label={translateUi("NyxID connects to {{value1}}", { value1: serviceName })}
       >
         <div className="flex w-20 flex-col items-center gap-2.5">
           <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
