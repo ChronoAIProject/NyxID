@@ -15,6 +15,7 @@ export const nextStepSchema = z.object({
   title: z.string(),
   description: z.string(),
   prompt: z.string(),
+  connect: z.boolean().optional(),
   icon: z.string(),
 });
 
@@ -91,3 +92,11 @@ export function topicsFor(
     (topic) => !topic.work_styles || topic.work_styles.includes(style),
   );
 }
+
+/** Live provider choices, fetched only when a setup suggestion is opened. */
+export const suggestionSetupSchema = z.object({
+  connected: z.boolean(),
+  choices: z.array(z.object({ slug: z.string(), name: z.string(), scopes: z.array(z.string()) })),
+  prompt: z.string(),
+});
+export type SuggestionSetup = z.infer<typeof suggestionSetupSchema>;

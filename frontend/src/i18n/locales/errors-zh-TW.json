@@ -414,5 +414,6 @@
   "Confirm your verification before creating a revision": "請先確認已完成查證，再建立修訂版",
   "Enter a verification reference": "請輸入查證參考資料",
   "Verification source must be at most 1000 UTF-8 bytes with no control characters": "查證來源不得超過 1000 個 UTF-8 位元組，且不得包含控制字元",
-  "Platform models are read-only for this account.": "此帳號的平台模型為唯讀。"
+  "Platform models are read-only for this account.": "此帳號的平台模型為唯讀。",
+  "Could not load connection options. Try again.": "無法載入連結選項，請重試。"
 }

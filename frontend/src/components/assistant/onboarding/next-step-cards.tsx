@@ -1,5 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { useState } from "react";
+import { NextStepConnect } from "./next-step-connect";
 import { ArrowRight } from "lucide-react";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { OnboardingIcon } from "./onboarding-icons";
@@ -7,8 +9,8 @@ import { cn } from "@/lib/utils";
 import type { NextStep } from "@/schemas/assistant-onboarding";
 
 /**
- * One-click next steps. Starting one sends its prompt to NyxBot, which does
- * the setup with its normal tools and confirmations.
+ * Connection suggestions open hosted setup first; other next steps send
+ * their prompt to NyxBot with its normal tools and confirmations.
  */
 export function NextStepCards({
   steps,
@@ -22,12 +24,18 @@ export function NextStepCards({
   readonly className?: string;
 }) {
   useUiTranslation();
+
+  const [connecting, setConnecting] = useState<NextStep>();
+  // OAuth completion can remove this recommendation during a Home refresh.
+  // Retain the selected row until its hosted setup delivers the follow-up.
+  const displayed = connecting && !steps.some((step) => step.id === connecting.id)
+    ? [connecting, ...steps] : steps;
   return (
     <ul
       aria-label={translateUi("Suggested next steps")}
       className={cn("grid gap-2", className)}
     >
-      {steps.map((step, index) => {
+      {displayed.map((step, index) => {
         return (
           <li
             key={step.id}
@@ -42,7 +50,7 @@ export function NextStepCards({
                 <button
                   type="button"
                   disabled={disabled}
-                  onClick={() => onStart(step)}
+                  onClick={() => step.connect ? setConnecting(step) : onStart(step)}
                   className={cn(
                     "flex w-full items-center gap-3 text-left transition-colors",
                     "disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none",
@@ -72,6 +80,7 @@ export function NextStepCards({
                 </button>
               </GroupedRow>
             </GroupedList>
+            {connecting?.id === step.id ? <NextStepConnect key={step.id} step={step} onStart={onStart} onClose={() => setConnecting(undefined)} /> : null}
           </li>
         );
       })}

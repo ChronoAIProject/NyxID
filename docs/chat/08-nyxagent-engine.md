@@ -2534,3 +2534,26 @@ runs; ordinary model callbacks add neither an activity nor a presentation read.
 A WebSocket/CONNECT handshake alone does not confirm stream completion.
 
 Shared-recipient connection-consent steps use the same optional decision metadata, scoped to the acting person. Once, Always and a consumed consent mean allowed, not proven execution; revoked or missing evidence remains unavailable.
+
+### Suggested setup and title language (#2312 / #2313)
+
+Connection-first Home suggestions resolve real provider choices before a chat
+starts, through the existing hosted connect flow (see `NYXBOT_FIRST_RUN.md`).
+The server returns only currently connectable catalog options, and reuses a
+verified existing connection instead of asking to add another one. With neither
+an existing connection nor a connectable provider, clients start the original
+suggestion prompt so NyxBot can guide setup. No assistant
+instruction or approval format changes; the 4 KiB base-prompt bound is unchanged.
+
+First-party turn requests may send `Accept-Language`, a bounded language tag.
+Web reads the active UI locale from the shared i18next instance, including live
+language switches; native sends its device locale. Only the first owner input
+captures it as the optional
+`AssistantConversation.title_language`, in the turn-admission transaction. It is
+not forwarded to NyxAgent or included in executable instructions. The isolated,
+tool-free utility title request has a separate `ui_language` fallback hint.
+The first user message determines the title's language. Only when that language
+is unclear (for example names, numbers, code or URLs) may the UI hint supply it;
+the assistant reply never determines it. Existing provisional titles, rename
+fences and legacy rows retain their behavior. Unknown headers/optional fields are safe across
+mixed replicas; old replicas do not enforce the new title-language hint.
