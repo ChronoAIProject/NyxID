@@ -3,8 +3,10 @@ use crate::{
     models::{
         credential_verification::CredentialVerificationCheck,
         downstream_service::{DownstreamService, test_helpers::dummy_service},
+        service_approval_config::ApprovalEffect,
         service_endpoint::EndpointRisk,
         user::UserType,
+        user_api_key::UserApiKey,
         user_service::UserService,
     },
     services::user_api_key_service::{self, CreateApiKeyParams},
@@ -51,7 +53,7 @@ impl Fixture {
         });
         state
             .db
-            .collection("downstream_services")
+            .collection::<DownstreamService>("downstream_services")
             .insert_one(&catalog)
             .await
             .unwrap();
@@ -65,34 +67,7 @@ impl Fixture {
             .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let endpoint_id = uuid::Uuid::new_v4().to_string();
-        let key = user_api_key_service::build_api_key(
-            &state.encryption_keys,
-            &owner,
-            CreateApiKeyParams {
-                label: "fixture",
-                credential_type: "api_key",
-                credential: "fixture-secret-not-for-output",
-                access_token: None,
-                refresh_token: None,
-                token_scopes: None,
-                expires_at: None,
-                provider_config_id: None,
-                connection_id: None,
-                oauth_client_id: None,
-                oauth_client_secret: None,
-                status: "active",
-                source: None,
-                source_id: None,
-            },
-        )
-        .await
-        .unwrap();
-        state
-            .db
-            .collection("user_api_keys")
-            .insert_one(&key)
-            .await
-            .unwrap();
+        let key = Self::key(&state, &owner).await;
         let endpoint = test_user_endpoint(
             &endpoint_id,
             &owner,
@@ -131,6 +106,31 @@ impl Fixture {
             server,
             catalog,
         }
+    }
+    async fn key(state: &AppState, owner: &str) -> UserApiKey {
+        user_api_key_service::create_api_key(
+            &state.db,
+            &state.encryption_keys,
+            owner,
+            CreateApiKeyParams {
+                label: "fixture",
+                credential_type: "api_key",
+                credential: "fixture-secret-not-for-output",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap()
     }
     async fn check(&self) -> VerificationView {
         check(
@@ -377,11 +377,7 @@ async fn org_admin_exact_connection_and_nonowner_authority() {
         .unwrap();
     let owner = f.auth.user_id.to_string();
     let s = f.snapshot().await;
-    for (collection, id) in [
-        ("user_services", &f.id),
-        ("user_api_keys", &s.key.id),
-        ("user_endpoints", &s.endpoint.id),
-    ] {
+    for (collection, id) in [("user_services", &f.id), ("user_endpoints", &s.endpoint.id)] {
         f.state
             .db
             .collection::<bson::Document>(collection)
@@ -389,6 +385,15 @@ async fn org_admin_exact_connection_and_nonowner_authority() {
             .await
             .unwrap();
     }
+    // Credential encryption binds the owner; create an org-owned key rather
+    // than corrupting a personal key by changing only its user_id.
+    let key = Fixture::key(&f.state, &org).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(doc! {"_id":&f.id}, doc! {"$set":{"api_key_id":&key.id}})
+        .await
+        .unwrap();
     assert!(
         check(State(f.state.clone()), f.auth.clone(), Path(f.id.clone()))
             .await
@@ -397,12 +402,14 @@ async fn org_admin_exact_connection_and_nonowner_authority() {
     let membership = test_membership(&org, &owner, OrgRole::Admin, None);
     f.state
         .db
-        .collection("org_memberships")
+        .collection::<crate::models::org_membership::OrgMembership>("org_memberships")
         .insert_one(&membership)
         .await
         .unwrap();
     f.mock(200).await;
-    assert_eq!(f.check().await.state, "verified");
+    let result = f.check().await;
+    assert_eq!(result.state, "verified", "{result:?}");
+    f.server.verify().await;
     f.state
         .db
         .collection::<bson::Document>("org_memberships")
@@ -440,7 +447,7 @@ async fn trusted_defaults_only_and_admin_clear_is_preserved() {
         catalog.credential_verification = None;
         f.state
             .db
-            .collection("downstream_services")
+            .collection::<DownstreamService>("downstream_services")
             .insert_one(&catalog)
             .await
             .unwrap();
@@ -481,7 +488,7 @@ async fn trusted_defaults_only_and_admin_clear_is_preserved() {
     custom.openapi_spec_url = Some(format!("{}/untrusted-spec", f.server.uri()));
     f.state
         .db
-        .collection("downstream_services")
+        .collection::<DownstreamService>("downstream_services")
         .insert_one(&custom)
         .await
         .unwrap();
@@ -574,9 +581,20 @@ async fn key_create_returns_committed_connection_when_provider_is_unavailable() 
 }
 
 #[tokio::test]
-async fn local_approval_policy_does_not_create_provider_rejection_or_an_approval() {
+async fn local_deny_policy_does_not_create_provider_rejection_or_an_approval() {
     let f = Fixture::new().await;
-    set_test_approval_preference(&f.state.db, &f.auth.user_id.to_string(), true).await;
+    crate::services::approval_service::set_service_approval_config(
+        &f.state.db,
+        &f.auth.user_id.to_string(),
+        &f.catalog.id,
+        "Fixture",
+        Some(true),
+        None,
+        None,
+        Some(&ApprovalEffect::Deny),
+    )
+    .await
+    .unwrap();
     let result = f.check().await;
     assert_eq!(result.state, "not_verified");
     assert_eq!(result.reason_code, "check_unavailable");
@@ -691,6 +709,7 @@ async fn ambiguous_operation_is_unavailable_in_inventory_and_checks() {
         verification::select_operation(
             &snapshot.service,
             &f.catalog,
+            snapshot.provider.as_ref(),
             &[operation, duplicate.clone()],
         )
         .is_none()
@@ -747,5 +766,109 @@ async fn verification_audit_is_only_identifiers_and_stable_outcome_metadata() {
     let dump = format!("{rows:?}");
     assert!(!dump.contains("fixture-secret"));
     assert!(!dump.contains("private-provider-body"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn linked_provider_gateway_policy_is_shared_by_checks_inventory_and_evidence_fence() {
+    let f = Fixture::new().await;
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(
+            doc! {"_id":&f.catalog.id},
+            doc! {"$set":{"provider_config_id":&provider_id}},
+        )
+        .await
+        .unwrap();
+    // A missing linked provider is not evidence that instance checks are safe.
+    assert_eq!(f.check().await.reason_code, "check_unavailable");
+    f.state.db.collection::<bson::Document>("provider_configs").insert_one(doc! {
+        "_id":&provider_id,"slug":"verification-provider","name":"Verification provider",
+        "provider_type":"api_key","is_active":true,"requires_gateway_url":true,
+        "created_by":f.auth.user_id.to_string(),"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+    }).await.unwrap();
+    let gateway = f.check().await;
+    assert_eq!(gateway.state, "not_verified");
+    assert_eq!(gateway.reason_code, "gateway_check_unsupported");
+    assert!(!gateway.can_check);
+    let listed =
+        crate::handlers::keys::get_key(State(f.state.clone()), f.auth.clone(), Path(f.id.clone()))
+            .await
+            .unwrap()
+            .0
+            .credential_verification
+            .unwrap();
+    assert_eq!(listed.reason_code, gateway.reason_code);
+    assert!(!listed.can_check);
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":&provider_id},
+            doc! {"$set":{"requires_gateway_url":false}},
+        )
+        .await
+        .unwrap();
+    f.mock(200).await;
+    assert_eq!(f.check().await.state, "verified");
+    let before = f.snapshot().await.binding();
+    // Policy changes invalidate a prior success even if a writer forgot the timestamp.
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":&provider_id},
+            doc! {"$set":{"requires_gateway_url":true}},
+        )
+        .await
+        .unwrap();
+    assert_ne!(f.snapshot().await.binding(), before);
+    assert_eq!(f.check().await.reason_code, "gateway_check_unsupported");
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":&provider_id},
+            doc! {"$set":{"requires_gateway_url":false,"is_active":false}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.check().await.reason_code, "check_unavailable");
+    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_check_preserves_the_normal_human_approval_bypass() {
+    let f = Fixture::new().await;
+    crate::services::approval_service::set_service_approval_config(
+        &f.state.db,
+        &f.auth.user_id.to_string(),
+        &f.catalog.id,
+        "Fixture",
+        Some(true),
+        None,
+        None,
+        Some(&ApprovalEffect::RequireApproval),
+    )
+    .await
+    .unwrap();
+    f.mock(200).await;
+    let result = f.check().await;
+    assert_eq!(result.state, "verified", "{result:?}");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("approval_requests")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.server.verify().await;
     f.state.db.drop().await.unwrap();
 }

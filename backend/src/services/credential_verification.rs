@@ -14,6 +14,7 @@ use crate::{
     models::{
         credential_verification::{CredentialVerificationCheck, CredentialVerificationObservation},
         downstream_service::DownstreamService,
+        provider_config::ProviderConfig,
         service_endpoint::{EndpointRisk, PublicationState, ServiceEndpoint},
         user_api_key::UserApiKey,
         user_endpoint::UserEndpoint,
@@ -58,6 +59,7 @@ pub fn binding(
     endpoint: &UserEndpoint,
     key: &UserApiKey,
     catalog: Option<&DownstreamService>,
+    provider: Option<&ProviderConfig>,
     operation: Option<&ServiceEndpoint>,
 ) -> String {
     let projection = serde_json::json!({
@@ -66,6 +68,7 @@ pub fn binding(
         "endpoint_updated": endpoint.updated_at, "key": key.id, "epoch": key.credential_epoch,
         "key_status": key.status, "key_updated": key.updated_at,
         "catalog": catalog.map(|c| (&c.id, c.updated_at, &c.credential_verification)),
+        "provider": provider.map(|p| (&p.id, p.updated_at, p.is_active, p.requires_gateway_url)),
         "operation": operation.map(|op| (&op.id, op.operation_generation, op.updated_at, &op.path, &op.method, &op.parameters, &op.risk, &op.publication)),
     });
     format!("{:x}", Sha256::digest(projection.to_string().as_bytes()))
@@ -76,13 +79,14 @@ pub fn view(
     endpoint: &UserEndpoint,
     key: &UserApiKey,
     catalog: Option<&DownstreamService>,
+    provider: Option<&ProviderConfig>,
     operation: Option<&ServiceEndpoint>,
 ) -> Option<VerificationView> {
     if !eligible(service, key) {
         return None;
     }
-    let reason = if catalog.is_some_and(|c| c.requires_gateway_url) {
-        "gateway_check_unsupported"
+    let reason = if let Some(reason) = provider_refusal(catalog, provider) {
+        reason
     } else if catalog
         .and_then(|c| c.credential_verification.as_ref())
         .is_none()
@@ -97,7 +101,7 @@ pub fn view(
     let Some(observation) = service
         .credential_verification
         .as_ref()
-        .filter(|v| v.binding == binding(service, endpoint, key, catalog, operation))
+        .filter(|v| v.binding == binding(service, endpoint, key, catalog, provider, operation))
     else {
         return Some(VerificationView::unverified(reason, can_check));
     };
@@ -108,6 +112,20 @@ pub fn view(
         source: observation.observed_at.map(|_| "check".into()),
         can_check,
     })
+}
+
+// Gateway/instance URL policy belongs to ProviderConfig, not the catalog row.
+// Missing linked providers fail closed; callers reuse their batch-loaded row.
+fn provider_refusal(
+    catalog: Option<&DownstreamService>,
+    provider: Option<&ProviderConfig>,
+) -> Option<&'static str> {
+    let id = catalog?.provider_config_id.as_deref()?;
+    match provider.filter(|p| p.id == id) {
+        Some(p) if p.requires_gateway_url => Some("gateway_check_unsupported"),
+        Some(p) if p.is_active => None,
+        _ => Some("check_unavailable"),
+    }
 }
 
 pub fn validate_declaration(check: &CredentialVerificationCheck) -> AppResult<()> {
@@ -153,6 +171,7 @@ pub struct Snapshot {
     pub key: UserApiKey,
     pub endpoint: UserEndpoint,
     pub catalog: Option<DownstreamService>,
+    pub provider: Option<ProviderConfig>,
     pub operation: Option<ServiceEndpoint>,
 }
 impl Snapshot {
@@ -162,6 +181,7 @@ impl Snapshot {
             &self.endpoint,
             &self.key,
             self.catalog.as_ref(),
+            self.provider.as_ref(),
             self.operation.as_ref(),
         )
     }
@@ -171,6 +191,7 @@ impl Snapshot {
             &self.endpoint,
             &self.key,
             self.catalog.as_ref(),
+            self.provider.as_ref(),
             self.operation.as_ref(),
         )
     }
@@ -208,11 +229,23 @@ pub async fn snapshot(db: &Database, service_id: &str) -> AppResult<Option<Snaps
         }
         None => None,
     };
+    let provider = match catalog
+        .as_ref()
+        .and_then(|c| c.provider_config_id.as_deref())
+    {
+        Some(id) => {
+            db.collection::<ProviderConfig>("provider_configs")
+                .find_one(doc! {"_id":id})
+                .await?
+        }
+        None => None,
+    };
     let mut result = Snapshot {
         service,
         key,
         endpoint,
         catalog,
+        provider,
         operation: None,
     };
     result.operation = operation(db, &result).await?;
@@ -223,7 +256,7 @@ pub async fn operation(db: &Database, snapshot: &Snapshot) -> AppResult<Option<S
     let Some(catalog) = snapshot
         .catalog
         .as_ref()
-        .filter(|c| c.is_active && !c.requires_gateway_url)
+        .filter(|c| c.is_active && provider_refusal(Some(c), snapshot.provider.as_ref()).is_none())
     else {
         return Ok(None);
     };
@@ -238,13 +271,20 @@ pub async fn operation(db: &Database, snapshot: &Snapshot) -> AppResult<Option<S
         .await?
         .try_collect()
         .await?;
-    Ok(select_operation(&snapshot.service, catalog, &operations).cloned())
+    Ok(select_operation(
+        &snapshot.service,
+        catalog,
+        snapshot.provider.as_ref(),
+        &operations,
+    )
+    .cloned())
 }
 
 /// Inventory and execution must agree when catalog operation names are ambiguous.
 pub fn select_operation<'a>(
     service: &UserService,
     catalog: &DownstreamService,
+    provider: Option<&ProviderConfig>,
     operations: &'a [ServiceEndpoint],
 ) -> Option<&'a ServiceEndpoint> {
     let check = catalog.credential_verification.as_ref()?;
@@ -252,19 +292,21 @@ pub fn select_operation<'a>(
         .iter()
         .filter(|op| op.service_id == catalog.id && op.name == check.operation && op.is_active);
     let operation = matching.next()?;
-    (matching.next().is_none() && valid_operation(service, catalog, operation)).then_some(operation)
+    (matching.next().is_none() && valid_operation(service, catalog, provider, operation))
+        .then_some(operation)
 }
 
 pub fn valid_operation(
     service: &UserService,
     catalog: &DownstreamService,
+    provider: Option<&ProviderConfig>,
     op: &ServiceEndpoint,
 ) -> bool {
     let Some(check) = catalog.credential_verification.as_ref() else {
         return false;
     };
     catalog.is_active
-        && !catalog.requires_gateway_url
+        && provider_refusal(Some(catalog), provider).is_none()
         && op.service_id == catalog.id
         && op.name == check.operation
         && op.is_active

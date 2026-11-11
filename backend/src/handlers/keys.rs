@@ -3312,6 +3312,9 @@ async fn enrich_key_discovery_metadata(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_by_id.get(id));
+        let verification_provider = inherited_catalog
+            .and_then(|catalog| catalog.provider_config_id.as_deref())
+            .and_then(|id| providers.get(id));
         key.credential_verification = service
             .api_key_id
             .as_deref()
@@ -3323,10 +3326,12 @@ async fn enrich_key_discovery_metadata(
                     endpoint,
                     credential,
                     inherited_catalog.copied(),
+                    verification_provider,
                     inherited_catalog.and_then(|c| {
                         crate::services::credential_verification::select_operation(
                             service,
                             c,
+                            verification_provider,
                             &verification_operations,
                         )
                     }),
