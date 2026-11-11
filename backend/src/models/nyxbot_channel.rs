@@ -51,6 +51,15 @@ pub struct GatewayBotMentionSupport {
     pub checked_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GatewayIntake {
+    pub binding_id: String,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub handed_over_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub last_inbound_at: Option<DateTime<Utc>>,
+}
+
 /// A channel bot linked to one of the owner's agents (NyxBot or a
 /// specialist). Telegram bots, and bots on platforms whose
 /// `nyxbot:gateway-{platform}` feature flag is on for their linking person, are reached
@@ -79,6 +88,8 @@ pub struct NyxbotChannel {
     pub gateway_native_activation_operation: Option<String>,
     #[serde(default)]
     pub gateway_native_delivery: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_intake: Option<GatewayIntake>,
     #[serde(default)]
     pub gateway_bot_mentions: GatewayBotMentionSupport,
     #[serde(default)]

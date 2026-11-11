@@ -294,9 +294,16 @@ pub fn platform_response(
 pub async fn platform_json_value(
     request: reqwest::RequestBuilder,
 ) -> AppResult<(reqwest::StatusCode, Value)> {
+    platform_json_value_with_timeout(request, TIMEOUT).await
+}
+
+pub async fn platform_json_value_with_timeout(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> AppResult<(reqwest::StatusCode, Value)> {
     super::channel_platform::mark_provider_attempt().await?;
     let response = request
-        .timeout(TIMEOUT)
+        .timeout(timeout)
         .send()
         .await
         .map_err(|_| upload_failed())?;

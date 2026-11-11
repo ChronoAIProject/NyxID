@@ -854,6 +854,7 @@ export function AssistantScreen({
                         <MachineToolCard
                           key={`machine:${activity.id}`}
                           receipt={activity.machine!}
+                          decision={activity.decision}
                           attachments={item.attachments}
                           conversationId={conversation.id}
                           onOpenDesktop={(params) =>
@@ -1302,6 +1303,7 @@ export function AssistantScreen({
                                   <MachineToolCard
                                     key={`machine:${activity.id}`}
                                     receipt={activity.machine!}
+                          decision={activity.decision}
                                     attachments={liveAttachments}
                                     conversationId={conversation.id}
                                     onOpenDesktop={(params) =>

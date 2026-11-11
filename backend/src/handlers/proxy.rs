@@ -3232,41 +3232,69 @@ async fn execute_proxy_inner(
     extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
-    crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
-    if let Some(pre) = &pre_resolved {
+    let connect = request.method() == http::Method::CONNECT;
+    let tracked = auth_user.assistant_chat.as_deref().filter(|_| {
+        crate::services::machine_activity_service::activity_id().is_none()
+            && crate::services::assistant_activity_decision::PROXY_ACTIVITY
+                .try_with(|_| ())
+                .is_err()
+    });
+    let run = async {
+        crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
+        if let Some(pre) = &pre_resolved {
+            super::invocation_diagnostics::Target::record_request(
+                &request,
+                pre.user_service_id.as_deref(),
+            );
+        }
+        // Poll resolution and forwarding sequentially so their debug frames never
+        // stack, including when a machine request is nested in pool dispatch.
+        let (resolved, extra_outbound_headers) = resolve_proxy_execution(
+            state,
+            auth_user,
+            service_id,
+            path,
+            &mut request,
+            pre_resolved,
+            target_mode,
+            extra_outbound_headers,
+        )
+        .await?;
         super::invocation_diagnostics::Target::record_request(
             &request,
-            pre.user_service_id.as_deref(),
+            resolved.resolved_user_service_id.as_deref(),
         );
+        execute_resolved_proxy(
+            state,
+            auth_user,
+            service_id,
+            path,
+            request,
+            extra_outbound_headers,
+            resolved_slug,
+            resolved,
+        )
+        .await
+    };
+    if let Some(chat) = tracked {
+        let id = uuid::Uuid::new_v4().to_string();
+        let activity = crate::services::assistant_activity_decision::ProxyActivity::new(id.clone());
+        let used = activity.used.clone();
+        let result = crate::services::assistant_activity_decision::PROXY_ACTIVITY
+            .scope(activity, run)
+            .await;
+        if used.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(turn) = chat.turn_id.as_deref()
+        {
+            return crate::services::assistant_activity_decision::proxy_response(
+                &state.db, chat, turn, &id, connect, result,
+            )
+            .await;
+        }
+        result
+    } else {
+        run.await
     }
-    // Poll resolution and forwarding sequentially so their debug frames never
-    // stack, including when a machine request is nested in pool dispatch.
-    let (resolved, extra_outbound_headers) = resolve_proxy_execution(
-        state,
-        auth_user,
-        service_id,
-        path,
-        &mut request,
-        pre_resolved,
-        target_mode,
-        extra_outbound_headers,
-    )
-    .await?;
-    super::invocation_diagnostics::Target::record_request(
-        &request,
-        resolved.resolved_user_service_id.as_deref(),
-    );
-    execute_resolved_proxy(
-        state,
-        auth_user,
-        service_id,
-        path,
-        request,
-        extra_outbound_headers,
-        resolved_slug,
-        resolved,
-    )
-    .await
 }
 
 // Construct the boxed future outside the caller's poll frame: Box::pin at
@@ -4978,6 +5006,15 @@ async fn execute_resolved_proxy_inner<'a>(
             })
             .await?;
 
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_activity_decision::approval(
+                    &state.db,
+                    chat,
+                    &approval_request.id,
+                    false,
+                )
+                .await?;
+            }
             // Block until the user approves/rejects or timeout expires
             let req_id = approval_request.id.clone();
             approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
@@ -4990,6 +5027,13 @@ async fn execute_resolved_proxy_inner<'a>(
                     )
                 })?;
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_activity_decision::approval(
+                    &state.db,
+                    chat,
+                    &approval_request.id,
+                    true,
+                )
+                .await?;
                 crate::services::assistant_invocation_service::revalidate_after_approval(
                     &state.db, chat,
                 )

@@ -1,4 +1,11 @@
-import { act, render, screen, within } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  act,
+  fireEvent,
+  render as renderUi,
+  screen,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CmaOperation } from "@/schemas/cma-operation";
 import { CmaOperationCard } from "./cma-operation-card";
@@ -10,7 +17,11 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-22T10:01:00Z"));
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const render = (ui: ReactNode) => renderUi(ui, { wrapper: TooltipProvider });
 
 const operation: CmaOperation = {
   id: "watch-1",
@@ -28,13 +39,23 @@ const operation: CmaOperation = {
   checked_at: "2026-10-22T10:01:00Z",
 };
 
-describe("CMA delegation card", () => {
+describe("CMA submission card", () => {
   it("warns about elapsed time without declaring a running request failed", () => {
     vi.setSystemTime(new Date("2026-10-22T10:11:00Z"));
-    render(<CmaOperationCard operation={{ ...operation, checked_at: "2026-10-22T10:10:59Z" }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Taking longer than usual");
-    expect(screen.getByText(/CMA still reports it as running/)).toBeInTheDocument();
-    expect(screen.getByText(/ask NyxBot to cancel this task/)).toBeInTheDocument();
+    render(
+      <CmaOperationCard
+        operation={{ ...operation, checked_at: "2026-10-22T10:10:59Z" }}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Taking longer than usual",
+    );
+    expect(
+      screen.getByText(/CMA still reports it as running/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/ask NyxBot to cancel this task/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Tracking progress/)).toBeInTheDocument();
     expect(screen.queryByText(/no progress/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
@@ -43,13 +64,30 @@ describe("CMA delegation card", () => {
 
   it("updates the elapsed-time notice while open and removes it on completion", () => {
     vi.setSystemTime(new Date("2026-10-22T10:09:00Z"));
-    const { rerender, unmount } = render(<CmaOperationCard operation={operation} />);
+    const { rerender, unmount } = render(
+      <CmaOperationCard operation={operation} />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Working");
-    act(() => { vi.advanceTimersByTime(60_000); });
-    expect(screen.getByRole("status")).toHaveTextContent("Taking longer than usual");
-    rerender(<CmaOperationCard operation={{ ...operation, status: "completed", state: "delivered", reason: "completed" }} />);
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Taking longer than usual",
+    );
+    rerender(
+      <CmaOperationCard
+        operation={{
+          ...operation,
+          status: "completed",
+          state: "delivered",
+          reason: "completed",
+        }}
+      />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Completed");
-    expect(screen.queryByText(/CMA still reports it as running/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/CMA still reports it as running/),
+    ).not.toBeInTheDocument();
     unmount();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -65,15 +103,26 @@ describe("CMA delegation card", () => {
     { kind: "cma_provisioning" as const, status: "running" },
     { created_at: "invalid" },
     { created_at: "2026-10-23T10:00:00Z" },
-  ])("preserves specific states instead of adding an elapsed-time warning: %j", (patch) => {
-    vi.setSystemTime(new Date("2026-10-22T10:30:00Z"));
-    render(<CmaOperationCard operation={{ ...operation, ...patch }} />);
-    expect(screen.queryByText("Taking longer than usual")).not.toBeInTheDocument();
-    expect(screen.queryByText(/CMA still reports it as running/)).not.toBeInTheDocument();
-  });
+  ])(
+    "preserves specific states instead of adding an elapsed-time warning: %j",
+    (patch) => {
+      vi.setSystemTime(new Date("2026-10-22T10:30:00Z"));
+      render(<CmaOperationCard operation={{ ...operation, ...patch }} />);
+      expect(
+        screen.queryByText("Taking longer than usual"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/CMA still reports it as running/),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("explains that a tracking timeout does not stop the remote task", () => {
-    render(<CmaOperationCard operation={{ ...operation, state: "delivered", reason: "timeout" }} />);
+    render(
+      <CmaOperationCard
+        operation={{ ...operation, state: "delivered", reason: "timeout" }}
+      />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Tracking timed out");
     expect(screen.getByText(/CMA may still be running/)).toBeInTheDocument();
     expect(screen.getByText(/before submitting it again/)).toBeInTheDocument();
@@ -81,23 +130,87 @@ describe("CMA delegation card", () => {
 
   it("offers the internal Agent panel when a local reference is available", () => {
     flags.cma = true;
-    render(<CmaOperationCard operation={{ ...operation, agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19", response_id: "rsp-one" }} />);
-    expect(screen.getByRole("button", { name: /View execution/ })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /View execution/ })).not.toBeInTheDocument();
+    render(
+      <CmaOperationCard
+        operation={{
+          ...operation,
+          agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
+          response_id: "rsp-one",
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /View execution/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /View execution/ }),
+    ).not.toBeInTheDocument();
   });
   it("does not invent an internal reference from a remote Agent ID", () => {
     flags.cma = true;
     render(<CmaOperationCard operation={operation} />);
-    expect(screen.queryByRole("button", { name: /View execution/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /View execution/ }),
+    ).not.toBeInTheDocument();
   });
   it("hides the internal execution entry when the feature is disabled", () => {
-    render(<CmaOperationCard operation={{ ...operation, agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19", response_id: "rsp-one" }} />);
-    expect(screen.queryByRole("button", { name: /View execution/ })).not.toBeInTheDocument();
+    render(
+      <CmaOperationCard
+        operation={{
+          ...operation,
+          agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
+          response_id: "rsp-one",
+        }}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /View execution/ }),
+    ).not.toBeInTheDocument();
   });
-  it("shows live execution identity and updates the same card when the job completes", () => {
+  it("uses the dedicated card controls without inventing session activity for an unconfirmed submission", () => {
+    render(
+      <CmaOperationCard
+        operation={{
+          ...operation,
+          agent_id: null,
+          operation_id: null,
+          reason: "submission_uncertain",
+          state: "delivered",
+          status: null,
+        }}
+      />,
+    );
+    expect(screen.queryByText("Delegated to CMA")).not.toBeInTheDocument();
+    expect(screen.queryByText("Recent actions")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Pin CMA/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reconnect/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Session ID")).not.toBeInTheDocument();
+    const details = screen.getByRole("button", { name: "Submission details" });
+    expect(details).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Minimise CMA submission" }),
+    );
+    expect(details).not.toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Submission unconfirmed",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Maximise CMA submission" }),
+    );
+    expect(details).toBeVisible();
+  });
+
+  it("keeps recorded identity in details and updates the same card when the job completes", () => {
     const { rerender } = render(<CmaOperationCard operation={operation} />);
     expect(screen.getByRole("status")).toHaveTextContent("Working");
-    expect(screen.getByText("agt_coffee")).toBeInTheDocument();
+    expect(screen.getByText("agt_coffee")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Submission details" }));
+    expect(screen.getByText("agt_coffee")).toBeVisible();
     expect(screen.getByText("coffee-site-20261022")).toBeInTheDocument();
     expect(screen.getByText("testtest")).toBeInTheDocument();
     expect(screen.getByText(/Tracking progress/)).toBeInTheDocument();
@@ -112,7 +225,7 @@ describe("CMA delegation card", () => {
       />,
     );
     expect(
-      screen.getAllByRole("region", { name: "CMA delegation" }),
+      screen.getAllByRole("region", { name: "CMA submission: CMA task" }),
     ).toHaveLength(1);
     expect(screen.getByRole("status")).toHaveTextContent("Completed");
     expect(screen.getByText(/Status recorded/)).toBeInTheDocument();
@@ -132,22 +245,33 @@ describe("CMA delegation card", () => {
     );
     expect(screen.getByRole("status")).toHaveTextContent("Ready");
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "CMA setup" })).toBeVisible();
     expect(
-      within(screen.getByRole("list", { name: "CMA progress" })).getByText(
-        "Agent ready",
-      ),
-    ).toBeInTheDocument();
+      screen.queryByRole("list", { name: "CMA progress" }),
+    ).not.toBeInTheDocument();
   });
 
   it.each([
     ["sandbox_ready", "Preparing sandbox"],
     ["desktop_preparation", "Preparing desktop"],
-  ])("shows CMA's %s phase without claiming the Agent is ready", (phase, label) => {
-    render(<CmaOperationCard operation={{ ...operation, kind: "cma_provisioning", status: "running", phase }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Starting");
-    expect(screen.getByText(label)).toBeInTheDocument();
-    expect(within(screen.getByRole("list", { name: "CMA progress" })).getByText("Agent ready").querySelector("svg")).toBeNull();
-  });
+  ])(
+    "shows CMA's %s phase without claiming the Agent is ready",
+    (phase, label) => {
+      render(
+        <CmaOperationCard
+          operation={{
+            ...operation,
+            kind: "cma_provisioning",
+            status: "running",
+            phase,
+          }}
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent("Starting");
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+    },
+  );
 
   it.each([
     [{ state: "waiting", status: "waiting_approval" }, "Needs approval"],
@@ -186,26 +310,59 @@ describe("CMA delegation card", () => {
 
   it("distinguishes a failed creation submission from an uncertain outcome", () => {
     const failed: CmaOperation = {
-      ...operation, kind: "cma_provisioning", operation_id: null, agent_id: null,
-      status: null, state: "delivered", reason: "submission_failed",
+      ...operation,
+      kind: "cma_provisioning",
+      operation_id: null,
+      agent_id: null,
+      status: null,
+      state: "delivered",
+      reason: "submission_failed",
     };
     const { rerender } = render(<CmaOperationCard operation={failed} />);
     expect(screen.getByRole("status")).toHaveTextContent("Submission failed");
-    expect(screen.queryByText(/final outcome could not be confirmed/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/final outcome could not be confirmed/),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "CMA progress" }).querySelector("svg")).toBeNull();
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
 
-    rerender(<CmaOperationCard operation={{ ...failed, reason: "submission_uncertain" }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Submission unconfirmed");
-    expect(screen.getByText(/final outcome could not be confirmed/)).toBeInTheDocument();
+    rerender(
+      <CmaOperationCard
+        operation={{ ...failed, reason: "submission_uncertain" }}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Submission unconfirmed",
+    );
+    expect(
+      screen.getByText(/final outcome could not be confirmed/),
+    ).toBeInTheDocument();
   });
 
   it("distinguishes confirmed response cancellation from an ordinary incomplete response", () => {
-    const { rerender } = render(<CmaOperationCard operation={{ ...operation, state: "delivered", status: "incomplete", reason: "operation_cancelled" }} />);
+    const { rerender } = render(
+      <CmaOperationCard
+        operation={{
+          ...operation,
+          state: "delivered",
+          status: "incomplete",
+          reason: "operation_cancelled",
+        }}
+      />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Cancelled");
     expect(screen.queryByText(/may still be running/)).not.toBeInTheDocument();
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
-    rerender(<CmaOperationCard operation={{ ...operation, state: "delivered", status: "incomplete", reason: "operation_failed" }} />);
+    rerender(
+      <CmaOperationCard
+        operation={{
+          ...operation,
+          state: "delivered",
+          status: "incomplete",
+          reason: "operation_failed",
+        }}
+      />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("Incomplete");
   });
 
@@ -223,16 +380,10 @@ describe("CMA delegation card", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Ready");
     expect(screen.getByText(/Tracking progress/)).toBeInTheDocument();
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
     expect(
-      within(screen.getByRole("list", { name: "CMA progress" }))
-        .getByText("Submitted")
-        .querySelector("svg"),
-    ).toBeInTheDocument();
-    expect(
-      within(screen.getByRole("list", { name: "CMA progress" }))
-        .getByText("CMA working")
-        .querySelector("svg"),
-    ).toBeNull();
+      screen.queryByRole("button", { name: /Pin CMA/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("preserves a confirmed outcome when the final result cannot be retrieved", () => {
@@ -337,13 +488,12 @@ describe("CMA delegation card", () => {
 
   it("shows the check date so a historical status cannot look like today's check", () => {
     render(<CmaOperationCard operation={operation} />);
-    expect(screen.getByText(/^Checked /)).toHaveTextContent(
-      new Date(operation.checked_at!).toLocaleDateString([], {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      }),
+    fireEvent.click(screen.getByRole("button", { name: "Submission details" }));
+    const checked = screen.getByText(
+      new Date(operation.checked_at!).toLocaleString(),
     );
+    expect(checked).toBeVisible();
+    expect(checked).toHaveAttribute("datetime", operation.checked_at);
   });
 
   it.each(["ready", "succeeded", "unknown"])(

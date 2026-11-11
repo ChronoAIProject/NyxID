@@ -8209,3 +8209,88 @@ async fn assistant_team_operation_discovery_live_revocation_and_cursor_binding()
     assert_eq!(denied["error"], "not_found");
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn approval_gated_native_activity_keeps_tool_bytes_and_reconciles_after_allow() {
+    let f = boxed_chat_fixture("approval_activity_native").await;
+    let id = connected(
+        &f.state.db,
+        &f.owner,
+        "decision-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    crate::services::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let args = json!({"subagent":"worker","services":[id],"access":"read"});
+    let response = call(&f, &auth, "nyxid__set_guest_access", args.clone()).await;
+    assert_eq!(
+        response.extensions().get::<ToolOutcome>(),
+        Some(&ToolOutcome::DecisionRequired)
+    );
+    assert!(tool_failure(&response).is_none());
+    let digest = response
+        .extensions()
+        .get::<ToolResultDigest>()
+        .unwrap()
+        .0
+        .clone();
+    let pending = result(response, true).await;
+    assert_eq!(pending["error"], "acknowledgement_required");
+    assert!(!digest.is_empty());
+    let ack = pending["acknowledgement_id"].as_str().unwrap();
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+        .await
+        .unwrap();
+    let mut a = row.active_turn.unwrap().activities;
+    let gated = a
+        .iter_mut()
+        .find(|a| a.decision.as_ref().is_some_and(|d| d.id == ack))
+        .unwrap();
+    assert_eq!(gated.decision.as_ref().unwrap().state, "waiting");
+    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
+        .await
+        .unwrap();
+    let mut args = args;
+    args["acknowledgement_id"] = json!(ack);
+    result(
+        call(&f, &auth, "nyxid__set_guest_access", args).await,
+        false,
+    )
+    .await;
+    crate::services::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.nyxbot_thread,
+        vec![gated],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        a.iter().find_map(|a| a.decision.as_ref()).unwrap().state,
+        "completed"
+    );
+    // A provider-authored acknowledgement-shaped result is still a genuine error.
+    let forged = rpc_success(
+        None,
+        json!({"isError":true,"content":[{"type":"text","text":"acknowledgement_required"}],"acknowledgement_id":ack}),
+    );
+    assert_eq!(
+        forged.extensions().get::<ToolOutcome>(),
+        Some(&ToolOutcome::Error)
+    );
+    assert!(tool_failure(&forged).is_some());
+    f.state.db.drop().await.unwrap();
+}

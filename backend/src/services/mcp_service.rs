@@ -2750,7 +2750,7 @@ pub fn generate_tool_definitions(
         description: "Search connected tools by keyword. Use this when you have many \
             tools and need to find a specific one. At equal relevance, saved connection order \
             refills only the existing slots of the same catalog service; unrelated services keep \
-            their slots. This order is advisory: choose the appropriate tool for the task."
+            their slots. This order is advisory: choose the appropriate tool for the task. For a Lark/Feishu /wiki/ document link, search wiki_get_node; resolve its node token, then read the supported object on the same connection. Never ask the owner to extract a hidden docx ID. If no connection exists, discover services and use nyx__connect_service for a hosted link; specialists require an explicit grant."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -5863,7 +5863,9 @@ pub fn execute_tool_resolved<'a>(
             )
         })
         .flatten();
-        let http_client = if resource_source.is_some() {
+        let wiki_slug = catalog_service_slug
+            .filter(|_| super::lark_wiki::matches(catalog_service_slug, service, endpoint));
+        let http_client = if resource_source.is_some() || wiki_slug.is_some() {
             super::resource_adapter::http_client()
         } else {
             http_client
@@ -5927,6 +5929,19 @@ pub fn execute_tool_resolved<'a>(
                 response.status,
                 &response.text,
             )?;
+        }
+        if let (Some(slug), McpToolExecutionOutcome::Response(response)) =
+            (&wiki_slug, &mut outcome)
+            && matches!(response.origin, ToolResponseOrigin::Downstream)
+            && response.body_error.is_none()
+        {
+            (response.status, response.text) = super::lark_wiki::response(
+                response.status,
+                &response.text,
+                slug,
+                exec_ctx.assistant_chat,
+                &config.frontend_url,
+            );
         }
         if let (Some(source), Some(arguments), McpToolExecutionOutcome::Response(response)) =
             (resource_source, resource_arguments, &mut outcome)
@@ -6034,6 +6049,17 @@ async fn execute_tool_resolved_inner(
     attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
+    let response_body_limit = if super::lark_wiki::matches(catalog_service_slug, service, endpoint)
+    {
+        Some(
+            exec_ctx
+                .response_body_limit
+                .unwrap_or(256 * 1024)
+                .min(256 * 1024),
+        )
+    } else {
+        exec_ctx.response_body_limit
+    };
     if super::lark_im_tool::kind(endpoint) == Some(super::lark_im_tool::Kind::Image)
         && (prepared.async_submission.is_some() || prepared.async_continuation.is_some())
     {
@@ -6853,7 +6879,7 @@ async fn execute_tool_resolved_inner(
                                 &metered,
                                 if exec_ctx.strict_response_utf8 {
                                     mcp_artifact_usage(
-                                        &resp.body[..exec_ctx.response_body_limit.map_or(resp.body.len(), |n| resp.body.len().min(n.saturating_add(1)))],
+                                        &resp.body[..response_body_limit.map_or(resp.body.len(), |n| resp.body.len().min(n.saturating_add(1)))],
                                         resp.body.len(), request_len, &target.service, &path, resp.status,
                                     )
                                 } else {
@@ -6879,14 +6905,14 @@ async fn execute_tool_resolved_inner(
                             resp.status,
                             header_value(&resp.headers, "content-type"),
                             resp.body,
-                            exec_ctx.response_body_limit,
+                            response_body_limit,
                             exec_ctx.strict_response_utf8,
                         )));
                     }
                     Ok(ProxyResponseType::Streaming(rx)) => {
                         let (status, headers, body_buf, received) = match collect_node_stream_response(
                             rx,
-                            exec_ctx.response_body_limit,
+                            response_body_limit,
                         )
                         .await
                         {
@@ -6922,7 +6948,7 @@ async fn execute_tool_resolved_inner(
                             status,
                             header_value(&headers, "content-type"),
                             body_buf,
-                            exec_ctx.response_body_limit,
+                            response_body_limit,
                             exec_ctx.strict_response_utf8,
                         )));
                     }
@@ -7107,7 +7133,7 @@ async fn execute_tool_resolved_inner(
                     ));
                 }
             }
-        } else if let Some(limit) = exec_ctx.response_body_limit {
+        } else if let Some(limit) = response_body_limit {
             let result: Result<_, reqwest::Error> = async {
                 let (bytes, received) = read_bounded_tool_body(response, limit).await?;
                 // Preserve received-byte accounting before strict decoding consumes

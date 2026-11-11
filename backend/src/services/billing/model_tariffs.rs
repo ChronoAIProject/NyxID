@@ -138,6 +138,7 @@ pub fn validate(t: &mut ModelTariff, slug: &str) -> AppResult<()> {
     {
         return Err(invalid("Tariff verification source is required"));
     }
+    crate::services::platform_model_execution::certification::validate_family_tariff(t)?;
     let selectors = model_usage::selectors(&t.contract)?;
     let b = &t.bounds;
     if !(1..=16).contains(&b.max_candidates)
@@ -373,6 +374,13 @@ pub async fn create(
         security_readiness_service::require(
             db,
             super::super::platform_model_execution::images::READINESS,
+        )
+        .await?;
+    }
+    if super::super::platform_model_execution::certification::family_contract(&input.contract) {
+        security_readiness_service::require(
+            db,
+            super::super::platform_model_execution::certification::READINESS,
         )
         .await?;
     }

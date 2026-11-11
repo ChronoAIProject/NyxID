@@ -215,20 +215,26 @@ Media artifacts have an 8,000,000-character inline cap. Current history rows do
 not carry media, so an artifact is visible in the live local message but is not
 reconstructed after reload.
 
-### CMA delegation cards
+### CMA submission cards
 
-NyxBot and specialist threads render a `CmaOperationCard` beneath the assistant
-reply when an owner chat key actually invokes a supported CMA operation. The
-card comes from the durable MCP watch, never assistant text or a promised task
-plan. It shows the CMA identity, operation and agent IDs when available, a safe
-idempotency key, the invoking assistant's name, and the last observed status.
+NyxBot and specialist threads render CMA operation cards in the shared assets
+preview column beside the chat when an owner chat key actually invokes a
+supported CMA operation. Below the `lg` breakpoint, they share the bounded
+preview area above the chat. They follow the live session card's layout, CMA
+header glyph, status line, minimise control, and details disclosure, with the
+same 500px maximum width, theme tokens and absence of internal dividers.
+The card comes from the durable MCP watch, never assistant text or a promised
+task plan. Submission details contain operation and agent IDs when available,
+a safe idempotency key, the invoking assistant's name and the last check time.
+An unconfirmed submission uses a CMA setup/task title until a real session
+supplies its task title; it has no invented stream, action history or pin.
 Agent status labels follow CMA's own vocabulary: **Starting**, **Ready**,
 **Working**, **Needs approval**, **Paused**, **Stopped**, **Deleted**, and
 **Needs attention**. Provisioning success is **Ready**; only a completed
-Responses operation is **Completed**. Progress stages describe submission, provisioning or activity,
-and readiness; they do not infer implementation or deployment milestones.
+Responses operation is **Completed**. Pending provisioning can show its last
+reported phase; the card does not infer implementation or deployment milestones.
 
-A full-width primary **View in CMA** link opens the exact agent in a new tab
+A **View in CMA** header control opens the exact agent in a new tab
 only when CMA supplies a valid `callback_url`, projected as `cma_url` in
 history. No destination is inferred from agent IDs or catalog configuration.
 An omitted callback preserves the last supplied link; explicit null or an
@@ -248,8 +254,8 @@ When the existing two-hour watch deadline expires, the card explicitly explains
 that automatic tracking ended and CMA may still be running.
 
 When CMA execution is enabled and the operation has a verified local Agent
-reference, **View execution** opens a right-side Sheet within the current
-NyxBot chat. The shared Agent view presents the continuous Conversation and
+reference, the **View execution** clipboard-list header icon opens a right-side Sheet within
+the current NyxBot chat. The shared Agent view presents the continuous Conversation and
 Desktop tabs, locating the operation's response only after its Agent binding
 is verified. Closing the Sheet preserves the source chat, draft, and reading
 position and disposes its live observers and desktop connection. **Back to
@@ -259,11 +265,36 @@ links continue to render the same view as a standalone page.
 
 History returns an owner/thread-scoped `cma_operations` metadata snapshot,
 including settled operations whose initiating turn is on an older message page.
-The transport attaches each card by `turn_id` after projecting stored and live
-messages. While a watch is submitting, waiting or cancelling, the selected
+The transport carries this snapshot on the conversation session independently
+of loaded message pages, so a pending or unconfirmed submission appears even
+without an agent ID or its original reply. A live session card replaces its
+normal operation receipt only when both service and agent IDs match; failed
+or uncertain receipts remain visible. A consolidated live card retains the
+receipt's status, request notices and metadata inside a single **Submission
+details** disclosure, collapsed by default. Opening it shows all request records
+together, with no per-request disclosures. **Session details** holds shared agent
+information. One feature-gated
+**View execution** header icon targets the newest pending request with a verified
+local `agent_ref_id`, or the newest verified request when none is pending,
+using its exact `response_id`, including while the card is minimised. The
+**Agent:** line describes the overall agent and observer connection; **Request
+status** describes each submitted request independently. Requests show pending
+work first and initially
+show three rows, with older rows revealed three at a time. Live cards precede
+submission history, which also initially shows three cards with an older-history
+control. The live card animates only the latest running action, with the overall
+agent indicator as a fallback while minimised or before any running action is
+reported. Other action markers and request statuses stay static; queued requests
+use a clock. Reduced-motion preferences disable the spin. Cards do not render
+inside replies.
+While a watch is submitting, waiting or cancelling, the selected
 thread refreshes history every five seconds, including after its assistant reply
 settles. Server polling continues independently of the page. Cards restore from
-history after reload and remain in the thread that made the call.
+history after reload and remain in the thread that made the call. Submission
+receipts never enter the global pin store. Verified live sessions retain the
+pin behavior from the dedicated CMA card: unpinned cards appear only in their
+source conversation; pinned cards appear across sessions and pages. Unpinning
+immediately restores source-only visibility.
 
 Approval, connection, paused, failed, timeout and unavailable states remain
 distinct. A failed result download preserves an already confirmed CMA outcome.

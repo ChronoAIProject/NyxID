@@ -89,9 +89,16 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
           {healthy ? "Healthy" : "Needs attention"}
         </Badge>
         <Badge variant="secondary">
-          {data.mode === "poll" ? "Polling" : "Webhook"}
+          {data.platform === "discord" ? (data.discord_intake?.receiving_side === "interactions_only" ? "Interactions" : "Gateway") : data.mode === "poll" ? "Polling" : "Webhook"}
         </Badge>
       </div>
+      {data.discord_intake && <>
+        <Row label="Receiving side" value={data.discord_intake.receiving_side === "native_gateway" ? "Agent Event Gateway" : data.discord_intake.receiving_side === "interactions_only" ? "Discord interactions" : "NyxID relay"} />
+        <Row label="Intake evidence" value={`${data.discord_intake.state}${data.discord_intake.code ? ` (${data.discord_intake.code})` : ""}`} />
+        <Row label="Last confirmed inbound" value={when(data.discord_intake.last_inbound_at)} />
+        {data.discord_intake.handed_over_at && <Row label="Handed over" value={when(data.discord_intake.handed_over_at)} />}
+        {data.discord_intake.block_reason && <Row label="Intake blocked by" value={data.discord_intake.block_reason} />}
+      </>}
       <Row
         label="Last inbound"
         value={`${when(d.last_inbound_at)}${d.last_inbound_source ? ` (${d.last_inbound_source})` : ""}`}
@@ -106,6 +113,12 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
       )}
       <Row label="Last reply sent" value={when(d.last_outbound_at)} />
       {outbound && <Row label="Last reply error" value={outbound} />}
+      {d.last_outbound_notice?.reason === "telegram_formatting_fallback" && (
+        <Row
+          label="Formatting notice"
+          value={`Telegram rejected formatting at ${when(d.last_outbound_notice.at)}. NyxID attempted the same text without styling; see the delivery result for confirmation.`}
+        />
+      )}
       {webhook && <Row label="Last webhook error" value={webhook} />}
       {d.subscription_state && (
         <Row

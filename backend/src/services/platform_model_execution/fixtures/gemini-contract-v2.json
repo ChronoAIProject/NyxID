@@ -1,0 +1,185 @@
+{
+  "certification_version": 2,
+  "family": "gemini",
+  "transports": [
+    "vertex.generateContent"
+  ],
+  "provenance": "Synthetic contract fixture, official documentation reviewed 2026-11-10. Admin attests each configured model; no live provider calls.",
+  "image_fixture": {
+    "certification_version": 1,
+    "provenance": "Synthetic sanitized protocol fixture; no live provider certification call.",
+    "native_model": "gemini-2.5-flash",
+    "transport": "vertex_google",
+    "request": {
+      "model": "nyxid/gemini-2.5-flash",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Describe this image."
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMwSJgAAAHkASHKbNIyAAAAAElFTkSuQmCC",
+                "detail": "auto"
+              }
+            },
+            {
+              "type": "text",
+              "text": "Be brief."
+            }
+          ]
+        }
+      ]
+    },
+    "response": {
+      "responseId": "private-response",
+      "modelVersion": "private-native",
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Hello"
+              }
+            ]
+          },
+          "finishReason": "STOP"
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 1000,
+        "candidatesTokenCount": 20,
+        "totalTokenCount": 1025,
+        "cachedContentTokenCount": 200,
+        "thoughtsTokenCount": 5,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 700
+          },
+          {
+            "modality": "IMAGE",
+            "tokenCount": 300
+          }
+        ],
+        "cacheTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 100
+          },
+          {
+            "modality": "IMAGE",
+            "tokenCount": 100
+          }
+        ],
+        "toolUsePromptTokenCount": 0
+      }
+    },
+    "stream_events": [
+      {
+        "responseId": "private-response",
+        "modelVersion": "private-native",
+        "candidates": [
+          {
+            "content": {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "Hello"
+                }
+              ]
+            },
+            "finishReason": "STOP"
+          }
+        ],
+        "usageMetadata": {
+          "promptTokenCount": 1000,
+          "candidatesTokenCount": 20,
+          "totalTokenCount": 1025,
+          "cachedContentTokenCount": 200,
+          "thoughtsTokenCount": 5,
+          "promptTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 700
+            },
+            {
+              "modality": "IMAGE",
+              "tokenCount": 300
+            }
+          ],
+          "cacheTokensDetails": [
+            {
+              "modality": "TEXT",
+              "tokenCount": 100
+            },
+            {
+              "modality": "IMAGE",
+              "tokenCount": 100
+            }
+          ],
+          "toolUsePromptTokenCount": 0
+        }
+      }
+    ],
+    "missing_evidence_response": {
+      "responseId": "private-response",
+      "modelVersion": "private-native",
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Hello"
+              }
+            ]
+          },
+          "finishReason": "STOP"
+        }
+      ]
+    },
+    "zero_refusal": {
+      "error": {
+        "code": 429,
+        "status": "RESOURCE_EXHAUSTED"
+      }
+    }
+  },
+  "usage": {
+    "promptTokenCount": 1000,
+    "cachedContentTokenCount": 200,
+    "candidatesTokenCount": 100,
+    "thoughtsTokenCount": 50,
+    "toolUsePromptTokenCount": 0,
+    "totalTokenCount": 1150,
+    "trafficType": "ON_DEMAND",
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 700
+      },
+      {
+        "modality": "IMAGE",
+        "tokenCount": 300
+      }
+    ],
+    "cacheTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 100
+      },
+      {
+        "modality": "IMAGE",
+        "tokenCount": 100
+      }
+    ]
+  },
+  "usage_contract_version": "gemini.generate.v2"
+}

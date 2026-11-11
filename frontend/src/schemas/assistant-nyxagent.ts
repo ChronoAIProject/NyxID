@@ -1,3 +1,4 @@
+import { discordIntakeSchema } from "./channel-bot-health";
 import { executionProposalSchema } from "./execution-proposal";
 import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
@@ -12,6 +13,7 @@ export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).ma
 
 /// A tool call the assistant made during a turn: identifier and status only.
 export const nyxAgentTurnActivitySchema = z.object({
+  decision: z.object({ kind: z.string(), id: z.string(), state: z.string() }).nullish(),
   machine: machineReceiptSchema.nullable().optional(),
   id: z.string(),
   label: z.string(),
@@ -732,6 +734,7 @@ export const nyxAgentChannelAgentSchema = z.object({
   gateway_native_activation: z.string().optional(),
   gateway_native_activation_detail: z.string().optional(),
   gateway_native_delivery: z.string().optional(),
+  discord_intake: discordIntakeSchema.optional(),
   gateway_next_retry_at: z.string().optional(),
   gateway_retry_available_at: z.string().optional(),
   /** `pending`, `active` or `failed`. */

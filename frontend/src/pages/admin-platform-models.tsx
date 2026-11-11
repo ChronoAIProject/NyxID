@@ -1,3 +1,4 @@
+import { ProviderCredentials } from "@/components/platform-models/credentials";
 import { titleCase } from "@/schemas/platform-models";
 import { PublicPreview } from "@/components/platform-models/public-preview";
 import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
@@ -43,6 +44,7 @@ export function AdminPlatformModelsPage() {
           enabled.
         </p>
       )}
+      <ProviderCredentials readOnly={readOnly} />
       {!readOnly && !creating && (
         <Button variant="primary" onClick={() => setCreating(true)}>
           Create model

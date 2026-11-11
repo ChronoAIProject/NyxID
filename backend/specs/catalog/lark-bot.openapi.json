@@ -1086,6 +1086,44 @@
           }
         }
       }
+    },
+    "/open-apis/wiki/v2/spaces/get_node": {
+      "get": {
+        "operationId": "wiki_get_node",
+        "summary": "Resolve a Lark/Feishu wiki document link to its underlying document or Base",
+        "description": "Resolve a normal Lark/Feishu document link from My document library or a knowledge space: for https://<tenant>/wiki/<node-token>, pass only <node-token> as token. Read data.node.obj_type and obj_token; on the SAME connection call docx_raw_content with document_id=obj_token for docx, or bitable_tables_list then bitable_records_list/search with app_token=obj_token for bitable. Sheets (sheet), legacy doc, mindnote, file and slides have no reader in these overlays: report lark_wiki_unsupported_type, never guess or pass their tokens to docx. Requires wiki:wiki:readonly (or wiki:wiki; Feishu also supports wiki:node:read), plus node read ACL for the connected user or tenant application. The channel bot identity and possession of a URL grant no access. Docx reading separately requires docx:document:readonly and document ACL. Missing connection: use nyx__connect_service for an owner-hosted setup link; specialists need the owner to grant that connection in their Grants page. Never ask for a hidden docx link or public sharing.",
+        "x-aevatar-tool": {
+          "name": "wiki_get_node",
+          "description": "Resolve a normal Lark/Feishu document link from My document library or a knowledge space: for https://<tenant>/wiki/<node-token>, pass only <node-token> as token. Read data.node.obj_type and obj_token; on the SAME connection call docx_raw_content with document_id=obj_token for docx, or bitable_tables_list then bitable_records_list/search with app_token=obj_token for bitable. Sheets (sheet), legacy doc, mindnote, file and slides have no reader in these overlays: report lark_wiki_unsupported_type, never guess or pass their tokens to docx. Requires wiki:wiki:readonly (or wiki:wiki; Feishu also supports wiki:node:read), plus node read ACL for the connected user or tenant application. The channel bot identity and possession of a URL grant no access. Docx reading separately requires docx:document:readonly and document ACL. Missing connection: use nyx__connect_service for an owner-hosted setup link; specialists need the owner to grant that connection in their Grants page. Never ask for a hidden docx link or public sharing.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "description": "The node token after /wiki/ in the owner-provided link, without the URL or query string.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Node metadata, including data.node.obj_type, obj_token and space_id. code must be zero before using the result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

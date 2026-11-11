@@ -40,6 +40,9 @@ const STALL_GAP_MS = 1500;
 /** Revert to the legacy drain after this many estimated gaps without input. */
 const IDLE_GAPS = 2;
 
+/** A tool call must not leave already-arrived Markdown hidden indefinitely. */
+const MAX_TAIL_HOLD_MS = 800;
+
 function prefersReducedMotion(): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return false;
@@ -63,6 +66,7 @@ function prefersReducedMotion(): boolean {
  */
 export function useSmoothReveal(text: string, active: boolean): string {
   const [revealed, setRevealed] = useState(() => text.length);
+  const [idleText, setIdleText] = useState<string | null>(null);
   // The frame loop must see the newest arrival without being torn down and
   // rebuilt on every delta — restarting it would drop the timestamp baseline
   // each time and the reveal would never accumulate.
@@ -93,14 +97,14 @@ export function useSmoothReveal(text: string, active: boolean): string {
       return;
     }
     if (text === previousText) return;
+    const now = performance.now();
     if (!text.startsWith(previousText)) {
-      lastArrivalRef.current = null;
+      lastArrivalRef.current = now;
       gapEmaRef.current = null;
       adaptiveCreditRef.current = 0;
       return;
     }
 
-    const now = performance.now();
     const lastArrival = lastArrivalRef.current;
     if (lastArrival !== null) {
       const gap = now - lastArrival;
@@ -126,6 +130,11 @@ export function useSmoothReveal(text: string, active: boolean): string {
     setPacedPreviously(paced);
     setRevealed(text.length);
   }
+  if (idleText !== null && idleText !== text) {
+    // A flush belongs to this observation of the source. A replacement that
+    // later restores the same text must wait for its own idle deadline.
+    setIdleText(null);
+  }
 
   useEffect(() => {
     if (!paced) return;
@@ -136,6 +145,13 @@ export function useSmoothReveal(text: string, active: boolean): string {
       const elapsed = previous === undefined ? 0 : (now - previous) / 1000;
       previous = now;
       if (elapsed <= 0) return;
+      const lastArrival = lastArrivalRef.current;
+      if (lastArrival !== null && now - lastArrival >= MAX_TAIL_HOLD_MS) {
+        // The full arrived string ends at a grapheme boundary. Once the
+        // producer pauses, show it even if its Markdown opener never closed.
+        // New arrivals resume pacing; the display clamp prevents retraction.
+        setIdleText(arrivalTextRef.current);
+      }
       const seconds = Math.min(elapsed, MAX_FRAME_SECONDS);
       setRevealed((current) => {
         const target = targetRef.current;
@@ -191,7 +207,9 @@ export function useSmoothReveal(text: string, active: boolean): string {
     return text;
   }
 
-  const safeCut = safeRevealEnd(text, Math.min(revealed, text.length));
+  const safeCut = idleText === text
+    ? text.length
+    : safeRevealEnd(text, Math.min(revealed, text.length));
   const extendsPreviousText = text.startsWith(displayed.source);
   const displayedCut = extendsPreviousText
     ? Math.max(displayed.cut, safeCut)

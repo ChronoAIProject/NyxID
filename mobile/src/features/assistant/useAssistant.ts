@@ -10,7 +10,8 @@ import { createIdempotencyKey } from "../../lib/api/idempotency";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { resolveChatAgentId } from "./assistantAgentContext";
 import { useAssistantLiveRefresh } from "./useAssistantLiveRefresh";
-import { recoveryReason } from "./assistantTurnPresentation";
+import { recoveryReason, storedError } from "./assistantTurnPresentation";
+import { settledInterruptedTurn } from "./interruptedTurn";
 import {
   assistantTurnBody,
   restoreRefusedAssistantSend,
@@ -64,7 +65,10 @@ export function useAssistant(
   const [deciding, setDeciding] = useState<string>();
   const [mutating, setMutating] = useState(false);
   const [error, setError] = useState<string>();
-  const [interrupted, setInterrupted] = useState(false);
+  const [interruption, setInterruption] = useState<{
+    conversationId?: string;
+    turnId?: string;
+  }>();
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [online, setOnline] = useState(true);
   const [foreground, setForeground] = useState(
@@ -230,7 +234,7 @@ export function useAssistant(
       setConversationId(id);
       updateHistory(undefined);
       setLive(undefined);
-      setInterrupted(false);
+      setInterruption(undefined);
       setInputText(undefined);
       setInputAttachments([]);
       setError(undefined);
@@ -346,7 +350,19 @@ export function useAssistant(
     };
   }, [conversationId, active, refreshHistory]);
 
+  const interruptedSettlement =
+    interruption?.conversationId === conversationId
+      ? settledInterruptedTurn(history, interruption?.turnId)
+      : undefined;
+  const unresolvedInterruption = !!interruption && !interruptedSettlement;
+  const interruptionError =
+    interruptedSettlement?.error_code === "turn_lost"
+      ? storedError("turn_lost")
+      : unresolvedInterruption
+        ? "Connection interrupted. The assistant may still be working. Refresh or open its history before sending again."
+        : undefined;
   const needsPolling =
+    unresolvedInterruption ||
     !!history?.conversation.active_turn ||
     !!history?.acknowledgements.some((row) => row.status === "pending") ||
     !!history?.approvals.length ||
@@ -426,7 +442,7 @@ export function useAssistant(
       sendOperation.current = operation;
       sendLock.current = true;
       setSending(true);
-      setInterrupted(false);
+      setInterruption(undefined);
       setError(undefined);
       setInputText(text);
       setInputAttachments(uploads?.attachments ?? []);
@@ -481,12 +497,13 @@ export function useAssistant(
           keepDraft = refused;
           if (!refused) adoptKnownDraft();
           setRecoveryRequired(!refused);
-          setInterrupted(!refused);
-          setError(
-            refused
-              ? errorMessage(cause)
-              : "Connection interrupted. The assistant may still be working. Refresh or open its history before sending again.",
-          );
+          if (refused) {
+            setError(errorMessage(cause));
+          } else {
+            // Keep this separate from request errors: final refresh, live
+            // invalidation and foreground recovery can prove settlement later.
+            setInterruption({ conversationId: id, turnId: reply.turnId });
+          }
         }
       } finally {
         if (streamController.current === controller)
@@ -762,10 +779,13 @@ export function useAssistant(
     loadingIndex,
     deciding,
     mutating,
-    error,
+    error: error ?? interruptionError,
     online,
     recoveryRequired,
-    interrupted: interrupted && !!history?.conversation.active_turn,
+    interrupted:
+      unresolvedInterruption &&
+      !!history?.conversation.active_turn &&
+      history.conversation.active_turn.turn_id === interruption?.turnId,
     openConversation,
     recover,
     send,

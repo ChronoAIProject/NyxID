@@ -7,17 +7,22 @@ use serde_json::{Value, json};
 /// never receives an unusable partial function call or a native identifier.
 pub(super) struct Decoder {
     native: Native,
+    contract: Option<crate::models::platform_model_tariff::UsageContract>,
+    invalid_usage: bool,
     decoder: crate::services::pool_ai_service::EventDecoder,
     body: Value,
     usage: Option<Value>,
     pub terminal: bool,
     sequence: Option<(i64, Value)>,
     claude_final_usage: bool,
+    gemini_final_usage: bool,
 }
 impl Decoder {
     pub fn new(native: Native) -> Self {
         Self {
             native,
+            contract: None,
+            invalid_usage: false,
             decoder: Default::default(),
             body: match native {
                 Native::Claude => json!({"type":"message","content":[],"stop_reason":null}),
@@ -33,37 +38,95 @@ impl Decoder {
             terminal: false,
             sequence: None,
             claude_final_usage: false,
+            gemini_final_usage: false,
+        }
+    }
+    pub fn with_contract(
+        mut self,
+        contract: &crate::models::platform_model_tariff::UsageContract,
+    ) -> Self {
+        if super::certification::family_contract(contract) {
+            self.contract = Some(contract.clone());
+        }
+        self
+    }
+    fn evidence(
+        &self,
+        usage: &Value,
+    ) -> AppResult<crate::services::billing::model_usage::Evidence> {
+        if self.invalid_usage {
+            return Err(invalid_response());
+        }
+        match &self.contract {
+            Some(c) => super::contract_usage::evidence(self.native, usage, c),
+            None => adapters::evidence(self.native, usage),
         }
     }
     pub fn partial_evidence(&self) -> Option<crate::services::billing::model_usage::Evidence> {
-        self.usage
-            .as_ref()
-            .and_then(|u| adapters::evidence(self.native, u).ok())
+        self.usage.as_ref().and_then(|u| self.evidence(u).ok())
     }
     pub fn push(&mut self, bytes: &[u8]) -> AppResult<Vec<String>> {
         let mut texts = vec![];
-        for event in self.decoder.push(bytes)? {
+        let events = match self.decoder.push(bytes) {
+            Ok(events) => events,
+            Err(error) => {
+                self.invalid_usage |= self.contract.is_some();
+                return Err(error);
+            }
+        };
+        for event in events {
             if event.data == "[DONE]" {
                 if self.terminal
                     || self.native != Native::GptOss
                     || self.body["choices"][0]["finish_reason"].is_null()
                 {
+                    self.invalid_usage |= self.contract.is_some();
                     return Err(invalid_response());
                 }
                 self.terminal = true;
                 continue;
             }
-            let data: Value = serde_json::from_str(&event.data).map_err(|_| invalid_response())?;
+            let data: Value = if self.contract.is_some() {
+                match super::contract_usage::parse(event.data.as_bytes()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.invalid_usage = true;
+                        return Err(error);
+                    }
+                }
+            } else {
+                serde_json::from_str(&event.data).map_err(|_| invalid_response())?
+            };
+            if self.contract.is_some() {
+                // Inspect every snapshot, including fields on ignored lifecycle
+                // events; a later valid snapshot cannot erase an unknown charge.
+                let checked = (|| {
+                    for body in [&data, &data["response"], &data["message"]] {
+                        super::contract_usage::envelope(self.native, body)?;
+                        for key in ["usage", "usageMetadata"] {
+                            if let Some(u) = body.get(key).filter(|u| !u.is_null()) {
+                                super::contract_usage::validate(self.native, u)?;
+                            }
+                        }
+                    }
+                    Ok::<(), crate::errors::AppError>(())
+                })();
+                if checked.is_err() {
+                    self.invalid_usage = true;
+                }
+                checked?;
+            }
             if let Some(n) = data.get("sequence_number") {
-                let n = n
-                    .as_i64()
-                    .filter(|n| *n >= 0)
-                    .ok_or_else(invalid_response)?;
+                let Some(n) = n.as_i64().filter(|n| *n >= 0) else {
+                    self.invalid_usage |= self.contract.is_some();
+                    return Err(invalid_response());
+                };
                 if let Some((last, previous)) = &self.sequence {
                     if *last == n && previous == &data {
                         continue;
                     }
                     if n <= *last {
+                        self.invalid_usage |= self.contract.is_some();
                         return Err(invalid_response());
                     }
                 }
@@ -73,6 +136,7 @@ impl Decoder {
                 || data.get("error").is_some()
                 || event.event_type.as_deref() == Some("error")
             {
+                self.invalid_usage |= self.contract.is_some();
                 return Err(invalid_response());
             }
             match self.native {
@@ -122,6 +186,7 @@ impl Decoder {
                         let block = &data["content_block"];
                         match block["type"].as_str() {
                             Some("text") => { let t = block["text"].as_str().ok_or_else(invalid_response)?; texts.push(t.into()); parts.push(json!({"type":"text","text":t})); }
+                            Some("thinking" | "redacted_thinking") if self.contract.is_some() => parts.push(json!({"type":"thinking"})),
                             Some("tool_use") => parts.push(json!({"type":"tool_use","name":block["name"],"input":block["input"],"partial":""})),
                             _ => return Err(invalid_response()),
                         }
@@ -145,6 +210,8 @@ impl Decoder {
                                 part["text"] = json!(s);
                                 texts.push(t.into());
                             }
+                            Some("thinking_delta" | "signature_delta")
+                                if self.contract.is_some() && part["type"] == "thinking" => {}
                             Some("input_json_delta") if part["type"] == "tool_use" => {
                                 let mut s = part["partial"]
                                     .as_str()
@@ -202,17 +269,31 @@ impl Decoder {
                     _ => return Err(invalid_response()),
                 },
                 Native::Gemini => {
+                    // After the candidate finishes, only a usage-only frame may
+                    // follow. More output makes the earlier counters ambiguous.
+                    if self.contract.is_some()
+                        && !self.body["candidates"][0]["finishReason"].is_null()
+                        && data["candidates"].as_array().is_some_and(|v| !v.is_empty())
+                    {
+                        self.invalid_usage = true;
+                        return Err(invalid_response());
+                    }
                     if let Some(u) = data.get("usageMetadata") {
                         self.usage = Some(u.clone());
                     }
-                    if let Some(candidates) = data["candidates"].as_array() {
+                    if let Some(candidates) = data["candidates"]
+                        .as_array()
+                        .filter(|v| self.contract.is_none() || !v.is_empty())
+                    {
                         if candidates.len() != 1 {
                             return Err(invalid_response());
                         }
                         let c = &candidates[0];
                         if let Some(parts) = c["content"]["parts"].as_array() {
                             for part in parts {
-                                if part.get("thoughtSignature").is_some() {
+                                if part.get("thoughtSignature").is_some()
+                                    && (self.contract.is_none() || !part["text"].is_string())
+                                {
                                     return Err(invalid_response());
                                 }
                                 if let Some(t) = part["text"].as_str()
@@ -229,6 +310,11 @@ impl Decoder {
                         if let Some(reason) = c.get("finishReason") {
                             self.body["candidates"][0]["finishReason"] = reason.clone();
                         }
+                    }
+                    if !self.body["candidates"][0]["finishReason"].is_null()
+                        && data.get("usageMetadata").is_some()
+                    {
+                        self.gemini_final_usage = true;
                     }
                     // Gemini's final usage may follow finishReason. EOF is its terminal marker.
                 }
@@ -298,16 +384,25 @@ impl Decoder {
         AppResult<Output>,
         crate::services::billing::model_usage::Evidence,
     )> {
+        if self.contract.is_some() && self.decoder.has_incomplete_event() {
+            self.invalid_usage = true;
+        }
         if self.native == Native::Gemini && clean_eof {
             self.terminal = !self.body["candidates"][0]["finishReason"].is_null();
         }
-        if !self.terminal {
+        if !self.terminal
+            || self.invalid_usage
+            || self.contract.is_some() && self.native == Native::Gemini && !self.gemini_final_usage
+        {
             return Err(invalid_response());
         }
         let usage = self.usage.as_ref().ok_or_else(invalid_response)?;
         Ok((
-            adapters::output(self.native, &self.body, id),
-            adapters::evidence(self.native, usage)?,
+            match &self.contract {
+                Some(c) => adapters::output_contract(self.native, &self.body, id, c),
+                None => adapters::output(self.native, &self.body, id),
+            },
+            self.evidence(usage)?,
         ))
     }
 }

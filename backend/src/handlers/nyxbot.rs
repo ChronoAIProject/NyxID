@@ -776,6 +776,7 @@ async fn connect_inner(
         gateway_native_activation_detail: None,
         gateway_native_activation_operation: None,
         gateway_native_delivery: None,
+        gateway_intake: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -1716,6 +1717,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         }
         Err(_) => return Err("storage_unavailable"),
     }
+    let outcome = async {
     let mut next = row.clone();
     next.gateway_source = source;
     next.route_api_key_id = route_key.id.clone();
@@ -1995,6 +1997,16 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         tracing::debug!(code, "NyxBot gateway group admission pending after move");
     }
     Ok(())
+    }.await;
+    if outcome.is_err() {
+        // Includes early `?` failures before/after reservation. Keep uncertain
+        // remote effects fenced; cleanup only this attempt's temporary keys.
+        if let Err(error) = releases::retire_failed_move(state, row, &agent.id, &route_key.id).await
+        {
+            tracing::warn!(channel_agent_id = %row.id, %error, "Discord/native setup cleanup deferred to sweep");
+        }
+    }
+    outcome
 }
 
 async fn connect_direct(
@@ -2943,6 +2955,24 @@ pub(super) async fn prepare_guest_model(
 
 async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) -> AppResult<Value> {
     let rows = list(state, owner).await?;
+    let discord_ids: Vec<_> = rows
+        .iter()
+        .filter(|r| r.platform == "discord")
+        .map(|r| &r.channel_bot_id)
+        .collect();
+    let discord_bots: Vec<ChannelBot> = if discord_ids.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .db
+            .collection(crate::models::channel_bot::COLLECTION_NAME)
+            .find(doc! {"_id":{"$in":discord_ids}})
+            .await?
+            .try_collect()
+            .await?
+    };
+    let intake =
+        crate::services::channel_bot_health::discord::load(&state.db, &discord_bots).await?;
     let mut open_chats = std::collections::HashSet::new();
     let mut nyxbot_id = None;
     if with_readiness && !rows.is_empty() {
@@ -2975,6 +3005,34 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
+        if let Some(intake) = intake.get(&row.channel_bot_id) {
+            value["discord_intake"] = json!(intake);
+            if let Some(advice) = crate::services::channel_bot_health::discord::advice(intake) {
+                value["delivery_status"] = json!(if intake.receiving_side == "native_gateway" {
+                    "unconfirmed"
+                } else {
+                    "failing"
+                });
+                value["delivery_error"] = json!(intake.code);
+                value["delivery_reason"] = json!(advice.text);
+                if row.transport == "direct" {
+                    value["gateway_fallback_reason"] = json!(
+                        "NyxID relay selected; intake is not confirmed. Check channel health."
+                    );
+                }
+            } else if row
+                .delivery_error
+                .as_deref()
+                .is_some_and(crate::services::channel_bot_health::discord::is_intake_code)
+            {
+                // Live evidence wins over an old intake-only diagnostic, e.g.
+                // after disabling relay or observing the first native event.
+                // The sweep repairs storage; a real delivery error is retained.
+                value["delivery_status"] = json!("unknown");
+                value["delivery_error"] = Value::Null;
+                value["delivery_reason"] = Value::Null;
+            }
+        }
         if with_readiness
             && row.org_specialist.is_none()
             && (row.private_chats.as_deref() == Some("everyone") || open_chats.contains(&row.id))
@@ -6359,7 +6417,9 @@ async fn direct_reply(
             message_id: message_id.to_owned(),
             reply: super::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
-                metadata: None,
+                metadata: crate::services::channel_reply_plan::assistant_metadata(
+                    &channel.platform,
+                ),
                 attachments: Vec::new(),
             },
         }),

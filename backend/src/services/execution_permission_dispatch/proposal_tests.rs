@@ -251,6 +251,10 @@ async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exa
             proposals::proposal(&proposal(&f).await).unwrap().state,
             "completed"
         );
+        assert_eq!(
+            proposal(&f).await.activity_outcome.as_deref(),
+            Some("completed")
+        );
         finish(&f, &resumed, &text).await;
         assert!(
             proposals::proposal(&proposal(&f).await)
