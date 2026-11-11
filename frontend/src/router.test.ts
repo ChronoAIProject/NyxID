@@ -78,6 +78,24 @@ it("keeps login-code minting free of code input parameters", () => {
   expect(validate({ user_code: "ABCD-EFGH" })).toEqual({});
 });
 
+it("preserves the reviewer email login override only for an explicit true value", () => {
+  const route = Object.values(router.routesById).find(
+    (entry) => entry.fullPath === "/login",
+  );
+  const validate = route?.options.validateSearch;
+  if (typeof validate !== "function")
+    throw new Error("Expected a login search validator");
+  for (const enable_email of [true, "true"]) {
+    expect(validate({ enable_email, return_to: "/dashboard" })).toEqual({
+      enable_email: true,
+      return_to: "/dashboard",
+    });
+  }
+  for (const enable_email of [undefined, false, "false", 1, "1", "TRUE", "", [true], {}]) {
+    expect(validate({ enable_email })).toEqual({});
+  }
+});
+
 describe("OAuth completion route registration", () => {
   it("registers the completion component outside the backend OAuth namespace", () => {
     expect(oauthCompleteRoute.fullPath).toBe("/oauth-complete");

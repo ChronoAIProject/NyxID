@@ -49,6 +49,7 @@ export function LoginPage() {
       )}
       <AuthFlow
         initialPanel={0}
+        enableEmailLogin={params.get("enable_email") === "true" || undefined}
         returnTo={returnTo}
         socialError={socialError}
         initialInviteCode={inviteCode}
