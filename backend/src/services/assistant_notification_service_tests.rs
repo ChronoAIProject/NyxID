@@ -2654,11 +2654,30 @@ async fn push_caps_hold_per_visible_source_across_kinds_and_per_rolling_hour_acr
     insert_row(&f, &decision).await;
     sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
     assert_eq!(sent.lock().unwrap().len(), 1);
-    assert_eq!(push_of(&f, &update.id).await.state, "sent");
-    assert_eq!(
-        push_of(&f, &decision.id).await.code.as_deref(),
-        Some("source_rate")
-    );
+    // Delivery claims run concurrently, including for the same source. The
+    // transaction that reserves its slot first wins, regardless of row age.
+    let update_push = push_of(&f, &update.id).await;
+    let decision_push = push_of(&f, &decision.id).await;
+    let (winner, winner_push, loser_push) = if update_push.state == "sent" {
+        (&update, &update_push, &decision_push)
+    } else {
+        (&decision, &decision_push, &update_push)
+    };
+    assert_eq!(winner_push.state, "sent");
+    assert_eq!(winner_push.attempts, 1);
+    assert_eq!(loser_push.state, "skipped");
+    assert_eq!(loser_push.code.as_deref(), Some("source_rate"));
+    assert_eq!(loser_push.attempts, 0);
+    assert!(loser_push.attempt.is_none());
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent[0].3.get("notification_id"), Some(&winner.id));
+        assert_eq!(
+            sent[0].3.get("type").map(String::as_str),
+            Some(winner.kind.as_str())
+        );
+    }
+    assert_eq!(reservations(&f, &f.owner).await, (1, 1));
     // Thirty-one distinct sources, three concurrent sweeps: thirty sends.
     let mut ids = Vec::new();
     for index in 0..31 {
