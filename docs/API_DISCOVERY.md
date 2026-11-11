@@ -1031,3 +1031,10 @@ timeouts, oversized responses, redirects and local policy refusals remain
 and reason only. The web and mobile surfaces show the observed result, not a
 promise that every operation or future request will succeed. Existing mobile
 installs need a new app build for the corrected labels.
+
+Credential verification checks (on save and `POST /api/v1/keys/{key_id}/verify`)
+use the normal authorized proxy with the exact saved credential. They record
+request-count usage metadata when billing metering is enabled, but never apply
+catalog prices or consume wallet credits, grants or allowances. This exemption
+is server-authored and limited to the declared verification operation; ordinary
+requests through the same connection retain their configured billing policy.
