@@ -17,6 +17,17 @@ fence through final dispatch, independently of the rollout flag.
 
 ## Login Credentials Bound to a Key
 
+Browser approval links for `/login/agent-key` and restricted `/login/device` access
+may include an optional `owner_id` preference alongside permission hints. It survives
+sign-in and is resolved only from authenticated personal-owner and eligible
+organization options. Matching keys for that owner appear first; other eligible
+keys remain available. New-key review prefills the resolved owner and uses the
+existing exact-connection defaults for it. The owner stays editable, and unavailable
+preferences show a notice rather than inferring an organization from a key or URL.
+This hint grants no authority, does not approve anything, and changes no backend
+permission, service-owner or snapshot rules. Clients must validate the delivered
+credential against their own owner and permission requirements.
+
 `nyxid login --agent-key` enrolls a CLI profile through explicit human approval in the web console or the mobile app's QR flow. The operator chooses an existing eligible personal/org key or creates a limited key. Each login receives its own `api_key_credentials` child secret; the parent key's primary secret is never recovered, displayed, or silently rotated. New keys also use child credentials, with their undisclosed primary secret discarded.
 
 Authentication resolves the live parent key for scopes, service/node restrictions, per-agent bindings, rate limits, and audit attribution. `AuthUser.api_key_credential_id` identifies the calling login credential while `api_key_id` and `api_key_name` remain the parent identity. Child expiry cannot exceed parent expiry. Parent revocation or rotation invalidates all children, and live parent expiry is checked on every authentication.

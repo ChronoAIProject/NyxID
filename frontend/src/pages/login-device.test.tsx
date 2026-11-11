@@ -138,6 +138,46 @@ const approvals = () =>
   mocks.post.mock.calls.filter(([path]) => String(path).includes("/approve"));
 describe("three-step device approval", () => {
   it.each(["device", "agent-key"] as const)(
+    "%s keeps the suggested organization editable and requires explicit approval",
+    async (flow) => {
+      inventory.options.personal_owner_id = "user";
+      inventory.options.orgs = [{ id: "team", owner_id: "team", name: "Example team" }];
+      const service = { id: "team-svc", owner_id: "team", name: "GitHub team" };
+      inventory.options.services.push(service);
+      const connection = { ...inventory.connections[0]!, id: service.id, label: service.name };
+      inventory.connections.push(connection);
+      inventory.options.keys.push({
+        ...inventory.options.keys[0]!, id: "team-key", name: "Team reader",
+        owner_type: "org", owner_id: "team", owner_name: "Example team",
+        allowed_service_ids: [service.id], allowed_services: [service],
+        effective_services: [connection],
+      });
+      mocks.query += "&login_type=agent&owner_id=team&permissions=read,proxy&service_permissions=github::repo:read";
+      await scope(flow);
+      expect(screen.getByText(/Suggested owner: Example team/)).toBeVisible();
+      const keys = within(screen.getByRole("group", { name: "Matching Agent Keys" })).getAllByRole("button");
+      expect(keys.map((key) => key.getAttribute("aria-label"))).toEqual(["Team reader", "Reader"]);
+      expect(approvals()).toEqual([]);
+      await click("Create new Agent Key");
+      expect(screen.getByRole("region", { name: "Authorize access" })).toHaveTextContent("Example team");
+      fireEvent.click(screen.getByText("Customize", { exact: true }));
+      expect(screen.getByRole("combobox", { name: "Owner" })).not.toBeDisabled();
+      expect(approvals()).toEqual([]);
+      await click("Create & continue");
+      expect(approvals()).toHaveLength(1);
+      expect(approvals()[0]![1]).toMatchObject({
+        selection: { kind: "new", target_org_id: "team", allowed_service_ids: ["team-svc"] },
+      });
+    },
+  );
+  it("explains unavailable owner hints without inventing an organization or hiding eligible keys", async () => {
+    mocks.query += "&login_type=agent&owner_id=unknown";
+    await scope();
+    expect(screen.getByText(/The suggested owner is unavailable/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Reader" })).toBeVisible();
+    expect(approvals()).toEqual([]);
+  });
+  it.each(["device", "agent-key"] as const)(
     "requires manual code entry for a code-free CLI %s link with preferences",
     async (flow) => {
       mocks.query = "?login_type=agent&key_source=new&key_name=My+Agent&permissions=read,proxy";

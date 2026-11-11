@@ -62,6 +62,7 @@ import {
   draftSummary,
   effectiveLoginConnections,
   exactConnectionDefaults,
+  loginOwnerPreference,
   normalizeRequested,
   permissionOptions,
   requestedProblems,
@@ -400,6 +401,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
       finish("approved");
     });
   }
+  const preferredOwner = inventory
+    ? loginOwnerPreference(hints.owner_id, inventory.options)
+    : undefined;
   function beginNew() {
     if (!inventory) return;
     setCredentialExpiry("");
@@ -412,8 +416,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         allowed_service_ids: exactConnectionDefaults(
           requested,
           inventory,
-          user?.id ?? "",
+          preferredOwner?.id ?? user?.id ?? "",
         ),
+        target_org_id: preferredOwner?.targetOrgId,
         allowed_node_ids: [],
         allow_all_services: false,
         allow_all_nodes: false,
@@ -437,6 +442,8 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         .filter((v) => v.comparison.matches)
         .sort(
           (a, b) =>
+            Number(b.key.owner_id === preferredOwner?.id) -
+              Number(a.key.owner_id === preferredOwner?.id) ||
             a.comparison.extras.length - b.comparison.extras.length ||
             a.key.name.localeCompare(b.key.name),
         )
@@ -807,6 +814,13 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 ) : (
                   inventory && (
                     <>
+                      {hints.owner_id && (
+                        <p className="text-12 text-muted-foreground">
+                          {preferredOwner
+                            ? translateUi("Suggested owner: {{name}}. You can choose another owner or key.", { name: preferredOwner.name })
+                            : translateUi("The suggested owner is unavailable. Choose an eligible owner or key.")}
+                        </p>
+                      )}
                       {choice !== "new" && !chosen && (
                         <LoginPermissionPicker
                           options={permissionOptions(inventory)}

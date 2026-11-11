@@ -72,6 +72,20 @@ export const emptyRequested = (): RequestedPermissions => ({
   service_permissions: [],
 });
 
+/** A link can suggest an owner; only authenticated options establish its identity. */
+export function loginOwnerPreference(
+  ownerId: string | undefined,
+  options: AgentKeyOptions,
+): { id: string; name: string; targetOrgId?: string } | undefined {
+  if (!ownerId) return undefined;
+  if (ownerId === options.personal_owner_id)
+    return { id: ownerId, name: translateUi("Personal") };
+  const org = options.orgs.find((item) => item.owner_id === ownerId);
+  return org
+    ? { id: ownerId, name: org.name, targetOrgId: org.id }
+    : undefined;
+}
+
 export function canonicalScope(slug: string, scope: string): string {
   return slug.startsWith("api-google")
     ? scope.replace(

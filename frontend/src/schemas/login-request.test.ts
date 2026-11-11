@@ -5,6 +5,7 @@ describe("device approval link hints", () => {
   it("preserves bounded list hints and normalized public codes through identity login", () => {
     const query = new URLSearchParams({
       user_code: "ioLu-abcd",
+      owner_id: "example-team",
       login_type: "agent",
       key_source: "new",
       key_name: "CLI account",
@@ -20,6 +21,7 @@ describe("device approval link hints", () => {
     expect(hints.errors).toEqual([]);
     expect(hints.permissions).toEqual(["read", "proxy", "email"]);
     expect(hints.user_code).toBe("101VABCD");
+    expect(hints.owner_id).toBe("example-team");
     expect(hints.show_details).toBe(true);
     const returned = loginRequestReturnTo("device", hints, hints.user_code!);
     expect(
@@ -34,6 +36,10 @@ describe("device approval link hints", () => {
     "supports_grant_choice=true",
     "login_type=agent&login_type=agent",
     "user_code=ABCDEFGH&user_code=12345678",
+    "owner_id=one&owner_id=two",
+    "owner_id=",
+    "owner_id=../team",
+    "owner_id=team%00",
     "key_name=hello",
     "login_type=admin",
     "platform=unknown",
@@ -60,6 +66,7 @@ describe("device approval link hints", () => {
       `permissions=${"a".repeat(1025)}`,
       `services=${"a".repeat(4097)}`,
       `service_permissions=${"a".repeat(8193)}`,
+      `owner_id=${"a".repeat(129)}`,
     ])
       expect(parseLoginRequestHints(query).errors.length).toBeGreaterThan(0);
   });

@@ -6,10 +6,23 @@ import {
   permissionOptions,
   draftSummary,
   effectiveLoginConnections,
+  loginOwnerPreference,
 } from "./login-permissions";
 import { loginInventory, requestedRead } from "./__fixtures__/login-inventory";
 
 describe("device login permission comparisons", () => {
+  it("resolves owner preferences from authenticated owner options without guessing from keys", () => {
+    const { options } = loginInventory();
+    options.orgs = [{ id: "team", owner_id: "team-owner", name: "Example team" }];
+    expect(loginOwnerPreference("user", options)).toBeUndefined();
+    options.personal_owner_id = "user";
+    expect(loginOwnerPreference("user", options)).toEqual({ id: "user", name: "Personal" });
+    expect(loginOwnerPreference("team-owner", options)).toEqual({
+      id: "team-owner", name: "Example team", targetOrgId: "team",
+    });
+    expect(loginOwnerPreference("unknown", options)).toBeUndefined();
+    expect(loginOwnerPreference(undefined, options)).toBeUndefined();
+  });
   it("includes inferred platform rows and durable future access without crossing owners", () => {
     const inventory = loginInventory();
     inventory.options.personal_owner_id = "user";
