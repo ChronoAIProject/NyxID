@@ -789,7 +789,7 @@ pub(crate) async fn send(
             text: Some(text),
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
-            metadata: None,
+            metadata: crate::services::channel_reply_plan::assistant_metadata(&channel.platform),
         },
     )
     .await?;

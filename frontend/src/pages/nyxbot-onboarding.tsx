@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { I18nextProvider, useTranslation } from "react-i18next";
@@ -41,6 +43,7 @@ function StepRedirect({
   readonly onNavigate: StepNavigation;
   readonly callbackStatus?: "success" | "error";
 }) {
+  useUiTranslation();
   useEffect(() => {
     onNavigate(step, { replace: true, callbackStatus });
   }, [step, onNavigate, callbackStatus]);
@@ -60,6 +63,7 @@ function ConnectedDataSource({
   readonly callbackStatus?: "success" | "error";
   readonly onNavigate: StepNavigation;
 }) {
+  useUiTranslation();
   const { t } = useTranslation();
   const flow = useNyxbotDataSource(progress, updateProgress);
   const loading =
@@ -136,7 +140,7 @@ function ConnectedDataSource({
         <OnboardingNotice error>
           {t("googleConnectFailed")}
           {flow.connectGoogle.error instanceof ApiError && (
-            <p>{flow.connectGoogle.error.message}</p>
+            <p>{translateUi(flow.connectGoogle.error.message ?? "")}</p>
           )}
         </OnboardingNotice>
       )}
@@ -159,6 +163,7 @@ function ConnectedOnboarding({
   readonly callbackStatus?: "success" | "error";
   readonly onNavigate: StepNavigation;
 }) {
+  useUiTranslation();
   const { progress, updateProgress } = useNyxbotProgress(userId, referral);
   const [showSpendingCap, setShowSpendingCap] = useState(false);
 
@@ -214,6 +219,7 @@ function ConnectedOnboarding({
 }
 
 export function NyxbotOnboardingPage() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const authenticated = useAuthStore((s) => s.isAuthenticated);
   const authLoading = useAuthStore((s) => s.isLoading);
@@ -243,7 +249,7 @@ export function NyxbotOnboardingPage() {
   returnUrl.searchParams.set("step", "source");
   if (search.channel) returnUrl.searchParams.set("channel", search.channel);
   return (
-    <I18nextProvider i18n={nyxbotI18n}>
+    <I18nextProvider i18n={nyxbotI18n} defaultNS="onboarding">
       {authLoading && !authenticated ? (
         <OnboardingLoading />
       ) : !search.step ? (

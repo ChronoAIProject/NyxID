@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -87,6 +90,7 @@ function StatCard({
   readonly description: string;
   readonly icon: React.ComponentType<{ className?: string }>;
 }) {
+  useUiTranslation();
   return (
     <Card>
       <CardContent className="flex items-start justify-between p-4">
@@ -105,6 +109,7 @@ export function OrgDeveloperAppsTab({
   orgId,
   orgName,
 }: OrgDeveloperAppsTabProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDeveloperApps(orgId);
   const createMutation = useCreateDeveloperApp();
@@ -140,13 +145,13 @@ export function OrgDeveloperAppsTab({
 
   async function handleCreate() {
     if (!name.trim()) {
-      toast.error("Application name is required");
+      toast.error(translateErrorMessage("Application name is required"));
       return;
     }
 
     const parsedUris = parseRedirectUris(redirectUrisText);
     if (parsedUris.error) {
-      toast.error(parsedUris.error);
+      toast.error(translateErrorMessage(parsedUris.error));
       return;
     }
 
@@ -159,7 +164,7 @@ export function OrgDeveloperAppsTab({
         target_org_id: orgId,
       });
 
-      toast.success("Developer app created");
+      toast.success(translateUi("Developer app created"));
       if (created.client_secret) {
         setCreatedClientId(created.id);
         setCreatedClientSecret(created.client_secret);
@@ -169,7 +174,7 @@ export function OrgDeveloperAppsTab({
       resetCreateForm();
     } catch (error) {
       toast.error(
-        error instanceof ApiError ? error.message : "Failed to create app",
+        translateErrorMessage(error instanceof ApiError ? error.message : "Failed to create app"),
       );
     }
   }
@@ -182,42 +187,35 @@ export function OrgDeveloperAppsTab({
           variant="outline"
           onClick={() => setShowInactive((current) => !current)}
         >
-          {showInactive ? "Hide inactive" : "Show inactive"}
+          {showInactive ? translateUi("Hide inactive") : translateUi("Show inactive")}
         </Button>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
             <Button>
-              <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
-              New Application
-            </Button>
+              <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>{translateUi("New Application")}</Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create Developer App</DialogTitle>
-              <DialogDescription>
-                Register an OAuth application owned by {orgName}.
+              <DialogTitle>{translateUi("Create Developer App")}</DialogTitle>
+              <DialogDescription>{translateUi("Register an OAuth application owned by ")}{orgName}.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
               <div className="space-y-2">
-                <Label htmlFor="org-app-name">
-                  Application Name
-                </Label>
+                <Label htmlFor="org-app-name">{translateUi("Application Name")}</Label>
                 <Input
                   id="org-app-name"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
-                  placeholder="My SaaS App"
+                  placeholder={translateUi("My SaaS App")}
                 />
               </div>
               <div className="space-y-2">
                 <Label
 
                   htmlFor="org-redirect-uris"
-                >
-                  Redirect URIs (one per line)
-                </Label>
+                >{translateUi("Redirect URIs (one per line)")}</Label>
                 <textarea
                   id="org-redirect-uris"
                   value={redirectUrisText}
@@ -229,7 +227,7 @@ export function OrgDeveloperAppsTab({
                 />
               </div>
               <div className="space-y-2">
-                <Label>Client Type</Label>
+                <Label>{translateUi("Client Type")}</Label>
                 <Select
                   value={clientType}
                   onValueChange={(value: "public" | "confidential") =>
@@ -240,17 +238,14 @@ export function OrgDeveloperAppsTab({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="public">Public (PKCE)</SelectItem>
-                    <SelectItem value="confidential">Confidential</SelectItem>
+                    <SelectItem value="public">{translateUi("Public (PKCE)")}</SelectItem>
+                    <SelectItem value="confidential">{translateUi("Confidential")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-3">
-                <Label>Allowed Scopes</Label>
-                <p className="text-13 text-muted-foreground">
-                  OIDC scopes this app can request. Determines what user data
-                  and NyxID capabilities are included in tokens.
-                </p>
+                <Label>{translateUi("Allowed Scopes")}</Label>
+                <p className="text-13 text-muted-foreground">{translateUi("OIDC scopes this app can request. Determines what user data and NyxID capabilities are included in tokens.")}</p>
                 <div className="space-y-2">
                   {OIDC_SCOPES.map((scope) => (
                     <div key={scope.id} className="flex items-start gap-2">
@@ -273,9 +268,7 @@ export function OrgDeveloperAppsTab({
                         >
                           {scope.label}
                           {scope.required && (
-                            <FieldHelp className="ml-1 text-muted-foreground">
-                              (required)
-                            </FieldHelp>
+                            <FieldHelp className="ml-1 text-muted-foreground">{translateUi("(required)")}</FieldHelp>
                           )}
                         </Label>
                         {"hint" in scope && scope.hint && (
@@ -294,16 +287,12 @@ export function OrgDeveloperAppsTab({
                 type="button"
                 variant="outline"
                 onClick={() => setCreateOpen(false)}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={() => void handleCreate()}
                 isLoading={createMutation.isPending}
-              >
-                Create App
-              </Button>
+              >{translateUi("Create App")}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -318,21 +307,21 @@ export function OrgDeveloperAppsTab({
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard
-          title="Total Apps"
+          title={translateUi("Total Apps")}
           value={apps.length}
-          description={`OAuth clients owned by ${orgName}`}
+          description={translateUi("OAuth clients owned by {{value1}}", { value1: orgName })}
           icon={Code}
         />
         <StatCard
-          title="Active Apps"
+          title={translateUi("Active Apps")}
           value={activeCount}
-          description="Ready for production traffic"
+          description={translateUi("Ready for production traffic")}
           icon={ShieldCheck}
         />
         <StatCard
-          title="Confidential Apps"
+          title={translateUi("Confidential Apps")}
           value={confidentialCount}
-          description="Require client secret"
+          description={translateUi("Require client secret")}
           icon={Shield}
         />
       </div>
@@ -341,7 +330,7 @@ export function OrgDeveloperAppsTab({
         {!isLoading && error && (
           <Card className="xl:col-span-2">
             <CardContent className="p-4">
-              <ErrorBanner message={`Failed to load developer apps owned by ${orgName}.`} onRetry={refetch} />
+              <ErrorBanner message={translateUi("Failed to load developer apps owned by {{value1}}.", { value1: orgName })} onRetry={refetch} />
             </CardContent>
           </Card>
         )}
@@ -388,11 +377,10 @@ export function OrgDeveloperAppsTab({
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle className="text-15">{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? "Active" : "Inactive"}
+                    {app.is_active ? translateUi("Active") : translateUi("Inactive")}
                   </Badge>
                 </div>
-                <CardDescription className="break-all">
-                  Client ID:{" "}
+                <CardDescription className="break-all">{translateUi("Client ID:")}{" "}
                   <span className="text-13 text-foreground">
                     {app.id}
                   </span>
@@ -402,8 +390,7 @@ export function OrgDeveloperAppsTab({
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">{app.client_type}</Badge>
                   <Badge variant="secondary">
-                    {app.redirect_uris.length} redirect URIs
-                  </Badge>
+                    {app.redirect_uris.length}{translateUi(" redirect URIs")}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(app.allowed_scopes || "")
@@ -428,8 +415,8 @@ export function OrgDeveloperAppsTab({
             <CardContent className="p-4 text-center">
               <p className="text-14 text-muted-foreground">
                 {apps.length === 0
-                  ? `No developer apps owned by ${orgName}.`
-                  : `No active developer apps owned by ${orgName}. Enable "Show inactive" to view deactivated apps.`}
+                  ? translateUi("No developer apps owned by {{value1}}.", { value1: orgName })
+                  : translateUi("No active developer apps owned by {{value1}}. Enable \"Show inactive\" to view deactivated apps.", { value1: orgName })}
               </p>
             </CardContent>
           </Card>

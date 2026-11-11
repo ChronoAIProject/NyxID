@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +14,7 @@ import type { ChannelBotHealth } from "@/schemas/channel-bot-health";
 function when(value: string | null): string {
   if (!value) return "never";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(getFormattingLocale());
 }
 
 function errorLine(
@@ -28,6 +31,7 @@ function Row({
   readonly label: string;
   readonly value: string;
 }) {
+  useUiTranslation();
   return (
     <div className="flex justify-between gap-3 text-14">
       <span className="text-muted-foreground">{label}</span>
@@ -38,16 +42,15 @@ function Row({
 
 /** Delivery diagnostics and the server's recovery recommendation. */
 export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
+  useUiTranslation();
   const health = useChannelBotHealth(botId);
   const resubscribe = useResubscribeChannelBot();
   const verify = useVerifyChannelBot({ creditsOwnerId: health.data?.user_id });
   if (health.isLoading)
-    return <p className="text-14 text-muted-foreground">Checking health…</p>;
+    return <p className="text-14 text-muted-foreground">{translateUi("Checking health…")}</p>;
   if (health.error || !health.data)
     return (
-      <p role="alert" className="text-14 text-destructive">
-        Health is unavailable
-        {health.error instanceof Error ? `: ${health.error.message}` : "."}
+      <p role="alert" className="text-14 text-destructive">{translateUi("Health is unavailable")}{health.error instanceof Error ? `: ${health.error.message}` : "."}
       </p>
     );
   const data = health.data;
@@ -63,8 +66,8 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
             resubscribe.mutate(botId, {
               onSuccess: (result) =>
                 result.recommended_action === "none"
-                  ? toast.success("Subscription registered")
-                  : toast.warning(result.recommended_action_text),
+                  ? toast.success(translateUi("Subscription registered"))
+                  : toast.warning(translateUi(result.recommended_action_text)),
             }),
           pending: resubscribe.isPending,
         }
@@ -80,45 +83,56 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
         : null;
   return (
     <section
-      aria-label="Channel health"
+      aria-label={translateUi("Channel health")}
       className="space-y-2 rounded-md border border-border p-3"
     >
-      <div className="flex items-center gap-2 type-card-title">
-        Health
-        <Badge variant={healthy ? "success" : "warning"}>
-          {healthy ? "Healthy" : "Needs attention"}
+      <div className="flex items-center gap-2 type-card-title">{translateUi("Health")}<Badge variant={healthy ? "success" : "warning"}>
+          {healthy ? translateUi("Healthy") : translateUi("Needs attention")}
         </Badge>
         <Badge variant="secondary">
-          {data.mode === "poll" ? "Polling" : "Webhook"}
+          {data.platform === "discord" ? (data.discord_intake?.receiving_side === "interactions_only" ? translateUi("Interactions") : translateUi("Gateway")) : data.mode === "poll" ? translateUi("Polling") : translateUi("Webhook")}
         </Badge>
       </div>
+      {data.discord_intake && <>
+        <Row label={translateUi("Receiving side")} value={data.discord_intake.receiving_side === "native_gateway" ? "Agent Event Gateway" : data.discord_intake.receiving_side === "interactions_only" ? "Discord interactions" : "NyxID relay"} />
+        <Row label={translateUi("Intake evidence")} value={`${data.discord_intake.state}${data.discord_intake.code ? ` (${data.discord_intake.code})` : ""}`} />
+        <Row label={translateUi("Last confirmed inbound")} value={when(data.discord_intake.last_inbound_at)} />
+        {data.discord_intake.handed_over_at && <Row label={translateUi("Handed over")} value={when(data.discord_intake.handed_over_at)} />}
+        {data.discord_intake.block_reason && <Row label={translateUi("Intake blocked by")} value={data.discord_intake.block_reason} />}
+      </>}
       <Row
-        label="Last inbound"
+        label={translateUi("Last inbound")}
         value={`${when(d.last_inbound_at)}${d.last_inbound_source ? ` (${d.last_inbound_source})` : ""}`}
       />
       {data.platform === "discord" && (
         <Row
-          label="Last NyxID relay Gateway state"
+          label={translateUi("Last NyxID relay Gateway state")}
           value={d.discord_gateway
             ? `${d.discord_gateway.state}${d.discord_gateway.reason ? ` (${d.discord_gateway.reason})` : ""}, reported ${when(d.discord_gateway.updated_at)}`
             : "No local connection recorded. Relay chat requires channel:discord-gateway and Discord Message Content Intent. Gateway-hosted bots use the Agent Event Gateway connection."}
         />
       )}
-      <Row label="Last reply sent" value={when(d.last_outbound_at)} />
-      {outbound && <Row label="Last reply error" value={outbound} />}
-      {webhook && <Row label="Last webhook error" value={webhook} />}
+      <Row label={translateUi("Last reply sent")} value={when(d.last_outbound_at)} />
+      {outbound && <Row label={translateUi("Last reply error")} value={outbound} />}
+      {d.last_outbound_notice?.reason === "telegram_formatting_fallback" && (
+        <Row
+          label={translateUi("Formatting notice")}
+          value={translateUi("Telegram rejected formatting at {{time}}. NyxID attempted the same text without styling; see the delivery result for confirmation.", { time: when(d.last_outbound_notice.at) })}
+        />
+      )}
+      {webhook && <Row label={translateUi("Last webhook error")} value={webhook} />}
       {d.subscription_state && (
         <Row
-          label="Subscription"
+          label={translateUi("Subscription")}
           value={`${d.subscription_state.registered ? "registered" : `missing${d.subscription_state.last_error ? ` (${d.subscription_state.last_error})` : ""}`}, checked ${when(d.subscription_state.checked_at)}`}
         />
       )}
-      {d.failure_reason && <Row label="Failure" value={d.failure_reason} />}
+      {d.failure_reason && <Row label={translateUi("Failure")} value={d.failure_reason} />}
       {d.consecutive_errors > 0 && (
-        <Row label="Consecutive errors" value={String(d.consecutive_errors)} />
+        <Row label={translateUi("Consecutive errors")} value={String(d.consecutive_errors)} />
       )}
       {data.next_poll_at && (
-        <Row label="Next poll" value={when(data.next_poll_at)} />
+        <Row label={translateUi("Next poll")} value={when(data.next_poll_at)} />
       )}
       <p
         className={

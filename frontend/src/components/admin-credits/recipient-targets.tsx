@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useFormContext } from "react-hook-form";
 import type { BillingTargetKind } from "@/schemas/billing-credits";
 import {
@@ -32,6 +33,7 @@ export function RecipientTargetFields({
   readonly description?: string;
   readonly onLookupBlocked?: (blocked: boolean) => void;
 }) {
+  const { t } = useUiTranslation();
   const form = useFormContext<RecipientTargetValues>();
   const targetKind: BillingTargetKind = form.watch("target_kind");
   return (
@@ -41,7 +43,7 @@ export function RecipientTargetFields({
         name="target_kind"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>Recipients</FormLabel>
+            <FormLabel>{t("Recipients")}</FormLabel>
             <Select
               value={field.value}
               onValueChange={(value) => {
@@ -60,12 +62,10 @@ export function RecipientTargetFields({
                 </SelectTrigger>
               </FormControl>
               <SelectContent>
-                <SelectItem value="all_users">All billing owners</SelectItem>
-                <SelectItem value="selected_users">Selected owners</SelectItem>
-                <SelectItem value="org_members">
-                  Organization members
-                </SelectItem>
-                <SelectItem value="groups">Group members</SelectItem>
+                <SelectItem value="all_users">{t("All billing owners")}</SelectItem>
+                <SelectItem value="selected_users">{t("Selected owners")}</SelectItem>
+                <SelectItem value="org_members">{t("Organization members")}</SelectItem>
+                <SelectItem value="groups">{t("Group members")}</SelectItem>
               </SelectContent>
             </Select>
             {description ? (
@@ -79,12 +79,12 @@ export function RecipientTargetFields({
       />
       <p className="text-13 text-muted-foreground">
         {targetKind === "org_members"
-          ? "Every person in the selected organizations receives the benefit on their personal wallet, including viewers."
+          ? t("Every person in the selected organizations receives the benefit on their personal wallet, including viewers.")
           : targetKind === "groups"
-            ? "Every person directly in the selected groups receives the benefit on their personal wallet."
+            ? t("Every person directly in the selected groups receives the benefit on their personal wallet.")
             : targetKind === "selected_users"
-              ? "Select a person for their personal wallet, or an organization for its shared wallet."
-              : "All active person and organization wallets."}
+              ? t("Select a person for their personal wallet, or an organization for its shared wallet.")
+              : t("All active person and organization wallets.")}
       </p>
       {targetKind === "org_members" ? (
         <FormField
@@ -92,7 +92,7 @@ export function RecipientTargetFields({
           name="target_org_ids"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Organizations</FormLabel>
+              <FormLabel>{t("Organizations")}</FormLabel>
               <FormControl>
                 <OrgPicker
                   onBlockedChange={onLookupBlocked}
@@ -111,7 +111,7 @@ export function RecipientTargetFields({
           name="target_group_ids"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Groups</FormLabel>
+              <FormLabel>{t("Groups")}</FormLabel>
               <FormControl>
                 <GroupPicker
                   onBlockedChange={onLookupBlocked}
@@ -130,7 +130,7 @@ export function RecipientTargetFields({
           name="target_user_ids"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Owners</FormLabel>
+              <FormLabel>{t("Owners")}</FormLabel>
               <FormControl>
                 <UserPicker
                   onBlockedChange={onLookupBlocked}

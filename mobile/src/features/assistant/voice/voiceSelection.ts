@@ -78,25 +78,43 @@ export function voiceElapsed(
   return `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
 }
 
-/** Mirrors Web: empty Send becomes Voice only for an eligible private chat. */
-export function showVoiceComposer(input: {
+/** Mirrors Web: private specialists and NyxBot both keep Voice when empty. */
+export function composerTrailingControl(input: {
   enabled: boolean;
   running: boolean;
+  conversationId?: string;
   text: string;
   attachmentCount: number;
   uploadBlocked: boolean;
+  recording?: boolean;
   channel?: unknown;
-  subagent?: boolean;
   destroyed?: boolean;
-}) {
-  return (
+  canCompose: boolean;
+  canSend: boolean;
+  voiceOpen?: boolean;
+  openingVoice?: boolean;
+  stopDisabled?: boolean;
+}): { kind: "send" | "stop" | "voice"; disabled?: boolean; busy?: boolean } {
+  if (input.running && input.conversationId) {
+    return { kind: "stop", disabled: input.stopDisabled };
+  }
+  // Persisted `subagent` is the normal specialist role, not a voice restriction.
+  if (
     input.enabled &&
     !input.running &&
     !input.text.trim() &&
     input.attachmentCount === 0 &&
     !input.uploadBlocked &&
+    !input.recording &&
     !input.channel &&
-    !input.subagent &&
-    !input.destroyed
-  );
+    !input.destroyed &&
+    !input.voiceOpen
+  ) {
+    return {
+      kind: "voice",
+      disabled: !input.canCompose || !!input.openingVoice,
+      busy: input.openingVoice,
+    };
+  }
+  return { kind: "send", disabled: !input.canSend };
 }

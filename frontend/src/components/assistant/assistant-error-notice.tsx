@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { X } from "lucide-react";
 
@@ -14,6 +16,7 @@ export function AssistantErrorNotice({
   readonly message?: string;
   readonly docked?: boolean;
 }) {
+  useUiTranslation();
   const [dismissed, setDismissed] = useState<string>();
   if (!message || dismissed === message) return null;
   return (
@@ -31,10 +34,10 @@ export function AssistantErrorNotice({
           role="alert"
           className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/5 py-2.5 pl-4 pr-2 text-14 text-destructive"
         >
-          <p className="min-w-0 flex-1 whitespace-pre-line break-words py-0.5">{message}</p>
+          <p className="min-w-0 flex-1 whitespace-pre-line break-words py-0.5">{translateUi(message)}</p>
           <button data-icon-button=""
             type="button"
-            aria-label="Dismiss"
+            aria-label={translateUi("Dismiss")}
             onClick={() => setDismissed(message)}
             className="flex shrink-0 items-center justify-center rounded-md text-destructive/70 transition-colors hover:bg-destructive/10 hover:text-destructive"
           >

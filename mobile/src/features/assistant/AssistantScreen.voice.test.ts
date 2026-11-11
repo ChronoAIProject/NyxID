@@ -731,6 +731,40 @@ test("voice entry yields to text, attachments, upload work and the active turn's
   x.harness.unmount();
 });
 
+for (const kind of ["specialist", "nyxbot"] as const) {
+  test(`an empty ${kind} composer keeps voice after its first text exchange`, async () => {
+    const x = setup();
+    x.assistant.agent.kind = kind;
+    x.assistant.agent.name = kind === "specialist" ? "cake-shop" : "nyxbot";
+    x.harness.render();
+    assert.equal(x.button("Open voice call")?.props.disabled, false);
+    x.input().props.onChangeText("Hello");
+    x.harness.flush();
+    assert.equal(x.button("Send message")?.props.disabled, false);
+    x.button("Send message")!.props.onPress();
+    await x.harness.settle();
+    assert.equal(x.events.filter(([name]) => name === "send").length, 1);
+
+    x.assistant.openConversation(A);
+    x.adopt(A);
+    Object.assign(x.assistant.history!.conversation, {
+      role: kind === "specialist" ? "subagent" : "orchestrator",
+      message_count: 2,
+      active_turn: null,
+    });
+    x.harness.render();
+    assert.equal(x.input().props.value, "");
+    assert.equal(x.button("Open voice call")?.props.kind, "voice");
+    assert.equal(x.button("Open voice call")?.props.disabled, false);
+    assert.equal(x.button("Send message"), undefined);
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    assert.equal(x.voice()?.props.thread, A);
+    assert.equal(x.drafts.length, 0, "saved chat voice must reuse its thread");
+    x.harness.unmount();
+  });
+}
+
 test("private attachments send directly without mention aliases or rewriting the draft", async () => {
   const x = setup(A);
   const file = {
@@ -784,7 +818,6 @@ test("the server feature flag and eligible chat context determine whether voice 
   assert.ok(x.button("Open voice call"));
   for (const context of [
     { channel: { platform: "telegram" } },
-    { role: "subagent" },
     { agent: { ...x.assistant.agent, destroyed: true } },
   ]) {
     Object.assign(x.assistant.history!.conversation, context);

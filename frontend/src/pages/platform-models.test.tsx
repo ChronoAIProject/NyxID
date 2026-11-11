@@ -102,6 +102,25 @@ beforeEach(() => {
   vi.clearAllMocks();
   account();
   mock.get.mockImplementation(async (path: string) => {
+    if (path === "/admin/platform-models/contracts") return [];
+    if (
+      path.includes("/platform-models/credentials") ||
+      path.includes("/platform-models/offerings")
+    )
+      return {
+        records: [
+          {
+            id: other,
+            name: "Model credential",
+            kind: "openai",
+            enabled: true,
+            created_at: "2026-11-01T00:00:00Z",
+            updated_at: "2026-11-01T00:00:00Z",
+            references: [],
+          },
+        ],
+        next_after: null,
+      };
     if (path.startsWith("/llm/models"))
       return { models: [publicModel], next_after: null };
     if (path === `/admin/platform-models/${id}`) return model;
@@ -372,7 +391,7 @@ describe("platform model surfaces", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Add private route" }),
     );
-    await userEvent.type(
+    await userEvent.selectOptions(
       screen.getByLabelText("Credential catalog-service ID"),
       other,
     );

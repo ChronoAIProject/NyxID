@@ -3,7 +3,7 @@ import test from "node:test";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
 import {
   chooseVoiceOption,
-  showVoiceComposer,
+  composerTrailingControl,
   voiceElapsed,
   voiceOptionKey,
   voiceTariff,
@@ -204,27 +204,96 @@ test("missing or unsynced platform duration prices never appear free", () => {
   );
 });
 
-test("composer offers voice only for an eligible empty private thread and never masks Send or Stop", () => {
-  const ready = {
-    enabled: true,
-    running: false,
-    text: "",
-    attachmentCount: 0,
-    uploadBlocked: false,
-  };
-  assert.equal(showVoiceComposer(ready), true);
-  assert.equal(showVoiceComposer({ ...ready, text: "  \n\t" }), true);
-  for (const patch of [
-    { enabled: false },
-    { running: true },
-    { text: "你好" },
-    { attachmentCount: 1 },
-    { uploadBlocked: true },
-    { channel: { platform: "telegram" } },
-    { subagent: true },
-    { destroyed: true },
-  ])
-    assert.equal(showVoiceComposer({ ...ready, ...patch }), false);
+const idleComposer = {
+  enabled: true,
+  running: false,
+  text: "",
+  attachmentCount: 0,
+  uploadBlocked: false,
+  canCompose: true,
+  canSend: false,
+};
+
+for (const conversationId of [undefined, "saved-specialist-thread"]) {
+  test(`empty ${conversationId ? "persisted" : "new"} composer offers enabled voice`, () => {
+    const control = composerTrailingControl({ ...idleComposer, conversationId });
+    assert.equal(control.kind, "voice");
+    assert.equal(control.disabled, false);
+  });
+}
+
+test("whitespace stays empty; typed text and attachments choose Send", () => {
+  assert.equal(
+    composerTrailingControl({ ...idleComposer, text: "  \n\t" }).kind,
+    "voice",
+  );
+  for (const draft of [{ text: "你好" }, { attachmentCount: 1 }]) {
+    assert.deepEqual(
+      composerTrailingControl({ ...idleComposer, ...draft, canSend: true }),
+      { kind: "send", disabled: false },
+    );
+  }
+});
+
+test("active and settling replies keep Stop even with text or voice disabled", () => {
+  for (const enabled of [true, false]) {
+    assert.deepEqual(
+      composerTrailingControl({
+        ...idleComposer,
+        enabled,
+        conversationId: "thread",
+        running: true,
+        text: "guidance",
+        canCompose: false,
+        stopDisabled: false,
+      }),
+      { kind: "stop", disabled: false },
+    );
+  }
+  assert.deepEqual(
+    composerTrailingControl({ ...idleComposer, running: true, canCompose: false }),
+    { kind: "send", disabled: true },
+    "before adoption there is no thread to stop and voice cannot start",
+  );
+});
+
+test("Stop protection and pending Stop remain disabled", () => {
+  assert.deepEqual(
+    composerTrailingControl({
+      ...idleComposer,
+      conversationId: "thread",
+      running: true,
+      stopDisabled: true,
+    }),
+    { kind: "stop", disabled: true },
+  );
+});
+
+for (const [reason, patch] of [
+  ["feature unavailable", { enabled: false }],
+  ["recording", { recording: true }],
+  ["upload or connection blocked", { uploadBlocked: true }],
+  ["channel thread", { channel: { platform: "telegram" } }],
+  ["destroyed agent", { destroyed: true }],
+  ["voice already open", { voiceOpen: true }],
+] as const) {
+  test(`${reason} cannot open voice from an empty composer`, () => {
+    assert.deepEqual(
+      composerTrailingControl({ ...idleComposer, ...patch }),
+      { kind: "send", disabled: true },
+    );
+  });
+}
+
+test("disabled composition and voice startup keep the voice control disabled", () => {
+  assert.deepEqual(
+    composerTrailingControl({ ...idleComposer, canCompose: false }),
+    { kind: "voice", disabled: true, busy: undefined },
+  );
+  assert.deepEqual(
+    composerTrailingControl({ ...idleComposer, openingVoice: true }),
+    { kind: "voice", disabled: true, busy: true },
+  );
 });
 
 test("voice timer floors seconds, clamps future starts and freezes at the server close time", () => {

@@ -777,6 +777,32 @@ mod tests {
     }
 
     #[test]
+    fn lark_wiki_lookup_registered_for_four_slugs_with_raw_read_contract() {
+        for slug in super::super::lark_wiki::SLUGS {
+            let spec = spec_for_slug(slug).unwrap();
+            let inputs = crate::services::openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let endpoint = inputs.iter().find(|e| e.name == "wiki_get_node").unwrap();
+            assert_eq!(endpoint.method, "GET");
+            let mark = &spec["paths"][&endpoint.path]["get"]["x-aevatar-tool"];
+            assert_eq!(mark["readOnly"], true);
+            assert_eq!(mark["destructive"], false);
+            assert_eq!(mark["requiresApproval"], false);
+            let schema = &spec["paths"][&endpoint.path]["get"]["parameters"];
+            assert_eq!(schema.as_array().unwrap().len(), 1);
+            assert_eq!(schema[0]["name"], "token");
+            assert_eq!(schema[0]["in"], "query");
+            assert_eq!(schema[0]["required"], true);
+            assert!(
+                mark["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("SAME connection")
+            );
+            assert!(endpoint.path.ends_with("/wiki/v2/spaces/get_node"));
+        }
+    }
+
+    #[test]
     fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
         for slug in ["api-lark", "api-feishu"] {
             let spec = spec_for_slug(slug).unwrap();
@@ -823,6 +849,31 @@ mod tests {
             );
             assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
             assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
+        }
+    }
+
+    #[test]
+    fn cma_uses_remote_discovery_without_a_hosted_overlay() {
+        assert!(spec_for_slug("cma").is_none());
+        assert!(spec_path_for_slug("cma").is_none());
+        for (method, path, name) in [
+            ("POST", "/api/v1/agents", "create_agent"),
+            ("POST", "/api/v1/agents", "post_api_v1_agents"),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "control_task",
+            ),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "post_api_v2_agents_agent_id_responses_response_id_controls",
+            ),
+        ] {
+            assert_eq!(
+                operation_marks("cma", method, path, name),
+                OperationMarks::default()
+            );
         }
     }
 

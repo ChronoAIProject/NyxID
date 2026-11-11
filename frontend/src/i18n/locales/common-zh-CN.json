@@ -1,0 +1,12 @@
+{
+  "just now": "刚刚",
+  "{{count}}m ago": "{{count}} 分钟前",
+  "{{count}}h ago": "{{count}} 小时前",
+  "{{count}}d ago": "{{count}} 天前",
+  "in a moment": "马上",
+  "in {{count}}m": "{{count}} 分钟后",
+  "in {{count}}h": "{{count}} 小时后",
+  "in {{count}}d": "{{count}} 天后",
+  "Couldn't reach NyxID. Check your connection and try again.": "无法连接到 NyxID。请检查网络连接后重试。",
+  "Generate new code": "生成新验证码"
+}

@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { useFieldArray } from "react-hook-form";
@@ -39,17 +42,18 @@ import {
 import type { PlatformProfile } from "@/schemas/platform-onboarding";
 
 function Preview({ content }: { content: HelpContent }) {
+  useUiTranslation();
   return (
     <div
       className="space-y-4 rounded-lg border border-border bg-muted p-4 text-14"
-      aria-label="Help preview"
+      aria-label={translateUi("Help preview")}
     >
       {content.articles.map((a, i) => (
         <article key={i}>
           <h4 className="font-semibold">{a.title}</h4>
           <p className="whitespace-pre-wrap break-words">{a.body}</p>
           {a.tags.length > 0 && (
-            <p className="text-muted-foreground">Topics: {a.tags.join(", ")}</p>
+            <p className="text-muted-foreground">{translateUi("Topics: ")}{a.tags.join(", ")}</p>
           )}
         </article>
       ))}
@@ -74,6 +78,7 @@ function LibraryEditor({
   library: HelpLibrary;
   onDirtyChange: (dirty: boolean) => void;
 }) {
+  useUiTranslation();
   const [reviewed, setReviewed] = useState(library);
   const form = useAppForm({
     resolver: zodResolver(helpContentSchema),
@@ -114,23 +119,19 @@ function LibraryEditor({
   };
   return (
     <div className="space-y-4 text-14">
-      <p>
-        Published revision {library.published_revision}. Publishing updates
-        every manager assigned to this library. Started replies keep their
-        reviewed revision.
-      </p>
+      <p>{translateUi("Published revision ")}{library.published_revision}{translateUi(". Publishing updates every manager assigned to this library. Started replies keep their reviewed revision. ")}</p>
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
       {stale && (
         <div className="space-y-2">
           <p role="alert">
             {changed
-              ? "This library changed elsewhere. Your unsaved edits are still here. Copy anything you want to keep before reloading."
-              : "This library changed elsewhere. Reload to review the current draft before editing or publishing."}
+              ? translateUi("This library changed elsewhere. Your unsaved edits are still here. Copy anything you want to keep before reloading.")
+              : translateUi("This library changed elsewhere. Reload to review the current draft before editing or publishing.")}
           </p>
           <Button onClick={reload}>
             {changed
-              ? "Discard local edits and reload"
-              : "Reload current draft"}
+              ? translateUi("Discard local edits and reload")
+              : translateUi("Reload current draft")}
           </Button>
         </div>
       )}
@@ -157,13 +158,13 @@ function LibraryEditor({
             ),
           )}
         >
-          <h3 className="type-card-title">FAQ articles</h3>
+          <h3 className="type-card-title">{translateUi("FAQ articles")}</h3>
           {articles.fields.map((a, i) => (
             <fieldset
               key={a.fieldKey}
               className="space-y-3 rounded-lg border border-border p-3"
             >
-              <Label asChild><legend className="px-1">Article {i + 1}</legend></Label>
+              <Label asChild><legend className="px-1">{translateUi("Article ")}{i + 1}</legend></Label>
               {(["id", "title", "body"] as const).map((name) => (
                 <FormField
                   key={name}
@@ -173,10 +174,10 @@ function LibraryEditor({
                     <FormItem>
                       <FormLabel>
                         {name === "id"
-                          ? "Stable article ID"
+                          ? translateUi("Stable article ID")
                           : name === "title"
-                            ? "Article title"
-                            : "Article text"}
+                            ? translateUi("Article title")
+                            : translateUi("Article text")}
                       </FormLabel>
                       <FormControl>
                         {name === "body" ? (
@@ -195,7 +196,7 @@ function LibraryEditor({
                 name={`articles.${i}.tags`}
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Topics (comma separated)</FormLabel>
+                    <FormLabel>{translateUi("Topics (comma separated)")}</FormLabel>
                     <FormControl>
                       <Input
                         value={field.value.join(", ")}
@@ -217,8 +218,7 @@ function LibraryEditor({
                 variant="destructive"
                 disabled={articles.fields.length <= 1}
                 onClick={() => articles.remove(i)}
-              >
-                Remove article {i + 1}
+              >{translateUi("Remove article ")}{i + 1}
               </Button>
             </fieldset>
           ))}
@@ -228,20 +228,15 @@ function LibraryEditor({
             onClick={() =>
               articles.append({ id: "", title: "", body: "", tags: [] })
             }
-          >
-            Add article
-          </Button>
-          <h3 className="type-card-title">Use cases</h3>
-          <p className="text-muted-foreground">
-            These describe ideas and example prompts. They do not create bots or
-            grant access.
-          </p>
+          >{translateUi("Add article")}</Button>
+          <h3 className="type-card-title">{translateUi("Use cases")}</h3>
+          <p className="text-muted-foreground">{translateUi("These describe ideas and example prompts. They do not create bots or grant access.")}</p>
           {cases.fields.map((c, i) => (
             <fieldset
               key={c.fieldKey}
               className="space-y-3 rounded-lg border border-border p-3"
             >
-              <Label asChild><legend className="px-1">Use case {i + 1}</legend></Label>
+              <Label asChild><legend className="px-1">{translateUi("Use case ")}{i + 1}</legend></Label>
               {(["id", "title", "description"] as const).map((name) => (
                 <FormField
                   key={name}
@@ -251,10 +246,10 @@ function LibraryEditor({
                     <FormItem>
                       <FormLabel>
                         {name === "id"
-                          ? "Stable use-case ID"
+                          ? translateUi("Stable use-case ID")
                           : name === "title"
-                            ? "Use-case title"
-                            : "Description"}
+                            ? translateUi("Use-case title")
+                            : translateUi("Description")}
                       </FormLabel>
                       <FormControl>
                         {name === "description" ? (
@@ -273,7 +268,7 @@ function LibraryEditor({
                 name={`use_cases.${i}.example_prompts`}
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Example prompts (one per line)</FormLabel>
+                    <FormLabel>{translateUi("Example prompts (one per line)")}</FormLabel>
                     <FormControl>
                       <Textarea
                         value={field.value.join("\n")}
@@ -293,8 +288,7 @@ function LibraryEditor({
                 type="button"
                 variant="destructive"
                 onClick={() => cases.remove(i)}
-              >
-                Remove use case {i + 1}
+              >{translateUi("Remove use case ")}{i + 1}
               </Button>
             </fieldset>
           ))}
@@ -309,9 +303,7 @@ function LibraryEditor({
                 example_prompts: [],
               })
             }
-          >
-            Add use case
-          </Button>
+          >{translateUi("Add use case")}</Button>
           {form.formState.errors.root?.message && (
             <ErrorBanner message={form.formState.errors.root.message} />
           )}
@@ -321,16 +313,10 @@ function LibraryEditor({
               variant="primary"
               disabled={!changed || stale}
               isLoading={mutation.isPending}
-            >
-              Save draft
-            </Button>
-            <Button type="button" onClick={() => setPreview((v) => !v)}>
-              Preview draft
-            </Button>
+            >{translateUi("Save draft")}</Button>
+            <Button type="button" onClick={() => setPreview((v) => !v)}>{translateUi("Preview draft")}</Button>
             {changed && (
-              <Button type="button" onClick={reload}>
-                Discard unsaved edits
-              </Button>
+              <Button type="button" onClick={reload}>{translateUi("Discard unsaved edits")}</Button>
             )}
             <Button
               type="button"
@@ -339,18 +325,14 @@ function LibraryEditor({
                 setReviewPublish(true);
                 setRollback(undefined);
               }}
-            >
-              Review publication
-            </Button>
+            >{translateUi("Review publication")}</Button>
           </div>
         </form>
       </Form>
       {preview && <Preview content={content} />}
       {reviewPublish && !changed && !stale && (
         <div className="space-y-3">
-          <h3 className="font-semibold">
-            Publish this saved draft to all assigned managers?
-          </h3>
+          <h3 className="font-semibold">{translateUi("Publish this saved draft to all assigned managers?")}</h3>
           <Preview content={reviewed.draft} />
           <Button
             variant="primary"
@@ -372,25 +354,22 @@ function LibraryEditor({
                 },
               )
             }
-          >
-            Publish shared help
-          </Button>
+          >{translateUi("Publish shared help")}</Button>
         </div>
       )}
       <details>
-        <summary>Published history and rollback</summary>
+        <summary>{translateUi("Published history and rollback")}</summary>
         <div className="space-y-3 py-3">
           {history.error && (
-            <ErrorBanner message="Could not load published history." />
+            <ErrorBanner message={translateUi("Could not load published history.")} />
           )}
           {history.data?.map((r) => (
             <div
               key={r.revision}
               className="flex items-center justify-between gap-3"
             >
-              <span>
-                Revision {r.revision} ·{" "}
-                {new Date(r.published_at).toLocaleString()}
+              <span>{translateUi("Revision ")}{r.revision} ·{" "}
+                {new Date(r.published_at).toLocaleString(getFormattingLocale())}
               </span>
               <Button
                 disabled={changed || stale || mutation.isPending}
@@ -398,27 +377,19 @@ function LibraryEditor({
                   setRollback(r);
                   setReviewPublish(false);
                 }}
-              >
-                Review revision {r.revision}
+              >{translateUi("Review revision ")}{r.revision}
               </Button>
             </div>
           ))}
           {history.data?.length === 50 && (
-            <Button onClick={() => setBefore(history.data?.at(-1)?.revision)}>
-              Older revisions
-            </Button>
+            <Button onClick={() => setBefore(history.data?.at(-1)?.revision)}>{translateUi("Older revisions")}</Button>
           )}
           {before && (
-            <Button onClick={() => setBefore(undefined)}>
-              Newest revisions
-            </Button>
+            <Button onClick={() => setBefore(undefined)}>{translateUi("Newest revisions")}</Button>
           )}
           {rollback && !changed && !stale && (
             <div className="space-y-3">
-              <p>
-                Restore revision {rollback.revision} as a new publication for
-                every assigned manager.
-              </p>
+              <p>{translateUi("Restore revision ")}{rollback.revision}{translateUi(" as a new publication for every assigned manager.")}</p>
               <Preview content={rollback.content} />
               <Button
                 variant="primary"
@@ -443,8 +414,7 @@ function LibraryEditor({
                     },
                   )
                 }
-              >
-                Restore revision {rollback.revision}
+              >{translateUi("Restore revision ")}{rollback.revision}
               </Button>
             </div>
           )}
@@ -455,6 +425,7 @@ function LibraryEditor({
 }
 const createSchema = z.object({ name: z.string().trim().min(1).max(100) });
 export function PlatformHelpEditor() {
+  useUiTranslation();
   const libraries = useHelpLibraries();
   const mutation = useHelpMutation();
   const [selected, setSelected] = useState<string>();
@@ -466,12 +437,12 @@ export function PlatformHelpEditor() {
   const current =
     libraries.data?.find((l) => l.id === selected) ?? libraries.data?.[0];
   return (
-    <DetailSection title="Shared FAQ and use cases">
+    <DetailSection title={translateUi("Shared FAQ and use cases")}>
       <div className="space-y-4 p-4">
-        {libraries.isPending && <p role="status">Loading shared help…</p>}
+        {libraries.isPending && <p role="status">{translateUi("Loading shared help…")}</p>}
         {libraries.error && (
           <ErrorBanner
-            message="Could not load help libraries."
+            message={translateUi("Could not load help libraries.")}
             onRetry={() => void libraries.refetch()}
           />
         )}
@@ -482,7 +453,7 @@ export function PlatformHelpEditor() {
               onValueChange={setSelected}
               disabled={editing}
             >
-              <SelectTrigger aria-label="Help library">
+              <SelectTrigger aria-label={translateUi("Help library")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -501,7 +472,7 @@ export function PlatformHelpEditor() {
           </>
         )}
         <details>
-          <summary>Create another library</summary>
+          <summary>{translateUi("Create another library")}</summary>
           <Form {...form}>
             <form
               className="space-y-3 py-3"
@@ -522,7 +493,7 @@ export function PlatformHelpEditor() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Library name</FormLabel>
+                    <FormLabel>{translateUi("Library name")}</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
@@ -534,9 +505,7 @@ export function PlatformHelpEditor() {
                 type="submit"
                 disabled={editing}
                 isLoading={mutation.isPending}
-              >
-                Create help library
-              </Button>
+              >{translateUi("Create help library")}</Button>
               {mutation.error && (
                 <ErrorBanner message={mutation.error.message} />
               )}
@@ -552,22 +521,21 @@ export function PlatformHelpAssignment({
 }: {
   profile: PlatformProfile;
 }) {
+  useUiTranslation();
   const libraries = useHelpLibraries();
   const assignment = useHelpAssignment(profile.id);
   const mutation = useAssignHelp(profile.id);
   const [selected, setSelected] = useState<string>();
   if (libraries.error || assignment.error)
     return (
-      <ErrorBanner message="Could not load this manager's help library." />
+      <ErrorBanner message={translateUi("Could not load this manager's help library.")} />
     );
   if (!assignment.data || !libraries.data)
-    return <p role="status">Loading help assignment…</p>;
+    return <p role="status">{translateUi("Loading help assignment…")}</p>;
   const value = selected ?? assignment.data.library_id;
   return (
     <div className="space-y-2">
-      <Label htmlFor={`help-${profile.id}`}>
-        Shared help library
-      </Label>
+      <Label htmlFor={`help-${profile.id}`}>{translateUi("Shared help library")}</Label>
       <Select value={value} onValueChange={setSelected}>
         <SelectTrigger id={`help-${profile.id}`}>
           <SelectValue />
@@ -593,9 +561,7 @@ export function PlatformHelpAssignment({
             { onSuccess: () => setSelected(undefined) },
           )
         }
-      >
-        Use this library
-      </Button>
+      >{translateUi("Use this library")}</Button>
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
     </div>
   );

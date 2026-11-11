@@ -477,7 +477,7 @@ pub fn schema(name: &str) -> Value {
                 "members": {"type": "string", "enum": ["everyone", "owner", "default"],
                     "description": "Groups and channels: whether members other than the \
                     user may talk to the agent, as guests; default lets them once the user \
-                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
+                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means model setup is pending; ready means the model route is ready, not that business information or customer testing is complete"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -497,7 +497,7 @@ pub fn schema(name: &str) -> Value {
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
-                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
+                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means model setup is pending; ready means the model route is ready, not that business information or customer testing is complete"},
                 "private_chat_posts": {"type":"boolean","description":"Allow new private customer chats to start with posting enabled. Default false. Groups, channels and topics still need per-chat opt-in. Turning off changes only future chats unless apply_to_existing is true."},
                 "apply_to_existing": {"type":"boolean","default":false,"description":"Also set existing private chats of this channel to private_chat_posts (required with this option). At most 1000 changed chats; over the cap nothing changes. Per-chat off remains effective until explicitly applied again."}}),
             vec!["channel_agent_id"],
@@ -838,7 +838,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
             Telegram, bot creation inside Telegram when available). Secrets are entered on that \
             page, never in chat. Once the bot exists NyxID links it to you or the named \
-            personal specialist automatically and tells you. For an organization specialist, use an existing same-org bot with connect_channel_bot."
+            personal specialist automatically and tells you. New bots stay owner-only; linking is not customer readiness or consent to open access. Keep unanswered onboarding questions pending when setup resumes. For an organization specialist, use an existing same-org bot with connect_channel_bot."
         }
         "connect_channel_bot" => {
             "Link a channel bot to you or to one of the user's personal specialists: the \
@@ -905,7 +905,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             specialist when its members need a service."
         }
         "update_channel_access" => {
-            "Change who can talk to a bot. For organization specialists, use org_guests with the current guest_revision from list_channel_agents: only organization admins may enable guests, set the daily organization-paid budget or delegate currently granted services. Verified members use their own permissions and billing. For personal bindings, guests use the owner's billing and the specialist's per-service guest access controls their services. Set who may talk in private chats: only the user \
+            "Change who can talk to a bot. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Opening on an explicit owner request is allowed; report audience_readiness and unresolved questions, including in Full access. Model ready is not business readiness. For organization specialists, use org_guests with the current guest_revision from list_channel_agents: only organization admins may enable guests, set the daily organization-paid budget or delegate currently granted services. Verified members use their own permissions and billing. For personal bindings, guests use the owner's billing and the specialist's per-service guest access controls their services. Set who may talk in private chats: only the user \
             (default) or anyone, each in their own thread as a guest (no account actions and \
             nothing private to the user; NyxBot uses no tools for them). Also set private_chat_posts to allow new private customer chats to receive agent-initiated posts, optionally apply_to_existing. This does not open the audience or change group/channel/topic permissions."
         }

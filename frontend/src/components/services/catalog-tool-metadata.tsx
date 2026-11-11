@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label } from "@/components/ui/label";
 import { useAuthStore } from "@/stores/auth-store";
 import { z } from "zod";
@@ -23,6 +26,7 @@ export function CatalogToolMetadata({
 }: {
   service: DownstreamService;
 }) {
+  useUiTranslation();
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
@@ -89,9 +93,9 @@ export function CatalogToolMetadata({
             },
           });
           form.reset(values);
-          toast.success("Tool metadata saved");
+          toast.success(translateUi("Tool metadata saved"));
         } catch {
-          toast.error("Metadata update failed");
+          toast.error(translateErrorMessage("Metadata update failed"));
         }
       })}
     >
@@ -106,56 +110,42 @@ export function CatalogToolMetadata({
                   serviceId: service.id,
                   body: { icon_url: "" },
                 });
-                toast.success("Tool icon removed");
+                toast.success(translateUi("Tool icon removed"));
               } catch {
-                toast.error("Icon removal failed");
+                toast.error(translateErrorMessage("Icon removal failed"));
               }
             }}
-          >
-            Remove icon
-          </Button>
+          >{translateUi("Remove icon")}</Button>
         )}
         <div className="grid gap-3 sm:grid-cols-2">
-          <Label>
-            Name
-            <Input {...form.register("name")} />
+          <Label>{translateUi("Name")}<Input {...form.register("name")} />
           </Label>
-          <Label>
-            Supplier
-            <Input {...form.register("supplier")} />
+          <Label>{translateUi("Supplier")}<Input {...form.register("supplier")} />
           </Label>
-          <Label>
-            Description
-            <Input {...form.register("description")} />
+          <Label>{translateUi("Description")}<Input {...form.register("description")} />
           </Label>
           {admin && (
-            <Label>
-              Offering kind
-              <Select
+            <Label>{translateUi("Offering kind")}<Select
                 value={form.watch("offering_kind")}
                 onValueChange={(value) =>
                   form.setValue("offering_kind", value as "ai_service" | "tool")
                 }
               >
-                <SelectTrigger aria-label="Offering kind">
+                <SelectTrigger aria-label={translateUi("Offering kind")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="ai_service">AI Service</SelectItem>
-                  <SelectItem value="tool">Tool</SelectItem>
+                  <SelectItem value="ai_service">{translateUi("AI Service")}</SelectItem>
+                  <SelectItem value="tool">{translateUi("Tool")}</SelectItem>
                 </SelectContent>
               </Select>
             </Label>
           )}
-          <Label>
-            OpenAPI spec URL
-            <Input {...form.register("openapi_spec_url")} />
+          <Label>{translateUi("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
           </Label>
         </div>
         <details className="space-y-3">
-          <summary className="cursor-pointer text-14">
-            Documentation and operational notes
-          </summary>
+          <summary className="cursor-pointer text-14">{translateUi("Documentation and operational notes")}</summary>
           <div className="grid gap-3 sm:grid-cols-2">
             {(
               [
@@ -173,10 +163,8 @@ export function CatalogToolMetadata({
               </Label>
             ))}
           </div>
-          <Label className="block">
-            Required permissions
-            <Input
-              placeholder="read:api, write:data"
+          <Label className="block">{translateUi("Required permissions")}<Input
+              placeholder={translateUi("read:api, write:data")}
               {...form.register("required_permissions")}
             />
           </Label>
@@ -185,10 +173,8 @@ export function CatalogToolMetadata({
               {form.formState.errors.required_permissions.message}
             </p>
           )}
-          <p className="text-13 text-text-tertiary">
-            Comma-separated vendor permissions required for the operations.
-          </p>
-          <p className="type-row-title">Capabilities</p>
+          <p className="text-13 text-text-tertiary">{translateUi("Comma-separated vendor permissions required for the operations.")}</p>
+          <p className="type-row-title">{translateUi("Capabilities")}</p>
           <div className="grid gap-2 sm:grid-cols-2">
             {(
               [
@@ -218,7 +204,7 @@ export function CatalogToolMetadata({
             ))}
           </div>
         </details>
-        <p className="text-14">Topics</p>
+        <p className="text-14">{translateUi("Topics")}</p>
         <div className="flex flex-wrap gap-1">
           {topics.map((topic) => (
             <Button
@@ -245,10 +231,9 @@ export function CatalogToolMetadata({
           ))}
         </div>
         {service.import_source && (
-          <p className="text-13 text-text-tertiary">
-            Imported from {service.import_source.kind}:{" "}
+          <p className="text-13 text-text-tertiary">{translateUi("Imported from ")}{service.import_source.kind}:{" "}
             {service.import_source.reference} ·{" "}
-            {service.import_source.version ?? "Unversioned"}
+            {service.import_source.version ?? translateUi("Unversioned")}
           </p>
         )}
         <div className="flex justify-end">
@@ -257,9 +242,7 @@ export function CatalogToolMetadata({
             type="submit"
             disabled={!form.formState.isDirty}
             isLoading={mutation.isPending}
-          >
-            Save metadata
-          </Button>
+          >{translateUi("Save metadata")}</Button>
         </div>
       </fieldset>
     </form>

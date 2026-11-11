@@ -116,6 +116,9 @@ beforeEach(() => {
         guest_revision: "revision-2",
       };
     }
+    if (endpoint.includes("guest-readiness")) return new Response(JSON.stringify({
+      status: "setting_up", configuration: { instructions_present: false, persona_present: false, memory_notes: 0, skills: 0, service_grants: 0, account_read: false },
+    }));
     if (failRead)
       return new Response(
         JSON.stringify({ message: "Settings temporarily unavailable" }),
@@ -401,4 +404,12 @@ it("asks before reconnecting a failed binding with a retained dirty draft", asyn
   );
   await waitFor(() => expect(reconnect).toHaveBeenCalledOnce());
   expect(writes).toEqual([]);
+});
+
+it("shows model setup and missing onboarding facts beside the immediate audience choice", async () => {
+  mount("active", false);
+  expect(await screen.findByText("Setting up for visitors…")).toBeTruthy();
+  expect(screen.getByText(/Instructions: missing; persona: missing/)).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "Who can talk to Helper in private chats" })).not.toBeDisabled();
+  expect(screen.getByText(/Opening access is your choice/)).toBeTruthy();
 });

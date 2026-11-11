@@ -17,6 +17,18 @@ model image round; legacy tool images preserve automatic inspection.
 
 ## Turn diagnostics and context continuity
 
+A browser or mobile **live reply interrupted** notice describes a lost client
+subscription, not a failed server turn. It is transient and keyed to the exact
+turn. History refresh (polling, live invalidation or foreground recovery) clears
+it when a saved assistant reply proves settlement, even if another turn is now
+running. A saved approval continuation can also resolve it through
+`continuation_of` → acknowledgement `creation_turn_id`; an unrelated reply or
+an allowed card alone cannot. An idle snapshot without the matching reply keeps
+the outcome unknown. Stored failures, Stop and `turn_lost` retain their normal
+outcome UI; a lost turn says to check completed actions, not that it may still be
+working. Interruption notices are not persisted or restored on reload, and
+recovery never replays the send automatically.
+
 Failed replies retain a normalized NyxID `error_code` and, only when the
 upstream named one, its sanitized `upstream_error_code`. NyxID's own classes
 (timeouts, Stop, preparation, settlement) never fill `upstream_error_code`.
@@ -2489,3 +2501,59 @@ setup carries the same verified org origin and payer, with no user-supplied
 model/credential choices. The provider admin is only the transport principal.
 Readiness, live sender/agent/binding checks and source fences apply on every
 turn, key use and delivery. See the [channel contract](09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
+
+
+### Approval-gated activity outcomes (#2315)
+
+New turn activities can carry `decision: { kind, id, state }`. The link is written
+only by NyxID's acknowledgement, execution-permission or proxy approval gate.
+It contains identifiers and closed states only, never tool input/output. The
+legacy activity `status` is retained for mixed fleets; the MCP `isError` result,
+result digest and continuation loop-guard digest are unchanged. New clients use
+the decision projection when present. Rows without it keep their existing UI.
+
+History batches the linked IDs and projects their current state: `waiting`,
+`allowed`, `denied`, `expired`, `completed`, `failed`, `cancelled`, or
+`unavailable`. Allow means permission, not completion. Exact card consumption
+records the executing conversation/turn/activity; only that occurrence's result
+can confirm completion. A successful unrelated continuation does not count.
+Authored skills require the reviewed revision's pinned publication. Machine
+jobs require their live job receipt. Execution-permission proposals v1–v4 use
+their retained occurrence and metadata-only response outcome; receipt completion
+alone does not prove HTTP success. Native permission-key MCP also uses its
+trusted tool-outcome marker, since HTTP 200 can carry a tool failure. No payload
+or retained result is decrypted for presentation. Missing/old outcome evidence stays unconfirmed.
+
+Web and mobile show “Waiting for approval”, “Completed after approval”,
+“Declined” or “Approval expired” with matching counts. A linked card is counted
+once even when it also appears as a receipt. Actual execution failures remain
+failed; a gated call is never counted as a generic failed action. Stop does not
+erase confirmed effects, and interrupted execution without a confirmed result
+never becomes success. Raw HTTP calls add an activity only when a decision gate
+runs; ordinary model callbacks add neither an activity nor a presentation read.
+A WebSocket/CONNECT handshake alone does not confirm stream completion.
+
+Shared-recipient connection-consent steps use the same optional decision metadata, scoped to the acting person. Once, Always and a consumed consent mean allowed, not proven execution; revoked or missing evidence remains unavailable.
+
+### Suggested setup and title language (#2312 / #2313)
+
+Connection-first Home suggestions resolve real provider choices before a chat
+starts, through the existing hosted connect flow (see `NYXBOT_FIRST_RUN.md`).
+The server returns only currently connectable catalog options, and reuses a
+verified existing connection instead of asking to add another one. With neither
+an existing connection nor a connectable provider, clients start the original
+suggestion prompt so NyxBot can guide setup. No assistant
+instruction or approval format changes; the 4 KiB base-prompt bound is unchanged.
+
+First-party turn requests may send `Accept-Language`, a bounded language tag.
+Web reads the active UI locale from the shared i18next instance, including live
+language switches; native sends its device locale. Only the first owner input
+captures it as the optional
+`AssistantConversation.title_language`, in the turn-admission transaction. It is
+not forwarded to NyxAgent or included in executable instructions. The isolated,
+tool-free utility title request has a separate `ui_language` fallback hint.
+The first user message determines the title's language. Only when that language
+is unclear (for example names, numbers, code or URLs) may the UI hint supply it;
+the assistant reply never determines it. Existing provisional titles, rename
+fences and legacy rows retain their behavior. Unknown headers/optional fields are safe across
+mixed replicas; old replicas do not enforce the new title-language hint.

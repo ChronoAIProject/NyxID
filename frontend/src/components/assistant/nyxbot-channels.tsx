@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
   GroupedList,
@@ -72,6 +74,7 @@ function AgentSelect({
   readonly disabled: boolean;
   readonly onChange: (agentId: string) => void;
 }) {
+  useUiTranslation();
   return (
     <Select
       value={value}
@@ -79,7 +82,7 @@ function AgentSelect({
       disabled={disabled || !agents.length}
     >
       <GroupedSelectTrigger aria-label={label} className="max-w-full">
-        <SelectValue placeholder="Choose agent" />
+        <SelectValue placeholder={translateUi("Choose agent")} />
       </GroupedSelectTrigger>
       <SelectContent>
         {agents.map((agent) => (
@@ -106,6 +109,7 @@ export function ChannelBotsManager({
   readonly agent?: AssistantAgent;
   readonly connectionId?: string;
 }) {
+  useUiTranslation();
   const channels = useNyxBotChannels();
   const drafts = useGroupedDraftGuard();
   const focusedConnection = useRef<HTMLLIElement | null>(null);
@@ -252,27 +256,24 @@ export function ChannelBotsManager({
     <div className="space-y-6">
       {channels.error || (error && !availableOpen) ? (
         <GroupedList
-          title="Connection status"
+          title={translateUi("Connection status")}
           footer={
             <p role="alert" className="text-destructive">
               {error ??
-                `Could not load connected bots. ${channels.error?.message}`}
+                translateUi("Could not load connected bots. {{value1}}", { value1: channels.error?.message })}
             </p>
           }
         >
           <GroupedRow asChild interactive>
-            <button type="button" onClick={() => void channels.refetch()}>
-              Refresh connected bots
-            </button>
+            <button type="button" onClick={() => void channels.refetch()}>{translateUi("Refresh connected bots")}</button>
           </GroupedRow>
         </GroupedList>
       ) : null}
       {connectedOrg ? <p role="status" className="type-secondary text-text-secondary">
-        {connectedOrg} is connected to the organization specialist. Each member, including admins, must verify their own chat account below before using member permissions. Connecting the bot does not verify anyone.
-      </p> : null}
-      {connectionId && channels.data && !connected.some((row) => row.id === connectionId) ? <p role="status" className="type-secondary text-text-secondary">This connection is no longer available to you. Refresh connected bots or ask an organization admin.</p> : null}
+        {connectedOrg}{translateUi(" is connected to the organization specialist. Each member, including admins, must verify their own chat account below before using member permissions. Connecting the bot does not verify anyone.")}</p> : null}
+      {connectionId && channels.data && !connected.some((row) => row.id === connectionId) ? <p role="status" className="type-secondary text-text-secondary">{translateUi("This connection is no longer available to you. Refresh connected bots or ask an organization admin.")}</p> : null}
       {connected.length ? (
-        <ul aria-label="Connected channel bots" className="space-y-6">
+        <ul aria-label={translateUi("Connected channel bots")} className="space-y-6">
           {connected.map((row) => {
             const target = targets.find((candidate) => candidate.id === agentOf(row));
             const live = row.status === "pending" || row.status === "active";
@@ -285,39 +286,40 @@ export function ChannelBotsManager({
                 : a.owner_kind !== "org",
             );
             return (
-              <li key={row.id} ref={row.id === connectionId ? focusedConnection : undefined} tabIndex={-1} aria-label={`${row.bot_label} connection`} className="space-y-6 scroll-mt-4 focus-visible:outline focus-visible:outline-ring">
+              <li key={row.id} ref={row.id === connectionId ? focusedConnection : undefined} tabIndex={-1} aria-label={translateUi("{{value1}} connection", { value1: row.bot_label })} className="space-y-6 scroll-mt-4 focus-visible:outline focus-visible:outline-ring">
                 <GroupedList
-                  title="Connected bot"
+                  title={translateUi("Connected bot")}
                   footer={
                     <>
                       {row.last_error ? (
                         <p
                           className="text-13 text-destructive"
                           data-channel-error={row.last_error}
-                        >
-                          Last error: {nyxBotChannelError(row.last_error)}
+                        >{translateUi("Last error: ")}{nyxBotChannelError(row.last_error)}
                         </p>
                       ) : null}
                       {row.platform === "discord" ? <DiscordGatewayStatus row={row} /> : null}
                       {!row.org_specialist && !row.owner_linked && row.inbound_hint ? (
                         <p>{row.inbound_hint}</p>
                       ) : null}
-                      {["failing", "interrupted", "media_failed"].includes(
+                      {["failing", "unconfirmed", "interrupted", "media_failed"].includes(
                         row.delivery_status ?? "",
                       ) ? (
                         <p className="text-13 text-destructive">
-                          {row.delivery_status === "failing"
-                            ? "Messages are not reaching the agent: "
-                            : "Attachment problem: "}
-                          {row.delivery_reason ?? "delivery failed"}
+                          {row.delivery_status === "unconfirmed"
+                            ? translateUi("Intake not confirmed: ")
+                            : row.delivery_status === "failing"
+                            ? translateUi("Messages are not reaching the agent: ")
+                            : translateUi("Attachment problem: ")}
+                          {row.delivery_reason ?? (row.delivery_status === "unconfirmed" ? translateUi("No authenticated inbound has been confirmed.") : translateUi("delivery failed"))}
                           {row.delivery_failed_at
-                            ? ` (${formatRelativeTime(row.delivery_failed_at)})`
+                            ? translateUi(" ({{value}})", { value: formatRelativeTime(row.delivery_failed_at) })
                             : ""}
                           .
                         </p>
                       ) : null}
                       {confirming === row.id ? (
-                        <p>Stop answering through {row.bot_label}?</p>
+                        <p>{translateUi("Stop answering through ")}{row.bot_label}?</p>
                       ) : null}
                     </>
                   }
@@ -344,12 +346,12 @@ export function ChannelBotsManager({
                       .join(" · ")}
                   />
                   <GroupedRow
-                    title="Answered by"
+                    title={translateUi("Answered by")}
                     accessory={
                       <AgentSelect
                         agents={rowTargets}
                         value={agentOf(row)}
-                        label={`Agent for ${row.bot_label}`}
+                        label={translateUi("Agent for {{value1}}", { value1: row.bot_label })}
                         disabled={busy || !canManage}
                         onChange={(agentId) => void relink(row, agentId)}
                       />
@@ -371,9 +373,7 @@ export function ChannelBotsManager({
                       interactive
                       search={{ id: `retry-gateway-${row.id}`, title: "Retry native gateway now", breadcrumb: `Channels › ${row.bot_label}`, keywords: "Discord gateway activation retry" }}
                     >
-                      <button type="button" disabled={busy || !row.owner_linked} onClick={() => void retryNative(row)}>
-                        Retry native gateway now
-                      </button>
+                      <button type="button" disabled={busy || !row.owner_linked} onClick={() => void retryNative(row)}>{translateUi("Retry native gateway now")}</button>
                     </GroupedRow>
                   ) : null}
                   {canManage && live && !row.org_specialist ? (
@@ -386,8 +386,8 @@ export function ChannelBotsManager({
                         }
                       >
                         {row.owner_linked
-                          ? "Link another account"
-                          : "Link account"}
+                          ? translateUi("Link another account")
+                          : translateUi("Link account")}
                       </button>
                     </GroupedRow>
                   ) : null}
@@ -398,9 +398,7 @@ export function ChannelBotsManager({
                           type="button"
                           disabled={disconnect.isPending}
                           onClick={() => setConfirming(undefined)}
-                        >
-                          Cancel
-                        </button>
+                        >{translateUi("Cancel")}</button>
                       </GroupedRow>
                       <GroupedRow
                         asChild
@@ -411,9 +409,7 @@ export function ChannelBotsManager({
                           type="button"
                           disabled={disconnect.isPending}
                           onClick={() => void remove(row)}
-                        >
-                          Disconnect
-                        </button>
+                        >{translateUi("Disconnect")}</button>
                       </GroupedRow>
                     </>
                   ) : (
@@ -426,9 +422,7 @@ export function ChannelBotsManager({
                         type="button"
                         disabled={busy}
                         onClick={() => setConfirming(row.id)}
-                      >
-                        Disconnect
-                      </button>
+                      >{translateUi("Disconnect")}</button>
                     </GroupedRow>
                   )}
                 </GroupedList>
@@ -452,39 +446,35 @@ export function ChannelBotsManager({
         />
       ) : null}
       <GroupedList
-        title="Channel bots"
+        title={translateUi("Channel bots")}
         footer={
           !available.length && !bots.isPending && !bots.error
             ? bots.data?.length
-              ? "All your channel bots are connected to other agents. Move one here with its agent selector in NyxBot settings."
-              : "You have no channel bots yet. Register one under Channel Bots, then connect it here."
+              ? translateUi("All your channel bots are connected to other agents. Move one here with its agent selector in NyxBot settings.")
+              : translateUi("You have no channel bots yet. Register one under Channel Bots, then connect it here.")
             : undefined
         }
       >
-        <GroupedDisclosure data-drawer-page-trigger="available-bots" search={{ id: "connect-another-bot", title: "Connect another bot", breadcrumb: "Channels" }} onClick={() => setAvailableOpen(true)}>
-          Connect another bot
-        </GroupedDisclosure>
+        <GroupedDisclosure data-drawer-page-trigger="available-bots" search={{ id: "connect-another-bot", title: "Connect another bot", breadcrumb: "Channels" }} onClick={() => setAvailableOpen(true)}>{translateUi("Connect another bot")}</GroupedDisclosure>
       </GroupedList>
       <GroupedDetail
         searchPage="available-bots"
         open={availableOpen}
-        title="Connect another bot"
+        title={translateUi("Connect another bot")}
         onReveal={() => setAvailableOpen(true)}
-        backLabel="Back to Channels"
+        backLabel={translateUi("Back to Channels")}
         onBack={() => setAvailableOpen(false)}
       >
         <GroupedList
-          title="Available bots"
+          title={translateUi("Available bots")}
           footer={
             <>
               {bots.error ? (
-                <p role="alert" className="text-destructive">
-                  Could not load your channel bots.
-                </p>
+                <p role="alert" className="text-destructive">{translateUi("Could not load your channel bots.")}</p>
               ) : null}
               {error && availableOpen ? (
                 <p role="alert" className="text-destructive">
-                  {error}
+                  {translateUi(error)}
                 </p>
               ) : null}
             </>
@@ -492,22 +482,20 @@ export function ChannelBotsManager({
         >
           <GroupedRow>
             <GroupedInput
-              aria-label="Search channel bots"
-              placeholder="Search bots"
+              aria-label={translateUi("Search channel bots")}
+              placeholder={translateUi("Search bots")}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
           </GroupedRow>
           {bots.isPending ? (
-            <GroupedRow title="Loading your channel bots..." />
+            <GroupedRow title={translateUi("Loading your channel bots...")} />
           ) : bots.error ? (
             <GroupedRow asChild interactive>
-              <button type="button" onClick={() => void bots.refetch()}>
-                Retry channel bots
-              </button>
+              <button type="button" onClick={() => void bots.refetch()}>{translateUi("Retry channel bots")}</button>
             </GroupedRow>
           ) : null}
-          <ul aria-label="Channel bots you can connect">
+          <ul aria-label={translateUi("Channel bots you can connect")}>
             {available
               .filter((bot) =>
                 `${bot.label} ${channelPlatformName(bot.platform)}`
@@ -528,7 +516,7 @@ export function ChannelBotsManager({
                         <p className="type-secondary text-text-tertiary">
                           {channelPlatformName(bot.platform)}
                           {bot.user_id !== currentUserId
-                            ? ` · ${orgName(bot.user_id) ?? ""}`
+                            ? translateUi(" · {{value}}", { value: orgName(bot.user_id) ?? "" })
                             : ""}
                         </p>
                       </div>
@@ -537,7 +525,7 @@ export function ChannelBotsManager({
                           <AgentSelect
                             agents={botTargets}
                             value={target}
-                            label={`Agent for ${bot.label}`}
+                            label={translateUi("Agent for {{value1}}", { value1: bot.label })}
                             disabled={busy}
                             onChange={(agentId) =>
                               setConnectTargets((current) => ({
@@ -550,11 +538,9 @@ export function ChannelBotsManager({
                         <Button
                           variant="ghost"
                           disabled={busy || !target}
-                          aria-label={`Connect ${bot.label}${targetName ? ` to ${targetName}` : ""}`}
+                          aria-label={targetName ? translateUi("Connect {{bot}} to {{target}}", { bot: bot.label, target: targetName }) : translateUi("Connect {{bot}}", { bot: bot.label })}
                           onClick={() => void requestLink(bot.id, target)}
-                        >
-                          Connect
-                        </Button>
+                        >{translateUi("Connect")}</Button>
                       </div>
                     </li>
                   </GroupedRow>
@@ -568,7 +554,7 @@ export function ChannelBotsManager({
               .toLowerCase()
               .includes(search.toLowerCase()),
           ) ? (
-            <GroupedRow title="No available bots found." />
+            <GroupedRow title={translateUi("No available bots found.")} />
           ) : null}
         </GroupedList>
         {ownerLink ? (
@@ -595,57 +581,66 @@ function OwnerLink({
   readonly busy: boolean;
   readonly onRenew: () => void;
 }) {
+  useUiTranslation();
   return (
     <GroupedList
-      title="Owner link"
-      aria-label="Owner link"
+      title={translateUi("Owner link")}
+      aria-label={translateUi("Owner link")}
       footer={
         <>
           <p>{link.instructions}</p>
-          <p>Single use. Expires {formatDateTime(link.expires_at)}.</p>
+          <p>{translateUi("Single use. Expires ")}{formatDateTime(link.expires_at)}.</p>
         </>
       }
     >
-      <GroupedRow title={`Verify your account for ${label}`} />
+      <GroupedRow title={translateUi("Verify your account for {{value1}}", { value1: label })} />
       {link.url ? (
         <GroupedRow asChild interactive>
           <a href={link.url} target="_blank" rel="noopener noreferrer">
-            <span className="flex-1">Open link</span>
+            <span className="flex-1">{translateUi("Open link")}</span>
             <ExternalLink aria-hidden />
           </a>
         </GroupedRow>
       ) : null}
       <GroupedRow>
-        <CopyableField grouped label="Link code" value={link.code} size="sm" />
+        <CopyableField grouped label={translateUi("Link code")} value={link.code} size="sm" />
       </GroupedRow>
       <GroupedRow asChild interactive>
-        <button type="button" disabled={busy} onClick={onRenew}>
-          New link
-        </button>
+        <button type="button" disabled={busy} onClick={onRenew}>{translateUi("New link")}</button>
       </GroupedRow>
     </GroupedList>
   );
 }
 
 function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
+  useUiTranslation();
+  if (row.discord_intake) {
+    const intake = row.discord_intake;
+    return <div className="space-y-1 type-secondary text-muted-foreground">
+      <p>{translateUi("Receiving side: ")}{intake.receiving_side === "native_gateway" ? translateUi("Agent Event Gateway") : intake.receiving_side === "interactions_only" ? translateUi("Discord interactions") : translateUi("NyxID relay")}{translateUi(". Intake: ")}{intake.state}.</p>
+      <p>{translateUi("Last confirmed inbound: ")}{intake.last_inbound_at ? formatDateTime(intake.last_inbound_at) : translateUi("not observed")}.</p>
+      {intake.handed_over_at ? <p>{translateUi("Handed over: ")}{formatDateTime(intake.handed_over_at)}.</p> : null}
+      {intake.block_reason ? <p>{translateUi("Intake blocked by: ")}{intake.block_reason}.</p> : null}
+      {row.gateway_native_activation ? <p>{translateUi("Native selection: ")}{row.gateway_native_activation_detail ?? row.gateway_native_activation}{translateUi(". Selection does not confirm connection health.")}</p> : null}
+    </div>;
+  }
   if (row.transport === "gateway") {
     if (row.gateway_source?.type !== "discord") {
-      return <p className="text-13 text-muted-foreground">Agent Event Gateway with NyxID relay intake. Native Discord is not confirmed.</p>;
+      return <p className="text-13 text-muted-foreground">{translateUi("Agent Event Gateway with NyxID relay intake. Native Discord is not confirmed.")}</p>;
     }
-    return <p className="text-13 text-muted-foreground">
-      Native gateway selected. Activation: {row.gateway_native_activation ?? "not reported"}.
-      {row.gateway_native_delivery ? ` Gateway delivery: ${row.gateway_native_delivery}.` : " Native delivery has not been confirmed."}
+    return <p className="text-13 text-muted-foreground">{translateUi("Native gateway selected. Activation: ")}{row.gateway_native_activation ?? translateUi("not reported")}.
+      {row.gateway_native_delivery ? translateUi(" Gateway delivery: {{value1}}.", { value1: row.gateway_native_delivery }) : translateUi(" Native delivery has not been confirmed.")}
     </p>;
   }
   if (!row.gateway_native_activation) return null;
   const draining = row.gateway_native_activation === "relay_draining";
   return <div className="space-y-1 text-13 text-muted-foreground">
-    <p>{draining ? "Waiting for the native gateway to release Discord before the relay can resume." : row.status === "active" && row.delivery_status !== "failing" ? "Working on NyxID relay." : "NyxID relay selected. Check channel health for delivery status."}</p>
+    <p>{draining ? translateUi("Waiting for the native gateway to release Discord before the relay can resume.") : row.status === "active" && row.delivery_status === "ok" ? translateUi("Working on NyxID relay.") : translateUi("NyxID relay selected. Check channel health for delivery status.")}</p>
     {row.gateway_native_activation !== "relay_ready" && !draining ? <>
-      <p>Native gateway activation did not complete: {row.gateway_native_activation_detail ?? row.gateway_native_activation}.</p>
-      <p>A successful relay reply does not confirm native gateway acceptance.</p>
-      {row.gateway_next_retry_at ? <p>Next automatic retry: {formatDateTime(row.gateway_next_retry_at)} (while the gateway flag is enabled; deferred while answering).</p> : null}
-      {row.gateway_retry_available_at ? <p>Manual retry available after {formatDateTime(row.gateway_retry_available_at)}.</p> : null}
+      <p>{translateUi("Native gateway activation did not complete: ")}{row.gateway_native_activation_detail ?? row.gateway_native_activation}.</p>
+      <p>{translateUi("A successful relay reply does not confirm native gateway acceptance.")}</p>
+      {row.gateway_next_retry_at ? <p>{translateUi("Next automatic retry: ")}{formatDateTime(row.gateway_next_retry_at)}{translateUi(" (while the gateway flag is enabled; deferred while answering).")}</p> : null}
+      {row.gateway_retry_available_at ? <p>{translateUi("Manual retry available after ")}{formatDateTime(row.gateway_retry_available_at)}.</p> : null}
     </> : null}
   </div>;
 }

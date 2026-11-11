@@ -76,6 +76,7 @@ export type RuntimeStepInfo = {
 };
 
 export type RuntimeToolCallInfo = {
+  decision?: import("./activity-decision").ActivityDecision | null;
   machine?: MachineReceipt;
   conversationId?: string;
   id: string;

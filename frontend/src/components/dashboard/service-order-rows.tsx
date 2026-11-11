@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { createContext, useContext, type ReactNode } from "react";
 import { GripVertical } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
@@ -72,6 +73,7 @@ export function ServiceOrderHandle({
   readonly label: string;
   readonly disabled: boolean;
 }) {
+  const { t } = useUiTranslation();
   const handle = useContext(DragHandleContext);
   if (!handle) return null;
   const { setActivatorNodeRef, attributes, listeners } = handle;
@@ -83,7 +85,7 @@ export function ServiceOrderHandle({
       size="icon"
       className="shrink-0 touch-none cursor-grab active:cursor-grabbing"
       disabled={disabled}
-      aria-label={`Drag ${label}`}
+      aria-label={t("Drag {{label}}", { label: label })}
       {...attributes}
       {...listeners}
     >

@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 import type { ChannelPlatformDescriptor } from "@/types/channels";
 import type { ChannelCredentialField } from "@/lib/channel-platforms";
@@ -70,10 +71,10 @@ export function buildCreateChannelBotSchema(platforms: readonly ChannelPlatformD
     for (const field of descriptor.registration.fields) {
       const value = data[field.name as ChannelCredentialField]?.trim();
       if (field.required && !value) {
-        ctx.addIssue({ code: "custom", message: `${field.label} is required`, path: [field.name] });
+        ctx.addIssue({ code: "custom", message: translateUi("{{value0}} is required", { value0: field.label }), path: [field.name] });
       }
       if (value && value.length > (field.secret ? 512 : 256)) {
-        ctx.addIssue({ code: "custom", message: `${field.label} is too long`, path: [field.name] });
+        ctx.addIssue({ code: "custom", message: translateUi("{{value0}} is too long", { value0: field.label }), path: [field.name] });
       }
     }
   });

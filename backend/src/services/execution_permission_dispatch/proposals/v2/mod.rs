@@ -365,6 +365,8 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         None
     };
     let request = ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
         execution_proposal: Some(ExecutionProposal {
             v3: None,
             v4: None,
@@ -460,4 +462,14 @@ pub(crate) async fn claim_for_test(
     row: &ApprovalRequest,
 ) -> AppResult<Option<(Resume, PreparedAdapter)>> {
     delivery::claim(state, row).await
+}
+
+#[cfg(test)]
+pub(crate) async fn complete_response_for_test(
+    state: &crate::AppState,
+    row: &ApprovalRequest,
+    resume: &Resume,
+    response: axum::response::Response,
+) -> AppResult<Option<axum::response::Response>> {
+    delivery::complete_response(state, row, resume, Ok(response)).await
 }

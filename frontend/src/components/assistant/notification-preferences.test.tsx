@@ -114,6 +114,7 @@ it("keeps the draft and shows the error when saving fails", async () => {
   await user.click(await screen.findByRole("button", { name: "Save notifications" }));
   await confirmChanges(false);
   expect(await screen.findByText("Settings are read-only right now")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review changes" })).not.toBeInTheDocument());
   expect(within(form).getByRole("switch", { name: "Push for group mentions" })).toHaveAttribute("aria-checked", "true");
   expect(screen.getByRole("button", { name: "Save notifications" })).toBeInTheDocument();
 });

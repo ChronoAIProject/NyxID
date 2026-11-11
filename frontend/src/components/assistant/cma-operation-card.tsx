@@ -1,127 +1,461 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { Circle, Clock3, ExternalLink, Loader2 } from "lucide-react";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
-import { Check, CircleAlert, Clock3, ExternalLink, Radio, Workflow } from "lucide-react";
-import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
-import { CmaGlyph } from "@/components/service-icons/cma";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { isCmaOperationPending, type CmaOperation } from "@/schemas/cma-operation";
+import {
+  isCmaOperationPending,
+  type CmaOperation,
+} from "@/schemas/cma-operation";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { CmaAgentPanel } from "./cma-agent-panel";
+import { CmaCardDetails, CmaCardFrame } from "./cma-card-frame";
 
 function presentation(operation: CmaOperation) {
   const { state, reason, status, kind } = operation;
-  if (state === "cancelled") return { label: "Tracking stopped", tone: "muted" };
-  if (state === "cancelling") return { label: "Stopping tracking", tone: "muted" };
-  if (reason === "timeout") return { label: "Tracking timed out", tone: "warning" };
-  if (["submission_uncertain", "submission_failed"].includes(reason ?? "")) {
+  if (state === "cancelled")
+    return { label: "Tracking stopped", tone: "muted" };
+  if (state === "cancelling")
+    return { label: "Stopping tracking", tone: "muted" };
+  if (reason === "timeout")
+    return { label: "Tracking timed out", tone: "warning" };
+  if (
+    kind === "cma_response" &&
+    reason === "operation_cancelled" &&
+    status === "incomplete"
+  ) {
+    return { label: "Cancelled", tone: "muted" };
+  }
+  if (reason === "submission_failed")
+    return { label: "Submission failed", tone: "error" };
+  if (reason === "submission_uncertain") {
     return { label: "Submission unconfirmed", tone: "warning" };
   }
-  if (reason === "operation_failed" || ["failed", "incomplete", "cancelled", "stopped", "deleted"].includes(status ?? "")) {
-    const label = status === "incomplete" ? "Incomplete"
-      : status === "cancelled" || status === "stopped" ? "Stopped"
-      : status === "deleted" ? "Deleted"
-      : kind === "cma_response" ? "Failed" : "Needs attention";
-    return { label, tone: ["cancelled", "stopped", "deleted"].includes(status ?? "") ? "muted" : "error" };
+  if (
+    reason === "operation_failed" ||
+    ["failed", "incomplete", "cancelled", "stopped", "deleted"].includes(
+      status ?? "",
+    )
+  ) {
+    const label =
+      status === "incomplete"
+        ? "Incomplete"
+        : status === "cancelled" || status === "stopped"
+          ? "Stopped"
+          : status === "deleted"
+            ? "Deleted"
+            : kind === "cma_response"
+              ? "Failed"
+              : "Needs attention";
+    return {
+      label,
+      tone: ["cancelled", "stopped", "deleted"].includes(status ?? "")
+        ? "muted"
+        : "error",
+    };
   }
-  const succeeded = status === (kind === "cma_response" ? "completed" : kind === "cma_provisioning" ? "succeeded" : "ready");
-  if (reason && reason !== "completed" && !(reason.startsWith("result_") && succeeded)) {
+  const succeeded =
+    status ===
+    (kind === "cma_response"
+      ? "completed"
+      : kind === "cma_provisioning"
+        ? "succeeded"
+        : "ready");
+  if (
+    reason &&
+    reason !== "completed" &&
+    !(reason.startsWith("result_") && succeeded)
+  ) {
     return { label: "Status unavailable", tone: "warning" };
   }
   if (succeeded) {
-    return { label: kind === "cma_response" ? "Completed" : "Ready", tone: kind === "cma_agent" && isCmaOperationPending(operation) ? "neutral" : "success" };
+    return {
+      label: kind === "cma_response" ? "Completed" : "Ready",
+      tone:
+        kind === "cma_agent" && isCmaOperationPending(operation)
+          ? "neutral"
+          : "success",
+    };
   }
-  if (reason === "completed" || ["completed", "succeeded", "ready"].includes(status ?? "")) {
+  if (
+    reason === "completed" ||
+    ["completed", "succeeded", "ready"].includes(status ?? "")
+  ) {
     return { label: "Status unavailable", tone: "warning" };
   }
-  if (["waiting_approval", "connection_required", "awaiting_connection", "waiting_for_connection"].includes(status ?? "")) {
-    return { label: status === "waiting_approval" ? "Needs approval" : "Needs connection", tone: "warning" };
+  if (
+    [
+      "waiting_approval",
+      "connection_required",
+      "awaiting_connection",
+      "waiting_for_connection",
+    ].includes(status ?? "")
+  ) {
+    return {
+      label:
+        status === "waiting_approval" ? "Needs approval" : "Needs connection",
+      tone: "warning",
+    };
   }
   if (status === "paused") return { label: "Paused", tone: "muted" };
   if (state === "submitting") return { label: "Submitting", tone: "active" };
   if (!status) return { label: "Awaiting status", tone: "active" };
   if (status === "queued") return { label: "Queued", tone: "active" };
-  if (["starting", "provisioning"].includes(status)) return { label: "Starting", tone: "active" };
-  if (["working", "running", "in_progress"].includes(status)) return { label: kind === "cma_provisioning" ? "Starting" : "Working", tone: "active" };
+  if (["starting", "provisioning"].includes(status))
+    return { label: "Starting", tone: "active" };
+  if (["working", "running", "in_progress"].includes(status))
+    return {
+      label: kind === "cma_provisioning" ? "Starting" : "Working",
+      tone: "active",
+    };
   return { label: "Status unavailable", tone: "warning" };
 }
 const tones: Record<string, string> = {
-  active: "border-[#c6ef68]/25 bg-[#c6ef68]/10 text-[#d4f58b]",
-  success: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200",
-  warning: "border-amber-300/25 bg-amber-300/10 text-amber-200",
-  error: "border-rose-300/25 bg-rose-300/10 text-rose-200",
-  muted: "border-white/15 bg-white/5 text-zinc-300",
-  neutral: "border-border bg-muted text-muted-foreground",
+  active: "text-primary-text",
+  success: "text-success",
+  warning: "text-warning",
+  error: "text-destructive",
+  muted: "text-text-tertiary",
+  neutral: "text-text-tertiary",
 };
-
 
 const phases: Record<string, string> = {
   sandbox_creation: "Creating sandbox",
   sandbox_startup: "Starting sandbox",
+  sandbox_ready: "Preparing sandbox",
   workspace_creation: "Preparing workspace",
   agent_creation: "Creating agent",
   agent_startup: "Starting agent",
+  desktop_preparation: "Preparing desktop",
 };
 
-export function CmaOperationCard({ operation }: { readonly operation: CmaOperation }) {
-  const { label, tone } = presentation(operation);
-  const pending = isCmaOperationPending(operation);
-  const accepted = Boolean(operation.operation_id || (operation.kind === "cma_agent" && operation.status));
-  const complete = tone === "success";
-  const stages = [
-    { label: "Submitted", done: accepted },
-    { label: operation.kind === "cma_provisioning" ? "Provisioning" : "CMA working", done: complete },
-    { label: operation.kind === "cma_response" ? "Result ready" : "Agent ready", done: complete },
-  ];
-  const lastChecked = operation.checked_at ? new Date(operation.checked_at) : null;
+export function CmaOperationCard({
+  operation,
+}: {
+  readonly operation: CmaOperation;
+}) {
+  useUiTranslation();
+  const [collapsed, setCollapsed] = useState(false);
+  const detailsId = useId();
+  const scrollBody = useRef<HTMLDivElement>(null);
   const cmaUrl = safeCmaUrl(operation.cma_url);
+  const title =
+    operation.kind === "cma_provisioning" ? "CMA setup" : "CMA task";
   return (
-    <section
-      aria-label="CMA delegation"
-      data-cma-operation={operation.id}
-      className={`${STATUS_CARD_MAX_W} relative my-3 overflow-hidden rounded-2xl border border-white/10 bg-[#111211] text-zinc-100 shadow-lg shadow-black/10`}
+    <CmaCardFrame
+      title={title}
+      ariaLabel={translateUi("CMA submission: {{value1}}", { value1: title })}
+      controlSubject="CMA submission"
+      operationId={operation.id}
+      collapsed={collapsed}
+      onToggle={() => setCollapsed((value) => !value)}
+      detailsId={detailsId}
+      scrollBody={scrollBody}
+      controls={
+        <>
+          <CmaExecutionControl operations={[operation]} />
+          {cmaUrl ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon"
+                  className="text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                >
+                  <a
+                    href={cmaUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={translateUi("View in CMA")}
+                  >
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{translateUi("View in CMA")}</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </>
+      }
     >
-      <div aria-hidden className="pointer-events-none absolute -right-16 -top-28 h-52 w-72 rounded-full bg-[#c6ef68]/[0.06] blur-3xl" />
-      <div className="relative p-4 sm:p-5">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/5 bg-white/5 text-[#c6ef68]">
-            <CmaGlyph className="size-6" />
-          </span>
-          <h3 className="min-w-0 flex-1 type-body-strong tracking-tight">Delegated to CMA</h3>
-          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 type-secondary-emphasis ", tones[tone])}>
-            <span aria-hidden className={cn("size-1.5 rounded-full bg-current", pending && tone === "active" && "motion-safe:animate-pulse")} />
-            {label}
-          </span>
-        </div>
-        <p className="mt-3 text-13 text-zinc-400">ChronoAI Managed Agent</p>
-        <dl className="mt-1.5 space-y-1 break-all font-mono text-12 text-zinc-400">
-          {operation.agent_id && <div><dt className="inline text-zinc-500">Agent </dt><dd className="inline select-all">{operation.agent_id}</dd></div>}
-          {operation.operation_id && operation.operation_id !== operation.agent_id && <div><dt className="inline text-zinc-500">Operation </dt><dd className="inline select-all">{operation.operation_id}</dd></div>}
-          {operation.idempotency_key && <div><dt className="inline text-zinc-500">Idempotency-Key </dt><dd className="inline select-all">{operation.idempotency_key}</dd></div>}
-        </dl>
-        <ol aria-label="CMA progress" className="mt-4 flex flex-wrap items-center gap-2 text-12">
-          {stages.map((stage, index) => <li key={stage.label} className="flex items-center gap-2">
-            {index > 0 && <span aria-hidden className="text-zinc-600">→</span>}
-            <span className={cn("inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5", stage.done ? "border-white/10 bg-white/[0.06] text-zinc-200" : "border-white/5 text-zinc-500")}>
-              {stage.done ? <Check aria-hidden className="size-3 text-[#c6ef68]" /> : <span aria-hidden className="size-1 rounded-full bg-current" />}
-              {stage.label}
-            </span>
-          </li>)}
-        </ol>
-        {operation.phase && phases[operation.phase] && pending && <p className="mt-3 flex items-center gap-1.5 text-13 text-zinc-400"><Workflow aria-hidden className="size-3" />{phases[operation.phase]}</p>}
-        {tone === "warning" && !pending && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
-        {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-13 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
-        {operation.state === "cancelled" && <p className="mt-3 text-13 text-zinc-400">Tracking ended. CMA may still be running.</p>}
-        {cmaUrl && <Button asChild variant="primary" className="mt-4 w-full">
-          <a href={cmaUrl} target="_blank" rel="noopener noreferrer">
-            View in CMA <ExternalLink aria-hidden className="size-3" />
-          </a>
-        </Button>}
-        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.08] pt-3 text-12 text-zinc-400">
-          <span className="inline-flex min-w-0 flex-1 items-center gap-2">
-            <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-violet-400/15 text-violet-300"><Radio aria-hidden className="size-3" /></span>
-            <span className="break-words"><span className="font-medium text-zinc-200">{operation.monitor_name}</span> · {pending ? "Tracking progress" : "Status recorded"}</span>
-          </span>
-          {lastChecked && Number.isFinite(lastChecked.getTime()) && <span className="inline-flex items-center gap-1"><Clock3 aria-hidden className="size-3" /><time dateTime={operation.checked_at!} title={lastChecked.toLocaleString()}>Checked {lastChecked.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })} · {lastChecked.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>}
-        </div>
+      <CmaOperationProgress operation={operation} />
+      <div id={detailsId} hidden={collapsed} className="space-y-2">
+        <CmaOperationDetails
+          operation={operation}
+          scrollBody={scrollBody}
+          visible={!collapsed}
+        />
       </div>
-    </section>
+    </CmaCardFrame>
+  );
+}
+
+const LONG_REQUEST_MS = 10 * 60_000;
+
+/** Keep request status and notices when a live card replaces its receipt. */
+export function CmaOperationProgress({
+  operation,
+  animate = true,
+}: {
+  readonly operation: CmaOperation;
+  readonly animate?: boolean;
+}) {
+  useUiTranslation();
+  const observed = presentation(operation);
+  const pending = isCmaOperationPending(operation);
+  const [now, setNow] = useState(Date.now);
+  const running =
+    pending &&
+    operation.kind === "cma_response" &&
+    observed.label === "Working";
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 60_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [running]);
+  // Elapsed request time never changes the persisted remote outcome.
+  const createdAt = Date.parse(operation.created_at);
+  const takingLonger =
+    running && Number.isFinite(createdAt) && now - createdAt >= LONG_REQUEST_MS;
+  const { label, tone } = takingLonger
+    ? { label: "Taking longer than usual", tone: "warning" }
+    : observed;
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1.5 text-13 text-foreground"
+        >
+          {animate &&
+          pending &&
+          tone === "active" &&
+          ["Submitting", "Starting", "Working"].includes(label) ? (
+            <Loader2
+              aria-hidden="true"
+              className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text"
+            />
+          ) : label === "Queued" ? (
+            <Clock3
+              aria-hidden="true"
+              className="h-3.5 w-3.5 text-text-tertiary"
+            />
+          ) : (
+            <Circle
+              aria-hidden="true"
+              className={cn("h-2 w-2 fill-current", tones[tone])}
+            />
+          )}
+          {label}
+        </span>
+        <span aria-hidden="true" className="text-text-tertiary">
+          ·
+        </span>
+        <span className="text-13 text-muted-foreground">
+          {pending ? translateUi("Tracking progress") : translateUi("Status recorded")}
+        </span>
+      </div>
+      {takingLonger ? (
+        <p className="text-13 text-warning">{translateUi("This request has been open for at least 10 minutes. CMA still reports it as running. View its progress, or ask NyxBot to cancel this task.")}</p>
+      ) : null}
+      {operation.reason === "timeout" ? (
+        <p className="text-13 text-warning">{translateUi("Automatic tracking reached its time limit. CMA may still be running. Check its status before submitting it again.")}</p>
+      ) : null}
+      {tone === "warning" && !pending && operation.reason !== "timeout" ? (
+        <p className="text-13 text-muted-foreground">{translateUi("CMA’s final outcome could not be confirmed. Check the operation before submitting it again.")}</p>
+      ) : null}
+      {operation.phase && phases[operation.phase] && pending ? (
+        <p className="text-13 text-muted-foreground">
+          {phases[operation.phase]}
+        </p>
+      ) : null}
+      {tone === "success" && operation.reason?.startsWith("result_") ? (
+        <p className="text-13 text-muted-foreground">{translateUi("CMA finished, but its final result is unavailable here.")}</p>
+      ) : null}
+      {operation.state === "cancelled" ? (
+        <p className="text-13 text-muted-foreground">{translateUi("Tracking ended. CMA may still be running.")}</p>
+      ) : null}
+    </>
+  );
+}
+
+export function CmaOperationDetails({
+  operation,
+  scrollBody,
+  visible,
+}: {
+  readonly operation: CmaOperation;
+  readonly scrollBody: RefObject<HTMLDivElement | null>;
+  readonly visible: boolean;
+}) {
+  useUiTranslation();
+  return (
+    <CmaCardDetails
+      label={translateUi("Submission details")}
+      scrollBody={scrollBody}
+      visible={visible}
+    >
+      <dl className="space-y-2">
+        <CmaOperationMetadata operation={operation} />
+      </dl>
+    </CmaCardDetails>
+  );
+}
+
+function CmaOperationMetadata({
+  operation,
+}: {
+  readonly operation: CmaOperation;
+}) {
+  useUiTranslation();
+  const lastChecked = operation.checked_at
+    ? new Date(operation.checked_at)
+    : null;
+  return (
+    <>
+      <div>
+        <dt>{translateUi("Monitored by")}</dt>
+        <dd className="mt-0.5 break-words text-muted-foreground">
+          {operation.monitor_name}
+        </dd>
+      </div>
+      {operation.agent_id ? (
+        <div>
+          <dt>{translateUi("Session ID")}</dt>
+          <dd className="mt-0.5 break-all font-mono text-muted-foreground">
+            {operation.agent_id}
+          </dd>
+        </div>
+      ) : null}
+      {operation.operation_id &&
+      operation.operation_id !== operation.agent_id ? (
+        <div>
+          <dt>{translateUi("Operation ID")}</dt>
+          <dd className="mt-0.5 break-all font-mono text-muted-foreground">
+            {operation.operation_id}
+          </dd>
+        </div>
+      ) : null}
+      {operation.idempotency_key ? (
+        <div>
+          <dt>{translateUi("Idempotency key")}</dt>
+          <dd className="mt-0.5 break-all font-mono text-muted-foreground">
+            {operation.idempotency_key}
+          </dd>
+        </div>
+      ) : null}
+      {lastChecked && Number.isFinite(lastChecked.getTime()) ? (
+        <div>
+          <dt>{translateUi("Last checked")}</dt>
+          <dd className="mt-0.5 text-muted-foreground">
+            <time dateTime={operation.checked_at!}>
+              {lastChecked.toLocaleString(getFormattingLocale())}
+            </time>
+          </dd>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function hasExecutionReference(operation: CmaOperation) {
+  return Boolean(
+    operation.agent_ref_id && /^[0-9a-f-]{36}$/i.test(operation.agent_ref_id),
+  );
+}
+
+function orderedRequests(operations: readonly CmaOperation[]) {
+  return [...operations].sort(
+    (a, b) =>
+      Number(isCmaOperationPending(b)) - Number(isCmaOperationPending(a)) ||
+      Date.parse(b.created_at) - Date.parse(a.created_at),
+  );
+}
+
+export function CmaExecutionControl({
+  operations,
+}: {
+  readonly operations: readonly CmaOperation[];
+}) {
+  useUiTranslation();
+  const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
+  const operation = orderedRequests(operations).find(hasExecutionReference);
+  if (!enabled || !operation) return null;
+  return (
+    <CmaAgentPanel
+      key={`${operation.agent_ref_id}:${operation.response_id ?? ""}`}
+      agentId={operation.agent_ref_id!}
+      responseId={operation.response_id ?? undefined}
+    />
+  );
+}
+
+export function CmaSessionRequests({
+  operations,
+  scrollBody,
+  visible,
+}: {
+  readonly operations: readonly CmaOperation[];
+  readonly scrollBody: RefObject<HTMLDivElement | null>;
+  readonly visible: boolean;
+}) {
+  useUiTranslation();
+  const [limit, setLimit] = useState(3);
+  const ordered = orderedRequests(operations);
+  if (!ordered.length) return null;
+  return (
+    <CmaCardDetails
+      label={translateUi("Submission details")}
+      scrollBody={scrollBody}
+      visible={visible}
+    >
+      <section aria-label={translateUi("CMA requests")} className="space-y-3">
+        <h4 className="type-group-label text-text-tertiary">{translateUi("Request status")}</h4>
+        {ordered.slice(0, limit).map((operation) => (
+          <section
+            key={operation.id}
+            aria-label={translateUi("CMA request: {{value1}}, {{value2}}", { value1: operation.monitor_name, value2: operation.created_at })}
+            data-cma-request={operation.id}
+            className="space-y-1"
+          >
+            <p className="text-13 text-muted-foreground">
+              {operation.monitor_name} ·{" "}
+              <time dateTime={operation.created_at}>
+                {Number.isFinite(Date.parse(operation.created_at))
+                  ? new Date(operation.created_at).toLocaleString(getFormattingLocale())
+                  : translateUi("Time unavailable")}
+              </time>
+            </p>
+            <CmaOperationProgress operation={operation} animate={false} />
+            <dl className="space-y-2 pt-1">
+              <CmaOperationMetadata operation={operation} />
+            </dl>
+          </section>
+        ))}
+        {ordered.length > limit ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setLimit((value) => value + 3)}
+          >{translateUi("Show older requests (")}{ordered.length - limit})
+          </Button>
+        ) : null}
+      </section>
+    </CmaCardDetails>
   );
 }

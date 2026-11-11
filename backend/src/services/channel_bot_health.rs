@@ -6,6 +6,8 @@
 //! Diagnostics are metadata only: codes, timestamps and counts. Never store
 //! message bodies, provider error prose with user content, or credentials.
 
+pub mod discord;
+
 use super::channel_platform::platform_name;
 use std::sync::{Arc, OnceLock};
 
@@ -69,6 +71,9 @@ pub fn failure_code(error: &AppError) -> &'static str {
     use crate::services::channel_adapters::x::{X_FORBIDDEN_ACCESS, X_FORBIDDEN_SCOPES};
     match error {
         AppError::ChannelPlatformError(message) => {
+            if message == super::telegram_formatting::REJECTED {
+                return "telegram_text_rejected";
+            }
             if message.contains(X_FORBIDDEN_SCOPES) {
                 return codes::SCOPES_MISSING;
             }
@@ -115,6 +120,7 @@ pub struct HealthFacts<'a> {
     pub backoff_active: bool,
     /// The bot is delivered through the Agent Event Gateway.
     pub gateway: bool,
+    pub discord_intake: Option<discord::Intake>,
 }
 
 impl<'a> HealthFacts<'a> {
@@ -136,6 +142,8 @@ impl<'a> HealthFacts<'a> {
                 .map(|state| state.registered),
             backoff_active: bot.poll_backoff_until.is_some_and(|until| until > now),
             gateway,
+            // Intake advice requires loaded flag, readiness and transport evidence.
+            discord_intake: None,
         }
     }
 
@@ -223,6 +231,10 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             "verify",
             format!("{name} is unavailable. NyxID retries automatically; select Verify once it recovers."),
         ),
+        "telegram_text_rejected" => advice(
+            "contact_admin",
+            "Telegram rejected a reply part. The reply is incomplete; later parts were not sent. Read the saved answer in NyxID and ask an administrator to inspect the delivery receipt before requesting another send.".into(),
+        ),
         codes::RECIPIENT_UNREACHABLE if outbound => advice(
             "none",
             "The last reply's recipient does not accept messages from this account.".into(),
@@ -239,6 +251,9 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
         && let Some(found) = for_code(code, facts, false)
     {
         return found;
+    }
+    if let Some(advice) = facts.discord_intake.as_ref().and_then(discord::advice) {
+        return advice;
     }
     if facts.failure_reason == Some(codes::NATIVE_RELAY_CONFLICT) {
         return for_code(codes::NATIVE_RELAY_CONFLICT, facts, false).expect("mapped code");
@@ -462,12 +477,22 @@ mod tests;
 
 /// Bounded read projection shared by NyxBot discovery and diagnostic surfaces.
 /// These are observed facts, not a provider probe or a setup-completion promise.
-pub fn setup_evidence(bot: &ChannelBot, gateway: bool) -> serde_json::Value {
+pub async fn setup_evidence(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    gateway: bool,
+) -> AppResult<serde_json::Value> {
     use serde_json::json;
-    let facts = HealthFacts::for_bot(bot, Utc::now(), gateway);
+    let mut facts = HealthFacts::for_bot(bot, Utc::now(), gateway);
+    if let Some(intake) = discord::load(db, std::slice::from_ref(bot))
+        .await?
+        .remove(&bot.id)
+    {
+        facts.discord_intake = Some(intake);
+    }
     let action = recommend(&facts);
     let d = &bot.diagnostics;
-    json!({
+    let mut value = json!({
         "contract_version": 1, "observed_at": Utc::now().to_rfc3339(),
         "bot_id": bot.id, "platform": bot.platform, "platform_bot_username": bot.platform_bot_username,
         "credential_source": bot.credential_source, "credential_connection_id": bot.connection_id,
@@ -481,9 +506,14 @@ pub fn setup_evidence(bot: &ChannelBot, gateway: bool) -> serde_json::Value {
         "last_authenticated_inbound_source": d.last_inbound_source,
         "last_outbound_attempt_at": d.last_outbound_at.map(|t| t.to_rfc3339()),
         "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
+        "last_outbound_notice": d.last_outbound_notice.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
         "failure_reason": d.failure_reason,
         "recommended_action": action.action, "recommended_action_text": action.text,
         "automatic_reply": "not_verified",
         "evidence_note": "Configured credentials, a registered subscription and historical traffic are separate evidence. No Verify, Resubscribe or test send was run. Gateway support and end-to-end automatic replies need their own evidence.",
-    })
+    });
+    if let Some(intake) = &facts.discord_intake {
+        value["discord_intake"] = json!(intake);
+    }
+    Ok(value)
 }

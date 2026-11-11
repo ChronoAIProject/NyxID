@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { describeChanges, changeLines, labelValue, recordChanges } from "@/lib/grouped-form-changes";
 import { GroupedDialog as Dialog, GroupedDialogContent as DialogContent } from "@/components/ui/grouped-dialog";
@@ -40,30 +42,25 @@ export function ShareAgentDialog({
 }: {
   readonly agent: AssistantAgent;
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.SHARED_AGENTS);
   const [open, setOpen] = useState(false);
   const policy = useAgentSharing(agent.id, open);
   if (!enabled || agent.kind !== "specialist" || agent.owner_kind === "org" || agent.share_role || agent.status === "destroyed") return null;
   return (
     <>
-      <GroupedList title="Sharing">
-        <GroupedDisclosure search={{ id: "share-agent", title: "Share agent", breadcrumb: "Overview › Sharing" }} onClick={() => setOpen(true)}>
-          Share agent
-        </GroupedDisclosure>
+      <GroupedList title={translateUi("Sharing")}>
+        <GroupedDisclosure search={{ id: "share-agent", title: "Share agent", breadcrumb: "Overview › Sharing" }} onClick={() => setOpen(true)}>{translateUi("Share agent")}</GroupedDisclosure>
       </GroupedList>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto bg-background">
           <DialogHeader>
-            <DialogTitle>Share {agent.display_name ?? agent.name}</DialogTitle>
-            <DialogDescription>
-              Each person's chats and notes stay private. The person chatting
-              pays for model and service usage. Only services you explicitly
-              share can use your connections.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Share ")}{agent.display_name ?? agent.name}</DialogTitle>
+            <DialogDescription>{translateUi("Each person's chats and notes stay private. The person chatting pays for model and service usage. Only services you explicitly share can use your connections.")}</DialogDescription>
           </DialogHeader>
           <GroupedFormScope>
             {policy.isPending ? (
-              <p role="status">Loading sharing settings…</p>
+              <p role="status">{translateUi("Loading sharing settings…")}</p>
             ) : null}
             {policy.error ? (
               <ErrorBanner message={policy.error.message} />
@@ -93,6 +90,7 @@ function SharingEditor({
   readonly id: string;
   readonly policy: Sharing;
 }) {
+  useUiTranslation();
   const save = useSaveAgentSharing(id);
   const form = useAppForm<SharingForm>({ mode: "onChange", resolver: zodResolver(sharingFormSchema), defaultValues: {
     enabled: policy.enabled,
@@ -128,7 +126,7 @@ function SharingEditor({
     <Form {...form}>
       <form className="space-y-5" onSubmit={submit}>
         <GroupedList
-          title="Sharing"
+          title={translateUi("Sharing")}
           footer={
             <>
               {save.error ? (
@@ -137,18 +135,14 @@ function SharingEditor({
                 </p>
               ) : null}
               {Object.values(form.formState.errors).length ? (
-                <p role="alert" className="text-destructive">
-                  Check the audience and service selections before saving.
-                </p>
+                <p role="alert" className="text-destructive">{translateUi("Check the audience and service selections before saving.")}</p>
               ) : null}
-              {save.isSuccess ? <p role="status">Sharing saved.</p> : null}
+              {save.isSuccess ? <p role="status">{translateUi("Sharing saved.")}</p> : null}
             </>
           }
         >
           <GroupedRow asChild>
-            <Label className="flex items-center justify-between gap-3">
-              Enable sharing
-              <Switch
+            <Label className="flex items-center justify-between gap-3">{translateUi("Enable sharing")}<Switch
                 checked={form.watch("enabled")}
                 onCheckedChange={(value) => form.setValue("enabled", value)}
               />
@@ -156,16 +150,16 @@ function SharingEditor({
           </GroupedRow>
         </GroupedList>
         <GroupedList
-          title="People and organizations"
-          footer="Users can chat. Managers can also edit the profile, persona and published team memory. Organization access applies to active Admins and Members."
+          title={translateUi("People and organizations")}
+          footer={translateUi("Users can chat. Managers can also edit the profile, persona and published team memory. Organization access applies to active Admins and Members.")}
         >
           {audience.map((entry, index) => (
             <GroupedRow key={entry.subject_id ?? entry.email ?? index}>
               <span className="min-w-0 flex-1 break-all">
-                {entry.subject_kind === "org" ? "Organization" : "Person"} ·{" "}
+                {entry.subject_kind === "org" ? translateUi("Organization") : translateUi("Person")} ·{" "}
                 {audienceLabel(entry)}
                 <br />
-                {entry.role === "manager" ? "Manager" : "User"}
+                {entry.role === "manager" ? translateUi("Manager") : translateUi("User")}
               </span>
               <Button
                 type="button"
@@ -176,9 +170,7 @@ function SharingEditor({
                     audience.filter((_, candidate) => candidate !== index),
                   )
                 }
-              >
-                Remove
-              </Button>
+              >{translateUi("Remove")}</Button>
             </GroupedRow>
           ))}
           <GroupedRow>
@@ -189,12 +181,12 @@ function SharingEditor({
                 if (v === "org") setRole("user");
               }}
             >
-              <GroupedSelectTrigger aria-label="Audience type">
+              <GroupedSelectTrigger aria-label={translateUi("Audience type")}>
                 <SelectValue />
               </GroupedSelectTrigger>
               <SelectContent>
-                <SelectItem value="person">Person</SelectItem>
-                <SelectItem value="org">Organization</SelectItem>
+                <SelectItem value="person">{translateUi("Person")}</SelectItem>
+                <SelectItem value="org">{translateUi("Organization")}</SelectItem>
               </SelectContent>
             </Select>
             <Select
@@ -202,23 +194,23 @@ function SharingEditor({
               onValueChange={(v: "user" | "manager") => setRole(v)}
               disabled={kind === "org"}
             >
-              <GroupedSelectTrigger aria-label="Sharing role">
+              <GroupedSelectTrigger aria-label={translateUi("Sharing role")}>
                 <SelectValue />
               </GroupedSelectTrigger>
               <SelectContent>
-                <SelectItem value="user">User</SelectItem>
-                <SelectItem value="manager">Manager</SelectItem>
+                <SelectItem value="user">{translateUi("User")}</SelectItem>
+                <SelectItem value="manager">{translateUi("Manager")}</SelectItem>
               </SelectContent>
             </Select>
           </GroupedRow>
           <GroupedRow asChild className="grouped-field">
             <Label className="block space-y-1">
-              <span>{kind === "org" ? "Organization ID" : "Person email"}</span>
+              <span>{kind === "org" ? translateUi("Organization ID") : translateUi("Person email")}</span>
               <GroupedInput
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 placeholder={
-                  kind === "org" ? "Organization UUID" : "person@example.com"
+                  kind === "org" ? translateUi("Organization UUID") : translateUi("person@example.com")
                 }
                 type={kind === "person" ? "email" : "text"}
               />
@@ -242,14 +234,12 @@ function SharingEditor({
                 ]);
                 setSubject("");
               }}
-            >
-              Add to audience
-            </Button>
+            >{translateUi("Add to audience")}</Button>
           </GroupedRow>
         </GroupedList>
         <GroupedList
-          title="Services for shared users"
-          footer="Withheld services never use your connection. People can choose their own connection for the same service after consent. Machine access and saved logins are unavailable."
+          title={translateUi("Services for shared users")}
+          footer={translateUi("Withheld services never use your connection. People can choose their own connection for the same service after consent. Machine access and saved logins are unavailable.")}
         >
           {policy.services.length ? (
             policy.services.map((service) => (
@@ -270,25 +260,25 @@ function SharingEditor({
                     <SelectValue />
                   </GroupedSelectTrigger>
                   <SelectContent>
-                    <SelectItem value="withheld">Withheld</SelectItem>
-                    <SelectItem value="read">Read</SelectItem>
-                    <SelectItem value="use">Use</SelectItem>
-                    <SelectItem value="all">All granted actions</SelectItem>
+                    <SelectItem value="withheld">{translateUi("Withheld")}</SelectItem>
+                    <SelectItem value="read">{translateUi("Read")}</SelectItem>
+                    <SelectItem value="use">{translateUi("Use")}</SelectItem>
+                    <SelectItem value="all">{translateUi("All granted actions")}</SelectItem>
                   </SelectContent>
                 </Select>
               </GroupedRow>
             ))
           ) : (
-            <GroupedRow title="No eligible services granted." />
+            <GroupedRow title={translateUi("No eligible services granted.")} />
           )}
         </GroupedList>
         <GroupedFormActions
           changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "enabled", label: "Sharing enabled" }, { key: "audience", label: "People and organizations", list: (value) => Array.isArray(value) ? value.map((person: SharingForm["audience"][number]) => `${audienceLabel(person)} · ${person.role === "manager" ? "Manager" : "User"}`) : [] }]), ...recordChanges(form.formState.defaultValues?.shared_access, form.getValues("shared_access"), (key) => `Service access · ${policy.services.find((service) => service.id === key)?.name ?? key}`, labelValue({ read: "Read", use: "Use", all: "All granted actions" }, "Withheld"))]}
           disabled={!form.formState.isValid}
-          label="sharing"
+          label={translateUi("sharing")}
           dirty={form.formState.isDirty}
           pending={save.isPending}
-          saveLabel="Save sharing"
+          saveLabel={translateUi("Save sharing")}
           save={submit}
           discard={() => form.reset()}
         />
@@ -302,6 +292,7 @@ export function SharedAgentMemory({
 }: {
   readonly agent: AssistantAgent;
 }) {
+  useUiTranslation();
   return (
     <div className="space-y-5">
       <Notes
@@ -330,6 +321,7 @@ function Notes({
   readonly kind: "private-notes" | "shared-memory";
   readonly editable: boolean;
 }) {
+  useUiTranslation();
   const query = useSharedNotes(id, kind);
   const title =
     kind === "private-notes" ? "Your private notes" : "Published team memory";
@@ -362,7 +354,7 @@ function Notes({
       }
     >
       <GroupedRow
-        title={query.isPending ? "Loading notes…" : "Notes unavailable"}
+        title={query.isPending ? translateUi("Loading notes…") : translateUi("Notes unavailable")}
       />
     </GroupedList>
   );
@@ -388,6 +380,7 @@ function NotesEditor({
   readonly title: string;
   readonly footer: string;
 }) {
+  useUiTranslation();
   const save = useSaveSharedNotes(id, kind);
   const form = useAppForm<z.infer<typeof notesFormSchema>>({ mode: "onChange", resolver: zodResolver(notesFormSchema), defaultValues: { text: value.notes.map((n) => n.text).join("\n") } });
   const submit = form.handleSubmit(async ({ text }) => {
@@ -415,7 +408,7 @@ function NotesEditor({
               </GroupedRow>
             ))
           ) : (
-            <GroupedRow title="No notes yet" />
+            <GroupedRow title={translateUi("No notes yet")} />
           )}
         </ul>
       </GroupedList>
@@ -447,7 +440,7 @@ function NotesEditor({
         >
           <GroupedRow search={{ id: `shared-notes-${kind}`, title, breadcrumb: "Memory", keywords: form.watch("text") }} asChild className="grouped-field">
             <Label>
-              <span>One note per line</span>
+              <span>{translateUi("One note per line")}</span>
               <GroupedTextarea
                 rows={4}
                 aria-invalid={!!form.formState.errors.text}
@@ -460,10 +453,10 @@ function NotesEditor({
         <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "text", label: "Notes", list: changeLines }])}
           disabled={!form.formState.isValid}
-          label={kind === "private-notes" ? "private notes" : "team memory"}
+          label={kind === "private-notes" ? translateUi("private notes") : translateUi("team memory")}
           dirty={form.formState.isDirty}
           pending={save.isPending}
-          saveLabel="Save notes"
+          saveLabel={translateUi("Save notes")}
           save={submit}
           discard={() => form.reset()}
         />
@@ -479,6 +472,7 @@ export function SharedConsentCards({
   readonly agentId: string;
   readonly conversationId?: string;
 }) {
+  useUiTranslation();
   const query = useSharedConsents(agentId);
   const decide = useDecideSharedConsent(agentId);
   const rows = query.data?.consents.filter((c) => !conversationId || (c.conversation_id === conversationId && c.decision === "pending")) ?? [];
@@ -486,7 +480,7 @@ export function SharedConsentCards({
     <div className="space-y-6">
       {query.error || decide.error || decide.isSuccess || !rows.length ? (
         <GroupedList
-          title="Connection consent"
+          title={translateUi("Connection consent")}
           footer={
             <>
               {query.error || decide.error ? (
@@ -495,7 +489,7 @@ export function SharedConsentCards({
                 </p>
               ) : null}
               {decide.isSuccess ? (
-                <p role="status">Choice saved. Continue the chat when ready.</p>
+                <p role="status">{translateUi("Choice saved. Continue the chat when ready.")}</p>
               ) : null}
             </>
           }
@@ -503,10 +497,10 @@ export function SharedConsentCards({
           <GroupedRow
             title={
               query.isPending
-                ? "Loading connection consent…"
+                ? translateUi("Loading connection consent…")
                 : rows.length
-                  ? "Connection choice"
-                  : "No connection consent requests."
+                  ? translateUi("Connection choice")
+                  : translateUi("No connection consent requests.")
             }
           />
         </GroupedList>
@@ -514,24 +508,16 @@ export function SharedConsentCards({
       {rows.map((row) => (
         <GroupedList
           key={row.id}
-          title="Connection consent"
+          title={translateUi("Connection consent")}
           footer={
             <>
-              <p>
-                Your connection: {row.connection_name ?? row.connection_id}.
-                Model and metered-service usage bills you.
-              </p>
-              <p>
-                Applies to this exact operation, or this turn’s stateless model
-                calls. Always remembers this scope until you revoke it or the
-                agent or connection changes. Your connection is never shared
-                with the owner.
-              </p>
+              <p>{translateUi("Your connection: ")}{row.connection_name ?? row.connection_id}{translateUi(". Model and metered-service usage bills you. ")}</p>
+              <p>{translateUi("Applies to this exact operation, or this turn’s stateless model calls. Always remembers this scope until you revoke it or the agent or connection changes. Your connection is never shared with the owner.")}</p>
               {row.audience ? <p>{row.audience}</p> : null}
             </>
           }
         >
-          <GroupedRow search={{ id: `consent-${row.id}`, title: row.connection_name ?? "Use your connection", breadcrumb: "Access › Connection consent", keywords: `${row.operation} ${row.decision}` }} title="Use your connection" description={row.operation} />
+          <GroupedRow search={{ id: `consent-${row.id}`, title: row.connection_name ?? "Use your connection", breadcrumb: "Access › Connection consent", keywords: `${row.operation} ${row.decision}` }} title={translateUi("Use your connection")} description={row.operation} />
           {row.decision === "pending" ? (
             (["once", "always", "skip"] as const).map((decision) => (
               <GroupedRow key={decision} asChild interactive>
@@ -541,10 +527,10 @@ export function SharedConsentCards({
                   onClick={() => decide.mutate({ consent: row.id, decision })}
                 >
                   {decision === "once"
-                    ? "Allow once"
+                    ? translateUi("Allow once")
                     : decision === "always"
-                      ? "Always"
-                      : "Skip"}
+                      ? translateUi("Always")
+                      : translateUi("Skip")}
                 </button>
               </GroupedRow>
             ))
@@ -552,7 +538,7 @@ export function SharedConsentCards({
             <>
               <GroupedRow
                 title={
-                  row.decision === "always" ? "Always allowed" : "Allowed once"
+                  row.decision === "always" ? translateUi("Always allowed") : translateUi("Allowed once")
                 }
               />
               <GroupedRow asChild interactive className="text-destructive">
@@ -562,9 +548,7 @@ export function SharedConsentCards({
                   onClick={() =>
                     decide.mutate({ consent: row.id, decision: "revoked" })
                   }
-                >
-                  Revoke
-                </button>
+                >{translateUi("Revoke")}</button>
               </GroupedRow>
             </>
           )}
@@ -591,6 +575,7 @@ export function SharedAgentProfile({
 }: {
   readonly agent: AssistantAgent;
 }) {
+  useUiTranslation();
   const update = useUpdateNyxBotAgent();
   const form = useAppForm<z.infer<typeof profileSchema>>({
     resolver: zodResolver(profileSchema),
@@ -604,10 +589,10 @@ export function SharedAgentProfile({
   });
   if (agent.share_role !== "manager" || agent.status === "destroyed")
     return (
-      <GroupedList title="Profile">
-        <GroupedRow search={{ id: "shared-description", title: "Description", keywords: agent.description }} title="Description" description={agent.description} />
-        <GroupedRow search={{ id: "shared-persona", title: "Persona", keywords: agent.persona ?? "" }} title="Persona" description={agent.persona} />
-        <GroupedRow search={{ id: "shared-voice-instructions", title: "Voice instructions", keywords: agent.voice_instructions ?? "" }} title="Voice instructions" description={agent.voice_instructions} />
+      <GroupedList title={translateUi("Profile")}>
+        <GroupedRow search={{ id: "shared-description", title: "Description", keywords: agent.description }} title={translateUi("Description")} description={agent.description} />
+        <GroupedRow search={{ id: "shared-persona", title: "Persona", keywords: agent.persona ?? "" }} title={translateUi("Persona")} description={agent.persona} />
+        <GroupedRow search={{ id: "shared-voice-instructions", title: "Voice instructions", keywords: agent.voice_instructions ?? "" }} title={translateUi("Voice instructions")} description={agent.voice_instructions} />
       </GroupedList>
     );
   const submit = form.handleSubmit(async (values) => {
@@ -622,7 +607,7 @@ export function SharedAgentProfile({
     <Form {...form}>
       <form className="space-y-3" onSubmit={submit}>
         <GroupedList
-          title="Profile and persona"
+          title={translateUi("Profile and persona")}
           footer={
             <>
               {update.error ? (
@@ -659,10 +644,10 @@ export function SharedAgentProfile({
         </GroupedList>
         <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), PROFILE_FIELDS)}
-          label="profile"
+          label={translateUi("profile")}
           dirty={form.formState.isDirty}
           pending={update.isPending}
-          saveLabel="Save profile"
+          saveLabel={translateUi("Save profile")}
           save={submit}
           discard={() => form.reset(undefined, { keepDirtyValues: false })}
         />

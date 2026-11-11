@@ -78,6 +78,8 @@ pub struct CatalogConnectInfo {
     pub provider_type: Option<String>,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
+    pub(crate) has_oauth_endpoints: bool,
+    pub(crate) supports_oauth_scopes: bool,
     pub requires_gateway_url: bool,
     pub api_key_url: Option<String>,
     pub api_key_instructions: Option<String>,
@@ -1351,7 +1353,7 @@ async fn load_catalog_info_by_id(
     catalog_info(db, service).await
 }
 
-async fn catalog_info(
+pub(crate) async fn catalog_info(
     db: &mongodb::Database,
     service: DownstreamService,
 ) -> AppResult<CatalogConnectInfo> {
@@ -1389,6 +1391,25 @@ async fn catalog_info(
                 provider,
             )
         }),
+        has_oauth_endpoints: provider
+            .as_ref()
+            .is_some_and(|p| match p.provider_type.as_str() {
+                "oauth2" => {
+                    p.authorization_url
+                        .as_deref()
+                        .is_some_and(|v| !v.is_empty())
+                        && p.token_url.as_deref().is_some_and(|v| !v.is_empty())
+                }
+                "device_code" => {
+                    p.device_code_url.as_deref().is_some_and(|v| !v.is_empty())
+                        && p.device_token_url
+                            .as_deref()
+                            .or(p.token_url.as_deref())
+                            .is_some_and(|v| !v.is_empty())
+                }
+                _ => false,
+            }),
+        supports_oauth_scopes: provider.as_ref().is_some_and(|p| p.supports_oauth_scopes),
         requires_gateway_url: provider
             .as_ref()
             .is_some_and(|provider| provider.requires_gateway_url),

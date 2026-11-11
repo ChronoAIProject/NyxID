@@ -1,3 +1,5 @@
+import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
+
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { NotFoundPage } from "@/components/shared/not-found-page";
@@ -9,15 +11,16 @@ import { useAuthStore } from "@/stores/auth-store";
  * signed-in users go to the dashboard, everyone else to the landing page.
  */
 export function AppNotFound() {
+  useUiTranslation();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   return (
     <NotFoundPage
       action={
         <Button asChild variant="primary">
           {isAuthenticated ? (
-            <Link to="/dashboard">Back to dashboard</Link>
+            <Link to="/dashboard">{translateUi("Back to dashboard")}</Link>
           ) : (
-            <Link to="/">Go to homepage</Link>
+            <Link to="/">{translateUi("Go to homepage")}</Link>
           )}
         </Button>
       }

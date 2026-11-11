@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -56,6 +57,7 @@ function NotificationRow({
   readonly item: AssistantNotification;
   readonly onOpen: (item: AssistantNotification) => void;
 }) {
+  useUiTranslation();
   const kind = NOTIFICATION_KIND_PRESENTATION[item.kind];
   const Icon = kind.icon;
   const unread = !item.read;
@@ -86,15 +88,15 @@ function NotificationRow({
                 unread ? "text-foreground" : "text-muted-foreground",
               )}
             >
-              {item.title || kind.label}
+              {item.title || translateUi(kind.label)}
             </span>
             {item.count > 1 ? (
               <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 type-group-label tabular-nums text-text-tertiary">
-                {String(item.count)} {unread ? "new" : "updates"}
+                {unread ? translateUi("{{count}} new", { count: item.count }) : translateUi("{{count}} updates", { count: item.count })}
               </span>
             ) : null}
             {pending ? (
-              <span className={cn(badgeVariants({ variant: "warning" }), "shrink-0")}>Needs you</span>
+              <span className={cn(badgeVariants({ variant: "warning" }), "shrink-0")}>{translateUi("Needs you")}</span>
             ) : null}
           </span>
           {item.preview ? (
@@ -103,7 +105,7 @@ function NotificationRow({
             </span>
           ) : null}
           <span className="mt-0.5 flex min-w-0 items-center gap-1 type-secondary text-text-tertiary">
-            <span className="truncate">{item.source.label || kind.label}</span>
+            <span className="truncate">{item.source.label || translateUi(kind.label)}</span>
             <span aria-hidden="true">·</span>
             <time dateTime={item.updated_at} className="shrink-0">
               {formatRelativeTime(item.updated_at)}
@@ -128,6 +130,7 @@ export function NotificationsPanel({
   readonly onClose: () => void;
   readonly opener: () => HTMLElement | null;
 }) {
+  useUiTranslation();
   const { current, update } = useAccountPanel();
   // The account panel unmounts this sheet when the feature goes away; until
   // it does, no further feed requests leave and nothing renders.
@@ -168,7 +171,7 @@ export function NotificationsPanel({
     if (!item.read) {
       markRead.mutate(
         { ids: [item.id] },
-        { onError: () => toast.error("Could not mark the notification as read") },
+        { onError: () => toast.error(translateUi("Could not mark the notification as read")) },
       );
     }
     const target = notificationTarget(item, window.location.origin);
@@ -187,8 +190,8 @@ export function NotificationsPanel({
     markRead.mutate(
       { all: true, before: asOf },
       {
-        onSuccess: () => setAnnouncement("All notifications marked as read."),
-        onError: () => toast.error("Could not mark notifications as read"),
+        onSuccess: () => setAnnouncement(translateUi("All notifications marked as read.")),
+        onError: () => toast.error(translateUi("Could not mark notifications as read")),
       },
     );
   }
@@ -202,7 +205,7 @@ export function NotificationsPanel({
     >
       <SheetContent
         side="right"
-        aria-label="Notifications"
+        aria-label={translateUi("Notifications")}
         className="flex w-full flex-col gap-0 p-0 sm:max-w-lg"
         onCloseAutoFocus={(event) => {
           event.preventDefault();
@@ -210,17 +213,17 @@ export function NotificationsPanel({
         }}
       >
         <SheetHeader className="shrink-0 space-y-1 px-5 pt-5 pr-14 text-left">
-          <SheetTitle>Notifications</SheetTitle>
+          <SheetTitle>{translateUi("Notifications")}</SheetTitle>
           <SheetDescription>
-            Automation results and updates from your chats while you were away.
+            {translateUi("Automation results and updates from your chats while you were away.")}
           </SheetDescription>
         </SheetHeader>
         <div className="flex shrink-0 flex-col items-stretch gap-2 px-5 pt-3">
           <SegmentedControl value={filter} onValueChange={selectFilter} className="min-w-0">
-            <SegmentedControlList aria-label="Filter notifications" className="flex-nowrap overflow-x-auto">
+            <SegmentedControlList aria-label={translateUi("Filter notifications")} className="flex-nowrap overflow-x-auto">
               {NOTIFICATION_FILTERS.map((value) => (
                 <SegmentedControlTrigger key={value} value={value} className="whitespace-nowrap">
-                  {NOTIFICATION_FILTER_LABEL[value]}
+                  {translateUi(NOTIFICATION_FILTER_LABEL[value])}
                 </SegmentedControlTrigger>
               ))}
             </SegmentedControlList>
@@ -233,7 +236,7 @@ export function NotificationsPanel({
             onClick={markAll}
             disabled={!asOf || (summary.data?.unread_count ?? 0) === 0 || markRead.isPending}
           >
-            Mark all notifications as read
+            {translateUi("Mark all notifications as read")}
           </Button>
         </div>
         <p role="status" aria-live="polite" className="sr-only">
@@ -242,27 +245,27 @@ export function NotificationsPanel({
         <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3">
           {list.isPending ? (
             <p role="status" className="px-2 py-6 text-center type-secondary text-text-tertiary">
-              Loading notifications...
+              {translateUi("Loading notifications...")}
             </p>
           ) : list.error ? (
             <div role="alert">
               <ErrorBanner
-                message={`Could not load notifications. ${list.error.message}`}
+                message={translateUi("Could not load notifications. {{error}}", { error: list.error.message })}
                 onRetry={() => void list.refetch()}
               />
             </div>
           ) : items.length === 0 && !hasNextPage ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MobileNotificationIcon className="h-40 w-40 text-muted-foreground/30" />
-              <p className="type-row-title text-text-tertiary">{EMPTY_TITLE[filter]}</p>
+              <p className="type-row-title text-text-tertiary">{translateUi(EMPTY_TITLE[filter])}</p>
               <p className="type-secondary text-text-tertiary">
-                Automation results and updates from your chats show up here.
+                {translateUi("Automation results and updates from your chats show up here.")}
               </p>
             </div>
           ) : (
             <>
               {items.length ? (
-                <ul aria-label="Notifications" className="space-y-1">
+                <ul aria-label={translateUi("Notifications")} className="space-y-1">
                   {items.map((item) => (
                     <NotificationRow key={item.id} item={item} onOpen={openItem} />
                   ))}
@@ -270,7 +273,7 @@ export function NotificationsPanel({
               ) : (
                 // Every row of the pages so far is hidden; older pages may still have some.
                 <p role="status" className="px-2 py-6 text-center type-secondary text-text-tertiary">
-                  {isFetchingNextPage ? "Looking further back..." : "Nothing to show on this page yet."}
+                  {isFetchingNextPage ? translateUi("Looking further back...") : translateUi("Nothing to show on this page yet.")}
                 </p>
               )}
               <div ref={sentinel} aria-hidden="true" className="h-px" />
@@ -286,7 +289,7 @@ export function NotificationsPanel({
                     {isFetchingNextPage ? (
                       <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
                     ) : null}
-                    Load more
+                    {translateUi("Load more")}
                   </Button>
                 </div>
               ) : null}

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { TelegramManagers } from "@/components/telegram-managers";
 import {
@@ -47,6 +49,7 @@ export function GatewayCleanupControls({
 }: {
   profile: PlatformProfile;
 }) {
+  useUiTranslation();
   const actor = useAuthStore((s) => s.user?.id);
   const tasks = useGatewayCleanup(profile);
   const mutation = useGatewayCleanupAction(profile);
@@ -81,13 +84,10 @@ export function GatewayCleanupControls({
   if (!tasks.data?.length && !tasks.error) return null;
   return (
     <section className="space-y-3 rounded-lg border border-border p-3">
-      <h3 className="type-row-title">Previous gateway connections</h3>
-      <p className="text-14 text-muted-foreground">
-        Inspect a previous connection before resolving its cleanup. A changed
-        remote binding is kept; recovery never deletes a different version.
-      </p>
+      <h3 className="type-row-title">{translateUi("Previous gateway connections")}</h3>
+      <p className="text-14 text-muted-foreground">{translateUi("Inspect a previous connection before resolving its cleanup. A changed remote binding is kept; recovery never deletes a different version.")}</p>
       {tasks.error && (
-        <ErrorBanner message="Could not load previous gateway connections." />
+        <ErrorBanner message={translateUi("Could not load previous gateway connections.")} />
       )}
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
       {tasks.data?.map((task) => (
@@ -95,9 +95,8 @@ export function GatewayCleanupControls({
           key={task.id}
           className="flex flex-wrap items-center justify-between gap-2 text-14"
         >
-          <span>
-            Previous connection · version{" "}
-            {task.captured_version ?? "unavailable"}
+          <span>{translateUi("Previous connection · version")}{" "}
+            {task.captured_version ?? translateUi("unavailable")}
           </span>
           <Button
             disabled={!actor || mutation.isPending}
@@ -113,29 +112,26 @@ export function GatewayCleanupControls({
                 },
               );
             }}
-          >
-            Inspect connection
-          </Button>
+          >{translateUi("Inspect connection")}</Button>
         </div>
       ))}
       {current && (
         <div className="space-y-3 text-14">
-          <p>
-            Reviewed previous version {current.captured_version}.{" "}
+          <p>{translateUi("Reviewed previous version ")}{current.captured_version}.{" "}
             {current.remote_exists
-              ? `Current remote version ${current.observed_version}.`
-              : "The remote connection is absent."}
+              ? translateUi("Current remote version {{value1}}.", { value1: current.observed_version })
+              : translateUi("The remote connection is absent.")}
           </p>
           <details>
-            <summary>Connection identifiers</summary>
+            <summary>{translateUi("Connection identifiers")}</summary>
             <p className="break-all">{current.remote_channel_id}</p>
           </details>
           <p>
             {action === "preserve_changed"
-              ? "Keep the changed remote binding and close cleanup for the obsolete connection. No remote connection will be deleted."
+              ? translateUi("Keep the changed remote binding and close cleanup for the obsolete connection. No remote connection will be deleted.")
               : action === "confirm_missing"
-                ? "Close cleanup for the absent remote connection."
-                : "Retry deletion of the original reviewed version. A later version change will stop the retry."}
+                ? translateUi("Close cleanup for the absent remote connection.")
+                : translateUi("Retry deletion of the original reviewed version. A later version change will stop the retry.")}
           </p>
           <div className="flex items-center gap-2">
             <Checkbox
@@ -145,9 +141,7 @@ export function GatewayCleanupControls({
                 setConfirmation(checked ? reviewKey : undefined)
               }
             />
-            <Label htmlFor={`gateway-review-${current.task_id}`}>
-              I reviewed this connection and resolution.
-            </Label>
+            <Label htmlFor={`gateway-review-${current.task_id}`}>{translateUi("I reviewed this connection and resolution.")}</Label>
           </div>
           <Button
             disabled={
@@ -171,10 +165,10 @@ export function GatewayCleanupControls({
             }}
           >
             {action === "preserve_changed"
-              ? "Keep changed remote binding"
+              ? translateUi("Keep changed remote binding")
               : action === "confirm_missing"
-                ? "Close completed cleanup"
-                : "Retry original cleanup"}
+                ? translateUi("Close completed cleanup")
+                : translateUi("Retry original cleanup")}
           </Button>
         </div>
       )}
@@ -183,6 +177,7 @@ export function GatewayCleanupControls({
 }
 
 function AdminProfiles() {
+  useUiTranslation();
   const [prepared, setPrepared] = useState<PlatformProfile>();
   const [notice, setNotice] = useState<string>();
   const pinned = useAdminPlatformProfile(prepared);
@@ -204,22 +199,20 @@ function AdminProfiles() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Platform BotFather"
-        description="Shared FAQ and personal NyxBot access. Review existing bots or prepare another channel."
+        title={translateUi("Platform BotFather")}
+        description={translateUi("Shared FAQ and personal NyxBot access. Review existing bots or prepare another channel.")}
       />
       <PlatformHelpEditor />
       <TelegramManagers />
       {action.error && <ErrorBanner message={action.error.message} />}
       {profiles.error && (
         <ErrorBanner
-          message="Could not load platform profiles. Your live admin access may have changed."
+          message={translateUi("Could not load platform profiles. Your live admin access may have changed.")}
           onRetry={() => void profiles.refetch()}
         />
       )}
       {profiles.isPending && (
-        <p role="status" className="text-14">
-          Loading platform profiles…
-        </p>
+        <p role="status" className="text-14">{translateUi("Loading platform profiles…")}</p>
       )}
       {notice && <p role="status">{notice}</p>}
       {[
@@ -233,7 +226,7 @@ function AdminProfiles() {
           title={`${profile.display_name ?? profile.manager_bot_id} · ${channelPlatformName(profile.platform ?? "telegram")}`}
         >
           <div className="space-y-3 p-4 text-14">
-            {profile.deleted_at && <p>Retired</p>}
+            {profile.deleted_at && <p>{translateUi("Retired")}</p>}
             {!profile.deleted_at && (
               <>
                 <ManagerRuntimeSettings profile={profile} />
@@ -242,7 +235,7 @@ function AdminProfiles() {
             )}
             {!profile.deleted_at && (
               <details>
-                <summary>Repair connection</summary>
+                <summary>{translateUi("Repair connection")}</summary>
                 {profile.execution_profile === "native_entry" ? (
                   <NativePlatformEntrySetup
                     profile={profile}
@@ -255,9 +248,7 @@ function AdminProfiles() {
                       onClick={() =>
                         action.mutate({ action: "verify", profile })
                       }
-                    >
-                      Verify manager
-                    </Button>
+                    >{translateUi("Verify manager")}</Button>
                     <Button
                       disabled={action.isPending}
                       onClick={() =>
@@ -266,22 +257,17 @@ function AdminProfiles() {
                           { onSuccess: onPrepared },
                         )
                       }
-                    >
-                      Repair webhook
-                    </Button>
+                    >{translateUi("Repair webhook")}</Button>
                   </div>
                 )}
               </details>
             )}
             <details>
-              <summary>Identifiers, cleanup and retirement</summary>
-              <p className="break-all">
-                Profile: {profile.id} · Generation {profile.generation}
+              <summary>{translateUi("Identifiers, cleanup and retirement")}</summary>
+              <p className="break-all">{translateUi("Profile: ")}{profile.id}{translateUi(" · Generation ")}{profile.generation}
               </p>
-              <p>
-                Setup owner: {profile.funding_owner_user_id} ·{" "}
-                {profile.transport ?? "direct"} transport
-              </p>
+              <p>{translateUi("Setup owner: ")}{profile.funding_owner_user_id} ·{" "}
+                {profile.transport ?? translateUi("direct")}{translateUi(" transport")}</p>
               <GatewayCleanupControls
                 key={`cleanup:${profile.id}:${profile.generation}`}
                 profile={profile}
@@ -291,32 +277,20 @@ function AdminProfiles() {
                   <Button
                     disabled={action.isPending}
                     onClick={() => setReview(profile)}
-                  >
-                    Review retirement
-                  </Button>
+                  >{translateUi("Review retirement")}</Button>
                 </div>
               )}
               {review?.id === profile.id && (
                 <div className="space-y-2">
-                  <p>
-                    Retire this profile and deactivate its channel? Retired
-                    managers cannot return to personal routing.
-                  </p>
+                  <p>{translateUi("Retire this profile and deactivate its channel? Retired managers cannot return to personal routing.")}</p>
                   {review.generation !== profile.generation && (
                     <>
-                      <p>
-                        This profile changed. Review its current configuration
-                        before retiring.
-                      </p>
-                      <Button onClick={() => setReview(profile)}>
-                        Review current profile
-                      </Button>
+                      <p>{translateUi("This profile changed. Review its current configuration before retiring.")}</p>
+                      <Button onClick={() => setReview(profile)}>{translateUi("Review current profile")}</Button>
                     </>
                   )}
                   <div className="flex justify-end gap-2">
-                    <Button onClick={() => setReview(undefined)}>
-                      Keep profile
-                    </Button>
+                    <Button onClick={() => setReview(undefined)}>{translateUi("Keep profile")}</Button>
                     <Button
                       variant="destructive"
                       isLoading={action.isPending}
@@ -327,9 +301,7 @@ function AdminProfiles() {
                           { onSuccess: () => setReview(undefined) },
                         )
                       }
-                    >
-                      Retire platform manager
-                    </Button>
+                    >{translateUi("Retire platform manager")}</Button>
                   </div>
                 </div>
               )}
@@ -338,30 +310,26 @@ function AdminProfiles() {
         </DetailSection>
       ))}
       {profiles.data?.profiles.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
-          No platform profiles on this page.
-        </p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("No platform profiles on this page.")}</p>
       )}
       <div className="flex justify-end gap-2">
         {before && (
-          <Button onClick={() => setBefore(undefined)}>Newest profiles</Button>
+          <Button onClick={() => setBefore(undefined)}>{translateUi("Newest profiles")}</Button>
         )}
         {profiles.data?.next_before_id && (
           <Button
             onClick={() =>
               setBefore(profiles.data?.next_before_id ?? undefined)
             }
-          >
-            Older profiles
-          </Button>
+          >{translateUi("Older profiles")}</Button>
         )}
       </div>
       <Button asChild>
-        <a href="/admin/platform-credentials">Manage platform credentials</a>
+        <a href="/admin/platform-credentials">{translateUi("Manage platform credentials")}</a>
       </Button>
       <details>
-        <summary>Prepare another shared bot</summary>{" "}
-        <DetailSection title="Convert a manager channel">
+        <summary>{translateUi("Prepare another shared bot")}</summary>{" "}
+        <DetailSection title={translateUi("Convert a manager channel")}>
           <Form {...form}>
             <form
               className="space-y-4 p-4"
@@ -377,26 +345,22 @@ function AdminProfiles() {
                 ),
               )}
             >
-              <p className="text-14 text-muted-foreground">
-                Conversion replaces the channel owner’s private route with
-                shared access, revokes old assistant and route keys, and starts
-                paused. Built-in FAQ needs no model or funding organization.
-              </p>
+              <p className="text-14 text-muted-foreground">{translateUi("Conversion replaces the channel owner’s private route with shared access, revokes old assistant and route keys, and starts paused. Built-in FAQ needs no model or funding organization.")}</p>
               {targets.error && (
-                <ErrorBanner message="Could not load your manager channels." />
+                <ErrorBanner message={translateUi("Could not load your manager channels.")} />
               )}
               <FormField
                 control={form.control}
                 name="channel_bot_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Telegram manager channel</FormLabel>
+                    <FormLabel>{translateUi("Telegram manager channel")}</FormLabel>
                     <FormControl>
                       <select
                         {...field}
                         className="h-8 w-full rounded-lg border border-input bg-background px-3 text-14"
                       >
-                        <option value="">Choose a manager</option>
+                        <option value="">{translateUi("Choose a manager")}</option>
                         {targets.data?.bots
                           .filter(
                             (bot) =>
@@ -422,9 +386,7 @@ function AdminProfiles() {
                     !form.formState.isDirty || !form.watch("channel_bot_id")
                   }
                   isLoading={action.isPending}
-                >
-                  Convert and pause manager
-                </Button>
+                >{translateUi("Convert and pause manager")}</Button>
               </div>
             </form>
           </Form>
@@ -435,10 +397,11 @@ function AdminProfiles() {
   );
 }
 export function AdminPlatformBotsPage() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   return canAdminWrite(user) ? (
     <AdminProfiles key={user?.id} />
   ) : (
-    <ErrorBanner message="Live NyxID admin access is required for platform BotFather controls." />
+    <ErrorBanner message={translateUi("Live NyxID admin access is required for platform BotFather controls.")} />
   );
 }

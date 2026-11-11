@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { AssistantLinkModal } from "./assistant-link-modals";
 import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { DecisionReceipt } from "./decision-receipt";
@@ -14,8 +16,8 @@ function title(row: NyxAgentAcknowledgement): string {
     if (row.kind === "service") {
       return `Allow this agent to use ${row.service_name ?? row.service_slug ?? "this service"}?`;
     }
-    if (row.kind === "account") return "Allow this agent to read your NyxID account?";
-    return `Confirm: ${row.summary}`;
+    if (row.kind === "account") return translateUi("Allow this agent to read your NyxID account?");
+    return translateUi("Confirm: {{summary}}", { summary: row.summary });
   }
   if (row.kind === "service")
     return `Allow this chat to use ${row.service_name ?? "this service"}?`;
@@ -25,7 +27,7 @@ function title(row: NyxAgentAcknowledgement): string {
       "(keys, channel bots, services, nodes, approval settings)?"
     );
   }
-  return `Confirm: ${row.summary}`;
+  return translateUi("Confirm: {{summary}}", { summary: row.summary });
 }
 
 export function NyxAgentAcknowledgementCard({
@@ -41,6 +43,7 @@ export function NyxAgentAcknowledgementCard({
   readonly onRequestAgain?: () => void;
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
+  useUiTranslation();
   const [error, setError] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -66,10 +69,10 @@ export function NyxAgentAcknowledgementCard({
       <DecisionReceipt acknowledgement={row}
         retired={confirmationsBypassed && acknowledgement.status === "pending"} />
       {row.status === "expired" && !confirmationsBypassed ? <>
-        <p className="text-13 text-muted-foreground">This confirmation can no longer be allowed. Ask for a new request to retry.</p>
-        {onRequestAgain ? <Button variant="outline" size="sm" disabled={deciding} onClick={onRequestAgain}>Ask for a new confirmation</Button> : null}
+        <p className="text-13 text-muted-foreground">{translateUi("This confirmation can no longer be allowed. Ask for a new request to retry.")}</p>
+        {onRequestAgain ? <Button variant="outline" size="sm" disabled={deciding} onClick={onRequestAgain}>{translateUi("Ask for a new confirmation")}</Button> : null}
       </> : null}
-      {row.review_path ? <a className="type-row-title underline" href={row.review_path}>Open request</a> : null}
+      {row.review_path ? <a className="type-row-title underline" href={row.review_path}>{translateUi("Open request")}</a> : null}
     </section>;
   }
 
@@ -79,7 +82,7 @@ export function NyxAgentAcknowledgementCard({
     try {
       await onDecision(choice);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save your decision. Try again.");
+      setError(cause instanceof Error ? cause.message : translateUi("Could not save your decision. Try again."));
     }
   }
 
@@ -89,9 +92,7 @@ export function NyxAgentAcknowledgementCard({
       className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
       {routed ? (
-        <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">
-          Requested from NyxBot
-        </p>
+        <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Requested from NyxBot")}</p>
       ) : null}
       <p className="type-card-title text-foreground">{label}</p>
       {acknowledgement.confirmation ? (
@@ -105,7 +106,7 @@ export function NyxAgentAcknowledgementCard({
                   : "font-medium text-foreground"
             }
           >
-            {ACTION_RISK_LABEL[acknowledgement.confirmation.risk]}
+            {translateUi(ACTION_RISK_LABEL[acknowledgement.confirmation.risk])}
           </span>
           {" · "}
           {confirmationReason(acknowledgement.confirmation)}
@@ -124,40 +125,37 @@ export function NyxAgentAcknowledgementCard({
       <p className="text-14 text-muted-foreground">
         {acknowledgement.kind === "skills"
           ? routed
-            ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
-            : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
+            ? translateUi("Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode.")
+            : translateUi("Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor.")
           : acknowledgement.kind === "operations"
-          ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
+          ? translateUi("This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode.")
           : routed
           ? "NyxBot decides this specialist's request against what you asked for. " +
             "You can decide it here instead; the agent resumes on its own."
           : acknowledgement.kind === "action"
-            ? "This confirmation applies once, to this action only."
-            : "This permission applies to this chat only."}
-        {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
+            ? translateUi("This confirmation applies once, to this action only.")
+            : translateUi("This permission applies to this chat only.")}
+        {routed ? "" : translateUi(" Allowing lets the assistant continue as soon as it finishes its reply.")}
       </p>
-      {acknowledgement.review_path ? <a className="type-row-title underline" href={acknowledgement.review_path}>Open request</a> : null}
+      {acknowledgement.review_path ? <a className="type-row-title underline" href={acknowledgement.review_path}>{translateUi("Open request")}</a> : null}
       {error ? (
         <p role="alert" className="text-14 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       ) : null}
       {acknowledgement.connect_own?.supported && acknowledgement.connect_own.service_slug ? (
         <ConnectOwnAction slug={acknowledgement.connect_own.service_slug} />
       ) : null}
       <div className="flex justify-end gap-2">
-        <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>
-          Deny
-        </Button>
-        <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>
-          Allow
-        </Button>
+        <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Deny")}</Button>
+        <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>{translateUi("Allow")}</Button>
       </div>
     </section>
   );
 }
 
 function ConnectOwnAction({ slug }: { readonly slug: string }) {
+  useUiTranslation();
   const [href, setHref] = useState<string | null>(null);
   const [error, setError] = useState<string>();
   const connect = useCreateAssistantConnectLink();
@@ -167,7 +165,7 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
       void connect.mutateAsync({ serviceSlug: slug, personal: true }).then(setHref).catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : "Could not create connection link.");
       });
-    }}>Connect your own</Button>
+    }}>{translateUi("Connect your own")}</Button>
     {error ? <p role="alert" className="text-14 text-destructive">{error}</p> : null}
     <AssistantLinkModal href={href} onClose={() => setHref(null)} />
   </>;

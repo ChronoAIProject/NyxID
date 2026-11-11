@@ -12,6 +12,7 @@ import type {
   NotificationKind,
   NotificationPushPreferences,
 } from "@/schemas/assistant-notifications";
+import { translateUi } from "@/i18n/use-ui-translation";
 
 /** Counts above this read "9+": the badge stays one glyph wide. */
 export const NOTIFICATION_BADGE_CAP = 9;
@@ -21,12 +22,14 @@ export function notificationBadgeText(unread: number): string {
 }
 
 export function notificationBellLabel(unread: number, needsDecision: number): string {
-  if (unread <= 0) return "Notifications";
-  const parts = [`${String(unread)} unread`];
+  if (unread <= 0) return translateUi("Notifications");
+  const parts = [translateUi("{{count}} unread", { count: unread })];
   if (needsDecision > 0) {
-    parts.push(`${String(needsDecision)} ${needsDecision === 1 ? "needs" : "need"} you`);
+    parts.push(needsDecision === 1
+      ? translateUi("{{count}} needs you", { count: needsDecision })
+      : translateUi("{{count}} need you", { count: needsDecision }));
   }
-  return `Notifications, ${parts.join(", ")}`;
+  return translateUi("Notifications, {{status}}", { status: parts.join(", ") });
 }
 
 export interface NotificationKindPresentation {
@@ -52,9 +55,9 @@ export const NOTIFICATION_KIND_PRESENTATION: Record<NotificationKind, Notificati
 /** The accessible name of a feed row: title, then unread and pending-decision state. */
 export function notificationRowLabel(item: AssistantNotification): string {
   const kind = NOTIFICATION_KIND_PRESENTATION[item.kind];
-  const parts = [item.title || kind.label];
-  if (!item.read) parts.push("unread");
-  if (item.kind === "needs_decision" && !item.resolved) parts.push("needs your decision");
+  const parts = [item.title || translateUi(kind.label)];
+  if (!item.read) parts.push(translateUi("unread"));
+  if (item.kind === "needs_decision" && !item.resolved) parts.push(translateUi("needs your decision"));
   return parts.join(", ");
 }
 

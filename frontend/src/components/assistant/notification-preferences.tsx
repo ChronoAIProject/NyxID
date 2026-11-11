@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   Form,
@@ -22,16 +23,17 @@ import {
   type NotificationPushPreferences,
 } from "@/schemas/assistant-notifications";
 
-const onOff = (value: unknown) => (value ? "On" : "Off");
+const onOff = (value: unknown) => (value ? translateUi("On") : translateUi("Off"));
 
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message
-    ? error.message
-    : "Could not save notification preferences. Try again.";
+    ? translateUi(error.message)
+    : translateUi("Could not save notification preferences. Try again.");
 }
 
 /** NyxBot settings › Notifications: which kinds also reach the phone as push. */
 export function NotificationPreferences() {
+  useUiTranslation();
   const enabled = useNotificationsEnabled();
   const settings = useNyxBotSettings(enabled);
   if (!enabled || !settings.data) return null;
@@ -48,6 +50,7 @@ function NotificationPreferencesForm({
 }: {
   readonly defaults: NotificationPushPreferences;
 }) {
+  useUiTranslation();
   const update = useUpdateNyxBotSettings();
   const form = useAppForm<NotificationPushPreferences>({
     resolver: zodResolver(notificationPushFormSchema),
@@ -68,21 +71,20 @@ function NotificationPreferencesForm({
   return (
     <Form {...form}>
       <form
-        aria-label="Notification preferences"
+        aria-label={translateUi("Notification preferences")}
         noValidate
         onSubmit={form.handleSubmit(save)}
         className="space-y-6"
       >
         <GroupedList
-          title="Notifications"
+          title={translateUi("Notifications")}
           footer={
             <>
               <p>
-                Every kind appears in the Notifications bell. Push reaches the NyxID app on your
-                phone; it is off until you turn a kind on here.
+                {translateUi("Every kind appears in the Notifications bell. Push reaches the NyxID app on your phone; it is off until you turn a kind on here.")}
               </p>
               <p>
-                Chat delivery of an automation&apos;s result is chosen per automation, not here.
+                {translateUi("Chat delivery of an automation's result is chosen per automation, not here.")}
               </p>
               {error ? (
                 <p role="alert" className="text-destructive">
@@ -100,14 +102,14 @@ function NotificationPreferencesForm({
               render={({ field }) => (
                 <FormItem inline>
                   <div className="min-w-0 flex-1">
-                    <FormLabel>{label}</FormLabel>
+                    <FormLabel>{translateUi(label)}</FormLabel>
                     <RowDescription className="type-secondary text-text-tertiary">
-                      {description}
+                      {translateUi(description)}
                     </RowDescription>
                   </div>
                   <FormControl>
                     <Switch
-                      aria-label={`Push for ${label.toLowerCase()}`}
+                      aria-label={translateUi("Push for {{kind}}", { kind: translateUi(label).toLowerCase() })}
                       checked={field.value}
                       onCheckedChange={field.onChange}
                     />
@@ -124,12 +126,12 @@ function NotificationPreferencesForm({
               form.getValues(),
               NOTIFICATION_PUSH_ROWS.map((row) => ({
                 key: row.name,
-                label: `Push: ${row.label}`,
+                label: translateUi("Push: {{kind}}", { kind: translateUi(row.label) }),
                 format: onOff,
               })),
             )
           }
-          label="Notification preferences"
+          label={translateUi("Notification preferences")}
           dirty={form.formState.isDirty}
           pending={update.isPending}
           save={form.handleSubmit(save)}
@@ -137,7 +139,7 @@ function NotificationPreferencesForm({
             form.reset();
             setError(undefined);
           }}
-          saveLabel="Save notifications"
+          saveLabel={translateUi("Save notifications")}
         />
       </form>
     </Form>

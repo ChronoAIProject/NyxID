@@ -1,3 +1,4 @@
+import { assistantTitleLanguage } from "../../features/assistant/titleLanguage";
 import {
   requestAuthenticatedResponse,
   requestJson,
@@ -169,7 +170,7 @@ export async function streamAssistantTurn(
     requestAuthenticatedResponse(`${ROOT}/turns`, {
       method: "POST",
       signal: controller.signal,
-      headers: { Accept: "text/event-stream" },
+      headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
       body,
     }),
     45000,

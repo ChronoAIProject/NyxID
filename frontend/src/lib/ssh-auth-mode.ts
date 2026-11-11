@@ -1,9 +1,10 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { SshAuthMode } from "@/schemas/services";
 
 export const SSH_AUTH_MODE_LABELS: Readonly<Record<SshAuthMode, string>> = {
-  cert: "Cert",
-  node_key: "Node Key",
-  proxy_only: "Proxy Only",
+  get cert() { return translateUi("Cert"); },
+  get node_key() { return translateUi("Node Key"); },
+  get proxy_only() { return translateUi("Proxy Only"); },
 };
 
 export function inferSshAuthMode(

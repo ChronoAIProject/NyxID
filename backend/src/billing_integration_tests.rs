@@ -901,6 +901,8 @@ async fn run_billing_route_coverage_smoke() {
     }));
     db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
         .insert_one(ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: None,
             id: request_id.clone(),

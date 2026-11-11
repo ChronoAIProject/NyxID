@@ -5130,3 +5130,108 @@ async fn notification_tool_is_private_bounded_read_only_and_allows_nyxbot_trigge
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn onboarding_2318_audience_card_and_full_access_report_configuration_without_veto() {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("onboarding2318_card")
+        .await;
+    let id = Uuid::new_v4().to_string();
+    let bot = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc! {
+        "_id":&id,"user_id":&f.owner,"channel_bot_id":&bot,"platform":"telegram","bot_label":"Customer bot",
+        "transport":"gateway","status":"active","route_api_key_id":"route","created_at":now,"updated_at":now
+    }).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&bot,"user_id":&f.owner,"is_active":true,"status":"active"})
+        .await
+        .unwrap();
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&f.state.db, &f.owner)
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>("assistant_agents").update_one(doc! {"_id":&agent.id},doc! {"$set":{"description":"","persona":null,"memory":[],"skills":[],"grants":{"service_ids":[],"platform_service_ids":[],"account_read":false}}}).await.unwrap();
+    f.state.db.collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+        .insert_one(doc! {"_id":Uuid::new_v4().to_string(),"kind":"guest_model_setup","user_id":&f.owner,"agent_id":&agent.id,"profile":&agent.model,"status":"setting_up","until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(5)),"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(1))}).await.unwrap();
+    let args = json!({"channel_agent_id":id,"private_chats":"everyone"});
+    let (value, refused) =
+        execute_tool(&f.state, &f.chat, "nyxid__update_channel_access", &args).await;
+    assert!(refused, "{value}");
+    assert_eq!(
+        value["audience_readiness"]["guest_readiness"]["status"],
+        "setting_up"
+    );
+    assert_eq!(
+        value["audience_readiness"]["configuration"]["instructions_present"],
+        false
+    );
+    assert_eq!(
+        value["audience_readiness"]["configuration"]["memory_notes"],
+        0
+    );
+    let ack = f
+        .state
+        .db
+        .collection::<bson::Document>("assistant_acknowledgements")
+        .find_one(doc! {"_id":value["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    let summary = ack.get_str("summary").unwrap();
+    assert!(
+        summary.contains("setting up")
+            && summary.contains("Instructions: missing")
+            && summary.contains("skills: 0")
+            && summary.contains("service grants: 0"),
+        "{summary}"
+    );
+    assert!(summary.contains("Opening access is your choice"));
+    let saved = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved.get("private_chats").is_none(),
+        "asking is not opening"
+    );
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (value, refused) =
+        execute_tool(&f.state, &f.chat, "nyxid__update_channel_access", &args).await;
+    assert!(!refused, "{value}");
+    assert_eq!(value["private_chats"], "everyone");
+    assert_eq!(value["audience_readiness"]["configuration"]["skills"], 0);
+    assert!(
+        value["audience_readiness"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("not proof")
+    );
+    let settings = crate::services::assistant_service_execution::guest_readiness_settings(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &agent.id,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(settings).unwrap()["configuration"],
+        value["audience_readiness"]["configuration"]
+    );
+    f.state.db.drop().await.unwrap();
+}

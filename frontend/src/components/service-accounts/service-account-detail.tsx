@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import {
   changedFields,
   describeChanges,
@@ -101,6 +104,7 @@ interface ServiceAccountDetailProps {
 }
 
 export function ServiceAccountDetail(props: ServiceAccountDetailProps) {
+  useUiTranslation();
   return <ServiceAccountDetailEditor key={props.saId} {...props} />;
 }
 
@@ -110,6 +114,7 @@ function ServiceAccountDetailEditor({
   showProviderSections = true,
   showKeyReadGrantSection = true,
 }: ServiceAccountDetailProps) {
+  useUiTranslation();
   const navigate = useNavigate();
 
   const { data: sa, isLoading } = useServiceAccount(saId);
@@ -137,10 +142,10 @@ function ServiceAccountDetailEditor({
 
   useEffect(() => {
     if (search.provider_status === "success") {
-      toast.success("Provider connected successfully");
+      toast.success(translateUi("Provider connected successfully"));
       void navigate({ to: ".", search: {}, replace: true });
     } else if (search.provider_status === "error") {
-      toast.error(search.message ?? "Failed to connect provider");
+      toast.error(translateErrorMessage(search.message ?? "Failed to connect provider"));
       void navigate({ to: ".", search: {}, replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -202,7 +207,7 @@ function ServiceAccountDetailEditor({
           "Catalog access was not granted. Reload the account and verify the backend supports catalog scope grants.",
         );
       }
-      toast.success("Service account updated");
+      toast.success(translateUi("Service account updated"));
       setEditOpen(false);
     },
     (pending) =>
@@ -264,7 +269,7 @@ function ServiceAccountDetailEditor({
       setRotateResult(result);
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to rotate secret",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to rotate secret"),
       );
     }
   }
@@ -277,10 +282,10 @@ function ServiceAccountDetailEditor({
   async function handleRevokeTokens() {
     try {
       const result = await revokeMutation.mutateAsync(saId);
-      toast.success(`${String(result.revoked_count)} token(s) revoked`);
+      toast.success(translateUi("{{value1}} token(s) revoked", { value1: String(result.revoked_count) }));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to revoke tokens",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to revoke tokens"),
       );
     } finally {
       setConfirmAction(null);
@@ -290,13 +295,13 @@ function ServiceAccountDetailEditor({
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(saId);
-      toast.success("Service account deleted");
+      toast.success(translateUi("Service account deleted"));
       void navigate({ to: backTo.to, search: () => backTo.search ?? {} });
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to delete service account",
+          : "Failed to delete service account"),
       );
     } finally {
       setConfirmAction(null);
@@ -317,18 +322,12 @@ function ServiceAccountDetailEditor({
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 type-card-title">
-          Service account not found
-        </h3>
-        <p className="mb-4 text-14 text-muted-foreground">
-          The service account you are looking for does not exist or has been
-          deleted.
-        </p>
+        <h3 className="mb-2 type-card-title">{translateUi("Service account not found")}</h3>
+        <p className="mb-4 text-14 text-muted-foreground">{translateUi("The service account you are looking for does not exist or has been deleted.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: backTo.to, search: () => backTo.search ?? {} })}
-        >
-          Back to {backTo.label}
+        >{translateUi("Back to ")}{backTo.label}
         </Button>
       </div>
     );
@@ -344,50 +343,46 @@ function ServiceAccountDetailEditor({
             <Button variant="outline" onClick={openEditDialog}>
               <ButtonIcon>
                 <Pencil className="h-3 w-3" />
-              </ButtonIcon>
-              Edit
-            </Button>
+              </ButtonIcon>{translateUi("Edit")}</Button>
             <Button
               variant="destructive"
               onClick={() => setConfirmAction("delete")}
             >
               <ButtonIcon variant="destructive">
                 <Trash2 className="h-3 w-3 text-destructive" />
-              </ButtonIcon>
-              Delete
-            </Button>
+              </ButtonIcon>{translateUi("Delete")}</Button>
           </>
         }
       />
 
-      <DetailSection title="Service Account Information">
-        <DetailRow label="ID" value={sa.id} copyable />
-        <DetailRow label="Client ID" value={sa.client_id} copyable />
-        <DetailRow label="Secret Prefix" value={`${sa.secret_prefix}...`} />
+      <DetailSection title={translateUi("Service Account Information")}>
+        <DetailRow label={translateUi("ID")} value={sa.id} copyable />
+        <DetailRow label={translateUi("Client ID")} value={sa.client_id} copyable />
+        <DetailRow label={translateUi("Secret Prefix")} value={`${sa.secret_prefix}...`} />
         <DetailRow
-          label="Status"
+          label={translateUi("Status")}
           value={sa.is_active ? "Active" : "Inactive"}
           badge
           badgeVariant={sa.is_active ? "success" : "destructive"}
         />
-        <DetailRow label="Allowed Scopes" value={sa.allowed_scopes} />
+        <DetailRow label={translateUi("Allowed Scopes")} value={sa.allowed_scopes} />
         <DetailRow
-          label="Role IDs"
+          label={translateUi("Role IDs")}
           value={sa.role_ids.length > 0 ? sa.role_ids.join(", ") : "None"}
         />
         <DetailRow
-          label="Rate Limit"
+          label={translateUi("Rate Limit")}
           value={
             sa.rate_limit_override
               ? `${String(sa.rate_limit_override)} req/s`
               : "Default"
           }
         />
-        <DetailRow label="Created By" value={sa.created_by} />
-        <DetailRow label="Created" value={formatDate(sa.created_at)} />
-        <DetailRow label="Updated" value={formatDate(sa.updated_at)} />
+        <DetailRow label={translateUi("Created By")} value={sa.created_by} />
+        <DetailRow label={translateUi("Created")} value={formatDate(sa.created_at)} />
+        <DetailRow label={translateUi("Updated")} value={formatDate(sa.updated_at)} />
         <DetailRow
-          label="Last Authenticated"
+          label={translateUi("Last Authenticated")}
           value={formatDate(sa.last_authenticated_at)}
         />
       </DetailSection>
@@ -395,15 +390,15 @@ function ServiceAccountDetailEditor({
       <Separator />
 
       {sa.purpose === "catalog_editor" && (
-        <DetailSection title="Catalog access">
+        <DetailSection title={translateUi("Catalog access")}>
           <DetailRow
-            label="Catalog coverage"
+            label={translateUi("Catalog coverage")}
             value="All current and future catalog services"
           />
           <p className="px-4 py-3 text-14 text-muted-foreground">
             {sa.catalog_scope_authorized
-              ? "Catalog read and write access follows the allowed scopes and the scopes on each token. Manage access with Edit."
-              : "This account uses its existing catalog roles. A platform administrator can save its catalog scopes in Edit to manage catalog access through scopes."}
+              ? translateUi("Catalog read and write access follows the allowed scopes and the scopes on each token. Manage access with Edit.")
+              : translateUi("This account uses its existing catalog roles. A platform administrator can save its catalog scopes in Edit to manage catalog access through scopes.")}
           </p>
         </DetailSection>
       )}
@@ -420,37 +415,29 @@ function ServiceAccountDetailEditor({
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />
       ) : (
-        <DetailSection title="Provider Connections">
-          <p className="px-4 py-3 text-14 text-muted-foreground">
-            Provider connections for org-owned service accounts aren't yet
-            available here. Use the{" "}
+        <DetailSection title={translateUi("Provider Connections")}>
+          <p className="px-4 py-3 text-14 text-muted-foreground">{translateUi("Provider connections for org-owned service accounts aren't yet available here. Use the")}{" "}
             <code className="rounded bg-muted px-1 font-mono text-14">
               nyxid
-            </code>{" "}
-            CLI or API for now.
-          </p>
+            </code>{" "}{translateUi("CLI or API for now.")}</p>
         </DetailSection>
       )}
 
       <Separator />
 
-      <DetailSection title="Actions">
+      <DetailSection title={translateUi("Actions")}>
         <div className="flex flex-wrap gap-2 px-4 py-3">
           <Button variant="outline" onClick={openRotateDialog}>
             <ButtonIcon>
               <RefreshCw className="h-3 w-3" />
-            </ButtonIcon>
-            Rotate Secret
-          </Button>
+            </ButtonIcon>{translateUi("Rotate Secret")}</Button>
           <Button
             variant="outline"
             onClick={() => setConfirmAction("revoke-tokens")}
           >
             <ButtonIcon>
               <Ban className="h-3 w-3" />
-            </ButtonIcon>
-            Revoke Tokens
-          </Button>
+            </ButtonIcon>{translateUi("Revoke Tokens")}</Button>
         </div>
       </DetailSection>
 
@@ -459,9 +446,8 @@ function ServiceAccountDetailEditor({
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Service Account</DialogTitle>
-            <DialogDescription>
-              Update configuration for {sa.name}.
+            <DialogTitle>{translateUi("Edit Service Account")}</DialogTitle>
+            <DialogDescription>{translateUi("Update configuration for ")}{sa.name}.
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
@@ -479,9 +465,9 @@ function ServiceAccountDetailEditor({
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Name</FormLabel>
+                    <FormLabel>{translateUi("Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="Service account name" {...field} />
+                      <Input placeholder={translateUi("Service account name")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -492,9 +478,9 @@ function ServiceAccountDetailEditor({
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Description</FormLabel>
+                    <FormLabel>{translateUi("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="Optional description" {...field} />
+                      <Input placeholder={translateUi("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -505,7 +491,7 @@ function ServiceAccountDetailEditor({
                 name="allowed_scopes"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Allowed Scopes</FormLabel>
+                    <FormLabel>{translateUi("Allowed Scopes")}</FormLabel>
                     <FormControl>
                       <ServiceAccountScopePicker
                         ownerId={sa.owner_id ?? sa.created_by}
@@ -522,9 +508,9 @@ function ServiceAccountDetailEditor({
                 name="role_ids"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Role IDs (comma-separated)</FormLabel>
+                    <FormLabel>{translateUi("Role IDs (comma-separated)")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="Optional" {...field} />
+                      <Input placeholder={translateUi("Optional")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -535,11 +521,11 @@ function ServiceAccountDetailEditor({
                 name="rate_limit_override"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Rate Limit Override</FormLabel>
+                    <FormLabel>{translateUi("Rate Limit Override")}</FormLabel>
                     <FormControl>
                       <Input
                         type="number"
-                        placeholder="Requests per second (empty for default)"
+                        placeholder={translateUi("Requests per second (empty for default)")}
                         {...field}
                       />
                     </FormControl>
@@ -553,12 +539,8 @@ function ServiceAccountDetailEditor({
                 render={({ field }) => (
                   <FormItem className="flex items-center justify-between rounded-lg border p-3">
                     <div className="space-y-0.5">
-                      <FormLabel>
-                        Active
-                      </FormLabel>
-                      <p className="text-13 text-muted-foreground">
-                        Inactive accounts cannot authenticate.
-                      </p>
+                      <FormLabel>{translateUi("Active")}</FormLabel>
+                      <p className="text-13 text-muted-foreground">{translateUi("Inactive accounts cannot authenticate.")}</p>
                     </div>
                     <FormControl>
                       <Switch
@@ -574,9 +556,7 @@ function ServiceAccountDetailEditor({
                   type="button"
                   variant="outline"
                   onClick={() => setEditOpen(false)}
-                >
-                  Cancel
-                </Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   variant="primary"
                   type="submit"
@@ -585,9 +565,7 @@ function ServiceAccountDetailEditor({
                     (!form.formState.isDirty && !grantsCatalog) ||
                     updateMutation.isPending
                   }
-                >
-                  Save Changes
-                </Button>
+                >{translateUi("Save Changes")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -606,11 +584,11 @@ function ServiceAccountDetailEditor({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rotate Client Secret</DialogTitle>
+            <DialogTitle>{translateUi("Rotate Client Secret")}</DialogTitle>
             <DialogDescription>
               {rotateResult
-                ? "The secret has been rotated. All existing tokens have been revoked."
-                : "This will generate a new client secret and revoke all existing tokens. The old secret will stop working immediately."}
+                ? translateUi("The secret has been rotated. All existing tokens have been revoked.")
+                : translateUi("This will generate a new client secret and revoke all existing tokens. The old secret will stop working immediately.")}
             </DialogDescription>
           </DialogHeader>
 
@@ -619,16 +597,12 @@ function ServiceAccountDetailEditor({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-14 text-amber-700 dark:text-amber-400">
-                    Save this secret now. It cannot be retrieved later.
-                  </p>
+                  <p className="text-14 text-amber-700 dark:text-amber-400">{translateUi("Save this secret now. It cannot be retrieved later.")}</p>
                 </div>
               </div>
 
               <div>
-                <p className="mb-1 type-secondary-emphasis text-muted-foreground">
-                  New Client Secret
-                </p>
+                <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("New Client Secret")}</p>
                 <div className="flex items-center gap-2">
                   <code className="flex-1 rounded bg-muted px-2 py-1 text-14 font-mono break-all">
                     {rotateResult.client_secret}
@@ -639,8 +613,8 @@ function ServiceAccountDetailEditor({
                     className="h-8 w-8"
                     onClick={() =>
                       void copyToClipboard(rotateResult.client_secret).then(
-                        () => toast.success("Secret copied"),
-                        () => toast.error("Failed to copy"),
+                        () => toast.success(translateUi("Secret copied")),
+                        () => toast.error(translateErrorMessage("Failed to copy")),
                       )
                     }
                   >
@@ -656,23 +630,17 @@ function ServiceAccountDetailEditor({
                     setRotateOpen(false);
                     setRotateResult(null);
                   }}
-                >
-                  Done
-                </Button>
+                >{translateUi("Done")}</Button>
               </DialogFooter>
             </div>
           ) : (
             <DialogFooter>
-              <Button variant="outline" onClick={() => setRotateOpen(false)}>
-                Cancel
-              </Button>
+              <Button variant="outline" onClick={() => setRotateOpen(false)}>{translateUi("Cancel")}</Button>
               <Button
                 variant="destructive"
                 isLoading={rotateMutation.isPending}
                 onClick={() => void handleRotateSecret()}
-              >
-                Rotate Secret
-              </Button>
+              >{translateUi("Rotate Secret")}</Button>
             </DialogFooter>
           )}
         </DialogContent>
@@ -684,9 +652,9 @@ function ServiceAccountDetailEditor({
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title="Delete Service Account"
-        description={`Are you sure you want to permanently delete "${sa.name}"? All tokens will be revoked and the client credentials will stop working immediately. This cannot be undone.`}
-        confirmLabel="Delete Service Account"
+        title={translateUi("Delete Service Account")}
+        description={translateUi("Are you sure you want to permanently delete \"{{value1}}\"? All tokens will be revoked and the client credentials will stop working immediately. This cannot be undone.", { value1: sa.name })}
+        confirmLabel={translateUi("Delete Service Account")}
         variant="destructive"
         isPending={deleteMutation.isPending}
         onConfirm={() => void handleDelete()}
@@ -698,9 +666,9 @@ function ServiceAccountDetailEditor({
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title="Revoke All Tokens"
-        description={`Are you sure you want to revoke all active tokens for "${sa.name}"? The service account will need to re-authenticate.`}
-        confirmLabel="Revoke Tokens"
+        title={translateUi("Revoke All Tokens")}
+        description={translateUi("Are you sure you want to revoke all active tokens for \"{{value1}}\"? The service account will need to re-authenticate.", { value1: sa.name })}
+        confirmLabel={translateUi("Revoke Tokens")}
         variant="destructive"
         isPending={revokeMutation.isPending}
         onConfirm={() => void handleRevokeTokens()}
@@ -730,6 +698,7 @@ function ConfirmDialog({
   isPending,
   onConfirm,
 }: ConfirmDialogProps) {
+  useUiTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -738,9 +707,7 @@ function ConfirmDialog({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{translateUi("Cancel")}</Button>
           <Button variant={variant} onClick={onConfirm} isLoading={isPending}>
             {confirmLabel}
           </Button>

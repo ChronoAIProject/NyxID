@@ -799,6 +799,7 @@ async fn create_thread_with_kind(
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        title_language: None,
         automation_v2: false,
         artifact_head: None,
         collaboration: collaboration.clone(),
@@ -3406,8 +3407,7 @@ pub async fn tool_delegation_summaries(
 /// Idle threads with queued events whose wake-up was deferred (full pool or
 /// a replica restart), oldest first. Bounded; loop guards still apply at wake time.
 pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<AssistantConversation>> {
-    // NyxBot threads parked at the streak cap wait for a user message; they
-    // never crowd out threads that can still wake.
+    // Provider approvals obey the same autonomous loop guard as other events.
     let mut filter = doc! {
         "collaboration": null,
         "pending_events.created_at": {"$exists": true},

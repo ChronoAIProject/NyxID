@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { ProviderServices } from "@/components/providers/provider-services";
 import { useState } from "react";
 import { canAdminWrite, type ProviderConfig } from "@/types/api";
@@ -50,6 +53,7 @@ import {
 } from "./provider-edit.helpers";
 
 export function ProviderEditPage() {
+  useUiTranslation();
   const { providerId } = useParams({ strict: false }) as { providerId: string };
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   useBreadcrumbLabel(provider?.name);
@@ -58,7 +62,7 @@ export function ProviderEditPage() {
     return (
       <ErrorBanner
         message={
-          error instanceof ApiError ? error.message : "Unable to load provider"
+          error instanceof ApiError ? error.message : translateUi("Unable to load provider")
         }
         onRetry={refetch}
       />
@@ -67,6 +71,7 @@ export function ProviderEditPage() {
 }
 
 function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
+  useUiTranslation();
   const [provider, setProvider] = useState(source);
   const providerId = provider.id;
   const isMounted = useEditorMounted();
@@ -141,7 +146,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
     try {
       await updateMutation.mutateAsync(data);
       if (!isMounted()) return;
-      toast.success("Provider updated");
+      toast.success(translateUi("Provider updated"));
       void navigate({
         to: "/providers/$providerId",
         params: { providerId },
@@ -150,7 +155,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
       if (err instanceof ApiError) {
         form.setError("root", { message: err.message });
       } else {
-        toast.error("Failed to update provider");
+        toast.error(translateErrorMessage("Failed to update provider"));
       }
       throw err;
     }
@@ -163,7 +168,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
 
   return (
     <div className="space-y-8">
-      <PageHeader title={`Edit ${provider.name}`} />
+      <PageHeader title={translateUi("Edit {{value1}}", { value1: provider.name })} />
 
       <ProviderServices provider={source} />
       {stale && (
@@ -190,7 +195,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Name</FormLabel>
+                  <FormLabel>{translateUi("Name")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -200,22 +205,18 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             />
 
             <div>
-              <p className="type-row-title mb-1">Slug</p>
+              <p className="type-row-title mb-1">{translateUi("Slug")}</p>
               <Badge variant="secondary">{provider.slug}</Badge>
-              <p className="text-13 text-muted-foreground mt-1">
-                Slug cannot be changed after creation.
-              </p>
+              <p className="text-13 text-muted-foreground mt-1">{translateUi("Slug cannot be changed after creation.")}</p>
             </div>
 
             <div>
-              <p className="type-row-title mb-1">Provider Type</p>
+              <p className="type-row-title mb-1">{translateUi("Provider Type")}</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
               </Badge>
-              <p className="text-13 text-muted-foreground mt-1">
-                Provider type cannot be changed after creation.
-              </p>
+              <p className="text-13 text-muted-foreground mt-1">{translateUi("Provider type cannot be changed after creation.")}</p>
             </div>
 
             <FormField
@@ -223,11 +224,11 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
               name="description"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Description</FormLabel>
+                  <FormLabel>{translateUi("Description")}</FormLabel>
                   <FormControl>
                     <textarea
                       className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder="Optional description"
+                      placeholder={translateUi("Optional description")}
                       {...field}
                     />
                   </FormControl>
@@ -242,11 +243,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
               render={({ field }) => (
                 <FormItem className="flex items-center justify-between rounded-lg border p-3">
                   <div className="space-y-0.5">
-                    <FormLabel>Active</FormLabel>
-                    <p className="text-13 text-muted-foreground">
-                      Inactive providers will not be available for user
-                      connections.
-                    </p>
+                    <FormLabel>{translateUi("Active")}</FormLabel>
+                    <p className="text-13 text-muted-foreground">{translateUi("Inactive providers will not be available for user connections.")}</p>
                   </div>
                   <FormControl>
                     <Switch
@@ -264,26 +262,23 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                 name="credential_mode"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Credential Mode</FormLabel>
+                    <FormLabel>{translateUi("Credential Mode")}</FormLabel>
                     <Select
                       value={field.value || "admin"}
                       onValueChange={field.onChange}
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Admin Only" />
+                          <SelectValue placeholder={translateUi("Admin Only")} />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="admin">Admin Only</SelectItem>
-                        <SelectItem value="user">User Provided</SelectItem>
-                        <SelectItem value="both">Admin or User</SelectItem>
+                        <SelectItem value="admin">{translateUi("Admin Only")}</SelectItem>
+                        <SelectItem value="user">{translateUi("User Provided")}</SelectItem>
+                        <SelectItem value="both">{translateUi("Admin or User")}</SelectItem>
                       </SelectContent>
                     </Select>
-                    <p className="text-13 text-muted-foreground">
-                      Controls whether admin-configured or user-provided OAuth
-                      credentials are used for connections.
-                    </p>
+                    <p className="text-13 text-muted-foreground">{translateUi("Controls whether admin-configured or user-provided OAuth credentials are used for connections.")}</p>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -295,7 +290,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
               name="icon_url"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Icon URL</FormLabel>
+                  <FormLabel>{translateUi("Icon URL")}</FormLabel>
                   <FormControl>
                     <Input
                       placeholder="https://example.com/icon.svg"
@@ -312,7 +307,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
               name="documentation_url"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Documentation URL</FormLabel>
+                  <FormLabel>{translateUi("Documentation URL")}</FormLabel>
                   <FormControl>
                     <Input placeholder="https://docs.example.com" {...field} />
                   </FormControl>
@@ -324,19 +319,15 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="type-card-title">
-                  OAuth 2.0 Configuration
-                </h3>
-                <p className="text-13 text-muted-foreground">
-                  Saved endpoint URLs are shown below.
-                </p>
+                <h3 className="type-card-title">{translateUi("OAuth 2.0 Configuration")}</h3>
+                <p className="text-13 text-muted-foreground">{translateUi("Saved endpoint URLs are shown below.")}</p>
 
                 <FormField
                   control={form.control}
                   name="authorization_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Authorization URL</FormLabel>
+                      <FormLabel>{translateUi("Authorization URL")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
@@ -350,7 +341,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="token_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Token URL</FormLabel>
+                      <FormLabel>{translateUi("Token URL")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
@@ -364,7 +355,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="revocation_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Revocation URL</FormLabel>
+                      <FormLabel>{translateUi("Revocation URL")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
@@ -378,16 +369,14 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="default_scopes"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Default Scopes</FormLabel>
+                      <FormLabel>{translateUi("Default Scopes")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="read, write, user:email"
+                          placeholder={translateUi("read, write, user:email")}
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Comma-separated list of scopes.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Comma-separated list of scopes.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -398,15 +387,14 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Client ID —{" "}
+                      <FormLabel>{translateUi("Client ID —")}{" "}
                         {provider.has_client_id
-                          ? "Configured"
-                          : "Not configured"}
+                          ? translateUi("Configured")
+                          : translateUi("Not configured")}
                       </FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder={translateUi("Leave blank to keep current")}
                           {...field}
                         />
                       </FormControl>
@@ -420,31 +408,21 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Client Secret —{" "}
+                      <FormLabel>{translateUi("Client Secret —")}{" "}
                         {provider.has_client_secret
-                          ? "Configured"
-                          : "Not configured"}
+                          ? translateUi("Configured")
+                          : translateUi("Not configured")}
                       </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Leave blank to keep current"
+                          placeholder={translateUi("Leave blank to keep current")}
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Only fill in if you want to change the client secret.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Only fill in if you want to change the client secret.")}</p>
                       {!isAdmin && provider.has_client_secret && (
-                        <p className="text-13 text-muted-foreground">
-                          Catalog Managers: on a provider someone else
-                          created, URLs, credential mode and token settings
-                          can change only before anyone has connected, and
-                          only with the current client ID and secret
-                          re-entered here. Replacing the client requires an
-                          Admin.
-                        </p>
+                        <p className="text-13 text-muted-foreground">{translateUi("Catalog Managers: on a provider someone else created, URLs, credential mode and token settings can change only before anyone has connected, and only with the current client ID and secret re-entered here. Replacing the client requires an Admin.")}</p>
                       )}
                       <FormMessage />
                     </FormItem>
@@ -457,10 +435,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   render={({ field }) => (
                     <FormItem className="flex items-center justify-between rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <FormLabel>Supports PKCE</FormLabel>
-                        <p className="text-13 text-muted-foreground">
-                          Enable Proof Key for Code Exchange.
-                        </p>
+                        <FormLabel>{translateUi("Supports PKCE")}</FormLabel>
+                        <p className="text-13 text-muted-foreground">{translateUi("Enable Proof Key for Code Exchange.")}</p>
                       </div>
                       <FormControl>
                         <Switch
@@ -477,13 +453,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   render={({ field }) => (
                     <FormItem className="flex items-center justify-between rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <FormLabel>Authorization nonce required</FormLabel>
-                        <p className="text-13 text-muted-foreground">
-                          Generate a fresh nonce for each hosted OAuth
-                          authorization attempt.
-                          Enable only when the provider requires it, after
-                          upgrading all backend replicas.
-                        </p>
+                        <FormLabel>{translateUi("Authorization nonce required")}</FormLabel>
+                        <p className="text-13 text-muted-foreground">{translateUi("Generate a fresh nonce for each hosted OAuth authorization attempt. Enable only when the provider requires it, after upgrading all backend replicas.")}</p>
                       </div>
                       <FormControl>
                         <Switch
@@ -500,25 +471,19 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="type-card-title">
-                  Device Code Configuration (RFC 8628)
-                </h3>
-                <p className="text-13 text-muted-foreground">
-                  Saved endpoint URLs are shown below.
-                </p>
+                <h3 className="type-card-title">{translateUi("Device Code Configuration (RFC 8628)")}</h3>
+                <p className="text-13 text-muted-foreground">{translateUi("Saved endpoint URLs are shown below.")}</p>
 
                 <FormField
                   control={form.control}
                   name="device_code_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Device Code URL</FormLabel>
+                      <FormLabel>{translateUi("Device Code URL")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Endpoint to request a device code (RFC 8628 step 1).
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Endpoint to request a device code (RFC 8628 step 1).")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -529,13 +494,11 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="device_token_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Device Token URL</FormLabel>
+                      <FormLabel>{translateUi("Device Token URL")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Endpoint to poll for token (RFC 8628 step 3).
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Endpoint to poll for token (RFC 8628 step 3).")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -546,7 +509,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="authorization_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Authorization URL (fallback)</FormLabel>
+                      <FormLabel>{translateUi("Authorization URL (fallback)")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
@@ -560,7 +523,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="token_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Token URL (fallback)</FormLabel>
+                      <FormLabel>{translateUi("Token URL (fallback)")}</FormLabel>
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
@@ -574,16 +537,14 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="default_scopes"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Default Scopes</FormLabel>
+                      <FormLabel>{translateUi("Default Scopes")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="openid, profile, offline_access"
+                          placeholder={translateUi("openid, profile, offline_access")}
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Comma-separated list of scopes.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Comma-separated list of scopes.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -594,15 +555,14 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Client ID —{" "}
+                      <FormLabel>{translateUi("Client ID —")}{" "}
                         {provider.has_client_id
-                          ? "Configured"
-                          : "Not configured"}
+                          ? translateUi("Configured")
+                          : translateUi("Not configured")}
                       </FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder={translateUi("Leave blank to keep current")}
                           {...field}
                         />
                       </FormControl>
@@ -616,11 +576,11 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client Secret (optional)</FormLabel>
+                      <FormLabel>{translateUi("Client Secret (optional)")}</FormLabel>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Leave blank to keep current"
+                          placeholder={translateUi("Leave blank to keep current")}
                           {...field}
                         />
                       </FormControl>
@@ -634,26 +594,19 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="type-card-title">
-                  Telegram Widget Configuration
-                </h3>
-                <p className="text-13 text-muted-foreground">
-                  Leave the bot token blank to keep the current secret.
-                </p>
+                <h3 className="type-card-title">{translateUi("Telegram Widget Configuration")}</h3>
+                <p className="text-13 text-muted-foreground">{translateUi("Leave the bot token blank to keep the current secret.")}</p>
 
                 <FormField
                   control={form.control}
                   name="client_id_param_name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Bot Username</FormLabel>
+                      <FormLabel>{translateUi("Bot Username")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="NyxIdBot" {...field} />
+                        <Input placeholder={translateUi("NyxIdBot")} {...field} />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Enter the BotFather username. A leading
-                        <span> @</span> is optional.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Enter the BotFather username. A leading")}<span> @</span>{translateUi(" is optional.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -664,22 +617,19 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Bot Token —{" "}
+                      <FormLabel>{translateUi("Bot Token —")}{" "}
                         {provider.has_client_secret
-                          ? "Configured"
-                          : "Not configured"}
+                          ? translateUi("Configured")
+                          : translateUi("Not configured")}
                       </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Leave blank to keep current"
+                          placeholder={translateUi("Leave blank to keep current")}
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Only fill this in when rotating the Telegram bot token.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Only fill this in when rotating the Telegram bot token.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -690,20 +640,18 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="type-card-title">
-                  API Key Configuration
-                </h3>
+                <h3 className="type-card-title">{translateUi("API Key Configuration")}</h3>
 
                 <FormField
                   control={form.control}
                   name="api_key_instructions"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>API Key Instructions</FormLabel>
+                      <FormLabel>{translateUi("API Key Instructions")}</FormLabel>
                       <FormControl>
                         <textarea
                           className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                          placeholder="Instructions for users to obtain an API key"
+                          placeholder={translateUi("Instructions for users to obtain an API key")}
                           {...field}
                         />
                       </FormControl>
@@ -717,16 +665,14 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   name="api_key_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>API Key URL</FormLabel>
+                      <FormLabel>{translateUi("API Key URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://provider.com/api-keys"
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Link where users can generate an API key.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Link where users can generate an API key.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -736,33 +682,28 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
 
             {(isOAuth || isDeviceCode) && (
               <div className="space-y-2 rounded-md border border-border p-3 text-13">
-                <p>
-                  Token endpoint authentication:{" "}
+                <p>{translateUi("Token endpoint authentication:")}{" "}
                   {provider.token_endpoint_auth_method}
                 </p>
                 {isDeviceCode && (
-                  <p>Device code format: {provider.device_code_format}</p>
+                  <p>{translateUi("Device code format: ")}{provider.device_code_format}</p>
                 )}
                 {provider.device_verification_url && (
-                  <p className="break-all">
-                    Device verification URL: {provider.device_verification_url}
+                  <p className="break-all">{translateUi("Device verification URL: ")}{provider.device_verification_url}
                   </p>
                 )}
                 {provider.extra_auth_params && (
-                  <div>
-                    Additional authorization parameters:
-                    <pre className="whitespace-pre-wrap">
+                  <div>{translateUi("Additional authorization parameters:")}<pre className="whitespace-pre-wrap">
                       {JSON.stringify(provider.extra_auth_params, null, 2)}
                     </pre>
                   </div>
                 )}
                 {provider.revocation && (
-                  <p className="break-all">
-                    Revocation: {provider.revocation.style},{" "}
-                    {provider.revocation.url}; authentication:{" "}
-                    {provider.revocation.auth}; revokes grant:{" "}
-                    {provider.revocation.revokes_grant ? "Yes" : "No"}; reviewed effect scope:{" "}
-                    {provider.revocation.effect_scope ?? "Unknown (remote token revocation withheld)"}
+                  <p className="break-all">{translateUi("Revocation: ")}{provider.revocation.style},{" "}
+                    {provider.revocation.url}{translateUi("; authentication:")}{" "}
+                    {provider.revocation.auth}{translateUi("; revokes grant:")}{" "}
+                    {provider.revocation.revokes_grant ? translateUi("Yes") : translateUi("No")}{translateUi("; reviewed effect scope:")}{" "}
+                    {provider.revocation.effect_scope ?? translateUi("Unknown (remote token revocation withheld)")}
                   </p>
                 )}
               </div>
@@ -773,9 +714,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                 type="submit"
                 isLoading={updateMutation.isPending}
                 disabled={stale || !form.formState.isDirty}
-              >
-                Save Changes
-              </Button>
+              >{translateUi("Save Changes")}</Button>
               <Button
                 type="button"
                 variant="outline"
@@ -785,9 +724,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     params: { providerId },
                   })
                 }
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
             </div>
           </form>
         </Form>

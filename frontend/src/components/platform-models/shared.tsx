@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useFormState } from "react-hook-form";
 import { firstNestedErrorMessage } from "@/lib/form-errors";
 import type { ReactNode } from "react";
@@ -17,6 +19,7 @@ export function Field({
   readonly title: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <Label className="grid gap-2">
       {title}
@@ -31,6 +34,7 @@ export function SaveError({
   readonly error: unknown;
   readonly reload?: () => void;
 }) {
+  useUiTranslation();
   if (!error) return null;
   const conflict = error instanceof ApiError && error.status === 409;
   return (
@@ -38,15 +42,15 @@ export function SaveError({
       <ErrorBanner
         message={
           conflict
-            ? "This model changed. Your edits have not been applied. Reload the current revision before saving again."
+            ? translateUi("This model changed. Your edits have not been applied. Reload the current revision before saving again.")
             : error instanceof Error
               ? error.message
-              : "The change could not be saved."
+              : translateUi("The change could not be saved.")
         }
       />
       {reload && (
         <Button type="button" variant="outline" onClick={reload}>
-          {conflict ? "Discard edits and reload" : "Reload current state"}
+          {conflict ? translateUi("Discard edits and reload") : translateUi("Reload current state")}
         </Button>
       )}
     </div>
@@ -57,6 +61,7 @@ export function PriceRows({
 }: {
   readonly components: RetailComponent[];
 }) {
+  useUiTranslation();
   return (
     <dl className="divide-y divide-border/30">
       {components.map((component, index) => (
@@ -69,8 +74,8 @@ export function PriceRows({
           </dt>
           <dd className="type-body tabular-nums">
             {component.explicit_free
-              ? "Free"
-              : `${component.credits_per_unit} credits / unit`}
+              ? translateUi("Free")
+              : translateUi("{{value1}} credits / unit", { value1: component.credits_per_unit })}
           </dd>
         </div>
       ))}
@@ -80,11 +85,12 @@ export function PriceRows({
 
 /** Invalid forms disable Save, so show the validation reason before submit. */
 export function EditErrors() {
+  useUiTranslation();
   const { errors } = useFormState();
   const message = firstNestedErrorMessage(errors);
   return message ? (
     <p role="alert" className="type-validation-error text-destructive">
-      {message}
+      {translateUi(message)}
     </p>
   ) : null;
 }

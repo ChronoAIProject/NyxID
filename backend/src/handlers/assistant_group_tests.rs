@@ -1457,6 +1457,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         (org.id.clone(), false),
     ] {
         let start = TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
@@ -41,6 +43,7 @@ export function AssistantPendingCredentialCancelDialog({
   readonly params: AssistantPendingCredentialCancelParams;
   readonly onComplete: (pendingCredentialId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -112,20 +115,20 @@ export function AssistantPendingCredentialCancelDialog({
         <DialogHeader>
           <DialogTitle>
             {resultId
-              ? "Pending credential cancelled"
-              : "Cancel pending credential"}
+              ? translateUi("Pending credential cancelled")
+              : translateUi("Cancel pending credential")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "The canonical projection confirms this request is inactive and declined."
-              : "The node will no longer be able to consume this pending credential request."}
+              ? translateUi("The canonical projection confirms this request is inactive and declined.")
+              : translateUi("The node will no longer be able to consume this pending credential request.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Pending credential</span>
+              <span className="text-muted-foreground">{translateUi("Pending credential")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[65%] truncate font-mono"
@@ -134,7 +137,7 @@ export function AssistantPendingCredentialCancelDialog({
               </Badge>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Node</span>
+              <span className="text-muted-foreground">{translateUi("Node")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[65%] truncate font-mono"
@@ -148,16 +151,14 @@ export function AssistantPendingCredentialCancelDialog({
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
-                this request cannot be consumed after cancellation.
-              </span>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{translateUi("I understand this request cannot be consumed after cancellation.")}</span>
             </Label>
           </div>
         ) : null}
 
         {error ? (
           <p role="alert" className="text-13 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -169,23 +170,17 @@ export function AssistantPendingCredentialCancelDialog({
                 onComplete(resultId);
                 close();
               }}
-            >
-              Done
-            </Button>
+            >{translateUi("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Keep request
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Keep request")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting || !confirmed}
                 onClick={() => void submit()}
-              >
-                Cancel request
-              </Button>
+              >{translateUi("Cancel request")}</Button>
             </>
           )}
         </DialogFooter>

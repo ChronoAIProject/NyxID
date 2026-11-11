@@ -149,6 +149,8 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod assistant_cma_agents;
+pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;

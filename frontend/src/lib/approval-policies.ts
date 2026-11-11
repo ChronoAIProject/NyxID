@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type {
   ApprovalEffect,
   ApprovalMode,
@@ -74,10 +75,10 @@ export function enabledSimpleApprovalVerbs(
 
 export function approvalPolicyLabel(config: ServiceApprovalConfigItem): string {
   const enabled = enabledSimpleApprovalVerbs(config);
-  if (config.default_effect === "deny") return "Unmatched operations denied";
-  if (enabled.length === approvalVerbs.length) return "Approval required";
-  if (enabled.length === 0) return "Approval not required";
-  return `Approval for ${enabled.map((verb) => approvalVerbLabels[verb]).join(", ")}`;
+  if (config.default_effect === "deny") return translateUi("Unmatched operations denied");
+  if (enabled.length === approvalVerbs.length) return translateUi("Approval required");
+  if (enabled.length === 0) return translateUi("Approval not required");
+  return translateUi("Approval for {{operations}}", { operations: enabled.map((verb) => translateUi(approvalVerbLabels[verb])).join(", ") });
 }
 
 function isSimpleRequireApprovalRule(rule: ApprovalRule): boolean {

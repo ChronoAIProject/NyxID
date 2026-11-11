@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Bell } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import {
@@ -23,6 +24,7 @@ import { cn } from "@/lib/utils";
  * the Notifications feature; the badge turns amber while a decision waits.
  */
 export function NotificationsBell() {
+  useUiTranslation();
   const enabled = useNotificationsEnabled();
   const summary = useNotificationSummary(enabled);
   const { open, current } = useAccountPanel();

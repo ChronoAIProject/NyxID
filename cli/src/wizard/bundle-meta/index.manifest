@@ -11,6 +11,7 @@ frontend/src/components/cli-wizard/client.ts
 frontend/src/components/cli-wizard/confirm-panels.tsx
 frontend/src/components/cli-wizard/disconnect-banner.tsx
 frontend/src/components/cli-wizard/display-once-panel.tsx
+frontend/src/components/cli-wizard/language-picker.tsx
 frontend/src/components/cli-wizard/name-input.tsx
 frontend/src/components/cli-wizard/scope-picker.tsx
 frontend/src/components/cli-wizard/shell.tsx
@@ -19,6 +20,7 @@ frontend/src/components/cli-wizard/upstream-error-banner.tsx
 frontend/src/components/cli-wizard/wizard-back-fab.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
 frontend/src/components/cli-wizard/wizard-heading.tsx
+frontend/src/components/cli-wizard/wizard.css
 frontend/src/components/icons/empty-state/road-barrier.tsx
 frontend/src/components/platform-icon.tsx
 frontend/src/components/service-accounts/service-account-scope-picker.tsx
@@ -152,6 +154,20 @@ frontend/src/hooks/use-orgs.ts
 frontend/src/hooks/use-runtime-config.ts
 frontend/src/hooks/use-scroll-fades.ts
 frontend/src/hooks/use-theme.ts
+frontend/src/i18n/catalog-loader.ts
+frontend/src/i18n/instance.ts
+frontend/src/i18n/language.ts
+frontend/src/i18n/locales/common-en.json
+frontend/src/i18n/locales/common-zh-CN.json
+frontend/src/i18n/locales/common-zh-TW.json
+frontend/src/i18n/locales/errors-en.json
+frontend/src/i18n/locales/errors-zh-CN.json
+frontend/src/i18n/locales/errors-zh-TW.json
+frontend/src/i18n/locales/wizard-en.json
+frontend/src/i18n/locales/wizard-zh-CN.json
+frontend/src/i18n/locales/wizard-zh-TW.json
+frontend/src/i18n/use-ui-translation.ts
+frontend/src/i18n/wizard.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/assistant/connect-watch.ts
 frontend/src/lib/assistant/identity.ts
@@ -159,8 +175,10 @@ frontend/src/lib/assistant/shell-routes.ts
 frontend/src/lib/credits-denial.ts
 frontend/src/lib/drawer-search.ts
 frontend/src/lib/drawer-section-info.ts
+frontend/src/lib/error-messages.ts
 frontend/src/lib/form-errors.ts
 frontend/src/lib/form-viewport.ts
+frontend/src/lib/formatting-locale.ts
 frontend/src/lib/http-origin.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/overlay-layer.ts
