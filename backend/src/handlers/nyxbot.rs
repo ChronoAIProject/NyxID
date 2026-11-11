@@ -57,6 +57,9 @@ use crate::{
 
 use super::assistant_team::{Pool, Started, start_server_turn};
 
+#[path = "nyxbot_provider_refusal.rs"]
+mod provider_refusal;
+
 pub const GATEWAY_SLUG: &str = "cmaeg";
 pub const PROVIDER_SLUG: &str = "nyxbot";
 pub const EVENT_RETENTION_HOURS: i64 = 24;
@@ -4219,7 +4222,10 @@ fn bounded_reply(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn problem(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({"error": {"code": code}, "code": code}))).into_response()
+    provider_refusal::coded(
+        (status, Json(json!({"error": {"code": code}, "code": code}))).into_response(),
+        code,
+    )
 }
 
 /// Authenticate the gateway: the bearer is the channel's dedicated agent key.
@@ -4238,6 +4244,7 @@ async fn provider_channel(
         key_service::validate_api_key(&state.db, &raw)
             .await
             .map_err(|_| problem(StatusCode::UNAUTHORIZED, "not_authenticated"))?;
+    provider_refusal::owner(&owner);
     let row = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -4248,17 +4255,26 @@ async fn provider_channel(
         .await
         .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?
         .ok_or_else(|| problem(StatusCode::FORBIDDEN, "forbidden"))?;
-    if crate::services::platform_bot_authority::require_personal_routes(
+    provider_refusal::channel(&row.user_id, &row.id);
+    match crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
         &row.channel_bot_id,
     )
     .await
-    .is_err()
     {
-        return Err(problem(
-            StatusCode::FORBIDDEN,
-            "shared_entry_requires_native_receipt",
-        ));
+        Ok(()) => {}
+        Err(AppError::Forbidden(_)) => {
+            return Err(problem(
+                StatusCode::FORBIDDEN,
+                "shared_entry_requires_native_receipt",
+            ));
+        }
+        Err(_) => {
+            return Err(problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_unavailable",
+            ));
+        }
     }
     match org_access(state, &row).await {
         Ok(OrgAccess::Holds) => {}
@@ -4299,6 +4315,7 @@ async fn provider_event_binding_with_authority(
     let (owner, key, _) = key_service::validate_api_key(&state.db, &raw)
         .await
         .map_err(|_| problem(StatusCode::UNAUTHORIZED, "not_authenticated"))?;
+    provider_refusal::owner(&owner);
     let Some(row) = state
         .db
         .collection::<NyxbotEventBinding>(EVENT_BINDINGS)
@@ -4322,7 +4339,7 @@ async fn provider_event_binding_with_authority(
     if require_authority {
         crate::services::nyxbot_event_binding_service::authorize_provider(state, &row)
             .await
-            .map_err(|error| error.into_response())?;
+            .map_err(provider_refusal::error)?;
     }
     Ok(Some((row, raw)))
 }
@@ -4462,8 +4479,23 @@ pub async fn put_binding(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::BindingPut,
+        put_binding_inner(State(state.clone()), Path(binding_id), headers, Json(body)),
+    )
+    .await
+}
+
+async fn put_binding_inner(
+    State(state): State<AppState>,
+    Path(binding_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
             return match crate::services::platform_entry_gateway_service::put_binding(
                 &state,
                 authority,
@@ -4473,11 +4505,11 @@ pub async fn put_binding(
             .await
             {
                 Ok(result) => Json(result).into_response(),
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((row, raw))) => {
@@ -4651,8 +4683,27 @@ pub async fn put_conversation(
     Path((binding_id, conversation_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::ConversationPut,
+        put_conversation_inner(
+            State(state.clone()),
+            Path((binding_id, conversation_id)),
+            headers,
+        ),
+    )
+    .await
+}
+
+async fn put_conversation_inner(
+    State(state): State<AppState>,
+    Path((binding_id, conversation_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
+            provider_refusal::binding(authority.binding_matches(&binding_id));
             return match crate::services::platform_entry_gateway_service::conversation(
                 &state,
                 authority,
@@ -4662,14 +4713,17 @@ pub async fn put_conversation(
             .await
             {
                 Ok(()) => Json(json!({})).into_response(),
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((row, _))) => {
+            provider_refusal::binding(
+                row.provider_binding_id.as_deref() == Some(binding_id.as_str()),
+            );
             if row.provider_binding_id.as_deref() != Some(binding_id.as_str())
                 || row.partition_policy != "per_event"
                 || conversation_id.len() > 256
@@ -4688,6 +4742,7 @@ pub async fn put_conversation(
         Ok(found) => found,
         Err(response) => return response,
     };
+    provider_refusal::binding(row.binding_id.as_deref() == Some(binding_id.as_str()));
     if row.binding_id.as_deref() != Some(binding_id.as_str()) || !valid_partition(&conversation_id)
     {
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
@@ -4809,8 +4864,27 @@ pub async fn get_event_context(
     Path((binding_id, conversation_id, event_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::Events,
+        get_event_context_inner(
+            State(state.clone()),
+            Path((binding_id, conversation_id, event_id)),
+            headers,
+        ),
+    )
+    .await
+}
+
+async fn get_event_context_inner(
+    State(state): State<AppState>,
+    Path((binding_id, conversation_id, event_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    provider_refusal::event(&event_id);
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
             return match crate::services::platform_entry_gateway_service::event_context(
                 &state,
                 authority,
@@ -4822,11 +4896,11 @@ pub async fn get_event_context(
             {
                 // Native context is transient and never persisted as model history.
                 Ok(()) => problem(StatusCode::NOT_FOUND, "event_not_found"),
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((row, _))) => {
@@ -4841,6 +4915,7 @@ pub async fn get_event_context(
             let Ok(Some(event)) = event else {
                 return problem(StatusCode::NOT_FOUND, "event_not_found");
             };
+            provider_refusal::partition_known();
             let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
                 return problem(StatusCode::NOT_FOUND, "event_not_found");
             };
@@ -4885,6 +4960,7 @@ pub async fn get_event_context(
     let Ok(Some(event)) = event else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
     };
+    provider_refusal::partition_known();
     let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
     };
@@ -4985,9 +5061,14 @@ fn responses_with_producers(
 ) -> futures::future::BoxFuture<'static, Response> {
     // Native authentication precedes ordinary routing. Keep that composition's
     // state outside both HTTP caller futures, including ordinary group events.
-    Box::pin(responses_with_producers_impl(
-        state, producers, headers, body,
-    ))
+    Box::pin(async move {
+        provider_refusal::scope(
+            &state.db,
+            provider_refusal::Endpoint::Responses,
+            responses_with_producers_impl(state.clone(), producers, headers, body),
+        )
+        .await
+    })
 }
 
 async fn media_admission(
@@ -5086,6 +5167,7 @@ async fn custom_responses(
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
     let event_id = context["activity"]["event_id"].as_str().unwrap_or_default();
+    provider_refusal::event(event_id);
     let event_key = custom_event_key(&binding.id, event_id);
     let request_hash = sha256_hex(request.to_string());
     // The response identity follows the authenticated event, rather than the
@@ -5103,6 +5185,7 @@ async fn custom_responses(
         Ok(None) => return problem(StatusCode::FORBIDDEN, "destination_not_authorized"),
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     };
+    provider_refusal::channel(&destination.user_id, &destination.id);
     let Ok(agent) =
         crate::services::nyxbot_event_binding_service::authorize_provider(&state, &binding).await
     else {
@@ -5115,14 +5198,17 @@ async fn custom_responses(
     if !destination_targets_agent {
         return problem(StatusCode::FORBIDDEN, "destination_target_changed");
     }
-    if crate::services::platform_bot_authority::require_personal_routes(
+    match crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
         &destination.channel_bot_id,
     )
     .await
-    .is_err()
     {
-        return problem(StatusCode::FORBIDDEN, "destination_requires_native_receipt");
+        Ok(()) => {}
+        Err(AppError::Forbidden(_)) => {
+            return problem(StatusCode::FORBIDDEN, "destination_requires_native_receipt");
+        }
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     match org_access(&state, &destination).await {
         Ok(OrgAccess::Holds) => {}
@@ -5328,8 +5414,15 @@ async fn responses_with_producers_impl(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Some(value) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+    {
+        provider_refusal::event(value);
+    }
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
             let Some(idempotency) = headers
                 .get("idempotency-key")
                 .and_then(|value| value.to_str().ok())
@@ -5354,11 +5447,11 @@ async fn responses_with_producers_impl(
                     let response_id = format!("resp_{}", &sha256_hex(idempotency)[..32]);
                     sse(futures::stream::iter(native_completion_frames(&response_id)))
                 }
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((binding, _))) => return custom_responses(state, binding, headers, body).await,
@@ -5379,6 +5472,11 @@ async fn responses_with_producers_impl(
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     };
+    provider_refusal::event(
+        request["event_context"]["activity"]["event_id"]
+            .as_str()
+            .unwrap_or(idempotency),
+    );
     if row.gateway_source.is_some() {
         return native_responses::respond(state, row, headers.clone(), request, idempotency).await;
     }
@@ -5389,16 +5487,15 @@ async fn responses_with_producers_impl(
     if !valid_partition(&partition) || row.status != "active" {
         return problem(StatusCode::NOT_FOUND, "conversation_not_found");
     }
-    if state
+    match state
         .db
         .collection::<NyxbotThread>(THREADS)
         .find_one(doc! {"channel_id": &row.id, "partition": &partition})
         .await
-        .ok()
-        .flatten()
-        .is_none()
     {
-        return problem(StatusCode::NOT_FOUND, "conversation_not_found");
+        Ok(Some(_)) => provider_refusal::partition_known(),
+        Ok(None) => return problem(StatusCode::NOT_FOUND, "conversation_not_found"),
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     let text: String = request["input"]
         .as_array()
