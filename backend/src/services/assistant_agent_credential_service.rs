@@ -17,7 +17,7 @@ use crate::{
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
     },
-    mw::auth::ASSISTANT_ACCOUNT_SCOPE,
+    mw::auth::{ASSISTANT_ACCOUNT_SCOPE, AuthUser},
     services::{api_key_mutation_service as mutations, key_service},
 };
 
@@ -407,6 +407,40 @@ pub async fn is_conversation_key(db: &Database, user_id: &str, key_id: &str) -> 
         .await
         .map_err(|_| unavailable())?
         > 0)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ModelCatalogRef<'a> {
+    Id(&'a str),
+    Slug(&'a str),
+}
+
+/// Preserve the proxy's narrow model-transport exception for a live assistant
+/// conversation key and an exact server-resolved catalog target.
+pub(crate) async fn allows_implicit_model_transport(
+    db: &Database,
+    auth: &AuthUser,
+    catalog: Option<ModelCatalogRef<'_>>,
+) -> AppResult<bool> {
+    if auth.api_key_purpose == ApiKeyPurpose::PublicNyxbot {
+        return Ok(false);
+    }
+    let (Some(key_id), Some(catalog)) = (auth.api_key_id.as_deref(), catalog) else {
+        return Ok(false);
+    };
+    let mut filter = match catalog {
+        ModelCatalogRef::Id(id) => doc! {"_id": id},
+        ModelCatalogRef::Slug(slug) => doc! {"slug": slug},
+    };
+    filter.insert("inference", doc! {"$ne": null});
+    filter.insert("is_active", true);
+    let model_service = db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .count_documents(filter)
+        .limit(1)
+        .await?
+        > 0;
+    Ok(model_service && is_conversation_key(db, &auth.user_id.to_string(), key_id).await?)
 }
 
 /// Used by key revocation in the same transaction when one exists.

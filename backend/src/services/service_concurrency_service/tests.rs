@@ -118,6 +118,27 @@ async fn bodies_hold_slots_until_completion_error_or_disconnect() {
 }
 
 #[tokio::test]
+async fn failed_http_responses_hold_slots_until_disconnect() {
+    let db = db().await;
+    let lease = claim(&db, "service", "failed-response", 1).await.unwrap();
+    let body = Body::from_stream(futures::stream::pending::<
+        Result<bytes::Bytes, std::io::Error>,
+    >());
+    let response = lease.hold_response(
+        Response::builder()
+            .status(503)
+            .body(body)
+            .expect("response"),
+    );
+    assert!(matches!(
+        claim(&db, "service", "failed-response", 1).await,
+        Err(AppError::ServiceConcurrencyLimited)
+    ));
+    drop(response);
+    released(&db, "service", "failed-response").await;
+}
+
+#[tokio::test]
 async fn cancellation_panic_and_renewal_loss_release_slots() {
     let db = db().await;
     let lease = claim(&db, "service", "person", 1).await.unwrap();

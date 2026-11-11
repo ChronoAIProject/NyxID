@@ -2483,6 +2483,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route(
+            "/monitoring/invocation-diagnostics",
+            post(handlers::invocation_diagnostics::redeem).layer(DefaultBodyLimit::max(256)),
+        )
         .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
