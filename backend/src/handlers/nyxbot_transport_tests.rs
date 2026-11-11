@@ -1057,6 +1057,7 @@ async fn unread_activity_survives_transport_move(back_to_relay: bool, fallback: 
     visible(&state, &id).await;
     let (_, gateway) = mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
     let _gateway = tokio_util::task::AbortOnDropHandle::new(gateway);
+    set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
     move_to_gateway(&state, &initial).await.unwrap();
     let on = load_channel(&state, OWNER, &initial.id).await.unwrap();
     assert_eq!(on.transport, "gateway");
