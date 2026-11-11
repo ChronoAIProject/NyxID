@@ -3168,7 +3168,7 @@ async fn finish_resolution(
     box_resolution_future(|| verify_auto_provision_eligibility(db, &user_service, effective_owner_id)).await?;
 
     // Load the endpoint
-    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+    let mut endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -3189,6 +3189,21 @@ async fn finish_resolution(
     let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
     let catalog_proxy_authorization =
         box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service)).await?;
+    // Legacy automatic no-auth rows have no platform credential. Refresh only
+    // their inherited destination, retaining the existing connection ACL lane.
+    if catalog_proxy_authorization.no_auth_platform_service
+        && user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
+        && user_service.service_type == "http"
+        && user_service.node_id.is_none()
+        && user_service.api_key_id.is_none()
+        && user_service.credential_binding.is_none()
+        && endpoint.user_id == user_service.user_id
+        && endpoint.catalog_service_id == user_service.catalog_service_id
+    {
+        endpoint.url = catalog_proxy_authorization.base_url.clone().ok_or_else(|| {
+            AppError::Conflict("Catalog service is unavailable".into())
+        })?;
+    }
     let catalog_billing = catalog_proxy_authorization.billing.clone();
     let catalog_service_slug = catalog_proxy_authorization.catalog_slug.clone();
     let catalog_ws_frame_injections =
@@ -3205,14 +3220,7 @@ async fn finish_resolution(
             || user_service.credential_binding.as_deref() == Some("platform")
             || catalog_proxy_authorization.platform_key_configured))
         || (catalog_proxy_authorization.no_auth_platform_service
-            && (catalog_proxy_authorization.platform_key_configured
-                || (user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
-                    && user_service.service_type == "http"
-                    && user_service.node_id.is_none()
-                    && user_service.api_key_id.is_none()
-                    && user_service.credential_binding.is_none()
-                    && endpoint.user_id == user_service.user_id
-                    && endpoint.catalog_service_id == user_service.catalog_service_id)))
+            && catalog_proxy_authorization.platform_key_configured)
     {
         let catalog_service = box_resolution_future(|| load_catalog_service_for_user_service(db, &user_service)).await?;
         let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
@@ -3603,6 +3611,7 @@ async fn load_catalog_service_for_user_service(
 struct CatalogProxyAuthorization {
     catalog_id: Option<String>,
     catalog_slug: Option<String>,
+    base_url: Option<String>,
     billing: Option<crate::models::service_billing::ServiceBilling>,
     auth_scheme: Option<String>,
     platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
@@ -3637,6 +3646,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     Ok(CatalogProxyAuthorization {
         catalog_id: Some(service.id.clone()),
         catalog_slug: Some(service.slug.clone()),
+        base_url: Some(service.base_url.clone()),
         billing: service.billing.clone(),
         auth_scheme: service.auth_scheme.clone(),
         platform_key: service.platform_key.clone(),
@@ -5986,6 +5996,27 @@ mod tests {
         assert_eq!(resolved.target.service.base_url, catalog.base_url);
         assert_eq!(resolved.target.service.id, catalog.id);
         assert!(resolved.target.credential.is_empty());
+        // Explicit custom connections keep their configured destination.
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id":&service_id},
+                doc! {"$set":{"source":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        let custom = resolve_proxy_target_by_user_service_id(
+            &db,
+            &test_encryption_keys(),
+            &owner,
+            &service_id,
+            None,
+            None,
+            test_execution_context(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(custom.target.base_url, "https://stale-snapshot.invalid");
         db.drop().await.unwrap();
     }
 
