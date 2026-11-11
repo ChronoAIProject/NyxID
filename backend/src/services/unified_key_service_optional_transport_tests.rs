@@ -19,6 +19,7 @@ struct Fixture {
     catalog: DownstreamService,
     connection: UserService,
     server: tokio::task::JoinHandle<()>,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Drop for Fixture {
@@ -29,13 +30,18 @@ impl Drop for Fixture {
 
 async fn fixture() -> Fixture {
     let db = connect_test_database("optional_transport").await.unwrap();
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = requests.clone();
     let app = Router::new().route(
         "/{*path}",
-        any(|headers: HeaderMap| async move {
-            axum::Json(serde_json::json!({
-                "github": headers.get("X-GitHub-Token").map(|v| v.to_str().unwrap()),
-                "authorization": headers.get("Authorization").map(|v| v.to_str().unwrap()),
-            }))
+        any(move |headers: HeaderMap| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                axum::Json(serde_json::json!({
+                    "github": headers.get("X-GitHub-Token").map(|v| v.to_str().unwrap()),
+                    "authorization": headers.get("Authorization").map(|v| v.to_str().unwrap()),
+                }))
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -107,6 +113,7 @@ async fn fixture() -> Fixture {
         catalog,
         connection,
         server,
+        requests,
     }
 }
 
@@ -214,7 +221,7 @@ async fn mcp_echo(f: &Fixture) -> serde_json::Value {
         &f.state.token_exchange_cache,
         &f.state.cloud_response_cache,
         &McpExecContext {
- strict_response_utf8: false,
+            strict_response_utf8: false,
             execution_permission: None,
             assistant_chat: None,
             response_body_limit: None,
@@ -363,9 +370,50 @@ async fn optional_header_reaches_both_llm_routes_after_listing() {
     }
 }
 
+async fn moved_echo_server() -> wiremock::MockServer {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(|request: &wiremock::Request| {
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "destination": "moved",
+                "github": request.headers.get("X-GitHub-Token").map(|v| v.to_str().unwrap()),
+                "authorization": request.headers.get("Authorization").map(|v| v.to_str().unwrap()),
+            }))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn stored_endpoint(f: &Fixture) -> UserEndpoint {
+    f.state
+        .db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(doc! { "_id": &f.connection.endpoint_id })
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn assert_moved_transports(f: &Fixture, token: Option<&str>) {
+    for (ingress, echo) in [
+        ("REST id", rest_echo(f).await),
+        ("REST slug", rest_echo_at(f, true).await),
+        ("MCP", mcp_echo(f).await),
+        ("LLM provider", llm_echo(f, false).await),
+        ("LLM gateway", llm_echo(f, true).await),
+    ] {
+        assert_eq!(echo["destination"], "moved", "{ingress}");
+        assert_eq!(echo["github"], serde_json::json!(token), "{ingress}");
+        assert!(echo["authorization"].is_null(), "{ingress}");
+    }
+}
+
 #[tokio::test]
-async fn no_requirements_preserve_existing_automatic_destination_after_catalog_edit() {
+async fn no_requirements_follow_catalog_move_preserving_ids_without_forwarding_tokens() {
     let f = fixture().await;
+    let moved = moved_echo_server().await;
+    token_for(&f, &f.owner, "owner-optional-token").await;
     f.state
         .db
         .collection::<ServiceProviderRequirement>(REQUIREMENTS)
@@ -377,10 +425,16 @@ async fn no_requirements_preserve_existing_automatic_destination_after_catalog_e
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .update_one(
             doc! { "_id": &f.catalog.id },
-            doc! { "$set": { "base_url": "https://changed.example" } },
+            doc! { "$set": { "base_url": moved.uri() } },
         )
         .await
         .unwrap();
+    // No reconciliation has run: exercise the stale stored snapshot on every
+    // ingress before listing repairs it. No SPR means no token inheritance,
+    // even though the owner has a usable legacy token.
+    assert_eq!(stored_endpoint(&f).await.url, f.catalog.base_url);
+    assert_moved_transports(&f, None).await;
+    assert_eq!(stored_endpoint(&f).await.url, f.catalog.base_url);
     let listed = Box::pin(crate::handlers::keys::list_keys(
         State(f.state.clone()),
         test_auth_user(&f.owner),
@@ -394,14 +448,68 @@ async fn no_requirements_preserve_existing_automatic_destination_after_catalog_e
     let retained = automatic_service(&f.state.db, &f.owner, &f.catalog.id).await;
     assert_eq!(retained.id, f.connection.id);
     assert_eq!(retained.endpoint_id, f.connection.endpoint_id);
-    for echo in [
-        rest_echo(&f).await,
-        rest_echo_at(&f, true).await,
-        mcp_echo(&f).await,
-    ] {
-        assert!(echo["github"].is_null());
-        assert!(echo["authorization"].is_null());
+    let endpoint = stored_endpoint(&f).await;
+    assert_eq!(endpoint.id, f.connection.endpoint_id);
+    assert_eq!(endpoint.url, moved.uri());
+    assert_moved_transports(&f, None).await;
+    assert_eq!(moved.received_requests().await.unwrap().len(), 10);
+    assert_eq!(f.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn optional_tokens_require_repaired_destination_then_follow_authorized_catalog_move() {
+    let f = fixture().await;
+    let moved = moved_echo_server().await;
+    let held_target = resolved_target(&f).await;
+    let token_id = token_for(&f, &f.owner, "owner-optional-token").await;
+    f.state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .update_one(
+            doc! { "_id": &f.catalog.id },
+            doc! { "$set": { "base_url": moved.uri() } },
+        )
+        .await
+        .unwrap();
+    let live_target = resolved_target(&f).await;
+    assert_eq!(live_target.base_url, moved.uri());
+    assert_eq!(stored_endpoint(&f).await.url, f.catalog.base_url);
+    // Preserve #1971's stronger optional-token fence: neither the old held
+    // target nor the new live target may inherit while storage disagrees.
+    for target in [&held_target, &live_target] {
+        assert!(matches!(
+            optional_credentials(&f, &f.owner, &f.catalog.id, target).await,
+            Err(AppError::NotFound(_))
+        ));
     }
+    let token = f
+        .state
+        .db
+        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .find_one(doc! { "_id": &token_id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(token.last_used_at.is_none());
+    let listed = Box::pin(crate::handlers::keys::list_keys(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+    ))
+    .await
+    .unwrap();
+    assert!(listed.0.keys.iter().any(|key| key.id == f.connection.id));
+    let retained = automatic_service(&f.state.db, &f.owner, &f.catalog.id).await;
+    assert_eq!(retained.id, f.connection.id);
+    assert_eq!(retained.endpoint_id, f.connection.endpoint_id);
+    assert_eq!(stored_endpoint(&f).await.url, moved.uri());
+    // Repair cannot authorize a previously resolved target for the old host.
+    assert!(matches!(
+        optional_credentials(&f, &f.owner, &f.catalog.id, &held_target).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert_moved_transports(&f, Some("owner-optional-token")).await;
+    assert_eq!(moved.received_requests().await.unwrap().len(), 5);
+    assert_eq!(f.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
