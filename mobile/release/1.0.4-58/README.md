@@ -37,17 +37,24 @@ Run `python3 mobile/release/1.0.4-58/validate_metadata.py` from the repository r
 
 The copy describes the current AI workspace. Language support is limited to supported native settings and selected controls; it does not claim a fully translated app. Playable voice samples are not advertised. The release does not add notification settings work.
 
-## Upload screenshots
+## Upload dark artwork and screenshots
 
-Match the destination field before choosing a file. **Search Results Asset** is a separate landscape artwork field. Its uploader lists 1920 × 1280, 3840 × 2560, and 5244 × 2950 as supported sizes. Upload `screenshots/search-results/search-results-1920x1280.png` from the Desktop pack to that field. Higher-resolution alternatives are in `screenshots/search-results/alternatives/`. Choose one asset.
+The current dark-only Desktop package is `~/Desktop/NyxID-58-Submission-DARK`. It contains the submission text, review notes, changelog, two primary landscape assets, and dark iPhone and iPad screenshots.
 
-Use the portrait iPhone files below in **App Previews and Screenshots**, under the matching iPhone display slot. They do not match the separate Search Results Asset field.
+The **Product Page Information** section has two artwork tabs. Both primary files are **5244 × 2950**, a size explicitly accepted by both uploaders in the supplied App Store Connect screenshots.
 
-The Desktop pack contains `screenshots/iphone/app-store/` with the numbered marketing images. Upload them in filename order. The images use real iPhone captures with a branded frame and caption. `screenshots/iphone/raw/` preserves the original 1206 × 2622 captures.
+| Tab | File in the dark package | Supported sizes shown in App Store Connect |
+| --- | --- | --- |
+| Header | `01-HEADER-DARK-5244x2950.png` | 5244 × 2950 or 3840 × 1646 |
+| Search Results | `02-SEARCH-RESULTS-DARK-5244x2950.png` | 5244 × 2950, 3840 × 2560, or 1920 × 1280 |
 
-Use the corresponding 13-inch iPad assets for the iPad screenshot slot. This binary supports iPad, so an iPad screenshot is required even if the primary marketing targets iPhone. Read `screenshots/README.md` in the Desktop pack for the capture provenance, dimensions, and upload order.
+Upload one image in each tab. The two files use the same dark artwork with different names to identify the destination. Their dimensions and absence of transparency are verified locally. Server upload acceptance has not been exercised from this session.
 
-Apple's current accepted dimensions are listed in [Screenshot specifications](https://developer.apple.com/help/app-store-connect/reference/screenshot-specifications). The prepared iPhone marketing images are 1320 × 2868. Check that App Store Connect accepts the selected slot and that all files are opaque PNGs.
+If App Store Connect also requests device screenshots, use `app-screenshots/iphone/` for the three 1320 × 2868 iPhone images and `app-screenshots/ipad/` for the genuine 2064 × 2752 iPad capture. The portrait files belong in the corresponding device screenshot slots.
+
+The dark images use actual app captures. The chat contains a real drafting response, and the captured voice call reached Listening and was ended afterward. `source-captures/` preserves the originals. The simulator uses the build 58 Debug native app with Metro from the PR branch, including its final main merge; the IPA's source manifest remains authoritative for the release binary.
+
+Read `READ-ME-FIRST.txt` in the dark package for the field mapping. `verification/image-manifest.json` records the upload image dimensions, sizes and hashes. Apple's device screenshot dimensions are listed in [Screenshot specifications](https://developer.apple.com/help/app-store-connect/reference/screenshot-specifications).
 
 ## Complete private review access
 
