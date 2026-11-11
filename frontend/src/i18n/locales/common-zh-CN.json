@@ -8,5 +8,6 @@
   "in {{count}}h": "{{count}} 小时后",
   "in {{count}}d": "{{count}} 天后",
   "Couldn't reach NyxID. Check your connection and try again.": "无法连接到 NyxID。请检查网络连接后重试。",
-  "Generate new code": "生成新验证码"
+  "Generate new code": "生成新验证码",
+  "The requested account is unavailable. Check your organization access.": "请求的账号不可用，请检查你的组织访问权限。"
 }

@@ -6,10 +6,83 @@ import {
   permissionOptions,
   draftSummary,
   effectiveLoginConnections,
+  loginConnectionLabel,
+  preferredOwnerKey,
 } from "./login-permissions";
 import { loginInventory, requestedRead } from "./__fixtures__/login-inventory";
 
 describe("device login permission comparisons", () => {
+  it.each(["user", "org"])(
+    "selects only the requested owner's CMA and distinguishes identical names: %s",
+    (owner) => {
+      const inventory = loginInventory();
+      inventory.options.personal_owner_id = "user";
+      inventory.options.orgs = [
+        { id: "org", owner_id: "org", name: "ChronoAI" },
+      ];
+      inventory.options.services = ["user", "org"].map((id) => ({
+        id: `cma-${id}`,
+        name: "cma",
+        owner_id: id,
+      }));
+      inventory.connections = ["user", "org"].map((id) => ({
+        ...inventory.connections[0]!,
+        id: `cma-${id}`,
+        owner_id: id,
+        label: "CMA",
+        slug: "cma",
+        catalog_service_slug: "cma",
+        granted_scopes: null,
+      }));
+      inventory.catalog = [{ slug: "cma", name: "CMA", scope_catalog: null }];
+      const original = inventory.options.keys[0]!;
+      inventory.options.keys = ["user", "org"].map((id) => ({
+        ...original,
+        id: `key-${id}`,
+        owner_type: id === "user" ? "personal" : "org",
+        owner_id: id,
+        scopes: "proxy",
+        allowed_service_ids: [`cma-${id}`],
+        allowed_services: [
+          inventory.options.services.find((s) => s.owner_id === id)!,
+        ],
+        effective_services: [
+          inventory.connections.find((c) => c.owner_id === id)!,
+        ],
+      }));
+      const requested = {
+        permissions: ["proxy"],
+        services: ["cma"],
+        service_permissions: [],
+      };
+      expect(exactConnectionDefaults(requested, inventory, owner)).toEqual([
+        `cma-${owner}`,
+      ]);
+      expect(preferredOwnerKey(inventory, requested, owner)).toBe(
+        `key-${owner}`,
+      );
+      expect(loginConnectionLabel(inventory.connections[0]!, inventory)).toBe(
+        "Personal · CMA",
+      );
+      expect(loginConnectionLabel(inventory.connections[1]!, inventory)).toBe(
+        "ChronoAI · CMA",
+      );
+      inventory.options.keys.find(
+        (k) => k.owner_id === owner,
+      )!.allow_all_services = true;
+      expect(preferredOwnerKey(inventory, requested, owner)).toBeUndefined();
+      inventory.connections.push({
+        ...inventory.connections.find((c) => c.owner_id === owner)!,
+        id: "duplicate",
+      });
+      inventory.options.services.push({
+        id: "duplicate",
+        name: "cma",
+        owner_id: owner,
+      });
+      expect(exactConnectionDefaults(requested, inventory, owner)).toEqual([]);
+    },
+  );
   it("includes inferred platform rows and durable future access without crossing owners", () => {
     const inventory = loginInventory();
     inventory.options.personal_owner_id = "user";

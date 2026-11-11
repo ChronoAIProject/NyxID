@@ -8,5 +8,6 @@
   "in {{count}}h": "in {{count}}h",
   "in {{count}}d": "in {{count}}d",
   "Couldn't reach NyxID. Check your connection and try again.": "Couldn't reach NyxID. Check your connection and try again.",
-  "Generate new code": "Generate new code"
+  "Generate new code": "Generate new code",
+  "The requested account is unavailable. Check your organization access.": "The requested account is unavailable. Check your organization access."
 }

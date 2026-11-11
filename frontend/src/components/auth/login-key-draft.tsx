@@ -48,8 +48,10 @@ export function LoginKeyDraft({
   initialRequested,
   onRequestedChange,
   onDeny,
+  connectionOwnerId,
 }: {
   onDeny: () => void;
+  connectionOwnerId?: string;
   initial: CreateApiKeyFormData;
   inventory: LoginInventory;
   requested: RequestedPermissions;
@@ -77,7 +79,9 @@ export function LoginKeyDraft({
     .filter((s) => !selected.includes(s.id))
     .map((s) => s.id);
   const ownerServices = inventory.options.services.filter(
-    (s) => !data.target_org_id || s.owner_id === data.target_org_id,
+    (s) =>
+      (!data.target_org_id || s.owner_id === data.target_org_id) &&
+      (!connectionOwnerId || s.owner_id === connectionOwnerId),
   );
   const toggleService = (id: string) =>
     form.setValue(
@@ -96,7 +100,9 @@ export function LoginKeyDraft({
             kind="new"
             customize={
               <>
-                <h4 className="text-12 font-semibold">{t("Requested access filters")}</h4>
+                <h4 className="text-12 font-semibold">
+                  {t("Requested access filters")}
+                </h4>
                 <LoginPermissionPicker
                   options={permissionOptions(inventory)}
                   value={requested}
@@ -106,6 +112,7 @@ export function LoginKeyDraft({
                   connections={{
                     inventory,
                     organizationId: data.target_org_id,
+                    ownerId: connectionOwnerId,
                     selectedIds: selected,
                     impliedIds: implied,
                     allowAll: data.allow_all_services ?? false,
@@ -114,8 +121,10 @@ export function LoginKeyDraft({
                 />
                 <ApiKeyNameField form={form} />
                 {inventory.options.orgs.length > 0 && (
-                  <label className="block space-y-2">{t("Owner")}<Select
-                      disabled={disabled}
+                  <label className="block space-y-2">
+                    {t("Owner")}
+                    <Select
+                      disabled={disabled || !!connectionOwnerId}
                       value={data.target_org_id ?? "personal"}
                       onValueChange={(value) => {
                         form.setValue(
@@ -128,14 +137,19 @@ export function LoginKeyDraft({
                         form.setValue("allow_auto_connected_services", false);
                         form.setValue("allow_all_nodes", false);
                         form.setValue("never_expires", false);
-                        form.setValue("expires_at", newApiKeyDefaults().expires_at);
+                        form.setValue(
+                          "expires_at",
+                          newApiKeyDefaults().expires_at,
+                        );
                       }}
                     >
                       <SelectTrigger aria-label={t("Owner")}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="personal">{t("Personal")}</SelectItem>
+                        <SelectItem value="personal">
+                          {t("Personal")}
+                        </SelectItem>
                         {inventory.options.orgs.map((org) => (
                           <SelectItem key={org.id} value={org.id}>
                             {org.name}
@@ -160,13 +174,21 @@ export function LoginKeyDraft({
                   disabled={disabled || data.allow_all_services}
                 />
                 <ApiKeyExpiryField form={form} />
-                <p className="text-11 text-muted-foreground">{t("Dates expire at the end of the selected day (23:59:59 UTC).")}{summary.expires_at && (
+                <p className="text-11 text-muted-foreground">
+                  {t(
+                    "Dates expire at the end of the selected day (23:59:59 UTC).",
+                  )}
+                  {summary.expires_at && (
                     <span className="block">
-                      {new Date(summary.expires_at).toLocaleString(getFormattingLocale())}
+                      {new Date(summary.expires_at).toLocaleString(
+                        getFormattingLocale(),
+                      )}
                     </span>
                   )}
                 </p>
-                <label className="block space-y-2">{t("Platform")}<Select
+                <label className="block space-y-2">
+                  {t("Platform")}
+                  <Select
                     disabled={disabled}
                     value={data.platform ?? "generic"}
                     onValueChange={(value) => form.setValue("platform", value)}
@@ -192,7 +214,9 @@ export function LoginKeyDraft({
                       form.setValue("allow_all_services", v === true);
                       form.setValue("allowed_service_ids", []);
                     }}
-                  />{t("All current and future services")}</label>
+                  />
+                  {t("All current and future services")}
+                </label>
                 <label className="flex items-center gap-2">
                   <Checkbox
                     checked={data.allow_all_nodes}
@@ -200,7 +224,9 @@ export function LoginKeyDraft({
                       form.setValue("allow_all_nodes", v === true);
                       form.setValue("allowed_node_ids", []);
                     }}
-                  />{t("All current and future nodes")}</label>
+                  />
+                  {t("All current and future nodes")}
+                </label>
                 {inventory.options.nodes
                   .filter(
                     (n) =>
@@ -209,7 +235,9 @@ export function LoginKeyDraft({
                   .map((node) => (
                     <label key={node.id} className="flex items-center gap-2">
                       <Checkbox
-                        aria-label={t("Grant node {{name}}", { name: node.name })}
+                        aria-label={t("Grant node {{name}}", {
+                          name: node.name,
+                        })}
                         disabled={data.allow_all_nodes}
                         checked={data.allowed_node_ids?.includes(node.id)}
                         onCheckedChange={(v) =>
@@ -255,7 +283,9 @@ export function LoginKeyDraft({
                       />
                       {form.formState.errors[name] && (
                         <span className="text-destructive">
-                          {translateUi(form.formState.errors[name]?.message ?? "")}
+                          {translateUi(
+                            form.formState.errors[name]?.message ?? "",
+                          )}
                         </span>
                       )}
                     </label>
@@ -266,7 +296,11 @@ export function LoginKeyDraft({
             actions={
               <div className="space-y-3">
                 {!comparison.matches && (
-                  <p role="alert" className="text-12 text-warning">{t("Complete the highlighted access selections, or edit the filters in Customize.")}</p>
+                  <p role="alert" className="text-12 text-warning">
+                    {t(
+                      "Complete the highlighted access selections, or edit the filters in Customize.",
+                    )}
+                  </p>
                 )}
                 <LoginActions onDeny={onDeny} disabled={disabled}>
                   <Button
@@ -279,7 +313,9 @@ export function LoginKeyDraft({
                       !createApiKeySchema.safeParse(data).success
                     }
                     isLoading={disabled}
-                  >{t("Create & continue")}</Button>
+                  >
+                    {t("Create & continue")}
+                  </Button>
                 </LoginActions>
               </div>
             }
@@ -294,6 +330,7 @@ export function LoginKeyDraft({
               selection={{
                 inventory,
                 organizationId: data.target_org_id,
+                ownerId: connectionOwnerId,
                 selectedIds: selected,
                 impliedIds: implied,
                 allowAll: data.allow_all_services ?? false,

@@ -83,6 +83,53 @@ export function canonicalScope(slug: string, scope: string): string {
 export function connectionSlug(connection: LoginConnection) {
   return connection.catalog_service_slug ?? connection.slug;
 }
+export function loginConnectionLabel(
+  connection: LoginConnection,
+  inventory: LoginInventory,
+): string {
+  const owner =
+    connection.owner_id ??
+    inventory.options.services.find((s) => s.id === connection.id)?.owner_id;
+  const personal =
+    inventory.options.personal_owner_id ??
+    inventory.options.keys.find((k) => k.owner_type === "personal")?.owner_id;
+  const org = inventory.options.orgs.find((o) => o.id === owner);
+  const label =
+    owner === personal
+      ? translateUi("Personal")
+      : (org?.name ??
+        `${translateUi("Organization")} · ${owner?.slice(-8) ?? "?"}`);
+  return `${label} · ${connection.label}`;
+}
+
+export function preferredOwnerKey(
+  inventory: LoginInventory,
+  requested: RequestedPermissions,
+  owner: string,
+): string | undefined {
+  const groups = requestedGroups(requested);
+  const keys = inventory.options.keys.filter(
+    (key) =>
+      key.owner_id === owner &&
+      !key.allow_all_services &&
+      !key.allow_auto_connected_services &&
+      !key.allow_all_nodes &&
+      key.allowed_node_ids.length === 0 &&
+      key.scopes
+        .split(/\s+/)
+        .every((scope) => requested.permissions.includes(scope)) &&
+      compareKey(key, requested, inventory).matches &&
+      !!key.effective_services?.length &&
+      key.effective_services.every(
+        (c) => c.owner_id === owner && groups.has(connectionSlug(c)),
+      ) &&
+      (!requested.service_permissions.length ||
+        compareKey(key, requested, inventory).extras.every(
+          (e) => e.group === "nyxid" && e.label === "read",
+        )),
+  );
+  return keys.length === 1 ? keys[0]!.id : undefined;
+}
 export function connectionReady(connection: LoginConnection, now = Date.now()) {
   return (
     connection.is_active &&
@@ -110,7 +157,9 @@ export function permissionOptions(
       if (!scopes.has(canonicalScope(item.slug, scope)))
         scopes.set(canonicalScope(item.slug, scope), {
           label: scope,
-          get description() { return translateUi("Published provider permission"); },
+          get description() {
+            return translateUi("Published provider permission");
+          },
         });
     groups.set(item.slug, { name: item.name, scopes });
   }
@@ -124,7 +173,9 @@ export function permissionOptions(
       if (!group.scopes.has(canonicalScope(slug, scope)))
         group.scopes.set(canonicalScope(slug, scope), {
           label: scope,
-          get description() { return translateUi("Recorded on an existing connection"); },
+          get description() {
+            return translateUi("Recorded on an existing connection");
+          },
         });
     groups.set(slug, group);
   }
@@ -134,7 +185,9 @@ export function permissionOptions(
       group: "nyxid",
       service: "NyxID",
       label: scope,
-      get description() { return translateUi("NyxID API permission"); },
+      get description() {
+        return translateUi("NyxID API permission");
+      },
       field: "permissions" as const,
       value: scope,
     })),
@@ -156,8 +209,12 @@ export function permissionOptions(
                 id: slug,
                 group: slug,
                 service: group.name,
-                get label() { return translateUi("Use service"); },
-                get description() { return translateUi("Provider permissions are not published"); },
+                get label() {
+                  return translateUi("Use service");
+                },
+                get description() {
+                  return translateUi("Provider permissions are not published");
+                },
                 field: "services" as const,
                 value: slug,
               },
@@ -309,9 +366,21 @@ export function compareKey(
     ];
     const related = groups.has(slug) || required.length > 0;
     if (!related)
-      extras.push({ group: slug, service, get label() { return translateUi("Additional service"); } });
+      extras.push({
+        group: slug,
+        service,
+        get label() {
+          return translateUi("Additional service");
+        },
+      });
     else if (!required.length)
-      matched.push({ group: slug, service, get label() { return translateUi("Use service"); } });
+      matched.push({
+        group: slug,
+        service,
+        get label() {
+          return translateUi("Use service");
+        },
+      });
     for (const scope of new Set(connection.granted_scopes ?? [])) {
       (required.includes(canonicalScope(slug, scope)) ? matched : extras).push({
         group: slug,
@@ -330,35 +399,53 @@ export function compareKey(
       extras.push({
         group: slug,
         service,
-        get label() { return translateUi("Provider access not reported"); },
+        get label() {
+          return translateUi("Provider access not reported");
+        },
       });
     if (!connectionReady(connection))
-      extras.push({ group: slug, service, get label() { return translateUi("Connection unavailable"); } });
+      extras.push({
+        group: slug,
+        service,
+        get label() {
+          return translateUi("Connection unavailable");
+        },
+      });
   }
   for (const id of allowed)
     if (!connections.some((c) => c.id === id))
       extras.push({
         group: `missing:${id}`,
         service: key.allowed_services.find((s) => s.id === id)?.name ?? id,
-        get label() { return translateUi("Service access not reported"); },
+        get label() {
+          return translateUi("Service access not reported");
+        },
       });
   if (key.allow_all_services)
     extras.push({
       group: "nyxid",
       service: "NyxID",
-      get label() { return translateUi("All current and future services"); },
+      get label() {
+        return translateUi("All current and future services");
+      },
     });
   if (key.allow_auto_connected_services)
     extras.push({
       group: "nyxid",
       service: "NyxID",
-      get label() { return translateUi("All current and future auto-connected platform services"); },
+      get label() {
+        return translateUi(
+          "All current and future auto-connected platform services",
+        );
+      },
     });
   if (key.allow_all_nodes)
     extras.push({
       group: "nyxid",
       service: "NyxID",
-      get label() { return translateUi("All current and future nodes"); },
+      get label() {
+        return translateUi("All current and future nodes");
+      },
     });
   for (const id of key.allowed_node_ids)
     extras.push({
@@ -397,11 +484,11 @@ export function exactConnectionDefaults(
     );
     if (
       candidates.length === 1 &&
-      candidates[0]!.granted_scopes != null &&
-      scopes.length > 0 &&
-      candidates[0]!.granted_scopes.every((s) =>
-        scopes.includes(canonicalScope(slug, s)),
-      )
+      (scopes.length === 0 ||
+        (candidates[0]!.granted_scopes != null &&
+          candidates[0]!.granted_scopes.every((s) =>
+            scopes.includes(canonicalScope(slug, s)),
+          )))
     )
       ids.push(candidates[0]!.id);
   }
@@ -451,8 +538,10 @@ export function draftSummary(
     allowed_nodes: inventory.options.nodes.filter((s) =>
       data.allowed_node_ids?.includes(s.id),
     ),
-    expires_at: data.never_expires ? null
-      : loginKeyExpiry(data.expires_at) ?? new Date(Date.now() + 90 * 86400000).toISOString(),
+    expires_at: data.never_expires
+      ? null
+      : (loginKeyExpiry(data.expires_at) ??
+        new Date(Date.now() + 90 * 86400000).toISOString()),
     rate_limit_per_second: data.rate_limit_per_second ?? null,
     rate_limit_burst: data.rate_limit_burst ?? null,
     platform: data.platform ?? null,

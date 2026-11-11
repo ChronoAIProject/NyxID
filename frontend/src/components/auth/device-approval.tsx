@@ -64,6 +64,7 @@ import {
   exactConnectionDefaults,
   normalizeRequested,
   permissionOptions,
+  preferredOwnerKey,
   requestedProblems,
   type LoginInventory,
 } from "@/lib/login-permissions";
@@ -121,7 +122,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
   const [context, setContext] = useState<AgentKeyPreview | null>(null);
   const [terminal, setTerminal] = useState<Terminal | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const stepUp = useMfaStepUp(`${user?.id ?? ""}:${flow}:${code}:${terminal ?? ""}`);
+  const stepUp = useMfaStepUp(
+    `${user?.id ?? ""}:${flow}:${code}:${terminal ?? ""}`,
+  );
   const [busy, setBusy] = useState(false);
   const [deadline, setDeadline] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now);
@@ -292,7 +295,21 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
       if (mode === "agent") {
         const next = await loadInventory();
         if (!alive.current || ended.current || !isCurrentApprover()) return;
+        if (
+          hints.owner_id &&
+          hints.owner_id !== next.options.personal_owner_id &&
+          !next.options.orgs.some((o) => o.id === hints.owner_id)
+        ) {
+          throw new Error(
+            "The requested account is unavailable. Check your organization access.",
+          );
+        }
         setInventory(next);
+        if (hints.owner_id) {
+          const preferred = preferredOwnerKey(next, requested, hints.owner_id);
+          if (preferred) setChoice(preferred);
+          else beginNew(next);
+        }
       }
       if (!alive.current || ended.current || !isCurrentApprover()) return;
       setCompleted(2);
@@ -355,6 +372,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         setInventory(next);
         if (
           !current?.matches ||
+          (hints.owner_id && currentKey?.owner_id !== hints.owner_id) ||
           JSON.stringify({ key: previousKey, access: previous }) !==
             JSON.stringify({ key: currentKey, access: current })
         )
@@ -400,8 +418,8 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
       finish("approved");
     });
   }
-  function beginNew() {
-    if (!inventory) return;
+  function beginNew(next = inventory) {
+    if (!next) return;
     setCredentialExpiry("");
     if (!draft)
       setDraft({
@@ -411,9 +429,13 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
           : ["read", "proxy"],
         allowed_service_ids: exactConnectionDefaults(
           requested,
-          inventory,
-          user?.id ?? "",
+          next,
+          hints.owner_id ?? user?.id ?? "",
         ),
+        target_org_id:
+          hints.owner_id && hints.owner_id !== next.options.personal_owner_id
+            ? hints.owner_id
+            : undefined,
         allowed_node_ids: [],
         allow_all_services: false,
         allow_all_nodes: false,
@@ -430,6 +452,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
   }
   const comparisons = inventory
     ? inventory.options.keys
+        .filter((key) => !hints.owner_id || key.owner_id === hints.owner_id)
         .map((key) => ({
           key,
           comparison: compareKey(key, requested, inventory),
@@ -456,7 +479,8 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
     });
   const problems = inventory ? requestedProblems(requested, inventory) : [];
   const title = ["Verify request", "Choose access", "Scope & approval"];
-  if (stepUp.prompt) return <LoginDeviceShell>{stepUp.prompt}</LoginDeviceShell>;
+  if (stepUp.prompt)
+    return <LoginDeviceShell>{stepUp.prompt}</LoginDeviceShell>;
   return (
     <LoginDeviceShell>
       <div
@@ -469,14 +493,26 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 <NyxidIcon className="size-9" />
               </div>
               <div className="space-y-1.5">
-                <h1 className="text-22 font-semibold tracking-tight">{translateUi("Approve ")}{flow === "device" ? translateUi("device") : translateUi("Agent Key")}{translateUi(" login")}</h1>
+                <h1 className="text-22 font-semibold tracking-tight">
+                  {translateUi("Approve ")}
+                  {flow === "device"
+                    ? translateUi("device")
+                    : translateUi("Agent Key")}
+                  {translateUi(" login")}
+                </h1>
                 {!terminal && (
                   <p className="text-12 leading-relaxed text-muted-foreground">
                     {step === 1
                       ? context
-                        ? translateUi("Match this code with the one on your requesting device.")
-                        : translateUi("Enter the code shown on your device or terminal.")
-                      : translateUi("Choose what the requesting device can access.")}
+                        ? translateUi(
+                            "Match this code with the one on your requesting device.",
+                          )
+                        : translateUi(
+                            "Enter the code shown on your device or terminal.",
+                          )
+                      : translateUi(
+                          "Choose what the requesting device can access.",
+                        )}
                   </p>
                 )}
               </div>
@@ -498,8 +534,14 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 <h1
                   id="expired-request-title"
                   className="text-22 font-semibold tracking-tight"
-                >{translateUi("Request expired")}</h1>
-                <p className="text-12 leading-relaxed text-muted-foreground">{translateUi("Get a new code from the device or terminal you’re signing in to, then enter it here.")}</p>
+                >
+                  {translateUi("Request expired")}
+                </h1>
+                <p className="text-12 leading-relaxed text-muted-foreground">
+                  {translateUi(
+                    "Get a new code from the device or terminal you’re signing in to, then enter it here.",
+                  )}
+                </p>
               </div>
               <Button
                 asChild
@@ -523,14 +565,22 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               </h2>
               <p className="text-12 text-muted-foreground">
                 {terminal === "approved"
-                  ? translateUi("The requester can now receive the approved credential.")
-                  : translateUi("This request cannot be approved. Start a new login on the requesting device.")}
+                  ? translateUi(
+                      "The requester can now receive the approved credential.",
+                    )
+                  : translateUi(
+                      "This request cannot be approved. Start a new login on the requesting device.",
+                    )}
               </p>
               {approval.identity?.verified && (
                 <p className="text-12 text-muted-foreground">
                   {approval.identity.keep_signed_in
-                    ? translateUi("You are also signed in to NyxID in this browser.")
-                    : translateUi("Identity verified only for this request. No browser sign-in was created.")}
+                    ? translateUi(
+                        "You are also signed in to NyxID in this browser.",
+                      )
+                    : translateUi(
+                        "Identity verified only for this request. No browser sign-in was created.",
+                      )}
                 </p>
               )}
             </section>
@@ -573,7 +623,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   : "text-muted-foreground"
                             }
                           >
-                            <span className="sr-only">{translateUi("Step ")}{index + 1}: </span>
+                            <span className="sr-only">
+                              {translateUi("Step ")}
+                              {index + 1}:{" "}
+                            </span>
                             {label}
                             <span
                               className={`mt-1 block text-10 font-normal ${complete ? "text-success" : latest ? "text-primary-text" : "text-muted-foreground"}`}
@@ -623,7 +676,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                       setDetailsOpen(true);
                       setStep(1);
                     }}
-                  >{translateUi("Review request")}</Button>
+                  >
+                    {translateUi("Review request")}
+                  </Button>
                 </div>
               )}
               <section hidden={step !== 1} className="space-y-4">
@@ -650,7 +705,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         busy || !validCode.success || !!hints.errors.length
                       }
                       isLoading={busy}
-                    >{translateUi("Continue")}</Button>
+                    >
+                      {translateUi("Continue")}
+                    </Button>
                   </form>
                 ) : (
                   <>
@@ -664,7 +721,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                     />
                     <ApprovalCaution />
                     {isLoading ? (
-                      <p className="text-12">{translateUi("Verifying your identity…")}</p>
+                      <p className="text-12">
+                        {translateUi("Verifying your identity…")}
+                      </p>
                     ) : !isAuthenticated ? (
                       <LoginIdentityCard
                         approval={approval}
@@ -683,15 +742,21 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                             setCompleted(Math.max(1, completed));
                             setStep(2);
                           }}
-                        >{translateUi("Continue")}</Button>
+                        >
+                          {translateUi("Continue")}
+                        </Button>
                       </LoginActions>
                     )}
                   </>
                 )}
               </section>
               <section hidden={step !== 2} className="space-y-4">
-                <h2 className="text-15 font-semibold">{translateUi("Choose access")}</h2>
-                <p className="text-12 text-muted-foreground">{translateUi("Choose the access this device should receive.")}</p>
+                <h2 className="text-15 font-semibold">
+                  {translateUi("Choose access")}
+                </h2>
+                <p className="text-12 text-muted-foreground">
+                  {translateUi("Choose the access this device should receive.")}
+                </p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   {[
                     ...(flow === "device"
@@ -768,7 +833,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                   ))}
                 </div>
                 {mode === "agent" && !supportsRestricted && (
-                  <p role="alert" className="text-12 text-warning">{translateUi("This legacy request cannot receive an Agent Key. Start a capable request, or explicitly choose full account access.")}</p>
+                  <p role="alert" className="text-12 text-warning">
+                    {translateUi(
+                      "This legacy request cannot receive an Agent Key. Start a capable request, or explicitly choose full account access.",
+                    )}
+                  </p>
                 )}
                 <LoginActions onDeny={denyRequest} disabled={busy}>
                   <Button
@@ -778,30 +847,44 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                     }
                     isLoading={busy}
                     onClick={() => void continueAccess()}
-                  >{translateUi("Continue to approval")}</Button>
+                  >
+                    {translateUi("Continue to approval")}
+                  </Button>
                 </LoginActions>
               </section>
               <section hidden={step !== 3} className="space-y-4">
                 {((!chosen && choice !== "new") || mode === "full") && (
                   <>
-                    <h2 className="text-15 font-semibold">{translateUi("Scope & approval")}</h2>
+                    <h2 className="text-15 font-semibold">
+                      {translateUi("Scope & approval")}
+                    </h2>
                     <p className="text-11 text-muted-foreground">
                       {mode === "full"
-                        ? translateUi("Full account access · No scope configuration needed.")
-                        : translateUi("Scope optional · Select permissions to find a matching key.")}
+                        ? translateUi(
+                            "Full account access · No scope configuration needed.",
+                          )
+                        : translateUi(
+                            "Scope optional · Select permissions to find a matching key.",
+                          )}
                     </p>
                   </>
                 )}
                 {mode === "full" ? (
                   <>
-                    <p className="text-12 text-muted-foreground">{translateUi("Approve full account access for the requesting device. Its session can refresh until it expires or you revoke it in Settings.")}</p>
+                    <p className="text-12 text-muted-foreground">
+                      {translateUi(
+                        "Approve full account access for the requesting device. Its session can refresh until it expires or you revoke it in Settings.",
+                      )}
+                    </p>
                     <LoginActions onDeny={denyRequest} disabled={busy}>
                       <Button
                         disabled={blocked}
                         isLoading={busy}
                         className="border-success bg-success text-white hover:border-success hover:bg-success/90"
                         onClick={() => void decide()}
-                      >{translateUi("Approve full account access")}</Button>
+                      >
+                        {translateUi("Approve full account access")}
+                      </Button>
                     </LoginActions>
                   </>
                 ) : (
@@ -821,8 +904,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         />
                       )}
                       {problems.length > 0 && (
-                        <p role="alert" className="text-12 text-warning">{translateUi("Unknown permissions or services: ")}{problems.join(", ")}
-                          {translateUi(". Remove them or clear the filters. ")}</p>
+                        <p role="alert" className="text-12 text-warning">
+                          {translateUi("Unknown permissions or services: ")}
+                          {problems.join(", ")}
+                          {translateUi(". Remove them or clear the filters. ")}
+                        </p>
                       )}
                       {choice !== "new" ? (
                         <>
@@ -833,7 +919,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   ref={keyChoiceTitle}
                                   tabIndex={-1}
                                   className="font-semibold outline-none"
-                                >{translateUi("Choose an existing Agent Key")}</h3>
+                                >
+                                  {translateUi("Choose an existing Agent Key")}
+                                </h3>
                                 <span>
                                   {comparisons.length}{" "}
                                   {comparisons.length === 1
@@ -868,7 +956,12 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                       >
                                         {comparison.exact
                                           ? translateUi("Exact match")
-                                          : translateUi("Matched + {{count}} extras", { count: comparison.extras.length })}
+                                          : translateUi(
+                                              "Matched + {{count}} extras",
+                                              {
+                                                count: comparison.extras.length,
+                                              },
+                                            )}
                                       </span>
                                     </span>
                                     <span className="block break-words pl-6 text-11 text-muted-foreground">
@@ -882,7 +975,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 ))}
                               </fieldset>
                               {!comparisons.length && (
-                                <p className="text-12 text-muted-foreground">{translateUi("No matching Agent Key. Create one with the requested access or edit the filters.")}</p>
+                                <p className="text-12 text-muted-foreground">
+                                  {translateUi(
+                                    "No matching Agent Key. Create one with the requested access or edit the filters.",
+                                  )}
+                                </p>
                               )}
                               <LoginActions
                                 onDeny={denyRequest}
@@ -891,11 +988,17 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 <Button
                                   variant="primary"
                                   disabled={blocked || !!problems.length}
-                                  onClick={beginNew}
-                                >{translateUi("Create new Agent Key")}</Button>
+                                  onClick={() => beginNew()}
+                                >
+                                  {translateUi("Create new Agent Key")}
+                                </Button>
                               </LoginActions>
                               {hints.key_source === "new" && (
-                                <p className="text-11 text-muted-foreground">{translateUi("The requester suggested creating a new key. You can also choose a matching existing key.")}</p>
+                                <p className="text-11 text-muted-foreground">
+                                  {translateUi(
+                                    "The requester suggested creating a new key. You can also choose a matching existing key.",
+                                  )}
+                                </p>
                               )}
                             </>
                           )}
@@ -907,7 +1010,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 disabled={blocked}
                                 onClick={changeKey}
                               >
-                                <ArrowLeft aria-hidden="true" />{translateUi("Change key")}</Button>
+                                <ArrowLeft aria-hidden="true" />
+                                {translateUi("Change key")}
+                              </Button>
                               <LoginGrantReview
                                 key={chosen.key.id}
                                 apiKey={chosen.key}
@@ -917,9 +1022,15 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 customize={
                                   <>
                                     <AgentKeyPermissions apiKey={chosen.key} />
-                                    <label className="block space-y-2 text-12">{translateUi("Login credential expiry (blank: 90 days, bounded by key expiry)")}<Input
+                                    <label className="block space-y-2 text-12">
+                                      {translateUi(
+                                        "Login credential expiry (blank: 90 days, bounded by key expiry)",
+                                      )}
+                                      <Input
                                         type="datetime-local"
-                                        aria-label={translateUi("Login credential expiry (blank: 90 days, bounded by key expiry)")}
+                                        aria-label={translateUi(
+                                          "Login credential expiry (blank: 90 days, bounded by key expiry)",
+                                        )}
                                         value={credentialExpiry}
                                         disabled={blocked}
                                         onChange={(e) =>
@@ -957,7 +1068,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                           api_key_id: chosen.key.id,
                                         })
                                       }
-                                    >{translateUi("Approve access with this key")}</Button>
+                                    >
+                                      {translateUi(
+                                        "Approve access with this key",
+                                      )}
+                                    </Button>
                                   </LoginActions>
                                 }
                               >
@@ -981,8 +1096,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                               disabled={blocked}
                               onClick={changeKey}
                             >
-                              <ArrowLeft aria-hidden="true" />{translateUi("Back to matching keys")}</Button>
+                              <ArrowLeft aria-hidden="true" />
+                              {translateUi("Back to matching keys")}
+                            </Button>
                             <LoginKeyDraft
+                              connectionOwnerId={hints.owner_id}
                               onDeny={denyRequest}
                               initial={draft}
                               inventory={inventory}
@@ -1015,11 +1133,14 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         </div>
         {isAuthenticated && !terminal && (
           <footer className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-border/50 px-5 py-3 text-11 text-muted-foreground sm:px-6">
-            <span>{translateUi("Approving as")}{" "}
+            <span>
+              {translateUi("Approving as")}{" "}
               <strong className="text-foreground">
                 {user?.display_name || user?.email}
               </strong>
-              {user?.display_name && user?.email ? translateUi(" · {{email}}", { email: user.email }) : ""}
+              {user?.display_name && user?.email
+                ? translateUi(" · {{email}}", { email: user.email })
+                : ""}
             </span>
             <Button
               variant="link"
@@ -1056,7 +1177,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
           </footer>
         )}
       </div>
-      <p className="text-center text-11 text-muted-foreground">{translateUi("Device login by NyxID")}</p>
+      <p className="text-center text-11 text-muted-foreground">
+        {translateUi("Device login by NyxID")}
+      </p>
     </LoginDeviceShell>
   );
 }
@@ -1159,7 +1282,9 @@ function ApprovalCodeInput({
             ref={(element) => {
               inputRefs.current[index] = element;
             }}
-            aria-label={translateUi("User code character {{value1}}", { value1: index + 1 })}
+            aria-label={translateUi("User code character {{value1}}", {
+              value1: index + 1,
+            })}
             value={character}
             disabled={disabled}
             autoComplete={index === 0 ? "one-time-code" : "off"}

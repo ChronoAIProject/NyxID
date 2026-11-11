@@ -137,14 +137,89 @@ async function scope(flow: "device" | "agent-key" = "device") {
 const approvals = () =>
   mocks.post.mock.calls.filter(([path]) => String(path).includes("/approve"));
 describe("three-step device approval", () => {
+  it.each([false, true])(
+    "prefills the organization's connection and waits for human approval (reuse: %s)",
+    async (reuse) => {
+      mocks.query +=
+        "&owner_id=org&login_type=agent&permissions=proxy&services=github&key_name=Metaverse";
+      inventory.options.personal_owner_id = "user";
+      inventory.options.orgs = [
+        { id: "org", owner_id: "org", name: "ChronoAI" },
+      ];
+      inventory.options.services.push({
+        id: "org-service",
+        owner_id: "org",
+        name: "github",
+      });
+      const connection = {
+        ...inventory.connections[0]!,
+        id: "org-service",
+        owner_id: "org",
+        granted_scopes: null,
+      };
+      inventory.connections.push(connection);
+      inventory.options.connections = inventory.connections;
+      inventory.options.keys = reuse
+        ? [
+            {
+              ...inventory.options.keys[0]!,
+              id: "org-key",
+              owner_id: "org",
+              owner_type: "org",
+              owner_name: "ChronoAI",
+              scopes: "proxy",
+              allowed_service_ids: ["org-service"],
+              allowed_services: [inventory.options.services[1]!],
+              effective_services: [connection],
+            },
+          ]
+        : [];
+      await scope("agent-key");
+      expect(approvals()).toEqual([]);
+      if (reuse) {
+        await click("Approve access with this key");
+        expect(approvals()[0]![1]).toMatchObject({
+          selection: { kind: "existing", api_key_id: "org-key" },
+        });
+      } else {
+        expect(
+          screen.getByRole("button", { name: "Create & continue" }),
+        ).toBeEnabled();
+        await click("Create & continue");
+        expect(approvals()[0]![1]).toMatchObject({
+          selection: {
+            kind: "new",
+            target_org_id: "org",
+            allowed_service_ids: ["org-service"],
+            scopes: "proxy",
+          },
+        });
+      }
+    },
+  );
+  it("rejects an unavailable requested owner without falling back to personal access", async () => {
+    mocks.query +=
+      "&owner_id=unavailable&login_type=agent&permissions=proxy&services=github";
+    inventory.options.personal_owner_id = "user";
+    await scope("agent-key");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The requested account is unavailable",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Create & continue" }),
+    ).toBeNull();
+    expect(approvals()).toEqual([]);
+  });
   it.each(["device", "agent-key"] as const)(
     "requires manual code entry for a code-free CLI %s link with preferences",
     async (flow) => {
-      mocks.query = "?login_type=agent&key_source=new&key_name=My+Agent&permissions=read,proxy";
+      mocks.query =
+        "?login_type=agent&key_source=new&key_name=My+Agent&permissions=read,proxy";
       mount(flow);
       await act(async () => {});
       const group = screen.getByRole("group", { name: "User code" });
-      for (const field of within(group).getAllByRole("textbox")) expect(field).toHaveValue("");
+      for (const field of within(group).getAllByRole("textbox"))
+        expect(field).toHaveValue("");
       expect(mocks.preview).not.toHaveBeenCalled();
       expect(approvals()).toHaveLength(0);
       await act(async () => {
@@ -153,9 +228,12 @@ describe("three-step device approval", () => {
         });
       });
       await click("Continue");
-      expect(mocks.preview).toHaveBeenCalledWith(`/auth/${flow}/preview`, expect.objectContaining({
-        body: { user_code: "ABCDEFGH" },
-      }));
+      expect(mocks.preview).toHaveBeenCalledWith(
+        `/auth/${flow}/preview`,
+        expect.objectContaining({
+          body: { user_code: "ABCDEFGH" },
+        }),
+      );
       expect(approvals()).toHaveLength(0);
     },
   );
@@ -414,60 +492,63 @@ describe("three-step device approval", () => {
       expect(screen.queryByText("Change account")).not.toBeInTheDocument();
     },
   );
-  it.each(["123456", "Ab_12-xy", "0123456789abcdef0123456789abcdef"])("requires second factor %s inside the same request before showing access choices", async (code) => {
-    mocks.auth = false;
-    const identity = {
-      id: "22222222-2222-4222-8222-222222222222",
-      flow: "device",
-      user_code: "ABCDEFGH",
-      keep_signed_in: false,
-      verified: false,
-      mfa_required: false,
-      user: null,
-      expires_at: "2026-01-01T00:10:00Z",
-    };
-    mocks.preview.mockImplementation(async (path: string) => {
-      if (path === "/auth/approval") return identity;
-      if (path.endsWith("/password"))
-        return { ...identity, mfa_required: true };
-      if (path.endsWith("/mfa"))
-        return {
-          ...identity,
-          verified: true,
-          user: {
-            id: "mfa-human",
-            email: "human@example.com",
-            display_name: null,
-          },
-        };
-      return preview;
-    });
-    mount();
-    await act(async () => {});
-    fireEvent.change(screen.getByLabelText("Email"), {
-      target: { value: "human@example.com" },
-    });
-    fireEvent.change(screen.getByLabelText("Password"), {
-      target: { value: "Local-test-password1!" },
-    });
-    await click("Verify & continue");
-    expect(
-      screen.queryByRole("button", { name: "Continue to approval" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Authenticator code")).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Authenticator code"), {
-      target: { value: code },
-    });
-    await click("Verify & continue");
-    expect(
-      screen.getByRole("button", { name: "Continue to approval" }),
-    ).toBeVisible();
-    expect(mocks.preview).toHaveBeenCalledWith(
-      `/auth/approval/${identity.id}/mfa`,
-      expect.objectContaining({ body: { code } }),
-    );
-    expect(approvals()).toEqual([]);
-  });
+  it.each(["123456", "Ab_12-xy", "0123456789abcdef0123456789abcdef"])(
+    "requires second factor %s inside the same request before showing access choices",
+    async (code) => {
+      mocks.auth = false;
+      const identity = {
+        id: "22222222-2222-4222-8222-222222222222",
+        flow: "device",
+        user_code: "ABCDEFGH",
+        keep_signed_in: false,
+        verified: false,
+        mfa_required: false,
+        user: null,
+        expires_at: "2026-01-01T00:10:00Z",
+      };
+      mocks.preview.mockImplementation(async (path: string) => {
+        if (path === "/auth/approval") return identity;
+        if (path.endsWith("/password"))
+          return { ...identity, mfa_required: true };
+        if (path.endsWith("/mfa"))
+          return {
+            ...identity,
+            verified: true,
+            user: {
+              id: "mfa-human",
+              email: "human@example.com",
+              display_name: null,
+            },
+          };
+        return preview;
+      });
+      mount();
+      await act(async () => {});
+      fireEvent.change(screen.getByLabelText("Email"), {
+        target: { value: "human@example.com" },
+      });
+      fireEvent.change(screen.getByLabelText("Password"), {
+        target: { value: "Local-test-password1!" },
+      });
+      await click("Verify & continue");
+      expect(
+        screen.queryByRole("button", { name: "Continue to approval" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Authenticator code")).toBeVisible();
+      fireEvent.change(screen.getByLabelText("Authenticator code"), {
+        target: { value: code },
+      });
+      await click("Verify & continue");
+      expect(
+        screen.getByRole("button", { name: "Continue to approval" }),
+      ).toBeVisible();
+      expect(mocks.preview).toHaveBeenCalledWith(
+        `/auth/approval/${identity.id}/mfa`,
+        expect.objectContaining({ body: { code } }),
+      );
+      expect(approvals()).toEqual([]);
+    },
+  );
   it("clears both the local proof and browser session when changing a persistent identity", async () => {
     mocks.auth = false;
     const identity = {
@@ -592,28 +673,55 @@ describe("three-step device approval", () => {
       ],
     ]);
   });
-  it.each(["device", "agent-key"] as const)("steps up inline and retries %s approval", async (flow) => {
-    let denied = false;
-    const original = mocks.post.getMockImplementation()!;
-    mocks.post.mockImplementation(async (path: string, body: unknown) => {
-      if (path.includes("/approve") && !denied) {denied = true; throw new ApiError(403, {error: "mfa_step_up_required", error_code: 2003, message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."});}
-      return original(path, body);
-    });
-    if (flow === "device") {
-      mount(); await click("Continue"); await click("Continue"); await click("Continue to approval"); await click("Approve full account access");
-    } else {
-      await scope("agent-key");
-      // The existing key flow still requires explicit permission confirmation.
-      await click("Create new Agent Key"); await click("Create & continue");
-    }
-    expect(screen.getByRole("region", {name: "Verify this session"})).toBeVisible();
-    expect(screen.queryByText("Approved — return to the requesting device")).not.toBeInTheDocument();
-    await click("Use a recovery code");
-    fireEvent.change(screen.getByLabelText("Recovery code"), {target: {value: "a".repeat(32)}});
-    await click("Verify & continue");
-    expect(mocks.preview).toHaveBeenCalledWith("/auth/mfa/step-up", expect.objectContaining({body: {code: "a".repeat(32)}}));
-    expect(screen.getByText("Approved — return to the requesting device")).toBeVisible();
-  });
+  it.each(["device", "agent-key"] as const)(
+    "steps up inline and retries %s approval",
+    async (flow) => {
+      let denied = false;
+      const original = mocks.post.getMockImplementation()!;
+      mocks.post.mockImplementation(async (path: string, body: unknown) => {
+        if (path.includes("/approve") && !denied) {
+          denied = true;
+          throw new ApiError(403, {
+            error: "mfa_step_up_required",
+            error_code: 2003,
+            message:
+              "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA.",
+          });
+        }
+        return original(path, body);
+      });
+      if (flow === "device") {
+        mount();
+        await click("Continue");
+        await click("Continue");
+        await click("Continue to approval");
+        await click("Approve full account access");
+      } else {
+        await scope("agent-key");
+        // The existing key flow still requires explicit permission confirmation.
+        await click("Create new Agent Key");
+        await click("Create & continue");
+      }
+      expect(
+        screen.getByRole("region", { name: "Verify this session" }),
+      ).toBeVisible();
+      expect(
+        screen.queryByText("Approved — return to the requesting device"),
+      ).not.toBeInTheDocument();
+      await click("Use a recovery code");
+      fireEvent.change(screen.getByLabelText("Recovery code"), {
+        target: { value: "a".repeat(32) },
+      });
+      await click("Verify & continue");
+      expect(mocks.preview).toHaveBeenCalledWith(
+        "/auth/mfa/step-up",
+        expect.objectContaining({ body: { code: "a".repeat(32) } }),
+      );
+      expect(
+        screen.getByText("Approved — return to the requesting device"),
+      ).toBeVisible();
+    },
+  );
   it("previews linked requests, shows actual requester details, and approves full account once", async () => {
     mount();
     expect(mocks.preview).toHaveBeenCalledTimes(1);
@@ -705,7 +813,7 @@ describe("three-step device approval", () => {
     );
     expect(
       screen.getByRole("checkbox", {
-        name: "Grant connection GitHub personal",
+        name: "Grant connection Personal · GitHub personal",
       }),
     ).toBeChecked();
     expect(approvals()).toEqual([]);

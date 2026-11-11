@@ -607,6 +607,19 @@ rollback. See [ADR-015](ADR-015-auth-device-login.md) for the rollout order.
 |----------|---------|-------------|
 | `AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS` | `60` | Sweep expired Agent Key login exchanges and revoke undelivered child credentials. Freshly created keys in abandoned exchanges are removed. `0` disables the sweep; poll/preview expiry cleanup remains active. Requests last 10 minutes and approval opens a 60-second delivery window. Requires transaction-capable MongoDB. |
 
+Browser approval links at `/login/agent-key` and `/login/device` accept an optional
+`owner_id` preference (1–128 ASCII letters, digits, `_` or `-`, once only). It is
+preserved through sign-in and narrows the restricted approval review to the
+personal account or an organization in the authenticated options inventory.
+Unavailable owners produce an error instead of falling back to personal access.
+A unique existing key is preselected only when its owner, explicit service
+connections and scopes fit the request without broad service/node grants.
+Otherwise the new-key review prefills the owner and any unambiguous usable
+connection. Connection labels include Personal or the organization name.
+These URL preferences grant no authority: explicit human approval and existing
+backend eligibility, org-write and permission-snapshot checks still apply.
+Clients must independently verify the delivered key's owner and permissions.
+
 ## OAuth Token Refresh (Optional)
 
 | Variable | Default | Description |

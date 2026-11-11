@@ -6,6 +6,7 @@ import type { RequestedPermissions } from "@/schemas/login-request";
 import {
   connectionCovers,
   connectionSlug,
+  loginConnectionLabel,
   effectiveLoginConnections,
   permissionOptions,
   requestedGroups,
@@ -93,17 +94,21 @@ export function LoginAccessRows({
             <summary className="flex cursor-pointer list-none items-center gap-3 p-3 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
               <PermissionIcon group={group} />
               <span className="min-w-0 flex-1">
-                <strong className="block break-words text-12">
-                  {name}
-                </strong>
+                <strong className="block break-words text-12">{name}</strong>
                 <span className="block break-words text-11 text-muted-foreground">
                   {group === "nyxid"
                     ? apiKey.scopes
                     : accounts.length
-                      ? accounts.map((c) => c.label).join(", ")
+                      ? accounts
+                          .map((c) => loginConnectionLabel(c, inventory))
+                          .join(", ")
                       : missing
-                        ? t("{{count}} requested permissions", { count: requestedEntries.length || 1 })
-                        : t("{{value}} permissions", { value: matched.length + extras.length })}
+                        ? t("{{count}} requested permissions", {
+                            count: requestedEntries.length || 1,
+                          })
+                        : t("{{value}} permissions", {
+                            value: matched.length + extras.length,
+                          })}
                 </span>
               </span>
               <span
@@ -116,7 +121,12 @@ export function LoginAccessRows({
                   : nyxidMissing
                     ? t("Choose permissions")
                     : extras.length
-                      ? t(matched.length ? "Matched + {{count}} extra permissions" : "+ {{count}} extra permissions", { count: extras.length })
+                      ? t(
+                          matched.length
+                            ? "Matched + {{count}} extra permissions"
+                            : "+ {{count}} extra permissions",
+                          { count: extras.length },
+                        )
                       : t("{{length}} selected", { length: matched.length })}
               </span>
               <ChevronDown
@@ -126,7 +136,10 @@ export function LoginAccessRows({
             </summary>
             <div className="space-y-3 border-t border-border/50 p-3">
               {selection && requestedEntries.length > 0 && (
-                <AccessEntries label={t("Requested")} entries={requestedEntries} />
+                <AccessEntries
+                  label={t("Requested")}
+                  entries={requestedEntries}
+                />
               )}
               {group === "nyxid" && scopes}
               {selection &&
@@ -140,10 +153,20 @@ export function LoginAccessRows({
                     disabled={disabled}
                   />
                 )}
-              <AccessEntries label={t("Included permissions")} entries={matched} />
-              <AccessEntries label={t("Extra access included")} entries={extras} />
+              <AccessEntries
+                label={t("Included permissions")}
+                entries={matched}
+              />
+              <AccessEntries
+                label={t("Extra access included")}
+                entries={extras}
+              />
               {selection && group !== "nyxid" && accounts.length > 0 && (
-                <p className="text-11 text-muted-foreground">{t("The selected accounts keep all their provider permissions.")}</p>
+                <p className="text-11 text-muted-foreground">
+                  {t(
+                    "The selected accounts keep all their provider permissions.",
+                  )}
+                </p>
               )}
             </div>
           </details>

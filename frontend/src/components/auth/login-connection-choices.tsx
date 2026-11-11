@@ -6,6 +6,7 @@ import {
   connectionCovers,
   connectionReady,
   connectionSlug,
+  loginConnectionLabel,
   permissionOptions,
   requestedGroups,
   type LoginInventory,
@@ -15,6 +16,7 @@ import type { RequestedPermissions } from "@/schemas/login-request";
 export type ConnectionSelection = {
   inventory: LoginInventory;
   organizationId?: string;
+  ownerId?: string;
   selectedIds: string[];
   impliedIds: string[];
   allowAll: boolean;
@@ -32,6 +34,7 @@ function loginConnectionChoices(
       (s) =>
         !selection.organizationId || s.owner_id === selection.organizationId,
     )
+    .filter((s) => !selection.ownerId || s.owner_id === selection.ownerId)
     .flatMap((service) => {
       const connection = selection.inventory.connections.find(
         (c) => c.id === service.id,
@@ -114,65 +117,86 @@ export function LoginConnectionChoices({
         <Link2 className="size-3" />
         {choices.length ? t("Use an existing connection") : t("Not connected")}
       </p>
-      {choices.map(({ service, connection, permissions, ready, status, extras }) => {
-        const implied =
-          selection.allowAll || selection.impliedIds.includes(service.id);
-        const checked = implied || selection.selectedIds.includes(service.id);
-        return (
-          <label
-            key={service.id}
-            className={`flex cursor-pointer items-start gap-2 rounded-md border p-2 ${checked ? "border-primary/30 bg-primary/5" : "border-transparent hover:bg-muted/40"}`}
-          >
-            <Checkbox
-              aria-label={t("Grant connection {{name}}", { name: service.name })}
-              disabled={disabled || implied || (!ready && !checked)}
-              checked={checked}
-              onCheckedChange={() => selection.onToggle(service.id)}
-              className="mt-0.5"
-            />
-            <span className="min-w-0 flex-1 space-y-1">
-              <span className="flex flex-wrap items-center justify-between gap-1">
-                <span className="font-medium">
-                  {connection.label || service.name}
-                </span>
-                <span
-                  className={`text-10 ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
-                >
-                  {status.startsWith("Matched +") ? t("Matched + {{count}} extra permissions", { count: extras }) : /^\d+ permissions?$/.test(status) ? t("{{count}} permissions", { count: permissions.length }) : t(status)}
-                </span>
-              </span>
-              <span className="block break-words text-10 text-muted-foreground">
-                {service.name}
-                {implied ? t(" · Included by your broader grant") : ""}
-              </span>
-              <span className="flex flex-wrap gap-1">
-                {permissions.slice(0, 3).map((p) => (
-                  <span
-                    key={p.scope}
-                    title={[p.scope, p.description].filter(Boolean).join(" · ")}
-                    className="max-w-full break-words rounded border border-border px-1.5 py-0.5 text-10 text-muted-foreground"
-                  >
-                    {p.label}
+      {choices.map(
+        ({ service, connection, permissions, ready, status, extras }) => {
+          const implied =
+            selection.allowAll || selection.impliedIds.includes(service.id);
+          const checked = implied || selection.selectedIds.includes(service.id);
+          return (
+            <label
+              key={service.id}
+              className={`flex cursor-pointer items-start gap-2 rounded-md border p-2 ${checked ? "border-primary/30 bg-primary/5" : "border-transparent hover:bg-muted/40"}`}
+            >
+              <Checkbox
+                aria-label={t("Grant connection {{name}}", {
+                  name: loginConnectionLabel(connection, selection.inventory),
+                })}
+                disabled={disabled || implied || (!ready && !checked)}
+                checked={checked}
+                onCheckedChange={() => selection.onToggle(service.id)}
+                className="mt-0.5"
+              />
+              <span className="min-w-0 flex-1 space-y-1">
+                <span className="flex flex-wrap items-center justify-between gap-1">
+                  <span className="font-medium">
+                    {loginConnectionLabel(connection, selection.inventory)}
                   </span>
-                ))}
-                {permissions.length > 3 && (
-                  <span className="text-10 text-muted-foreground">
-                    +{permissions.length - 3}{t(" more")}</span>
+                  <span
+                    className={`text-10 ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
+                  >
+                    {status.startsWith("Matched +")
+                      ? t("Matched + {{count}} extra permissions", {
+                          count: extras,
+                        })
+                      : /^\d+ permissions?$/.test(status)
+                        ? t("{{count}} permissions", {
+                            count: permissions.length,
+                          })
+                        : t(status)}
+                  </span>
+                </span>
+                <span className="block break-words text-10 text-muted-foreground">
+                  {service.name}
+                  {implied ? t(" · Included by your broader grant") : ""}
+                </span>
+                <span className="flex flex-wrap gap-1">
+                  {permissions.slice(0, 3).map((p) => (
+                    <span
+                      key={p.scope}
+                      title={[p.scope, p.description]
+                        .filter(Boolean)
+                        .join(" · ")}
+                      className="max-w-full break-words rounded border border-border px-1.5 py-0.5 text-10 text-muted-foreground"
+                    >
+                      {p.label}
+                    </span>
+                  ))}
+                  {permissions.length > 3 && (
+                    <span className="text-10 text-muted-foreground">
+                      +{permissions.length - 3}
+                      {t(" more")}
+                    </span>
+                  )}
+                </span>
+                {connection.node_id && (
+                  <span className="block text-10 text-warning">
+                    {t("Requires node access:")}{" "}
+                    {selection.inventory.options.nodes.find(
+                      (n) => n.id === connection.node_id,
+                    )?.name ?? connection.node_id}
+                  </span>
                 )}
               </span>
-              {connection.node_id && (
-                <span className="block text-10 text-warning">{t("Requires node access:")}{" "}
-                  {selection.inventory.options.nodes.find(
-                    (n) => n.id === connection.node_id,
-                  )?.name ?? connection.node_id}
-                </span>
-              )}
-            </span>
-          </label>
-        );
-      })}
+            </label>
+          );
+        },
+      )}
       {!choices.length && (
-        <p className="text-11 text-muted-foreground">{t("Connect an account in AI Services to grant this access. You can still use its permissions as filters.")}</p>
+        <p className="text-11 text-muted-foreground">
+          {t(
+            "Connect an account in AI Services to grant this access. You can still use its permissions as filters.",
+          )}
+        </p>
       )}
     </div>
   );

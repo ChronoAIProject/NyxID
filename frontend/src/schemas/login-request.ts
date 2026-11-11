@@ -8,6 +8,7 @@ export type RequestedPermissions = {
 };
 export type LoginRequestHints = RequestedPermissions & {
   user_code?: string;
+  owner_id?: string;
   login_type: "full" | "agent";
   key_source: "existing" | "new";
   key_name: string;
@@ -21,6 +22,7 @@ export type LoginRequestHints = RequestedPermissions & {
 const lists = { permissions: 1024, services: 4096, service_permissions: 8192 };
 const singles = [
   "user_code",
+  "owner_id",
   "login_type",
   "key_source",
   "key_name",
@@ -85,6 +87,11 @@ export function parseLoginRequestHints(
     const parsed = userCodeSchema.safeParse(code);
     if (parsed.success) result.user_code = parsed.data;
     else result.errors.push("The code in this link is invalid.");
+  }
+  const owner = single("owner_id");
+  if (owner !== undefined) {
+    if (/^[A-Za-z0-9_-]{1,128}$/.test(owner)) result.owner_id = owner;
+    else result.errors.push("Invalid owner_id.");
   }
   const showDetails = single("show_details");
   if (showDetails !== undefined) {

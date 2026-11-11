@@ -5,6 +5,7 @@ describe("device approval link hints", () => {
   it("preserves bounded list hints and normalized public codes through identity login", () => {
     const query = new URLSearchParams({
       user_code: "ioLu-abcd",
+      owner_id: "org-owner",
       login_type: "agent",
       key_source: "new",
       key_name: "CLI account",
@@ -27,6 +28,9 @@ describe("device approval link hints", () => {
     ).toMatchObject({ ...hints, query: expect.any(String) });
   });
   it.each([
+    "owner_id=",
+    "owner_id=../x",
+    "owner_id=one&owner_id=two",
     "constructor=x",
     "__proto__=x",
     "toString=x",
