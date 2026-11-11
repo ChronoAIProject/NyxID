@@ -247,6 +247,22 @@ pub enum OrnnLocalRefusal {
 }
 
 impl OrnnOutcome {
+    /// Attached preview/runtime reads distinguish a hidden or denied object
+    /// from transport failures. No provider body or free-form code escapes.
+    pub(crate) fn into_skill_read_result(self) -> AppResult<Vec<u8>> {
+        use crate::errors::skill_read::SkillReadReason;
+        match self {
+            Self::Response {
+                status: 401 | 403 | 404,
+                ..
+            } => Err(AppError::SkillRead(SkillReadReason::OrnnPrincipalDenied)),
+            Self::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable) => Err(AppError::SkillRead(
+                SkillReadReason::OwnerConnectionUnavailable,
+            )),
+            outcome => outcome.into_app_result(),
+        }
+    }
+
     /// The non-publication contract: every error keeps the status and message
     /// that skill reads, catalog/preview and runtime package reads always had.
     pub fn into_app_result(self) -> AppResult<Vec<u8>> {
@@ -517,8 +533,8 @@ pub async fn preview_checked(
     if field(&meta, "guid").map_err(Read)? != id
         || field(&meta, "version").map_err(Read)? != version
     {
-        return Err(Mismatch(invalid(
-            "Ornn returned a different skill or version",
+        return Err(Mismatch(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch,
         )));
     }
     let closure = data(
@@ -595,8 +611,8 @@ async fn download_checked(
         return Err(PreviewFailure::Read(invalid("Skill archive exceeds 4 MiB")));
     }
     if hex::encode(Sha256::digest(&bytes)) != hash {
-        return Err(PreviewFailure::Mismatch(invalid(
-            "Skill SHA-256 mismatch; content refused",
+        return Err(PreviewFailure::Mismatch(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch,
         )));
     }
     Ok(bytes)
@@ -704,13 +720,17 @@ pub async fn read(
         .skills
         .iter()
         .find(|r| !r.disabled && (r.skill_id == skill || r.name == skill))
-        .ok_or_else(inaccessible)?;
+        .ok_or(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::SkillNotBound,
+        ))?;
     let (id, version, hash) = if let Some(dep) = dependency {
         let d = root
             .dependencies
             .iter()
             .find(|d| d.skill_id == dep || d.name == dep)
-            .ok_or_else(inaccessible)?;
+            .ok_or(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::SkillNotBound,
+            ))?;
         (&d.skill_id, &d.version, &d.sha256)
     } else {
         (&root.skill_id, &root.version, &root.sha256)

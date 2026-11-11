@@ -2101,7 +2101,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Org metadata accepts general API keys. Handlers apply membership or
     // Direct-owner read access; service accounts remain rejected as before.
     let org_read_routes = Router::new()
-        .route("/", get(handlers::orgs::list_orgs))
+        .route("/", get(handlers::agent_skills::org_membership_lookup))
         .route("/{org_id}", get(handlers::orgs::get_org))
         .route(
             "/{org_id}/authorization",

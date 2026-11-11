@@ -26,10 +26,48 @@ download; content is hash-checked before use. Signed identity, live key/turn,
 owner or organization connection access, revocation, and explicit operation
 restrictions still apply. Other Ornn calls receive no exception.
 
+For an organization specialist, attached **Test** previews, runtime reads and
+preloads use an accessible, active Ornn connection owned by that organization.
+Selection is deterministic by connection ID among eligible rows; personal,
+other-organization and shared-master fallbacks are forbidden. Ornn decides
+content visibility for the signed acting person: organization grants, creator
+access and direct-user grants retain their existing semantics. Revoking an org
+grant refuses an org-only reader; a creator or direct grantee remains eligible
+when Ornn admits them. NyxID imposes no additional org-grant requirement and
+performs no extra metadata request for runtime downloads. It still enforces the
+exact bound GUID/version path and verifies the returned bytes against the pin's
+SHA-256. A downstream refusal does not trigger a second credential attempt.
+A successful preview certifies that person's access now, not another member's
+access or a future turn's key/policy state.
+
+Ornn resolves private organization grants through a bearer-authenticated NyxID
+`GET /orgs` callback. The internal reader supplies a 60-second, purpose-limited
+capability (JWT type `nyxid-ornn-org-read+jwt`, audience
+`nyxid:ornn-org-membership`), not a browser token or raw conversation key. Only
+`GET /api/v1/orgs` accepts it, returning the single bound organization after live
+person/org membership, agent, pins-digest and connection checks. Runtime tokens
+also recheck the key, conversation, turn and invocation; guests are refused.
+It has no access-token scope and cannot authorize other account or execution
+routes. No token row or persistent grant is written. The internal projection
+forwards this bearer without changing stored connection settings. Ornn must use
+signed identity authentication; a separate credential header may coexist, but
+other credential injection methods (including bearer/basic and Authorization
+headers) are incompatible with this callback and fail with `owner_connection_unavailable`. Platform bindings
+and connections configured to inject a general delegation token remain unavailable. Upgrade all API replicas serving callbacks before relying on
+this path; old replicas reject the new purpose and fail closed.
+
+Attached read failures add `details.reason`: `skill_not_bound`,
+`owner_connection_unavailable`, `ornn_principal_denied` (Ornn 401/403/404), or
+`pinned_version_mismatch`. Access failures retain forbidden/1002; integrity
+failures use validation_error. Upstream 5xx and transport failures do not claim
+a principal denial. No upstream prose, package content or credentials appear
+in these diagnostics.
+
 Runtime refusals emit the metadata-only `assistant_skill_read_refused` audit
 event with `skill_not_bound`, `grant_refused`, or `operation_restriction`.
 Catalog availability and transport failures use `service_unavailable`,
-`proxy_error`, or `upstream_error` rather than claiming a grant denial.
+`proxy_error`, or `upstream_error` rather than claiming a grant denial. Missing
+organization connections use `owner_connection_unavailable`.
 No package or message content is recorded.
 
 ## Packages and disclosure
