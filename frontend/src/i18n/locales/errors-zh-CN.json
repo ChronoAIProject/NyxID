@@ -395,5 +395,12 @@
   "OAuth authority is temporarily unavailable; retry the request": "OAuth 授权服务暂时不可用；请重试该请求",
   "Service monitoring is unavailable": "服务监控不可用",
   "Service monitoring is not configured": "服务监控未配置",
-  "Security rollout is not ready; inspect admin security readiness": "安全推出尚未就绪；请检查管理员安全就绪状态"
+  "Security rollout is not ready; inspect admin security readiness": "安全推出尚未就绪；请检查管理员安全就绪状态",
+  "Integrity break detected in {{chains}}": "检测到 {{chains}} 完整性中断",
+  "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.": "已应用 {{count}} 项；失败：{{details}}。重试前请检查剩余变更。",
+  "Failed to approve the request": "无法批准请求",
+  "Failed to deny the request": "无法拒绝请求",
+  "Failed to approve request": "无法批准请求",
+  "Failed to reject request": "无法拒绝请求",
+  "Failed to disconnect node": "无法断开节点"
 }

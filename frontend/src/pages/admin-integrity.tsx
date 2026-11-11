@@ -183,9 +183,7 @@ export function AdminIntegrityPage() {
           toast.success(translateUi("Verification passed: both chains intact"));
         } else {
           toast.error(
-            translateErrorMessage(`Integrity break detected in ${broken
-              .map((chain) => CHAIN_LABELS[chain.chain])
-              .join(", ")}`),
+            translateErrorMessage("Integrity break detected in {{chains}}", { chains: broken.map((chain) => translateUi(CHAIN_LABELS[chain.chain])).join(", ") }),
           );
         }
       },

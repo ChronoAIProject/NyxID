@@ -208,7 +208,7 @@ export function ApprovalsView() {
       toast.error(
         translateErrorMessage(error instanceof ApiError
           ? error.message
-          : `Failed to ${approved ? "approve" : "deny"} the request`),
+          : approved ? "Failed to approve the request" : "Failed to deny the request"),
       );
     }
   }

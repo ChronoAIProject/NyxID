@@ -11891,5 +11891,13 @@
   "Trigger disabled": "Trigger disabled",
   "Allocated credits to {{value1}} owners": "Allocated credits to {{value1}} owners",
   "Allocated credits to {{value1}} owners; {{value2}} pending activation": "Allocated credits to {{value1}} owners; {{value2}} pending activation",
-  "Untitled": "Untitled"
+  "Untitled": "Untitled",
+  "Telegram manager \"{{name}}\" connected": "Telegram manager \"{{name}}\" connected",
+  "Bot \"{{name}}\" created successfully": "Bot \"{{name}}\" created successfully",
+  "Issued credits to {{count}} owners; {{pending}} pending activation": "Issued credits to {{count}} owners; {{pending}} pending activation",
+  "Issued credits to {{count}} owners; {{pending}} pending activation_one": "Issued credits to {{count}} owner; {{pending}} pending activation",
+  "Issued credits to {{count}} owners; {{pending}} pending activation_other": "Issued credits to {{count}} owners; {{pending}} pending activation",
+  "Issued credits to {{count}} owners": "Issued credits to {{count}} owners",
+  "Issued credits to {{count}} owners_one": "Issued credits to {{count}} owner",
+  "Issued credits to {{count}} owners_other": "Issued credits to {{count}} owners"
 }

@@ -105,7 +105,7 @@ export function AdminNodesPage() {
       }
     } catch (err) {
       toast.error(
-        translateErrorMessage(err instanceof ApiError ? err.message : `Failed to ${action} node`),
+        translateErrorMessage(err instanceof ApiError ? err.message : action === "disconnect" ? "Failed to disconnect node" : "Failed to delete node"),
       );
     } finally {
       setActionTarget(null);

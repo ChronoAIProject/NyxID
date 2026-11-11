@@ -395,5 +395,12 @@
   "OAuth authority is temporarily unavailable; retry the request": "OAuth 授權服務暫時無法使用；請重試該要求",
   "Service monitoring is unavailable": "服務監控無法使用",
   "Service monitoring is not configured": "服務監控未設定",
-  "Security rollout is not ready; inspect admin security readiness": "安全推出尚未就緒；請檢查管理員安全就緒狀態"
+  "Security rollout is not ready; inspect admin security readiness": "安全推出尚未就緒；請檢查管理員安全就緒狀態",
+  "Integrity break detected in {{chains}}": "偵測到 {{chains}} 完整性中斷",
+  "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.": "已套用 {{count}} 項；失敗：{{details}}。重試前請檢查剩餘變更。",
+  "Failed to approve the request": "無法核准請求",
+  "Failed to deny the request": "無法拒絕請求",
+  "Failed to approve request": "無法核准請求",
+  "Failed to reject request": "無法拒絕請求",
+  "Failed to disconnect node": "無法中斷節點連線"
 }

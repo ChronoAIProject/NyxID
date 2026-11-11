@@ -114,7 +114,7 @@ export function ApprovalHistoryPage() {
       toast.error(
         translateErrorMessage(err instanceof ApiError
           ? err.message
-          : `Failed to ${decideTarget.action} request`),
+          : decideTarget.action === "approve" ? "Failed to approve request" : "Failed to reject request"),
       );
     } finally {
       setDecideTarget(null);

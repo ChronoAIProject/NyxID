@@ -246,9 +246,9 @@ export function ChannelBotSetup({
           return;
         }
         toast.success(
-          translateUi(result.credential_source === "telegram_manager"
-            ? `Telegram manager "${result.platform_bot_username}" connected`
-            : `Bot "${result.platform_bot_username}" created successfully`),
+          result.credential_source === "telegram_manager"
+            ? translateUi("Telegram manager \"{{name}}\" connected", { name: result.platform_bot_username })
+            : translateUi("Bot \"{{name}}\" created successfully", { name: result.platform_bot_username }),
         );
         reset();
         createBot.reset();

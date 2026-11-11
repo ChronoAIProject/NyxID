@@ -31,7 +31,7 @@ export function ClientSecretDialog({
   function handleCopy(value: string, label: string) {
     void copyToClipboard(value)
       .then(() => toast.success(translateUi("{{value1}} copied", { value1: label })))
-      .catch(() => toast.error(translateErrorMessage(`Failed to copy ${label}`)));
+      .catch(() => toast.error(translateErrorMessage("Failed to copy {{label}}", { label })));
   }
 
   return (

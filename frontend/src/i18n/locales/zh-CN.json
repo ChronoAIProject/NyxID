@@ -11891,5 +11891,13 @@
   "Trigger disabled": "触发器已停用",
   "Allocated credits to {{value1}} owners": "已向 {{value1}} 位所有者分配额度",
   "Allocated credits to {{value1}} owners; {{value2}} pending activation": "已向 {{value1}} 位所有者分配额度；{{value2}} 笔等待激活",
-  "Untitled": "未命名"
+  "Untitled": "未命名",
+  "Telegram manager \"{{name}}\" connected": "Telegram 管理机器人“{{name}}”已连接",
+  "Bot \"{{name}}\" created successfully": "机器人“{{name}}”已创建",
+  "Issued credits to {{count}} owners; {{pending}} pending activation": "已向 {{count}} 位所有者发放额度；{{pending}} 笔等待激活",
+  "Issued credits to {{count}} owners; {{pending}} pending activation_one": "已向 {{count}} 位所有者发放额度；{{pending}} 笔等待激活",
+  "Issued credits to {{count}} owners; {{pending}} pending activation_other": "已向 {{count}} 位所有者发放额度；{{pending}} 笔等待激活",
+  "Issued credits to {{count}} owners": "已向 {{count}} 位所有者发放额度",
+  "Issued credits to {{count}} owners_one": "已向 {{count}} 位所有者发放额度",
+  "Issued credits to {{count}} owners_other": "已向 {{count}} 位所有者发放额度"
 }

@@ -221,11 +221,10 @@ export function AdminCreditsPage() {
   async function submitGrant(value: IssueGrantForm) {
     try {
       const result = await issueGrant.mutateAsync(value);
-      const recipientLabel = `${String(result.created_count)} owner${result.created_count === 1 ? "" : "s"}`;
       toast.success(
-        translateUi(result.pending_activation_count > 0
-          ? `Issued credits to ${recipientLabel}; ${String(result.pending_activation_count)} pending activation`
-          : `Issued credits to ${recipientLabel}`),
+        result.pending_activation_count > 0
+          ? translateUi("Issued credits to {{count}} owners; {{pending}} pending activation", { count: result.created_count, pending: result.pending_activation_count })
+          : translateUi("Issued credits to {{count}} owners", { count: result.created_count }),
       );
       const rolloutWarning = rolloutWarningMessage(result.recipients);
       if (rolloutWarning) toast.warning(translateUi(rolloutWarning));

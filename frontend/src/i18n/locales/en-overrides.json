@@ -56,5 +56,9 @@
   "{{email}} · {{count}} members_one": "{{email}} · {{count}} member",
   "{{email}} · {{count}} members_other": "{{email}} · {{count}} members",
   " · {{count}} sunset flags hidden_one": " · {{count}} sunset flag hidden",
-  " · {{count}} sunset flags hidden_other": " · {{count}} sunset flags hidden"
+  " · {{count}} sunset flags hidden_other": " · {{count}} sunset flags hidden",
+  "Issued credits to {{count}} owners; {{pending}} pending activation_one": "Issued credits to {{count}} owner; {{pending}} pending activation",
+  "Issued credits to {{count}} owners; {{pending}} pending activation_other": "Issued credits to {{count}} owners; {{pending}} pending activation",
+  "Issued credits to {{count}} owners_one": "Issued credits to {{count}} owner",
+  "Issued credits to {{count}} owners_other": "Issued credits to {{count}} owners"
 }

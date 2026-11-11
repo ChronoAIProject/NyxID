@@ -395,5 +395,12 @@
   "OAuth authority is temporarily unavailable; retry the request": "OAuth authority is temporarily unavailable; retry the request",
   "Service monitoring is unavailable": "Service monitoring is unavailable",
   "Service monitoring is not configured": "Service monitoring is not configured",
-  "Security rollout is not ready; inspect admin security readiness": "Security rollout is not ready; inspect admin security readiness"
+  "Security rollout is not ready; inspect admin security readiness": "Security rollout is not ready; inspect admin security readiness",
+  "Integrity break detected in {{chains}}": "Integrity break detected in {{chains}}",
+  "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.": "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.",
+  "Failed to approve the request": "Failed to approve the request",
+  "Failed to deny the request": "Failed to deny the request",
+  "Failed to approve request": "Failed to approve request",
+  "Failed to reject request": "Failed to reject request",
+  "Failed to disconnect node": "Failed to disconnect node"
 }
