@@ -132,7 +132,7 @@ function PersonalAudience({
           <p>{botAudienceDescription(channel)}</p>
           <GuestReadiness readiness={readiness.data ?? channel.guest_readiness} />
           <AudienceReadiness configuration={readiness.data?.configuration} />
-          {readiness.isError ? <p>Customer readiness is unavailable. Refresh to check before relying on replies.</p> : null}
+          {readiness.isError ? <p>{translateUi("Customer readiness is unavailable. Refresh to check before relying on replies.")}</p> : null}
           {agent?.kind === "specialist" ? (
             <a
               className="type-button underline"
