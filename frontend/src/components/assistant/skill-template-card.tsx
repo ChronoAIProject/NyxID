@@ -29,6 +29,8 @@ export interface SkillTemplateCardProps {
   readonly outline: SkillTemplateOutline | null;
   /** The skill is not attached yet, so starting attaches it first. */
   readonly needsAttach?: boolean;
+  /** The owner already started this skill from the card. */
+  readonly started?: boolean;
   readonly onStart?: () => void;
   readonly onDismiss?: () => void;
 }
@@ -54,6 +56,7 @@ export function SkillTemplateCard({
   members = [],
   outline,
   needsAttach = false,
+  started = false,
   onStart,
   onDismiss,
 }: SkillTemplateCardProps) {
@@ -147,14 +150,20 @@ export function SkillTemplateCard({
         </div>
       ) : null}
 
-      <div className="flex justify-end gap-2">
-        <Button variant="outline" disabled={!onDismiss} onClick={onDismiss}>
-          Not now
-        </Button>
-        <Button variant="primary" disabled={!onStart || !outline} onClick={onStart}>
-          {needsAttach ? "Add & start" : "Start"}
-        </Button>
-      </div>
+      {started ? (
+        <p role="status" className="type-secondary text-right text-text-tertiary">
+          Started. Progress continues below.
+        </p>
+      ) : (
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" disabled={!onDismiss} onClick={onDismiss}>
+            Not now
+          </Button>
+          <Button variant="primary" disabled={!onStart || !outline} onClick={onStart}>
+            {needsAttach ? "Add & start" : "Start"}
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

@@ -47,3 +47,9 @@ cd frontend && npx vite --port 3000
 The local preview renders each skill card with `SkillTemplateCard` next to its
 tool results, in dark and light themes. The copied report is a local file; do
 not commit it.
+
+`http://localhost:3000/skill-chat-preview.html` shows the same cards in a mock
+NyxBot chat: a skillset suggested from a task, a skill named by the person, and
+a run tracked by `SkillRunChecklist` (running, needs you, done). The outlines
+come from the report; the conversation and the progress are illustrative, since
+NyxBot does not render these cards in chat yet.
