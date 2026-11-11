@@ -5422,9 +5422,13 @@ async fn execute_resolved_proxy_inner<'a>(
                     .assistant_agent_owner_id
                     .as_deref()
                     .is_none_or(|owner| owner == user_id_str)
-                && effective_owner_for_approval
+                && (effective_owner_for_approval
                     .as_deref()
-                    .is_none_or(|owner| owner == user_id_str),
+                    .is_none_or(|owner| owner == user_id_str)
+                    || matches!(
+                        auth_user.auth_method,
+                        AuthMethod::Session | AuthMethod::AccessToken
+                    )),
             &target,
             method.as_str(),
             path,

@@ -103,7 +103,9 @@ pub(crate) async fn admit(
                 keys,
                 jwt,
                 config,
-                caller.resource_owner_id,
+                // CMA authenticates the human actor in the signed assertion.
+                // A credential-free org connection does not turn them into an org.
+                caller.actor_user_id,
                 personal,
                 target,
                 method,

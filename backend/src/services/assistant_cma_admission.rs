@@ -76,6 +76,37 @@ fn id(value: Option<&Value>) -> AppResult<Option<String>> {
         _ => Err(invalid()),
     }
 }
+// Binary attachments retain their exact request binding and owned-parent gate.
+// All other mutation routes keep the existing prohibition on query parameters.
+fn validate_query(method: &str, path: &str, query: Option<&str>) -> AppResult<()> {
+    if matches!(method, "GET" | "HEAD" | "OPTIONS") {
+        return Ok(());
+    }
+    let query = query.filter(|q| !q.is_empty());
+    if !path.ends_with("/attachments") {
+        return if query.is_none() {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
+    }
+    let fields: Vec<_> =
+        url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()).collect();
+    match fields.as_slice() {
+        [(key, value)]
+            if key == "name"
+                && !value.is_empty()
+                && value.len() <= 255
+                && !matches!(value.as_ref(), "." | "..")
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '/' | '\\')) =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid()),
+    }
+}
 fn classify(method: &str, path: &str, body: &[u8]) -> AppResult<Operation> {
     if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#', '%', '\\']) {
         return Err(invalid());
@@ -141,7 +172,16 @@ fn classify(method: &str, path: &str, body: &[u8]) -> AppResult<Operation> {
             id: (*agent).into(),
             admission: false,
         }),
-        ("POST", ["api", "v1", "agents", agent, "files" | "input"]) => Ok(Operation::Agent {
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "agents",
+                agent,
+                "files" | "input" | "attachments",
+            ],
+        ) => Ok(Operation::Agent {
             id: (*agent).into(),
             admission: true,
         }),
@@ -285,6 +325,7 @@ pub struct CmaDispatchPermit {
     gateway: CatalogCmaGateway,
     owner: String,
     target: crate::models::downstream_service::DownstreamService,
+    base_url: String,
     operation: Operation,
     method: String,
     path: String,
@@ -297,8 +338,18 @@ pub struct CmaDispatchPermit {
 fn wire_hash(body: &[u8]) -> String {
     hex::encode(Sha256::digest(body))
 }
-fn completed() -> AppError {
-    AppError::Conflict("cma_creation_already_completed: query the original resource".into())
+fn completed(row: &AssistantCmaCreation) -> AppError {
+    // Called only after matching the owner, original key, request and deployment.
+    // Return durable identifiers, never replay the creation or claim its live status.
+    AppError::ConflictWithDetails {
+        message: "cma_creation_already_completed: query the original resource".into(),
+        details: Box::new(serde_json::json!({
+            "reason": "cma_creation_already_completed",
+            "operation_id": row.operation_id,
+            "agent_id": row.cma_agent_id,
+            "sandbox_id": row.cma_sandbox_id,
+        })),
+    }
 }
 fn duplicate(error: &AppError) -> bool {
     matches!(error, AppError::DatabaseError(error) if
@@ -324,7 +375,7 @@ fn same_request(
         return Err(drift());
     }
     if previous.submission_state == "confirmed" {
-        return Err(completed());
+        return Err(completed(previous));
     }
     if previous.sandbox_generation != candidate.sandbox_generation
         && previous.submission_state != "confirmed_not_created"
@@ -522,7 +573,7 @@ fn apply_creation_change(
     match change {
         CreationChange::Dispatch => {
             if row.submission_state == "confirmed" {
-                return Err(completed());
+                return Err(completed(row));
             }
             if row.submission_state == "confirmed_not_created" {
                 return Err(drift());
@@ -706,9 +757,7 @@ pub async fn admit(
     let deployment_fingerprint = gateway
         .deployment_fingerprint_for_target(owner, &target.service.id, &target.base_url)
         .await?;
-    if !matches!(operation, Operation::Read) && query.is_some_and(|q| !q.is_empty()) {
-        return Err(invalid());
-    }
+    validate_query(method, path, query)?;
     let keys_in_headers = headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("idempotency-key"))
@@ -729,6 +778,7 @@ pub async fn admit(
         gateway,
         owner: owner.into(),
         target: target.service.clone(),
+        base_url: target.base_url.clone(),
         operation: operation.clone(),
         method: method.into(),
         path: path.into(),
@@ -770,7 +820,7 @@ pub async fn admit(
             return Err(drift());
         }
         if previous.submission_state == "confirmed" {
-            return Err(completed());
+            return Err(completed(previous));
         }
     }
     let recovery = headers
@@ -961,7 +1011,7 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
     /// Called after all header/body rewriting, directly before network dispatch.
     async fn before_send(&self, request: &reqwest::Request) -> AppResult<()> {
         self.gateway
-            .deployment_fingerprint_for_target(&self.owner, &self.target.id, &self.target.base_url)
+            .deployment_fingerprint_for_target(&self.owner, &self.target.id, &self.base_url)
             .await?;
         let body = request
             .body()
@@ -969,7 +1019,7 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
             .unwrap_or_default();
         let expected = format!(
             "{}/{}",
-            self.target.base_url.trim_end_matches('/'),
+            self.base_url.trim_end_matches('/'),
             self.path.trim_start_matches('/')
         );
         let mut expected = url::Url::parse(&expected).map_err(|_| drift())?;
@@ -1414,6 +1464,50 @@ mod tests {
     mod fingerprint_regressions {
         use super::*;
         include!("assistant_cma_admission_fingerprint_tests.rs");
+    }
+
+    #[test]
+    fn binary_attachment_admission_keeps_query_and_parent_validation() {
+        assert!(matches!(
+            classify(
+                "POST",
+                "/api/v1/agents/agt_example/attachments",
+                b"\0binary"
+            ),
+            Ok(Operation::Agent {
+                admission: true,
+                ..
+            })
+        ));
+        assert!(
+            validate_query(
+                "POST",
+                "/api/v1/agents/agt_example/attachments",
+                Some("name=room.glb")
+            )
+            .is_ok()
+        );
+        for query in [
+            None,
+            Some(""),
+            Some("name=..%2Fescape"),
+            Some("name=a&name=b"),
+            Some("name=a&url=https://evil.invalid"),
+            Some("name=%00"),
+            Some("name=.."),
+        ] {
+            assert!(
+                validate_query("POST", "/api/v1/agents/agt_example/attachments", query).is_err()
+            );
+        }
+        assert!(
+            validate_query(
+                "POST",
+                "/api/v2/agents/agt_example/responses",
+                Some("name=x")
+            )
+            .is_err()
+        );
     }
 
     #[test]

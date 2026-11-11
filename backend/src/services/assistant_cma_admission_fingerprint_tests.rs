@@ -347,11 +347,64 @@ async fn differing_connection_creation_uses_catalog_fingerprint_and_confirms_onc
             .unwrap(),
         1
     );
-    assert!(
-        f.admit(&f.target, "/api/v1/agents", key, body)
-            .await
-            .is_err()
-    );
+    let receipt = match f.admit(&f.target, "/api/v1/agents", key, body).await {
+        Err(error) => error.response_body(),
+        Ok(_) => panic!("confirmed creation must not be dispatched again"),
+    };
+    assert_eq!(receipt.error_code, 1004);
+    let details = receipt.details.unwrap();
+    assert_eq!(details["reason"], "cma_creation_already_completed");
+    assert_eq!(details["operation_id"], "op_1");
+    assert_eq!(details["agent_id"], "agent_1");
+    let changed = match f
+        .admit(&f.target, "/api/v1/agents", key, br#"{"name":"changed"}"#)
+        .await
+    {
+        Err(error) => error.response_body(),
+        Ok(_) => panic!("changed creation must be refused"),
+    };
+    assert!(changed.details.is_none());
+    assert_eq!(f.post_count().await, 1);
+    let upload_path = "/api/v1/agents/agent_1/attachments";
+    let bytes = b"\0binary model";
+    let upload = admit(
+        &f.db,
+        &f.keys,
+        &f.jwt,
+        &f.config,
+        &f.owner,
+        true,
+        &f.target,
+        "POST",
+        upload_path,
+        Some("name=room.glb"),
+        bytes,
+        &[("Idempotency-Key".into(), "upload-original-key".into())],
+        false,
+    )
+    .await
+    .unwrap();
+    let request = reqwest::Client::new()
+        .post(format!("{}{upload_path}?name=room.glb", f.server.uri()))
+        .header("Idempotency-Key", "upload-original-key")
+        .body(bytes.to_vec())
+        .build()
+        .unwrap();
+    upload.before_send(&request).await.unwrap();
+    let changed = reqwest::Client::new()
+        .post(format!("{}{upload_path}?name=other.glb", f.server.uri()))
+        .header("Idempotency-Key", "upload-original-key")
+        .body(bytes.to_vec())
+        .build()
+        .unwrap();
+    assert!(upload.before_send(&changed).await.is_err());
+    let changed = reqwest::Client::new()
+        .post(format!("{}{upload_path}?name=room.glb", f.server.uri()))
+        .header("Idempotency-Key", "upload-original-key")
+        .body(b"changed bytes".to_vec())
+        .build()
+        .unwrap();
+    assert!(upload.before_send(&changed).await.is_err());
     f.assert_single_intent().await;
     f.db.drop().await.unwrap();
 }
@@ -576,5 +629,101 @@ async fn catalog_drift_target_mismatch_and_expired_recovery_remain_closed() {
     assert!(retained.request_ciphertext.is_some());
     assert_eq!(retained.idempotency_key, key);
     f.assert_single_intent().await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolved_cma_destination_does_not_revert_to_stale_connection_snapshot() {
+    let mut f = Fixture::new().await;
+    f.target.service.base_url = "https://stale-connection.invalid".into();
+    let permit = admit(
+        &f.db,
+        &f.keys,
+        &f.jwt,
+        &f.config,
+        &f.owner,
+        true,
+        &f.target,
+        "GET",
+        "/api/v1/agents",
+        None,
+        b"",
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    let request = reqwest::Client::new()
+        .get(format!("{}/api/v1/agents", f.server.uri()))
+        .build()
+        .unwrap();
+    permit.before_send(&request).await.unwrap();
+    let wrong = reqwest::Client::new()
+        .get("https://stale-connection.invalid/api/v1/agents")
+        .build()
+        .unwrap();
+    assert!(permit.before_send(&wrong).await.is_err());
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_connection_cma_admission_keeps_actor_and_connection_binding() {
+    let f = Fixture::new().await;
+    let org = uuid::Uuid::new_v4().to_string();
+    let caller = registry::DispatchCaller {
+        actor_user_id: &f.owner,
+        resource_owner_id: &org,
+        user_service_id: Some("org-cma"),
+    };
+    let admission = registry::admit(
+        &f.db,
+        &f.keys,
+        &f.jwt,
+        &f.config,
+        &caller,
+        true,
+        &f.target,
+        "GET",
+        "/api/v1/agents",
+        None,
+        b"",
+        || Ok(vec![].into()),
+        false,
+    )
+    .await
+    .unwrap();
+    let guard = registry::verify(Some(&admission), &f.target, Some(&caller))
+        .unwrap()
+        .unwrap();
+    let request = reqwest::Client::new()
+        .get(format!("{}/api/v1/agents", f.server.uri()))
+        .build()
+        .unwrap();
+    guard.before_send(&request).await.unwrap();
+    let changed = registry::DispatchCaller {
+        actor_user_id: &f.owner,
+        resource_owner_id: &org,
+        user_service_id: Some("another-connection"),
+    };
+    assert!(registry::verify(Some(&admission), &f.target, Some(&changed)).is_err());
+    assert!(
+        registry::admit(
+            &f.db,
+            &f.keys,
+            &f.jwt,
+            &f.config,
+            &caller,
+            false,
+            &f.target,
+            "GET",
+            "/api/v1/agents",
+            None,
+            b"",
+            || Ok(vec![].into()),
+            false
+        )
+        .await
+        .is_err()
+    );
     f.db.drop().await.unwrap();
 }

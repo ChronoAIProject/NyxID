@@ -3205,7 +3205,14 @@ async fn finish_resolution(
             || user_service.credential_binding.as_deref() == Some("platform")
             || catalog_proxy_authorization.platform_key_configured))
         || (catalog_proxy_authorization.no_auth_platform_service
-            && catalog_proxy_authorization.platform_key_configured)
+            && (catalog_proxy_authorization.platform_key_configured
+                || (user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
+                    && user_service.service_type == "http"
+                    && user_service.node_id.is_none()
+                    && user_service.api_key_id.is_none()
+                    && user_service.credential_binding.is_none()
+                    && endpoint.user_id == user_service.user_id
+                    && endpoint.catalog_service_id == user_service.catalog_service_id)))
     {
         let catalog_service = box_resolution_future(|| load_catalog_service_for_user_service(db, &user_service)).await?;
         let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
@@ -5915,6 +5922,71 @@ mod tests {
             .expect("test forwarding policy must be valid"),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn credential_free_auto_connection_resolves_current_catalog_destination() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("auto_no_auth_destination").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&owner, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.service_category = "internal".into();
+        catalog.auth_key_name = String::new();
+        catalog.base_url = "https://current-catalog.invalid".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &endpoint_id,
+            &owner,
+            "Auto",
+            "https://stale-snapshot.invalid",
+            None,
+            Some(&catalog.id),
+        );
+        db.collection(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            &service_id,
+            &owner,
+            &catalog.slug,
+            &endpoint_id,
+            Some(&catalog.id),
+            None,
+        );
+        connection.source = Some("auto_provision".into());
+        // Legacy automatic rows have no explicit credential_binding.
+        assert!(connection.credential_binding.is_none());
+        db.collection(USER_SERVICES)
+            .insert_one(connection)
+            .await
+            .unwrap();
+        let resolved = resolve_proxy_target_by_user_service_id(
+            &db,
+            &test_encryption_keys(),
+            &owner,
+            &service_id,
+            None,
+            None,
+            test_execution_context(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved.target.base_url, catalog.base_url);
+        assert_eq!(resolved.target.service.base_url, catalog.base_url);
+        assert_eq!(resolved.target.service.id, catalog.id);
+        assert!(resolved.target.credential.is_empty());
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
