@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 mod lifecycle;
+mod presentation;
 mod resume;
 pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
+pub(crate) use presentation::delivery_notice;
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
 use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";

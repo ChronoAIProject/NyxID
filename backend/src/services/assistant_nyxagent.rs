@@ -921,6 +921,11 @@ pub fn events_text(events: &[AgentEvent]) -> String {
             "NyxID events (authored by NyxID; only a quoted owner message is a request from the user; continuation lines are indented):"
         },
     );
+    if let Some(notice) = super::execution_permission_dispatch::proposals::delivery_notice(events) {
+        text.push_str("\n- ");
+        text.push_str(&notice);
+        return text;
+    }
     for event in events {
         text.push_str("\n- ");
         text.push_str(&event_notice_text(event));

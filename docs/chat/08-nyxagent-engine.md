@@ -2557,3 +2557,15 @@ is unclear (for example names, numbers, code or URLs) may the UI hint supply it;
 the assistant reply never determines it. Existing provisional titles, rename
 fences and legacy rows retain their behavior. Unknown headers/optional fields are safe across
 mixed replicas; old replicas do not enforce the new title-language hint.
+
+Retained execution-permission updates use the exact request ID, independently of
+owner-action acknowledgements. Repeated calls for the same prepared effect in
+the same task join its receipt; a later owner task can be a distinct request.
+A batch of retained-result wake events appears as one notice with the number of
+distinct requests. Its reply groups unapproved requests by their actual state
+(denied, expired, cancelled or still pending), preserving each request ID. It
+does not repeat an indistinguishable failure sentence per request. Completed
+provider results and uncertain outcomes retain their existing receipt handling;
+settlement still marks every delivered request individually. This presentation
+also applies to queued wakes written by older replicas, without changing their
+stored identities or authority.
