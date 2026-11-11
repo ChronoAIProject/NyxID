@@ -21,11 +21,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useOrgSpecialistChannel } from "@/hooks/use-org-specialist-channel";
-import { useSetNyxBotPrivateChats } from "@/hooks/use-nyxbot-agents";
+import { useGuestReadiness, useSetNyxBotPrivateChats } from "@/hooks/use-nyxbot-agents";
 import { botAudienceDescription } from "@/lib/assistant/bot-audience";
 import { useDrawerSearchTarget } from "@/lib/drawer-search";
 import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { GuestReadiness } from "./guest-readiness";
+import { AudienceReadiness } from "./audience-readiness";
 import { changeList, describeChanges } from "@/lib/grouped-form-changes";
 import type {
   AssistantAgent,
@@ -122,13 +123,16 @@ function PersonalAudience({
 }) {
   useUiTranslation();
   const access = useSetNyxBotPrivateChats();
+  const readiness = useGuestReadiness(channel.agent_id ?? agent?.id, !disabled);
   return (
     <GroupedList
       title={translateUi("Who can talk to this bot")}
       footer={
         <>
           <p>{botAudienceDescription(channel)}</p>
-          <GuestReadiness readiness={channel.guest_readiness} />
+          <GuestReadiness readiness={readiness.data ?? channel.guest_readiness} />
+          <AudienceReadiness configuration={readiness.data?.configuration} />
+          {readiness.isError ? <p>Customer readiness is unavailable. Refresh to check before relying on replies.</p> : null}
           {agent?.kind === "specialist" ? (
             <a
               className="type-button underline"
