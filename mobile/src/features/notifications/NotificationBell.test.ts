@@ -31,20 +31,21 @@ function render(props: Record<string, unknown>) {
   return { h, root: pressable, all: () => nodes(pressable) };
 }
 
-test("the bell names its counts, caps the badge and colours decisions amber", () => {
+test("the bell names its counts, caps the badge and marks decisions separately", () => {
   const pressed: number[] = [];
   const x = render({ unread: 23, needsDecision: 2, onPress: () => pressed.push(1) });
   assert.equal(x.root.props.accessibilityLabel, "Notifications, 23 unread, 2 need your decision");
   const badge = x.all().find((n) => n.props.testID === "notification-bell-badge")!;
-  assert.equal(badge.props.style[1].backgroundColor, lightColors.warning);
-  assert.equal(nodes(badge).find((n) => n.type === "Text")!.props.children, "9+");
+  assert.equal(badge.props.style[1].backgroundColor, lightColors.card);
+  assert.equal(x.all().find((n) => n.props.testID === "notification-bell-attention")!.props.style[1].backgroundColor, lightColors.warning);
+  assert.equal(nodes(badge).find((n) => n.type === "Text")!.props.children, "23");
   assert.ok(x.root.props.style[0].minWidth >= 44 && x.root.props.style[0].minHeight >= 44);
   x.root.props.onPress();
   assert.deepEqual(pressed, [1]);
   x.h.unmount();
   const quiet = render({ unread: 3, needsDecision: 0, onPress: () => {} });
   const plain = quiet.all().find((n) => n.props.testID === "notification-bell-badge")!;
-  assert.equal(plain.props.style[1].backgroundColor, lightColors.primary);
+  assert.equal(plain.props.style[1].backgroundColor, lightColors.card);
   assert.equal(nodes(plain).find((n) => n.type === "Text")!.props.children, "3");
   quiet.h.unmount();
   const empty = render({ unread: 0, needsDecision: 0, onPress: () => {}, disabled: true });

@@ -153,7 +153,7 @@ test("the indicator follows the profile flag, caps its badge and polls the summa
   const on = setup({ summary: { unread_count: 12, needs_decision_count: 1, by_source: [], by_source_truncated: false } });
   const value = on.h.mount(() => on.module.useNotificationIndicator(true)) as ReturnType<typeof useNotificationIndicator>;
   assert.deepEqual({ enabled: value.enabled, unread: value.unread, needsDecision: value.needsDecision, badge: value.badge },
-    { enabled: true, unread: 12, needsDecision: 1, badge: "9+" });
+    { enabled: true, unread: 12, needsDecision: 1, badge: "12" });
   const summary = on.queries.find((query) => JSON.stringify(query.key) === JSON.stringify([...NOTIFICATIONS, "summary", 7]))!;
   assert.equal(summary.enabled, true);
   assert.equal(summary.refetchInterval, 30_000, "a 30 second backstop while the stream is down");

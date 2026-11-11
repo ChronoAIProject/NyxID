@@ -7,13 +7,16 @@ jest.mock("../../theme/ThemeContext", () => {
 });
 
 describe("NotificationBell", () => {
-  it("announces its counts, caps the badge at 9+ and reports presses", async () => {
+  it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("announces %s unread, displays %s and reports presses", async (unread, badge) => {
     const onPress = jest.fn();
-    await render(<NotificationBell unread={15} needsDecision={1} onPress={onPress} />);
+    await render(<NotificationBell unread={Number(unread)} needsDecision={1} onPress={onPress} />);
     const bell = screen.getByRole("button", {
-      name: "Notifications, 15 unread, 1 needs your decision",
+      name: `Notifications, ${unread} unread, 1 needs your decision`,
     });
-    expect(screen.getByText("9+")).toBeTruthy();
+    expect(screen.getByText(String(badge))).toBeTruthy();
+    expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ position: "absolute", top: -6, right: -8 });
+    expect(screen.getByTestId("notification-bell-glyph")).toHaveStyle({ position: "relative" });
+    expect(screen.getByTestId("notification-bell-attention")).toBeTruthy();
     await fireEvent.press(bell);
     expect(onPress).toHaveBeenCalledTimes(1);
   });

@@ -14,8 +14,8 @@ import type {
 } from "@/schemas/assistant-notifications";
 import { translateUi } from "@/i18n/use-ui-translation";
 
-/** Counts above this read "9+": the badge stays one glyph wide. */
-export const NOTIFICATION_BADGE_CAP = 9;
+/** Keep exact counts through 99, then bound the bell's compact pill. */
+export const NOTIFICATION_BADGE_CAP = 99;
 
 export function notificationBadgeText(unread: number): string {
   return unread > NOTIFICATION_BADGE_CAP ? `${String(NOTIFICATION_BADGE_CAP)}+` : String(unread);

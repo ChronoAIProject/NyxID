@@ -30,12 +30,14 @@ const row = (overrides: Record<string, unknown>) =>
     ...overrides,
   });
 
-test("badge caps at 9+, count chips start at two and labels read naturally", () => {
+test("badge caps at 99+, count chips start at two and labels read naturally", () => {
   assert.equal(notificationBadge(0), "");
   assert.equal(notificationBadge(-1), "");
   assert.equal(notificationBadge(9), "9");
-  assert.equal(notificationBadge(10), "9+");
-  assert.equal(notificationBadge(240), "9+");
+  assert.equal(notificationBadge(10), "10");
+  assert.equal(notificationBadge(99), "99");
+  assert.equal(notificationBadge(100), "99+");
+  assert.equal(notificationBadge(240), "99+");
   assert.equal(notificationCountLabel(1), null);
   assert.equal(notificationCountLabel(3), "3 new");
   assert.equal(notificationBellLabel(0, 0), "Notifications");

@@ -41,8 +41,8 @@ export function notificationBellLabel(
   return label;
 }
 
-export const NOTIFICATION_BADGE_CAP = 9;
-/** Bell badge text: empty when nothing is unread, capped at "9+". */
+export const NOTIFICATION_BADGE_CAP = 99;
+/** Bell badge text: empty when nothing is unread, capped at "99+". */
 export function notificationBadge(unread: number): string {
   if (!Number.isFinite(unread) || unread <= 0) return "";
   return unread > NOTIFICATION_BADGE_CAP ? `${NOTIFICATION_BADGE_CAP}+` : String(Math.floor(unread));

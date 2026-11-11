@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 
 /**
  * The bell beside Search in the assistant header. Hidden entirely without
- * the Notifications feature; the badge turns amber while a decision waits.
+ * the Notifications feature; a separate amber dot marks waiting decisions.
  */
 export function NotificationsBell() {
   useUiTranslation();
@@ -52,19 +52,22 @@ export function NotificationsBell() {
               active && "bg-overlay-strong text-foreground",
             )}
           >
-            <Bell aria-hidden="true" className="h-4 w-4" />
-            {unread > 0 ? (
-              <span
-                aria-hidden="true"
-                data-needs-decision={needsDecision > 0 ? "" : undefined}
-                className={cn(
-                  badgeVariants({ variant: needsDecision > 0 ? "warning" : "default" }),
-                  "absolute -right-1 -top-1 min-w-4 justify-center rounded-full px-1 py-0 tabular-nums",
-                )}
-              >
-                {notificationBadgeText(unread)}
-              </span>
-            ) : null}
+            <span aria-hidden="true" className="relative flex h-4 w-4 items-center justify-center">
+              <Bell className="h-4 w-4" />
+              {unread > 0 ? (
+                <span
+                  aria-hidden="true"
+                  data-notification-count=""
+                  className={cn(
+                    badgeVariants({ variant: "secondary" }),
+                    "absolute right-0 top-0 min-w-4 -translate-y-1/2 translate-x-1/2 justify-center rounded-full border-hairline px-1 py-0 tabular-nums text-foreground",
+                  )}
+                >
+                  {notificationBadgeText(unread)}
+                </span>
+              ) : null}
+              {needsDecision > 0 ? <span data-needs-decision="" className="absolute -bottom-1 -right-1 h-1.5 w-1.5 rounded-full bg-warning ring-2 ring-sidebar" /> : null}
+            </span>
           </button>
         </TooltipTrigger>
         <TooltipContent side="bottom" sideOffset={6}>

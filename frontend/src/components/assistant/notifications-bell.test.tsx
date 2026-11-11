@@ -54,13 +54,17 @@ it("is absent, and reads nothing, without the Notifications feature", async () =
   expect(summaryReads).toBe(0);
 });
 
-it("shows the unread count, capped at 9+, and names what needs you", async () => {
+it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("shows %s unread as %s and keeps the decision marker separate", async (count, badge) => {
   signIn([FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS]);
-  summary = { unread_count: 12, needs_decision_count: 2, by_source: [] };
+  summary = { unread_count: count, needs_decision_count: 2, by_source: [] };
   renderBell();
-  const bell = await screen.findByRole("button", { name: "Notifications, 12 unread, 2 need you" });
-  expect(bell).toHaveTextContent("9+");
+  const bell = await screen.findByRole("button", { name: `Notifications, ${count} unread, 2 need you` });
+  const countBadge = bell.querySelector("[data-notification-count]")!;
+  expect(countBadge).toHaveTextContent(String(badge));
+  expect(countBadge).toHaveClass("absolute", "tabular-nums");
+  expect(countBadge.parentElement).toHaveClass("relative");
   expect(bell.querySelector("[data-needs-decision]")).not.toBeNull();
+  expect(countBadge).not.toHaveAttribute("data-needs-decision");
   expect(bell).toHaveAttribute("aria-haspopup", "dialog");
   expect(bell).toHaveAttribute("aria-expanded", "false");
 });
@@ -95,7 +99,9 @@ it("opens the notifications panel from the bell and marks it expanded while open
 
 it("formats the badge and label", () => {
   expect(notificationBadgeText(9)).toBe("9");
-  expect(notificationBadgeText(10)).toBe("9+");
+  expect(notificationBadgeText(10)).toBe("10");
+  expect(notificationBadgeText(99)).toBe("99");
+  expect(notificationBadgeText(100)).toBe("99+");
   expect(notificationBellLabel(0, 0)).toBe("Notifications");
   expect(notificationBellLabel(1, 1)).toBe("Notifications, 1 unread, 1 needs you");
 });
