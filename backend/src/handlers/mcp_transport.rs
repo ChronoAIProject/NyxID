@@ -1,3 +1,5 @@
+#[path = "mcp_tool_results.rs"]
+mod retained_results;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -2337,6 +2339,9 @@ async fn handle_tools_list(
         .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
     {
         tool_defs.push(crate::services::assistant_resource_service::definition());
+        if retained_results::chat(auth).is_some() {
+            tool_defs.push(crate::services::assistant_tool_result_service::definition());
+        }
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -2378,6 +2383,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
             let mut definitions = mcp_service::generate_tool_definitions(&[], None);
             definitions.extend(crate::services::machine_tools::definitions());
             definitions.push(crate::services::assistant_resource_service::definition());
+            definitions.push(crate::services::assistant_tool_result_service::definition());
             definitions.push(crate::services::assistant_upload_service::definition());
             definitions.push(crate::services::assistant_upload_service::list_definition());
             definitions
@@ -2765,6 +2771,8 @@ async fn handle_tools_call_inner(
         request.params.as_ref(),
         response.extensions().get::<ToolResultDigest>(),
     ) {
+        let normalized = retained_results::progress_params(params);
+        let params = &normalized;
         let call = crate::services::assistant_continuation::call_digest(
             params
                 .get("name")
@@ -2839,6 +2847,7 @@ async fn dispatch_tools_call(
                 | "nyx__ssh_exec"
                 | "nyx__ssh_list_services"
                 | "nyx__resource_get"
+                | "nyxid__read_tool_result"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
@@ -2874,6 +2883,15 @@ async fn dispatch_tools_call(
         return refused;
     }
 
+    if tool_name == crate::services::assistant_tool_result_service::TOOL_NAME {
+        return Box::pin(retained_results::read(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
+        ))
+        .await;
+    }
     if tool_name.starts_with("nyxid__") {
         return Box::pin(handle_account_tool(
             state,
@@ -3698,7 +3716,12 @@ fn dispatch_service_tool<'a>(
             )
             .await;
         }
+        let (content, business_digest) =
+            box_tool_future(|| retained_results::project(state, auth, content, is_error)).await;
         let mut result = content_result(request.id.clone(), content, is_error);
+        if let Some(digest) = business_digest {
+            result.extensions_mut().insert(digest);
+        }
         classify_service_tool_response(&mut result, is_policy_refusal, failure);
         match concurrency {
             Some(lease) => lease.hold_response(result),
@@ -4392,6 +4415,9 @@ fn guest_turn(auth: &McpAuthContext) -> bool {
 /// team, memory, connection, SSH and Oracle tools act for the owner and are
 /// refused.
 fn guest_tool_allowed(tool_name: &str) -> bool {
+    if tool_name == crate::services::assistant_tool_result_service::TOOL_NAME {
+        return true;
+    }
     if tool_name.starts_with("nyxid__") {
         return false;
     }
@@ -4970,6 +4996,9 @@ async fn handle_meta_call_tool(
         ))
         .await;
     }
+    if tool_name == crate::services::assistant_tool_result_service::TOOL_NAME {
+        return Box::pin(retained_results::read(state, auth, &inner_args, request_id)).await;
+    }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
     }
@@ -5339,6 +5368,8 @@ async fn handle_meta_call_tool(
         .await;
     }
 
+    let (content, business_digest) =
+        box_tool_future(|| retained_results::project(state, auth, content, is_error)).await;
     // Embed tools/list_changed inline for SSE-capable clients
     let mut result = if changed && client_accepts_sse {
         content_result_with_notifications(
@@ -5353,6 +5384,9 @@ async fn handle_meta_call_tool(
     } else {
         content_result(request_id, content, is_error)
     };
+    if let Some(digest) = business_digest {
+        result.extensions_mut().insert(digest);
+    }
     classify_service_tool_response(&mut result, is_policy_refusal, failure);
     match concurrency {
         Some(lease) => lease.hold_response(result),
@@ -5499,6 +5533,9 @@ async fn handle_meta_search(
             .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
         {
             candidates.push(crate::services::assistant_resource_service::definition());
+            if retained_results::chat(auth).is_some() {
+                candidates.push(crate::services::assistant_tool_result_service::definition());
+            }
         }
     }
     let ranked_candidates = if exact_service_id_query {

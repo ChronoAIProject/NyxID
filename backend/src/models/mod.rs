@@ -266,3 +266,5 @@ pub mod platform_model;
 pub mod platform_model_tariff;
 
 pub mod execution_permission_channel;
+
+pub mod assistant_tool_result;
