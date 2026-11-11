@@ -1,0 +1,40 @@
+name: Runner DNS probe (temporary)
+on:
+  pull_request:
+    paths: ['.github/workflows/runner-dns-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Probe
+        run: |
+          set +e
+          echo "== resolv.conf"; cat /etc/resolv.conf | grep -v '^#'
+          echo "== resolvectl"; resolvectl status 2>/dev/null | grep -E "DNS Servers|Current DNS|Link|DNS Domain" | head -12
+          echo "== system resolver"
+          for h in archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com ubuntu.com canonical.com mirrors.edge.kernel.org ubuntu-archive-asm.trafficmanager.net github.com deb.debian.org; do
+            printf '%s => %s\n' "$h" "$(getent ahostsv4 "$h" 2>/dev/null | awk 'NR==1{print $1}')"
+          done
+          echo "== direct resolvers"
+          for r in 168.63.129.16 1.1.1.1 8.8.8.8 9.9.9.9; do
+            printf '%s archive => %s | azure => %s\n' "$r" "$(dig +short +time=3 +tries=1 @"$r" archive.ubuntu.com | head -1)" "$(dig +short +time=3 +tries=1 @"$r" azure.archive.ubuntu.com | tail -1)"
+          done
+          echo "== canonical nameservers"
+          for ns in ns1.canonical.com ns2.canonical.com ns3.canonical.com; do
+            ip=$(dig +short +time=3 +tries=1 @1.1.1.1 "$ns" | head -1)
+            printf '%s (%s) => %s\n' "$ns" "$ip" "$(dig +short +time=3 +tries=1 @"$ip" archive.ubuntu.com | head -1)"
+          done
+          echo "== reachability"
+          ip=$(dig +short +time=3 +tries=1 @1.1.1.1 archive.ubuntu.com | head -1)
+          echo "archive ip via 1.1.1.1: $ip"
+          curl -s -o /dev/null -w 'archive.ubuntu.com (pinned) http=%{http_code} t=%{time_total}\n' --max-time 15 --resolve "archive.ubuntu.com:80:$ip" http://archive.ubuntu.com/ubuntu/dists/noble/InRelease
+          sip=$(dig +short +time=3 +tries=1 @1.1.1.1 security.ubuntu.com | head -1)
+          curl -s -o /dev/null -w 'security.ubuntu.com (pinned) http=%{http_code} t=%{time_total}\n' --max-time 15 --resolve "security.ubuntu.com:80:$sip" http://security.ubuntu.com/ubuntu/dists/noble-security/InRelease
+          aip=$(dig +short +time=3 +tries=1 @1.1.1.1 azure.archive.ubuntu.com | tail -1)
+          curl -s -o /dev/null -w 'azure.archive.ubuntu.com (pinned) http=%{http_code} t=%{time_total}\n' --max-time 15 --resolve "azure.archive.ubuntu.com:80:$aip" http://azure.archive.ubuntu.com/ubuntu/dists/noble/InRelease
+          curl -s -o /dev/null -w 'kernel.org mirror http=%{http_code} t=%{time_total}\n' --max-time 15 https://mirrors.edge.kernel.org/ubuntu/dists/noble/InRelease
+          curl -s -o /dev/null -w 'kernel.org mirror security http=%{http_code} t=%{time_total}\n' --max-time 15 https://mirrors.edge.kernel.org/ubuntu/dists/noble-security/InRelease
+          exit 0
