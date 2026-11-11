@@ -39,7 +39,9 @@ impl ReviewNotes {
             "cancelled"
         } else {
             match row.status.as_str() {
-                "denied" => "denied",
+                // ApprovalRequest stores the owner's denial as "rejected";
+                // "denied" is the retained proposal state, not the request status.
+                "rejected" => "denied",
                 "expired" => "expired",
                 "pending" if row.expires_at <= Utc::now() => "expired",
                 "pending" => "pending",

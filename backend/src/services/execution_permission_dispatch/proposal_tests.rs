@@ -1507,6 +1507,20 @@ async fn retained_review_batch_reports_distinct_denials_and_expiries_once_after_
     let (a, b) = tokio::join!(proposals::sweep(&f.state), proposals::sweep(&f.state));
     a.unwrap();
     b.unwrap();
+    // Assert the durable contract before presentation: request denials use
+    // "rejected", while the retained proposal itself uses "denied".
+    for status in ["rejected", "expired"] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .count_documents(doc! {"_id":{"$in":&ids},"status":status})
+                .await
+                .unwrap(),
+            3,
+            "unexpected durable request status: {status}",
+        );
+    }
     let resumed = event_turn(&f, &row).await;
     assert_eq!(resumed.active_turn.as_ref().unwrap().events.len(), 6);
     let event_text = engine::events_text(&resumed.active_turn.as_ref().unwrap().events);
