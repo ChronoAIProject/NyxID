@@ -60,16 +60,16 @@ pub enum ScopeRemoval {
     /// provider's own settings. UI allows removal with a "revoke at <provider>"
     /// note.
     Manual,
-    /// Removal can't be achieved by re-auth because the provider tracks scopes
-    /// at the grant level as a union (e.g. GitHub). Needs a provider-specific
-    /// teardown not yet implemented; UI keeps granted scopes locked.
+    /// NyxID does not support reliable grant removal through this re-auth flow
+    /// (e.g. GitHub). A smaller explicit token scope does not revoke older app
+    /// access; UI keeps known granted scopes locked until teardown is supported.
     Unsupported,
 }
 
 /// Per-provider scope-removal capability. `auto` = providers with a seeded
 /// `revocation_url` and standard downscope-on-reauth; `manual` = downscope
-/// works but no programmatic revoke; `unsupported` = grant-level union
-/// (GitHub) where re-auth can't narrow. Unknown/uncurated providers default to
+/// works but no programmatic revoke; `unsupported` = add-only management
+/// (GitHub) where re-auth alone does not reliably revoke old app access. Unknown/uncurated providers default to
 /// `manual` (allow removal, advise verifying at the provider) — the long tail
 /// still needs per-provider verification before promising `auto`.
 pub fn removal_capability(slug: &str) -> ScopeRemoval {
@@ -130,6 +130,8 @@ pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
             "read:user",
             "user:email",
             "read:org",
+            "read:project",
+            "project",
             "repo",
             "public_repo",
             "repo:status",
@@ -545,6 +547,18 @@ const GITHUB: &[(&str, &str, &str, bool)] = &[
         "Read org",
         "Read org membership and teams.",
         false,
+    ),
+    (
+        "read:project",
+        "Projects (read)",
+        "Read user and organization projects.",
+        false,
+    ),
+    (
+        "project",
+        "Projects (read/write)",
+        "Read and write user and organization projects.",
+        true,
     ),
     (
         "write:org",
@@ -1333,6 +1347,18 @@ mod tests {
         let github = platform_scope_allowlist("github").unwrap();
         for s in ["read:user", "user:email"] {
             assert!(github.contains(&s), "github allowlist missing default {s}");
+        }
+    }
+
+    #[test]
+    fn github_projects_shared_app_scopes_match_display_catalog() {
+        let allowed = platform_scope_allowlist("github").unwrap();
+        let catalog = for_provider("github").unwrap();
+        for (scope, sensitive) in [("read:project", false), ("project", true)] {
+            assert!(allowed.contains(&scope));
+            let entry = catalog.iter().find(|entry| entry.scope == scope).unwrap();
+            assert_eq!(entry.sensitive, sensitive);
+            assert!(!entry.required);
         }
     }
 

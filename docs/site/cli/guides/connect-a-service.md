@@ -273,15 +273,17 @@ nyxid service scopes api-twitter
 nyxid service scopes api-twitter --set "tweet.read,media.write" --no-wait
 ```
 
+Without `--set`, both local and hosted wizards select the connection's recorded grants (catalog defaults only when no grant is recorded). On providers that support narrowing, `--set` is the exact desired set: review the removal summary and acknowledge the warning before continuing. Requested shared-app scopes that are unavailable remain visible with a reason and block continuation until removed or requested through your own app.
+
 This re-authorizes the **same** connection in place — its agent bindings, node routing, and org sharing are preserved (it never creates a duplicate). Because changing scopes means re-consenting, the provider's authorization screen still opens in a browser, exactly as when you first add the connection; `--no-wait` lets that browser be on a different device.
 
 What you can remove depends on the provider:
 
 | Provider behavior | Removal |
 |---|---|
-| Has a token-revocation endpoint (X, Google, Discord, Slack, Twitch, Reddit, TikTok) | Removal applies; the old grant is revoked. |
-| No revocation endpoint (Facebook, Spotify, LinkedIn, Microsoft, Lark/Feishu) | NyxID uses only the new scopes, but the old grant lingers until you revoke it in the provider's own settings. |
-| Grant-level scope union (GitHub) | Granted scopes are locked — re-auth can't narrow them. You can still add scopes. |
+| Supports narrower tokens (X, Google, Discord, Slack, Twitch, Reddit, TikTok) | The wizard requests the selected scopes after a removal warning. The provider determines the new token's grant; reauthorization alone is not a promise that all older tokens or grants are revoked. |
+| Manual grant cleanup (Facebook, Spotify, LinkedIn, Microsoft, Lark/Feishu) | The wizard requests the selected scopes; review and revoke older app access in the provider's settings where needed. |
+| Add-only scope management (GitHub) | Recorded granted scopes are locked and retained in the request, even if omitted from `--set`. You can still add scopes. |
 
 > **Note:** dropping `offline.access` ("Stay connected") removes the refresh token, so the connection stops auto-refreshing and will need reconnecting when the access token expires. Keep it unless you mean to.
 
@@ -323,3 +325,28 @@ Add `--org <id|slug|name>` to `service add` (you must be an org admin). Every me
 - [Your first agent call](/docs/ai/getting-started/first-agent-call) — let an AI agent reach this service over MCP.
 - [Set up a credential node](/docs/cli/guides/credential-node) — proxy to localhost / firewalled APIs.
 - [Command reference: `service`](/docs/cli/reference/service) — every subcommand and flag, in one place.
+
+
+### GitHub Projects on the shared app
+
+NyxID's shared classic GitHub OAuth App supports `read:project` (Projects, read)
+and `project` (Projects, read/write). Choose only the access you need:
+
+```bash
+nyxid service scopes api-github --set "read:user,user:email,repo,read:project"
+```
+
+Known GitHub grants such as `repo` stay selected and locked; you can also open
+`nyxid service scopes api-github` and add Projects (read) in the picker. The
+connection id and bindings stay unchanged. No operator permission toggle on the
+classic OAuth App is needed, but the user must consent and organization approval,
+SSO and project visibility can still restrict access.
+
+The hosted GitHub overlay offers typed read-only list/get Projects v2 and
+field/item listing for organizations and users. The generic proxy also supports
+`GET /orgs/{org}/projectsV2/{project_number}`. A 404 alone does not establish a
+missing scope: verify project number, organization access and upstream policy.
+
+GitHub's documented automatic union applies when `scope` is omitted. Explicitly
+scoped tokens may differ, and authorizing a smaller scope set is not a reliable
+way to revoke older app access. NyxID therefore keeps this flow add-only.

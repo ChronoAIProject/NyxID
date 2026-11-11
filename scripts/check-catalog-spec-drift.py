@@ -8,7 +8,7 @@ scheduled CI job turns red and a human updates the overlay.
 
 Only providers that publish a machine-readable spec are checked; the rest
 (Telegram, Lark/Feishu, Reddit, Spotify, Twitch, Facebook, Microsoft
-Graph*, GitHub*) either publish nothing fetchable or something too large
+Graph*) either publish nothing fetchable or something too large
 to diff meaningfully, and are skipped by design.
 
 Notion publishes a current spec. Its version-pinned legacy database query is
@@ -32,6 +32,11 @@ except ImportError:  # pragma: no cover
 # official paths so they align with overlay paths, which are relative to
 # the seeded base_url)
 OFFICIAL_SPECS = {
+    "github.openapi.json": (
+        "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json",
+        False,
+        "",
+    ),
     "chrono-sandbox.openapi.json": ("https://sandbox.chrono-ai.fun/openapi.json", False, ""),
     "aurinko.openapi.json": (
         "https://apirefs.aurinko.io/assets/swagger.json",
