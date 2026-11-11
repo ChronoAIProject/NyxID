@@ -578,3 +578,61 @@ async fn catalog_drift_target_mismatch_and_expired_recovery_remain_closed() {
     f.assert_single_intent().await;
     f.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn catalog_endpoint_repair_never_rebinds_retained_pre_move_creation() {
+    let f = Fixture::new().await;
+    crate::services::unified_key_service::auto_provision_no_auth_services(&f.db,&f.owner).await.unwrap();
+    let connection = f.db.collection::<crate::models::user_service::UserService>("user_services").find_one(doc! {"user_id":&f.owner,"catalog_service_id":&f.catalog.id}).await.unwrap().unwrap();
+    let body = br#"{"machine_included":false}"#;
+    let key = "pre-domain-move-retained-request";
+    let permit = f.admit(&f.target,"/api/v1/sandboxes",key,body).await.unwrap();
+    permit.before_send(&f.request("/api/v1/sandboxes",key,body)).await.unwrap();
+    let row = f.saved(&permit.creation.as_ref().unwrap().id).await;
+    let next = MockServer::start().await;
+    f.db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME).update_one(doc! {"_id":&f.catalog.id},doc! {"$set":{"base_url":next.uri()}}).await.unwrap();
+    assert_eq!(crate::services::catalog_endpoint_service::reconcile(&f.db,Some(&f.owner),None).await.unwrap(),1);
+    let resolution = crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(&f.db,&f.keys,&f.owner,&connection.id,None).await.unwrap().unwrap();
+    assert_eq!(resolution.target.base_url,next.uri());
+    assert_eq!(resolution.user_service_id,connection.id);
+    assert!(f.admit(&resolution.target,"/api/v1/sandboxes",key,body).await.is_err());
+    assert!(f.gateway().replay_creation(&f.keys,&row,body).await.is_err());
+    assert!(recover_creation(&f.db,&f.keys,&f.gateway(),&f.owner,&row.sandbox_ref_id,row.sandbox_generation).await.is_err());
+    let retained = f.saved(&row.id).await;
+    assert_eq!(retained.deployment_fingerprint,row.deployment_fingerprint);
+    assert_eq!(retained.idempotency_key,row.idempotency_key);
+    assert_eq!(retained.request_ciphertext,row.request_ciphertext);
+    assert_eq!(retained.sandbox_ref_id,row.sandbox_ref_id);
+    assert_eq!(retained.submission_generation,row.submission_generation);
+    assert_eq!(retained.submission_state,row.submission_state);
+    assert_eq!(f.post_count().await,0);
+    assert!(next.received_requests().await.unwrap().is_empty());
+    f.assert_single_intent().await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn endpoint_only_repair_keeps_current_catalog_creation_recoverable() {
+    let f = Fixture::new().await;
+    f.observations().await;
+    crate::services::unified_key_service::auto_provision_no_auth_services(&f.db,&f.owner).await.unwrap();
+    let connection = f.db.collection::<crate::models::user_service::UserService>("user_services").find_one(doc! {"user_id":&f.owner,"catalog_service_id":&f.catalog.id}).await.unwrap().unwrap();
+    let body = br#"{"machine_included":false}"#;
+    let key = "current-catalog-repair-recovery";
+    let permit = f.admit(&f.target,"/api/v1/agents",key,body).await.unwrap();
+    let row = permit.creation.as_ref().unwrap();
+    change_creation(&f.db,row,CreationChange::Dispatch).await.unwrap();
+    change_creation(&f.db,row,CreationChange::Receipt(CreationReceipt::Lifecycle("op_1".into()))).await.unwrap();
+    f.db.collection::<bson::Document>("user_endpoints").update_one(doc! {"_id":&connection.endpoint_id},doc! {"$set":{"url":"https://stale.example"}}).await.unwrap();
+    assert_eq!(crate::services::catalog_endpoint_service::reconcile(&f.db,Some(&f.owner),None).await.unwrap(),1);
+    let recovered = recover_creation(&f.db,&f.keys,&f.gateway(),&f.owner,&row.sandbox_ref_id,row.sandbox_generation).await.unwrap();
+    assert!(!recovered.pending);
+    let saved = f.saved(&row.id).await;
+    assert_eq!(saved.submission_state,"confirmed");
+    assert_eq!(saved.idempotency_key,key);
+    assert_eq!(saved.deployment_fingerprint,row.deployment_fingerprint);
+    assert_eq!(saved.id,row.id);
+    assert_eq!(f.post_count().await,0);
+    f.assert_single_intent().await;
+    f.db.drop().await.unwrap();
+}

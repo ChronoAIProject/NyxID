@@ -2070,7 +2070,7 @@ mod tests {
                 Mock::given(method("POST"))
                     .and(path("/device"))
                     .and(body_string_contains(
-                        "scope=read%3Auser+read%3Aorg+public_repo",
+                        "scope=read%3Auser+read%3Aorg+public_repo+read%3Aproject",
                     ))
                     .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "device_code": "test-device-code", "user_code": "TEST-CODE",
@@ -2089,7 +2089,7 @@ mod tests {
                     assistant_personal: false,
                     service_slug: service.slug.clone(),
                     use_platform_key: None,
-                    scopes: vec!["read:org, public_repo".to_string()],
+                    scopes: vec!["read:org, public_repo, read:project".to_string()],
                     label: None,
                     endpoint_url: None,
                     requested_by: None,
@@ -2118,7 +2118,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(preview.scopes, ["read:org", "public_repo"]);
+            assert_eq!(preview.scopes, ["read:org", "public_repo", "read:project"]);
             let Json(status) = handlers::get_connect_link(
                 State(state.clone()),
                 test_auth_user(&actor),
@@ -2171,7 +2171,10 @@ mod tests {
                         url::Url::parse(completed.authorization_url.as_deref().unwrap()).unwrap();
                     let params: std::collections::HashMap<_, _> =
                         url.query_pairs().into_owned().collect();
-                    assert_eq!(params["scope"], "read:user read:org public_repo");
+                    assert_eq!(
+                        params["scope"],
+                        "read:user read:org public_repo read:project"
+                    );
                     let oauth = db
                         .collection::<crate::models::oauth_state::OAuthState>(
                             crate::models::oauth_state::COLLECTION_NAME,

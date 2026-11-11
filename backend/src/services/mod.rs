@@ -587,3 +587,4 @@ pub mod lark_wiki;
 pub mod platform_model_credentials;
 
 pub mod assistant_tool_result_service;
+pub(crate) mod catalog_endpoint_service;

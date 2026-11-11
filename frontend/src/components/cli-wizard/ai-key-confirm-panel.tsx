@@ -260,7 +260,9 @@ export function AiKeyConfirm({
     // `__custom__` is the CatalogGrid sentinel for the "Custom /
     // self-hosted…" card. It is not a real catalog entry — skip the
     // fetch and render the CustomServiceForm below instead.
-    enabled: Boolean(trimmedSlug) && trimmedSlug !== "__custom__",
+    // Manage mode resolves the canonical catalog from the existing key;
+    // its connection slug may be renamed or numbered (api-github-2).
+    enabled: Boolean(trimmedSlug) && trimmedSlug !== "__custom__" && !prefill.reconnect_key_id,
   });
 
   const entryErrorMessage = (() => {
@@ -387,6 +389,7 @@ export function AiKeyConfirm({
 
 /** Shape of `GET /keys/{id}` we read for manage-scopes mode. */
 interface ExistingKeyShape {
+  readonly oauth_app_source?: "platform" | "byo" | null;
   readonly id: string;
   readonly slug: string;
   readonly label: string;
@@ -465,8 +468,11 @@ function ManageScopesPanel({
       : null;
   const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
   const [override, setOverride] = useState<readonly string[] | null>(null);
+  // Unsupported narrowing is add-only in the submitted request, not just
+  // in the picker appearance. Preserve all known grants even with --set.
+  const lockedScopes = entry?.scope_removal === "unsupported" ? granted : [];
   const selectedScopes = includeRequiredScopes(
-    override ?? seedScopes,
+    [...(override ?? seedScopes), ...lockedScopes],
     entry?.scope_catalog ?? [],
   );
   const scopeOverride =
@@ -476,7 +482,18 @@ function ManageScopesPanel({
     entry?.scope_catalog?.some((scope) => scope.required)
       ? selectedScopes
       : undefined;
-  const setSelectedScopes = setOverride;
+  const [removalAcknowledged, setRemovalAcknowledged] = useState(false);
+  const setSelectedScopes = (scopes: readonly string[]) => {
+    setOverride(scopes);
+    setRemovalAcknowledged(false);
+  };
+  const removedScopes = granted.filter((scope) => !selectedScopes.includes(scope));
+  const platformAllowlist = key?.oauth_app_source === "platform"
+    ? entry?.platform_scope_allowlist
+    : null;
+  const blockedScopes = platformAllowlist
+    ? selectedScopes.filter((scope) => !platformAllowlist.includes(scope))
+    : [];
 
   const [authFlowActive, setAuthFlowActive] = useState(false);
 
@@ -509,11 +526,6 @@ function ManageScopesPanel({
       </div>
     );
   }
-
-  // `unsupported` providers (e.g. GitHub) can't narrow a grant by re-auth, so
-  // lock the granted scopes (add-only).
-  const lockedScopes =
-    entry.scope_removal === "unsupported" ? granted : [];
 
   if (authFlowActive) {
     return (
@@ -556,12 +568,25 @@ function ManageScopesPanel({
         lockedScopes={lockedScopes}
         grantedScopes={granted}
         providerName={entry.name}
+        platformAllowlist={platformAllowlist}
         idPrefix="pair-manage-scope"
       />
+
+      {removedScopes.length > 0 ? (
+        <Label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={removalAcknowledged}
+            onChange={(event) => setRemovalAcknowledged(event.target.checked)}
+          />
+          {translateUi("I understand that removing these permissions may stop apps using this connection.")}
+        </Label>
+      ) : null}
 
       <Button
         variant="primary"
         className="w-full"
+        disabled={blockedScopes.length > 0 || (removedScopes.length > 0 && !removalAcknowledged)}
         onClick={() => setAuthFlowActive(true)}
       >{translateUi("Re-authorize with these permissions")}{" "}
         <ButtonIcon variant="primary">
