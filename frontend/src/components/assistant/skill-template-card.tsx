@@ -1,6 +1,7 @@
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 
 /** One step of a NYX template outline, as the backend's outline reader returns it. */
 export interface SkillTemplateStep {
@@ -60,11 +61,14 @@ export function SkillTemplateCard({
   onStart,
   onDismiss,
 }: SkillTemplateCardProps) {
+  const { t } = useUiTranslation();
   const label =
-    kind === "skillset" ? `Skillset · ${members.length} skills` : "Skill";
+    kind === "skillset"
+      ? t("Skillset · {{count}} skills", { count: members.length })
+      : t("Skill");
   return (
     <section
-      aria-label={`${name} ${kind}`}
+      aria-label={kind === "skillset" ? t("{{name}} skillset", { name }) : t("{{name}} skill", { name })}
       className={`${STATUS_CARD_MAX_W} space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
       <div className="space-y-1">
@@ -84,7 +88,7 @@ export function SkillTemplateCard({
             ))}
           </div>
 
-          <ol aria-label="Steps" className="space-y-2.5">
+          <ol aria-label={t("Steps")} className="space-y-2.5">
             {outline.steps.map((step, index) => (
               <li key={step.id} className="flex gap-2.5">
                 <span
@@ -102,11 +106,11 @@ export function SkillTemplateCard({
                     <div className="flex flex-wrap gap-1.5">
                       {step.uses ? (
                         <Badge variant="secondary" className="max-w-full break-all">
-                          Uses {step.uses.name}
+                          {t("Uses {{name}}", { name: step.uses.name })}
                           <span className="ml-1 font-mono font-normal text-text-tertiary">{step.uses.version}</span>
                         </Badge>
                       ) : null}
-                      {step.asks_you ? <Badge variant="info">Asks you</Badge> : null}
+                      {step.asks_you ? <Badge variant="info">{t("Asks you")}</Badge> : null}
                     </div>
                   ) : null}
                 </div>
@@ -118,13 +122,13 @@ export function SkillTemplateCard({
             <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-border/50 pt-3">
               {outline.needs ? (
                 <>
-                  <dt className="type-group-label text-text-tertiary">Needs</dt>
+                  <dt className="type-group-label text-text-tertiary">{t("Needs")}</dt>
                   <dd className="type-secondary break-words text-muted-foreground">{outline.needs}</dd>
                 </>
               ) : null}
               {outline.produces ? (
                 <>
-                  <dt className="type-group-label text-text-tertiary">Produces</dt>
+                  <dt className="type-group-label text-text-tertiary">{t("Produces")}</dt>
                   <dd className="type-secondary break-words text-muted-foreground">{outline.produces}</dd>
                 </>
               ) : null}
@@ -133,13 +137,13 @@ export function SkillTemplateCard({
         </>
       ) : (
         <p className="type-secondary rounded-lg border border-dashed border-border p-3 text-text-tertiary">
-          This skill has no NYX template outline. NyxBot explains it from its guidance instead.
+          {t("This skill has no NYX template outline. NyxBot explains it from its guidance instead.")}
         </p>
       )}
 
       {kind === "skillset" && members.length ? (
         <div className="space-y-1.5 border-t border-border/50 pt-3">
-          <p className="type-group-label text-text-tertiary">Included skills</p>
+          <p className="type-group-label text-text-tertiary">{t("Included skills")}</p>
           <div className="flex flex-wrap gap-1.5">
             {members.map((member) => (
               <Badge key={member} variant="secondary" className="max-w-full break-all">
@@ -152,15 +156,15 @@ export function SkillTemplateCard({
 
       {started ? (
         <p role="status" className="type-secondary text-right text-text-tertiary">
-          Started. Progress continues below.
+          {t("Started. Progress continues below.")}
         </p>
       ) : (
         <div className="flex justify-end gap-2">
           <Button variant="outline" disabled={!onDismiss} onClick={onDismiss}>
-            Not now
+            {t("Not now")}
           </Button>
           <Button variant="primary" disabled={!onStart || !outline} onClick={onStart}>
-            {needsAttach ? "Add & start" : "Start"}
+            {needsAttach ? t("Add & start") : t("Start")}
           </Button>
         </div>
       )}

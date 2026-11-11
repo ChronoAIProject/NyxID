@@ -2,6 +2,7 @@ import { Check, Circle, Loader2, MessageCircleQuestion, SkipForward, X } from "l
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { cn } from "@/lib/utils";
 
 export type SkillRunStepStatus = "pending" | "running" | "needs_you" | "done" | "failed" | "skipped";
@@ -37,21 +38,22 @@ export interface SkillRunChecklistProps {
 const ICON = "size-3.5 shrink-0";
 
 function StepIcon({ status, small = false }: { readonly status: SkillRunStepStatus; readonly small?: boolean }) {
+  const { t } = useUiTranslation();
   const size = small ? "size-3 shrink-0" : ICON;
   switch (status) {
     case "running":
-      return <Loader2 aria-label="Running" className={cn(size, "animate-spin text-nyx-secondary-400")} />;
+      return <Loader2 aria-label={t("Running")} className={cn(size, "animate-spin text-nyx-secondary-400")} />;
     case "done":
-      return <Check aria-label="Done" className={cn(size, "text-success")} />;
+      return <Check aria-label={t("Done")} className={cn(size, "text-success")} />;
     case "needs_you":
-      return <MessageCircleQuestion aria-label="Needs you" className={cn(size, "text-warning")} />;
+      return <MessageCircleQuestion aria-label={t("Needs you")} className={cn(size, "text-warning")} />;
     case "failed":
-      return <X aria-label="Failed" className={cn(size, "text-destructive")} />;
+      return <X aria-label={t("Failed")} className={cn(size, "text-destructive")} />;
     case "skipped":
-      return <SkipForward aria-label="Skipped" className={cn(size, "text-text-tertiary")} />;
+      return <SkipForward aria-label={t("Skipped")} className={cn(size, "text-text-tertiary")} />;
     case "pending":
     default:
-      return <Circle aria-label="Not started" className={cn(size, "text-text-tertiary/60")} />;
+      return <Circle aria-label={t("Not started")} className={cn(size, "text-text-tertiary/60")} />;
   }
 }
 
@@ -74,6 +76,7 @@ function currentStep(steps: readonly SkillRunStep[]): number {
  * arrive as their own cards.
  */
 export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop }: SkillRunChecklistProps) {
+  const { t } = useUiTranslation();
   const done = steps.filter((step) => step.status === "done" || step.status === "skipped").length;
   const current = currentStep(steps);
   const finished = current === -1;
@@ -81,20 +84,20 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
   const stopped = finished && failed !== -1;
   const active = finished ? undefined : steps[current];
   const heading = stopped
-    ? "Stopped"
+    ? t("Stopped")
     : finished
-      ? "Done"
+      ? t("Done")
       : kind === "skillset"
-        ? "Running skillset"
-        : "Running skill";
+        ? t("Running skillset")
+        : t("Running skill");
   const label = stopped
-    ? `Step ${failed + 1} of ${steps.length} failed`
+    ? t("Step {{current}} of {{total}} failed", { current: failed + 1, total: steps.length })
     : finished
-      ? `Finished · ${steps.length} steps`
-      : `Step ${current + 1} of ${steps.length}`;
+      ? t("Finished · {{count}} steps", { count: steps.length })
+      : t("Step {{current}} of {{total}}", { current: current + 1, total: steps.length });
   return (
     <section
-      aria-label={`${name} run`}
+      aria-label={t("{{name}} run", { name })}
       className={`${STATUS_CARD_MAX_W} space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
       <div className="space-y-2">
@@ -115,7 +118,7 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
         </div>
         <div
           role="progressbar"
-          aria-label="Steps done"
+          aria-label={t("Steps done")}
           aria-valuemin={0}
           aria-valuemax={steps.length}
           aria-valuenow={done}
@@ -131,7 +134,7 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
         </div>
       </div>
 
-      <ol aria-label="Steps" className="space-y-1">
+      <ol aria-label={t("Steps")} className="space-y-1">
         {steps.map((step) => {
           const live = step.status === "running";
           const asking = step.status === "needs_you";
@@ -158,7 +161,7 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
                   >
                     {step.title}
                   </span>
-                  {asking ? <Badge variant="warning">Needs you</Badge> : null}
+                  {asking ? <Badge variant="warning">{t("Needs you")}</Badge> : null}
                   {step.uses ? (
                     <span className="type-secondary font-mono text-text-tertiary">{step.uses.name}</span>
                   ) : null}
@@ -169,7 +172,7 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
                   </p>
                 ) : null}
                 {(live || asking) && step.substeps?.length ? (
-                  <ul aria-label={`${step.uses?.name ?? step.title} steps`} className="space-y-1 border-l border-hairline py-0.5 pl-2.5">
+                  <ul aria-label={t("{{name}} steps", { name: step.uses?.name ?? step.title })} className="space-y-1 border-l border-hairline py-0.5 pl-2.5">
                     {step.substeps.map((substep) => (
                       <li key={substep.id} className="flex min-w-0 items-center gap-1.5">
                         <StepIcon status={substep.status} small />
@@ -198,7 +201,7 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
       {!finished && onStop ? (
         <div className="flex justify-end">
           <Button size="sm" variant="outline" onClick={onStop}>
-            Stop
+            {t("Stop")}
           </Button>
         </div>
       ) : null}
