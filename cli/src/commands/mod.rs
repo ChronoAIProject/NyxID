@@ -22,6 +22,7 @@ pub mod lark_permission;
 pub(crate) mod machine_native_update;
 pub mod mcp;
 pub mod mfa;
+pub mod monitoring;
 pub mod node;
 pub mod node_credential;
 pub mod notification;
