@@ -505,7 +505,20 @@ pub async fn catalog(
         chat: None,
     };
     let value = match (query.skill, query.version) {
-        (Some(id), Some(version)) => json!(skills::preview(&reader, &id, &version).await?),
+        (Some(id), Some(version)) => {
+            let preview = skills::preview(&reader, &id, &version).await?;
+            // `assistant:skill-runs` adds the parsed outline and the author; a
+            // failed flag lookup keeps today's response.
+            if Box::pin(crate::services::skill_outline::enabled(&state.db, &owner))
+                .await
+                .unwrap_or(false)
+            {
+                let publisher = Box::pin(skills::publisher_kind(&state.db, &preview)).await;
+                skills::catalog_preview(&preview, publisher)
+            } else {
+                json!(preview)
+            }
+        }
         (Some(id), None) => skills::versions(&reader, &id, query.page).await?,
         (None, _) => skills::search(&reader, &query.q, query.page).await?,
     };

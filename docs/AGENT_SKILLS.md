@@ -187,8 +187,10 @@ root's verified closure that the frontmatter also declares. Malformed or
 oversized sections yield no outline, never a truncated one. Outlines are
 untrusted guidance; nothing is stored on the agent and nothing enters audit.
 With the flag on, owner turns get guidance to explain a skill's outline before
-multi-step work, and NyxBot drafts get advisory `outline_warnings`. With the flag
-off, tool lists, results and instructions are unchanged.
+multi-step work, NyxBot drafts get advisory `outline_warnings`, and the app's
+catalog preview adds the structured `outline` and the Ornn `author` for the Find
+skills card. With the flag off, tool lists, results, instructions and the
+catalog preview are unchanged.
 
 ## Owner-requested authoring
 

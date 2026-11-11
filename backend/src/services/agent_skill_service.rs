@@ -365,6 +365,98 @@ pub struct Preview {
     /// never part of the preview response.
     #[serde(skip)]
     pub(crate) skill_md: Option<String>,
+    /// Who published the skill in Ornn, shown only with `assistant:skill-runs`.
+    #[serde(skip)]
+    pub(crate) author: Option<OrnnAuthor>,
+}
+
+/// The Ornn publisher of a previewed skill. `id` is the publishing NyxID
+/// account, so its person/organization kind comes from NyxID, not Ornn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrnnAuthor {
+    pub id: Option<String>,
+    pub name: String,
+    /// A platform system skill, optionally tied to one NyxID service.
+    pub system_skill: bool,
+    pub service: Option<String>,
+}
+
+impl OrnnAuthor {
+    fn from_meta(meta: &Value) -> Option<Self> {
+        let name = meta["createdByDisplayName"].as_str()?.trim();
+        (!name.is_empty()).then(|| Self {
+            id: meta["createdBy"].as_str().map(str::to_owned),
+            name: line(name, 80),
+            system_skill: meta["isSystemSkill"].as_bool().unwrap_or(false),
+            service: meta["nyxidServiceSlug"].as_str().map(|slug| line(slug, 80)),
+        })
+    }
+}
+
+/// What kind of NyxID account published a skill in Ornn. It only chooses the
+/// author shown on the card, never any authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublisherKind {
+    Person,
+    Organization,
+    /// A NyxID service account: a machine identity run for the platform, such
+    /// as the account that publishes NyxBot's platform skills.
+    ServiceAccount,
+}
+
+/// The publisher's kind from NyxID's own records; `None` when NyxID doesn't
+/// know the account or can't read it, so no author is shown.
+pub async fn publisher_kind(db: &Database, preview: &Preview) -> Option<PublisherKind> {
+    let id = preview.author.as_ref()?.id.as_deref()?;
+    let user = db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": id})
+        .projection(doc! {"user_type": 1})
+        .await
+        .ok()?;
+    if let Some(user) = user {
+        return Some(if user.get_str("user_type") == Ok("org") {
+            PublisherKind::Organization
+        } else {
+            PublisherKind::Person
+        });
+    }
+    db.collection::<bson::Document>(crate::models::service_account::COLLECTION_NAME)
+        .find_one(doc! {"_id": id})
+        .projection(doc! {"_id": 1})
+        .await
+        .ok()?
+        .map(|_| PublisherKind::ServiceAccount)
+}
+
+/// The app's catalog preview with `assistant:skill-runs`: today's preview
+/// plus the parsed outline (structured steps, or `null` when the skill has
+/// none) and its author. System skills and skills published by a service
+/// account belong to the platform. Flag off, the route returns the plain preview.
+pub fn catalog_preview(preview: &Preview, publisher: Option<PublisherKind>) -> Value {
+    let mut value = json!(preview);
+    value["outline"] = json!(
+        preview
+            .skill_md
+            .as_deref()
+            .and_then(|md| super::skill_outline::parse(md, &preview.reference.dependencies))
+    );
+    value["author"] = match (&preview.author, publisher) {
+        (Some(author), _) if author.system_skill => json!({
+            "kind": "platform", "name": author.name, "service": author.service, "system_skill": true,
+        }),
+        (Some(author), Some(PublisherKind::ServiceAccount)) => json!({
+            "kind": "platform", "name": author.name, "service": null, "system_skill": false,
+        }),
+        (Some(author), Some(PublisherKind::Organization)) => {
+            json!({"kind": "organization", "name": author.name})
+        }
+        (Some(author), Some(PublisherKind::Person)) => {
+            json!({"kind": "person", "name": author.name})
+        }
+        _ => Value::Null,
+    };
+    value
 }
 
 fn invalid(message: &str) -> AppError {
@@ -575,6 +667,7 @@ pub async fn preview_checked(
         description: line(meta["description"].as_str().unwrap_or_default(), 200),
         size_bytes: bytes.len(),
         skill_md,
+        author: OrnnAuthor::from_meta(&meta),
     })
 }
 

@@ -964,6 +964,7 @@ fn validate_skill_template_dir() {
             description: description.chars().take(200).collect(),
             size_bytes: presented.len(),
             skill_md: Some(presented.clone()),
+            author: None,
         };
         let preview_result = preview_with_outline(&preview, None, None).unwrap();
         let outline_page = preview_with_outline(&preview, Some(0), None).unwrap();

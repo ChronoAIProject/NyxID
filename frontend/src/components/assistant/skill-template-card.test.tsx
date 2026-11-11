@@ -42,6 +42,24 @@ describe("SkillTemplateCard", () => {
     expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
   });
 
+  it.each([
+    [{ kind: "person", name: "Ada Example" }, "By Ada Example", null],
+    [{ kind: "organization", name: "Example Org" }, "By Example Org", null],
+    [{ kind: "platform", name: "Platform Skills" }, "By Platform Skills", null],
+    [{ kind: "platform", name: "Platform Skills", service: "cma", system_skill: true }, "By Platform Skills", "System skill for cma"],
+    [{ kind: "agent", name: "NyxBot", agent: { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } }, "Drafted by NyxBot", null],
+  ] as const)("shows who wrote the skill (%o)", (author, line, badge) => {
+    render(<SkillTemplateCard name="s" version="1.0" kind="skill" outline={outline} author={author} />);
+    expect(screen.getByText(line)).toBeInTheDocument();
+    if (badge) expect(screen.getByText(badge)).toBeInTheDocument();
+    else expect(screen.queryByText(/System skill/)).not.toBeInTheDocument();
+  });
+
+  it("shows no author line without an author", () => {
+    render(<SkillTemplateCard name="s" version="1.0" kind="skill" outline={outline} />);
+    expect(screen.queryByText(/^By |^Drafted by /)).not.toBeInTheDocument();
+  });
+
   it("replaces the buttons once started", () => {
     render(<SkillTemplateCard name="text-a-customer" version="1.2" kind="skill" outline={outline} started onStart={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent("Started. Progress continues below.");

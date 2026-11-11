@@ -11,8 +11,9 @@ import "@/app.css";
 
 // Local-only preview of NYX template cards. The report is produced by the
 // backend's `validate_skill_template_dir` check (real outline parser and the
-// real `preview_agent_skill` builder) and served from `public/` while
-// developing; nothing here talks to a backend.
+// real `preview_agent_skill` builder) and loaded from the git-ignored
+// `skill-template-report.local.json` beside this file; nothing here talks to a
+// backend.
 interface ReportEntry {
   readonly name: string;
   readonly kind: "skill" | "skillset";

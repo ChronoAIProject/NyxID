@@ -12062,5 +12062,9 @@
   "Finished · {{count}} steps": "Finished · {{count}} steps",
   "Steps done": "Steps done",
   "{{name}} steps": "{{name}} steps",
-  "{{name}} run": "{{name}} run"
+  "{{name}} run": "{{name}} run",
+  "By {{name}}": "By {{name}}",
+  "Drafted by {{name}}": "Drafted by {{name}}",
+  "System skill": "System skill",
+  "System skill for {{service}}": "System skill for {{service}}"
 }

@@ -12062,5 +12062,9 @@
   "Finished · {{count}} steps": "已完成 · 共 {{count}} 步",
   "Steps done": "已完成的步驟",
   "{{name}} steps": "{{name}} 的步驟",
-  "{{name}} run": "{{name}} 執行"
+  "{{name}} run": "{{name}} 執行",
+  "By {{name}}": "作者：{{name}}",
+  "Drafted by {{name}}": "由 {{name}} 起草",
+  "System skill": "系統技能",
+  "System skill for {{service}}": "{{service}} 的系統技能"
 }

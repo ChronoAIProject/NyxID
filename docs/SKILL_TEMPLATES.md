@@ -144,8 +144,15 @@ NyxBot's instructions, tool list and tool results are unchanged.
   deferred first page should echo the preview's fingerprint: if a dependency
   tag moved between calls, the answer is `outline_changed` instead of an
   outline for different pins. Offset `0` without a fingerprint is an
-  intentional fresh read; refresh the full preview to see its resolved pins. The HTTP preview used by
-  the app is unchanged.
+  intentional fresh read; refresh the full preview to see its resolved pins.
+- **Showing it in the app.** The app's catalog preview
+  (`GET /assistant/nyxagent/skills/catalog?skill=&version=`) adds two fields:
+  `outline`, the parsed outline as structured steps (`null` when the skill has
+  none), and `author`, who published it in Ornn. A system skill or a skill
+  published by a NyxID service account belongs to the platform; otherwise the
+  publishing account is shown as an organization or a person, and an account
+  NyxID doesn't know gets no author. The Find skills version view shows them as
+  a skill card. Flag off, the route returns exactly today's preview.
 - **Explaining.** NyxBot's instructions ask it to read the outline before
   multi-step or changing work a skill covers, explain it in plain words, and ask
   whether to go ahead. Agreeing is not an approval.
@@ -191,5 +198,6 @@ Turning the flag off restores the previous behavior on the next tool listing and
 turn; it changes no stored data. Changing the flag changes NyxBot's stable
 instructions, so an existing conversation's upstream context resets once.
 
-Later parts of #2331 add skill cards (suggest or start a skill) and a live step
-checklist under the same flag.
+Later parts of #2331 add skill cards in chat (suggest or start a skill) and a
+live step checklist under the same flag; this part ships the card and the
+checklist components and shows the card in the Find skills preview.

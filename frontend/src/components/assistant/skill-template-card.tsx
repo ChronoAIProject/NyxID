@@ -1,7 +1,10 @@
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { ServiceOwnerAvatar } from "@/components/dashboard/service-owner-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 
 /** One step of a NYX template outline, as the backend's outline reader returns it. */
 export interface SkillTemplateStep {
@@ -20,10 +23,57 @@ export interface SkillTemplateOutline {
   readonly produces?: string | null;
 }
 
+/**
+ * Who wrote a skill, using the owner kinds NyxID already shows elsewhere: the
+ * platform (system skills and platform service accounts), an organization, a
+ * person, or one of the owner's agents that drafted it.
+ */
+export type SkillTemplateAuthor =
+  | {
+      readonly kind: "platform";
+      readonly name: string;
+      readonly service?: string | null;
+      /** An Ornn system skill bound to a NyxID service, not only platform-published. */
+      readonly system_skill?: boolean;
+    }
+  | { readonly kind: "organization"; readonly name: string; readonly avatarUrl?: string | null }
+  | { readonly kind: "person"; readonly name: string }
+  | {
+      readonly kind: "agent";
+      readonly name: string;
+      readonly agent: { readonly id: string; readonly name: string; readonly kind: AssistantAgentKind };
+    };
+
+function AuthorLine({ author }: { readonly author: SkillTemplateAuthor }) {
+  const { t } = useUiTranslation();
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+      {author.kind === "agent" ? (
+        <AgentAvatar agent={author.agent} size="sm" />
+      ) : (
+        <ServiceOwnerAvatar
+          type={author.kind === "organization" ? "org" : author.kind === "platform" ? "platform" : "personal"}
+          name={author.name}
+          avatarUrl={author.kind === "organization" ? author.avatarUrl : null}
+        />
+      )}
+      <span className="type-secondary min-w-0 break-words text-text-tertiary">
+        {author.kind === "agent" ? t("Drafted by {{name}}", { name: author.name }) : t("By {{name}}", { name: author.name })}
+      </span>
+      {author.kind === "platform" && author.system_skill ? (
+        <Badge variant="accent">
+          {author.service ? t("System skill for {{service}}", { service: author.service }) : t("System skill")}
+        </Badge>
+      ) : null}
+    </div>
+  );
+}
+
 export interface SkillTemplateCardProps {
   readonly name: string;
   readonly version: string;
   readonly kind: "skill" | "skillset";
+  readonly author?: SkillTemplateAuthor | null;
   /** Skillset members, by name. */
   readonly members?: readonly string[];
   /** `null` when the skill has no valid outline. */
@@ -34,6 +84,8 @@ export interface SkillTemplateCardProps {
   readonly started?: boolean;
   readonly onStart?: () => void;
   readonly onDismiss?: () => void;
+  /** Hide Not now / Start where the surrounding view owns the actions. */
+  readonly actions?: boolean;
 }
 
 /** Overview paragraphs: blank lines separate paragraphs, single line breaks are wrapping. */
@@ -54,12 +106,14 @@ export function SkillTemplateCard({
   name,
   version,
   kind,
+  author = null,
   members = [],
   outline,
   needsAttach = false,
   started = false,
   onStart,
   onDismiss,
+  actions = true,
 }: SkillTemplateCardProps) {
   const { t } = useUiTranslation();
   const label =
@@ -76,6 +130,7 @@ export function SkillTemplateCard({
         <p className="type-card-title break-words text-foreground">
           {name} <span className="font-mono font-normal text-text-tertiary">{version}</span>
         </p>
+        {author ? <AuthorLine author={author} /> : null}
       </div>
 
       {outline ? (
@@ -154,7 +209,7 @@ export function SkillTemplateCard({
         </div>
       ) : null}
 
-      {started ? (
+      {!actions ? null : started ? (
         <p role="status" className="type-secondary text-right text-text-tertiary">
           {t("Started. Progress continues below.")}
         </p>

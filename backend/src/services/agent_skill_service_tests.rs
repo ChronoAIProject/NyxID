@@ -177,6 +177,8 @@ struct Registry {
     deny: bool,
     bad_hash: bool,
     closure: Vec<Value>,
+    /// Extra Ornn metadata fields, such as the publisher.
+    meta: Value,
 }
 impl Registry {
     fn new() -> Self {
@@ -189,6 +191,7 @@ impl Registry {
             deny: false,
             bad_hash: false,
             closure: vec![],
+            meta: json!({}),
         }
     }
     fn reference(&self) -> SkillReference {
@@ -221,7 +224,13 @@ impl OrnnReader for Registry {
         } else {
             self.reference().sha256
         };
-        Ok(serde_json::to_vec(&json!({"data":{"guid":ID,"name":"example","description":"Useful\nguidance","version":"1.0","skillHash":hash}})).unwrap())
+        let mut data = json!({"guid":ID,"name":"example","description":"Useful\nguidance","version":"1.0","skillHash":hash});
+        if let Some(extra) = self.meta.as_object() {
+            for (key, value) in extra {
+                data[key] = value.clone();
+            }
+        }
+        Ok(serde_json::to_vec(&json!({ "data": data })).unwrap())
     }
 }
 #[tokio::test]
@@ -1235,4 +1244,94 @@ async fn outline_pages_cannot_splice_two_resolved_closures() {
             .unwrap()
             .contains("version 1.10")
     );
+}
+
+#[tokio::test]
+async fn catalog_preview_adds_the_outline_and_author_only_when_asked() {
+    let skill =
+        "## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n   Asks you\n";
+    let registry = Registry {
+        meta: json!({"createdBy": "publisher-1", "createdByDisplayName": "Ada", "isSystemSkill": false}),
+        ..outline_registry(skill)
+    };
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    // The plain preview (flag off) is unchanged: no outline, no author.
+    let plain = json!(verified);
+    let keys: Vec<_> = plain.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys, ["description", "reference", "size_bytes"]);
+
+    let person = catalog_preview(&verified, Some(PublisherKind::Person));
+    assert_eq!(person["outline"]["steps"][0]["title"], "Prepare");
+    assert_eq!(person["outline"]["steps"][0]["asks_you"], true);
+    assert_eq!(person["author"], json!({"kind": "person", "name": "Ada"}));
+    assert_eq!(person["reference"], plain["reference"]);
+    let organization = catalog_preview(&verified, Some(PublisherKind::Organization));
+    assert_eq!(
+        organization["author"],
+        json!({"kind": "organization", "name": "Ada"})
+    );
+    // A service account publishes for the platform; it is not a system skill.
+    let platform = catalog_preview(&verified, Some(PublisherKind::ServiceAccount));
+    assert_eq!(
+        platform["author"],
+        json!({"kind": "platform", "name": "Ada", "service": null, "system_skill": false})
+    );
+    // An account NyxID doesn't know shows no author rather than a guess.
+    assert_eq!(catalog_preview(&verified, None)["author"], Value::Null);
+
+    // A system skill belongs to the platform, whoever published it.
+    let system = Registry {
+        meta: json!({"createdBy": "publisher-1", "createdByDisplayName": "Ada", "isSystemSkill": true, "nyxidServiceSlug": "cma"}),
+        ..outline_registry(skill)
+    };
+    let system = catalog_preview(&preview(&system, ID, "1.0").await.unwrap(), None);
+    assert_eq!(
+        system["author"],
+        json!({"kind": "platform", "name": "Ada", "service": "cma", "system_skill": true})
+    );
+
+    // No publisher name, no author; a skill without the template, no outline.
+    let plain_skill = catalog_preview(
+        &preview(&Registry::new(), ID, "1.0").await.unwrap(),
+        Some(PublisherKind::Person),
+    );
+    assert_eq!(plain_skill["author"], Value::Null);
+    assert_eq!(plain_skill["outline"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_publisher_kind_comes_from_nyxid_accounts() {
+    let f = fixture("agent_skill_publisher_kind").await;
+    let db = &f.state.db;
+    db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+        .insert_many([
+            mongodb::bson::doc! {"_id": "org-account", "user_type": "org"},
+            mongodb::bson::doc! {"_id": "person-account", "user_type": "person"},
+            mongodb::bson::doc! {"_id": "legacy-account"},
+        ])
+        .await
+        .unwrap();
+    db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
+        .insert_one(mongodb::bson::doc! {"_id": "platform-account", "name": "Skills"})
+        .await
+        .unwrap();
+    let skill = "## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n";
+    for (account, expected) in [
+        ("org-account", Some(PublisherKind::Organization)),
+        ("person-account", Some(PublisherKind::Person)),
+        ("legacy-account", Some(PublisherKind::Person)),
+        ("platform-account", Some(PublisherKind::ServiceAccount)),
+        ("unknown-account", None),
+    ] {
+        let registry = Registry {
+            meta: json!({"createdBy": account, "createdByDisplayName": "Publisher"}),
+            ..outline_registry(skill)
+        };
+        let verified = preview(&registry, ID, "1.0").await.unwrap();
+        assert_eq!(publisher_kind(db, &verified).await, expected, "{account}");
+    }
+    // Without a publisher there is nothing to look up.
+    let anonymous = preview(&outline_registry(skill), ID, "1.0").await.unwrap();
+    assert_eq!(publisher_kind(db, &anonymous).await, None);
+    f.state.db.drop().await.unwrap();
 }
