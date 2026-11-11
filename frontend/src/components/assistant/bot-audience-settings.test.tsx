@@ -1,18 +1,7 @@
-import {
-  act,
-  cleanup,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import {
-  GroupedDraftBoundary,
-  GroupedDraftDialog,
-} from "@/components/ui/grouped-drafts";
 import { BotAudienceSettings } from "./bot-audience-settings";
 import {
   assistantAgentSchema,
@@ -28,7 +17,6 @@ vi.mock("@/stores/auth-store", () => ({
     select({ user: { id: "admin" } }),
 }));
 const at = "2026-11-06T00:00:00Z";
-const key = ["org-specialist-channel", "admin", "channel"];
 const agent = assistantAgentSchema.parse({
   id: "agent",
   name: "Researcher",
@@ -76,6 +64,17 @@ beforeEach(() => {
   });
   settings = orgChannelSettingsSchema.parse({
     channel_id: "channel",
+    agent_id: "agent",
+    grants_ready: true,
+    guest_policy_mode: "grants",
+    effective_guest_services: [
+      {
+        id: "service",
+        label: "Calendar",
+        access: "use",
+        limited_operations: false,
+      },
+    ],
     org_id: "org",
     can_manage: true,
     guest_revision: "revision-1",
@@ -111,14 +110,23 @@ beforeEach(() => {
       settings = {
         ...settings,
         guest_enabled: body.enabled,
-        daily_credits: body.daily_credits,
-        delegated_service_ids: body.service_ids,
         guest_revision: "revision-2",
       };
     }
-    if (endpoint.includes("guest-readiness")) return new Response(JSON.stringify({
-      status: "setting_up", configuration: { instructions_present: false, persona_present: false, memory_notes: 0, skills: 0, service_grants: 0, account_read: false },
-    }));
+    if (endpoint.includes("guest-readiness"))
+      return new Response(
+        JSON.stringify({
+          status: "setting_up",
+          configuration: {
+            instructions_present: false,
+            persona_present: false,
+            memory_notes: 0,
+            skills: 0,
+            service_grants: 0,
+            account_read: false,
+          },
+        }),
+      );
     if (failRead)
       return new Response(
         JSON.stringify({ message: "Settings temporarily unavailable" }),
@@ -145,175 +153,96 @@ function mount(status = "active", org = true, onReconnect = vi.fn()) {
   );
   return onReconnect;
 }
-async function budget() {
-  return screen.findByRole("textbox", {
-    name: "Daily guest budget (credits, UTC)",
-  });
-}
-async function reviewSave() {
-  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  const dialog = await screen.findByRole("dialog", { name: "Review changes" });
-  await userEvent.click(
-    within(dialog).getByRole("button", { name: "Save changes" }),
-  );
-}
 
-it("enables guests in one switch with the server default budget and organization billing copy", async () => {
+it("enables with a switch-only revision-bound request and shows Grants before enabling", async () => {
   mount();
-  expect(await budget()).toHaveValue("3");
+  expect(await screen.findByText(/Enabling guests applies/)).toBeVisible();
+  expect(screen.getByText(/Guests can use/)).toHaveTextContent("Calendar");
   expect(
-    screen.getByText(
-      /Verified organization members use their own permissions and billing/,
-    ),
+    screen.getByText(/The organization pays for their messages/),
   ).toBeVisible();
-  expect(screen.getByText("0.25 credits (0.1 reserved)")).toBeVisible();
-  expect(
-    screen.queryByRole("button", { name: "Verify my chat account" }),
-  ).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByText("Daily guest budget")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("switch", { name: "Allow guests" }));
   await waitFor(() =>
-    expect(writes).toEqual([
-      {
-        endpoint: "/assistant/nyxagent/channels/channel/org-specialist",
-        method: "PUT",
-        body: {
-          enabled: true,
-          daily_credits: "3",
-          service_ids: [],
-          expected_revision: "revision-1",
-        },
-      },
-    ]),
-  );
-  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeChecked();
-  expect(
-    screen.queryByRole("region", { name: "Unsaved changes" }),
-  ).not.toBeInTheDocument();
-});
-it.each(["active", "pending", "failed"])(
-  "shows saved settings for a %s binding with recovery for inactive rows",
-  async (status) => {
-    settings.daily_credits = "7";
-    settings.guest_enabled = true;
-    settings.channel_status = status;
-    const reconnect = mount(status);
-    expect(await budget()).toHaveValue("7");
-    expect(
-      screen.getByRole("region", { name: "Who can talk to this bot · Helper" }),
-    ).toBeVisible();
-    if (status === "active")
-      expect(
-        screen.getByRole("switch", { name: "Allow guests" }),
-      ).toBeEnabled();
-    else {
-      expect(await budget()).toBeDisabled();
-      expect(
-        screen.getByRole("switch", { name: "Allow guests" }),
-      ).toBeDisabled();
-      expect(
-        screen.getByRole("checkbox", { name: "Public lookup" }),
-      ).toBeDisabled();
-      await userEvent.click(
-        screen.getByRole("button", {
-          name: status === "pending" ? "Finish connecting" : "Reconnect",
-        }),
-      );
-      expect(reconnect).toHaveBeenCalledOnce();
-    }
-    expect(writes).toEqual([]);
-  },
-);
-it("keeps listing settings visible when the settings request is unavailable", async () => {
-  failRead = true;
-  mount("failed");
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "temporarily unavailable",
-  );
-  expect(screen.getByText("4 credits")).toBeVisible();
-  expect(screen.getByText("Model-only chat")).toBeVisible();
-  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Reconnect" })).toBeEnabled();
-});
-it("preserves dirty drafts through refresh and reviews the save with its original revision", async () => {
-  mount();
-  const input = await budget();
-  await userEvent.clear(input);
-  await userEvent.type(input, "2.5");
-  await userEvent.click(
-    screen.getByRole("checkbox", { name: "Public lookup" }),
-  );
-  expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
-  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
-  settings = {
-    ...settings,
-    spent_today_credits: "0.4",
-    daily_credits: "8",
-    guest_revision: "remote-edit",
-  };
-  await act(async () => {
-    await client.invalidateQueries({ queryKey: key });
-  });
-  expect(input).toHaveValue("2.5");
-  expect(screen.getByRole("checkbox", { name: "Public lookup" })).toBeChecked();
-  expect(await screen.findByText("0.4 credits (0.1 reserved)")).toBeVisible();
-  expect(writes).toEqual([]);
-  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  const dialog = await screen.findByRole("dialog", { name: "Review changes" });
-  expect(dialog).toHaveTextContent("Daily guest budget");
-  expect(dialog).toHaveTextContent("Public lookup");
-  expect(writes).toEqual([]);
-  await userEvent.click(
-    within(dialog).getByRole("button", { name: "Save changes" }),
-  );
-  await waitFor(() =>
     expect(writes[0]?.body).toEqual({
-      enabled: false,
-      daily_credits: "2.5",
-      service_ids: ["service"],
+      enabled: true,
       expected_revision: "revision-1",
     }),
   );
+  expect(
+    screen.getByRole("link", { name: /Agent details → Grants/ }),
+  ).toHaveAttribute("href", "/assistant?agent=agent&details=grants");
 });
-it("retains conflicting edits until explicitly discarded to the latest settings", async () => {
+it("shows one legacy notice without a budget or service editor", async () => {
+  settings.guest_policy_mode = "legacy";
   mount();
-  const input = await budget();
-  await userEvent.clear(input);
-  await userEvent.type(input, "2");
+  expect(
+    await screen.findByText(
+      "Existing guest limits are kept. Review them in Grants.",
+    ),
+  ).toBeVisible();
+  expect(screen.queryByText(/Enabling guests applies/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+});
+it("never reveals service IDs or budget controls while loading fails", async () => {
+  failRead = true;
+  mount();
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "NyxBot is temporarily unavailable. Try again shortly.",
+  );
+  expect(screen.queryByText("Delegated services")).not.toBeInTheDocument();
+  expect(screen.queryByText("Daily guest budget")).not.toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
+});
+it.each(["failed", "pending"])(
+  "keeps %s org settings readable but disabled",
+  async (status) => {
+    mount(status);
+    await screen.findByText(/Enabling guests applies/);
+    expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
+  },
+);
+it("keeps member settings read-only", async () => {
+  settings.can_manage = false;
+  mount();
+  await screen.findByText(/Enabling guests applies/);
+  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
+});
+it("explains missing wallet and permits disabling during rollout loss", async () => {
+  settings.readiness_reason = "org_wallet_not_provisioned";
+  settings.grants_ready = false;
+  settings.guest_enabled = true;
+  mount();
+  expect(
+    await screen.findByText(/Provision the organization billing wallet/),
+  ).toBeVisible();
+  expect(screen.getByText(/legacy daily cap still apply/)).toBeVisible();
+  expect(
+    screen.getByRole("switch", { name: "Allow guests" }),
+  ).not.toBeDisabled();
+  await userEvent.click(screen.getByRole("switch", { name: "Allow guests" }));
+  await waitFor(() => expect(writes[0]?.body.enabled).toBe(false));
+});
+it("refuses enabling with an unavailable wallet", async () => {
+  settings.readiness_reason = "org_wallet_suspended";
+  mount();
+  await screen.findByText("The organization wallet is suspended.");
+  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
+});
+it("keeps the switch state on a stale-revision conflict", async () => {
   conflict = true;
-  settings = { ...settings, daily_credits: "9", guest_revision: "remote-edit" };
-  await reviewSave();
+  mount();
+  await screen.findByText(/Enabling guests applies/);
+  await userEvent.click(screen.getByRole("switch", { name: "Allow guests" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Guest settings changed",
   );
-  expect(input).toHaveValue("2");
-  expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Discard" }));
-  expect(input).toHaveValue("9");
   expect(
-    screen.queryByRole("region", { name: "Unsaved changes" }),
-  ).not.toBeInTheDocument();
-});
-it("keeps member controls read-only", async () => {
-  settings.can_manage = false;
-  mount();
-  expect(await budget()).toBeDisabled();
-  expect(
-    screen.getByText("Only organization admins can change guest access."),
-  ).toBeVisible();
-  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
-  expect(writes).toEqual([]);
-});
-it("explains a missing wallet and prevents enabling guests", async () => {
-  settings.readiness_reason = "org_wallet_not_provisioned";
-  mount();
-  await budget();
-  expect(
-    screen.getByText(/Provision the organization billing wallet/),
-  ).toBeVisible();
-  expect(
-    screen.getByRole("link", { name: "Open organization Billing" }),
-  ).toHaveAttribute("href", "/billing?ownerId=org");
-  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
+    screen.getByRole("switch", { name: "Allow guests" }),
+  ).not.toBeChecked();
 });
 it("explains personal billing, links specialist grants and saves private audience immediately", async () => {
   mount("active", false);
@@ -352,64 +281,16 @@ it.each(["failed", "pending"])(
   },
 );
 
-it("keeps the saved switch state when immediate enabling fails", async () => {
-  conflict = true;
-  mount();
-  await budget();
-  await userEvent.click(screen.getByRole("switch", { name: "Allow guests" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Guest settings changed",
-  );
-  expect(
-    screen.getByRole("switch", { name: "Allow guests" }),
-  ).not.toBeChecked();
-  expect(writes).toHaveLength(1);
-});
-
-it("asks before reconnecting a failed binding with a retained dirty draft", async () => {
-  const reconnect = vi.fn();
-  const content = (status: string) => (
-    <QueryClientProvider client={client}>
-      <GroupedDraftBoundary>
-        <BotAudienceSettings
-          channel={channel(status)}
-          agent={agent}
-          canManage
-          onReconnect={reconnect}
-        />
-        <GroupedDraftDialog />
-      </GroupedDraftBoundary>
-    </QueryClientProvider>
-  );
-  const view = render(content("active"));
-  const input = await budget();
-  await userEvent.clear(input);
-  await userEvent.type(input, "5");
-  view.rerender(content("failed"));
-  await userEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-  let dialog = await screen.findByRole("dialog", {
-    name: "Discard unsaved changes?",
-  });
-  await userEvent.click(
-    within(dialog).getByRole("button", { name: "Keep editing" }),
-  );
-  expect(reconnect).not.toHaveBeenCalled();
-  expect(input).toHaveValue("5");
-  await userEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-  dialog = await screen.findByRole("dialog", {
-    name: "Discard unsaved changes?",
-  });
-  await userEvent.click(
-    within(dialog).getByRole("button", { name: "Discard" }),
-  );
-  await waitFor(() => expect(reconnect).toHaveBeenCalledOnce());
-  expect(writes).toEqual([]);
-});
-
 it("shows model setup and missing onboarding facts beside the immediate audience choice", async () => {
   mount("active", false);
   expect(await screen.findByText("Setting up for visitors…")).toBeTruthy();
-  expect(screen.getByText(/Instructions: missing; persona: missing/)).toBeTruthy();
-  expect(screen.getByRole("combobox", { name: "Who can talk to Helper in private chats" })).not.toBeDisabled();
+  expect(
+    screen.getByText(/Instructions: missing; persona: missing/),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("combobox", {
+      name: "Who can talk to Helper in private chats",
+    }),
+  ).not.toBeDisabled();
   expect(screen.getByText(/Opening access is your choice/)).toBeTruthy();
 });

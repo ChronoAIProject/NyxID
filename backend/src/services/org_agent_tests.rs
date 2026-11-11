@@ -16,6 +16,7 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 pub(crate) struct Fixture {
+    pub(crate) readiness: tokio::task::JoinHandle<()>,
     pub(crate) state: crate::AppState,
     pub(crate) admin: String,
     pub(crate) member: String,
@@ -151,7 +152,7 @@ impl Fixture {
         (Self::with_db(db).await, memberships, reads)
     }
     pub(crate) async fn with_db(db: mongodb::Database) -> Self {
-        super::security_readiness_service::ready_test_replica(&db).await;
+        let readiness = super::security_readiness_service::controlled_ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -199,6 +200,7 @@ impl Fixture {
                 .unwrap();
         }
         Self {
+            readiness,
             state: test_app_state(db),
             admin: ids[0].clone(),
             member: ids[1].clone(),

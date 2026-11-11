@@ -81,6 +81,7 @@ function setup(
     },
   };
   const harness = hookHarness<Element>({
+    "./OrgGuestControls": { OrgGuestChannel: "OrgGuestChannel", OrgGuestGrantsAdoption: "OrgGuestGrantsAdoption" },
     "./AgentCollaborationPanel": {
       AgentCollaborationPanel: "AgentCollaborationPanel",
       AgentOperationControls: "AgentOperationControls",

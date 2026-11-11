@@ -1,3 +1,4 @@
+import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
   useCallback,
@@ -610,6 +611,9 @@ export function AgentsScreen({
                 }
               />
             )}
+            {agent.owner_kind === "org" && agent.org_role === "admin" && maintain && alive && (
+              <OrgGuestGrantsAdoption key={`${getAuthEpoch()}:${agent.id}:guest-adoption`} agent={agent} disabled={busy} />
+            )}
             <AgentCollaborationPanel
               key={`${getAuthEpoch()}:${agent.id}:sharing:${editorVersion}`}
               agent={agent}
@@ -679,7 +683,9 @@ export function AgentsScreen({
             )}
             {!!agent.channels.length && (
               <SettingsGroup inset={false} title="Connected channels">
-                {agent.channels.map((channel) => (
+                {agent.channels.map((channel) => agent.owner_kind === "org" ? (
+                  <OrgGuestChannel key={`${getAuthEpoch()}:${channel.id}`} agent={agent} channel={channel} />
+                ) : (
                   <SettingsRow
                     key={channel.id}
                     label={channel.bot_label}
@@ -1116,7 +1122,7 @@ function AgentGrantsForm({
       }
       readOnly={agent.can_maintain !== true || agent.status === "destroyed"}
       allowAccountRead={agent.owner_kind !== "org"}
-      allowGuestAccess={agent.owner_kind !== "org"}
+      allowGuestAccess={agent.owner_kind !== "org" || agent.org_role === "admin"}
       connectionsLoading={connectionsLoading}
       connectionsError={connectionsError}
       saveError={saveError}
