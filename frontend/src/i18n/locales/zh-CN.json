@@ -12022,5 +12022,9 @@
   "Affected bots": "受影响的机器人",
   "Selected operations only": "仅限所选操作",
   "Apply reviewed guest settings": "应用已查看的访客设置",
-  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "访客使用你的计费方式。专属智能体的每项服务访客访问权限决定访客可使用哪些服务。NyxBot 不会为访客使用你的服务。"
+  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "访客使用你的计费方式。专属智能体的每项服务访客访问权限决定访客可使用哪些服务。NyxBot 不会为访客使用你的服务。",
+  "Authorize your bot's permissions below, then finish callback setup.": "请先在下方授权机器人的权限，再完成回调配置。",
+  "Grant bot permissions": "授予机器人权限",
+  "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.": "所需权限已预选。打开链接并确认，即可在 {{platform}} 中开通。",
+  "Authorize {{platform}}": "授权 {{platform}}"
 }

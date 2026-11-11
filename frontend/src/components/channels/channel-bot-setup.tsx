@@ -238,7 +238,12 @@ export function ChannelBotSetup({
     const payload = channelBotRegistrationPayload(data, descriptor);
     createBot.mutate(payload, {
       onSuccess: (result) => {
-        if (result.webhook_secret || fullPage || stayInPlace) {
+        if (
+          result.webhook_secret ||
+          result.permission_setup_url ||
+          fullPage ||
+          stayInPlace
+        ) {
           setCreatedBot(result);
           if (fullPage) onComplete?.();
           if (!fullPage) reset();
@@ -325,9 +330,29 @@ export function ChannelBotSetup({
                     ? translateUi("{{value1}} is connected. NyxBot will continue in this chat.", { value1: connectedBotLabel || label || "Your bot" })
                     : createdBot?.webhook_secret
                     ? translateUi("Save the verification secret below. It will not be shown again.")
+                    : createdBot?.permission_setup_url
+                    ? translateUi("Authorize your bot's permissions below, then finish callback setup.")
                     : translateUi("Your bot has been added to NyxID. Open it to review setup and assign an agent.")}
                 </p>
               </div>
+            </div>
+          )}
+          {createdBot?.permission_setup_url && (
+            <div className="space-y-3 rounded-xl border border-border bg-muted/40 p-4">
+              <p className="type-card-title">{translateUi("Grant bot permissions")}</p>
+              <p className="text-13 text-muted-foreground">
+                {translateUi("The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.", { platform: getPlatform(createdBot.platform).label })}
+              </p>
+              <Button variant="primary" asChild>
+                <a
+                  href={createdBot.permission_setup_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {translateUi("Authorize {{platform}}", { platform: getPlatform(createdBot.platform).label })}
+                  <ExternalLink className="size-4" aria-hidden="true" />
+                </a>
+              </Button>
             </div>
           )}
           {createdBot?.webhook_url && (

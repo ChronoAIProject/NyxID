@@ -246,15 +246,15 @@ NyxID exchanges your App ID and App Secret for a tenant access token automatical
 | **Verification Token** | Event Subscriptions → Verification Token |
 | **Encrypt Key** | Event Subscriptions → Encrypt Key (optional) |
 
-5. Click **Create channel bot**, then **Open channel bot**. NyxID stores the credentials; the bot status starts as `pending_webhook`.
+5. Click **Create channel bot**. On the completion page, click **Authorize Lark** (or **Authorize Feishu**). NyxID generates a link to your app's permission page with the required permissions already selected; confirm and enable them there. NyxID stores the credentials; the bot status starts as `pending_webhook`.
 
-6. Copy the bot's callback URL into **Event Subscriptions** in the platform's developer console. For Lark it has this shape; Feishu uses `/feishu/` instead of `/lark/`:
+6. Copy the callback URL shown on the completion page into **Event Subscriptions** in the platform's developer console. For Lark it has this shape; Feishu uses `/feishu/` instead of `/lark/`:
 
 ```
 https://YOUR_NYXID_API_ORIGIN/api/v1/webhooks/channel/lark/<BOT_ID>
 ```
 
-7. Subscribe to at least `im.message.receive_v1`, enable the app's required message permissions, and publish/install the app for the intended workspace. Assign an agent in NyxID. The bot promotes to **active** automatically after the first verified inbound event.
+7. Subscribe to at least `im.message.receive_v1` and publish/install the app for the intended workspace. Click **Open channel bot** in NyxID and assign an agent. The bot promotes to **active** automatically after the first verified inbound event.
 
 :::note
 If an existing Lark bot is stuck in `pending_webhook`, check that the Verification Token in NyxID matches the one in the Lark console. Patch the bot via the console or CLI and wait for the next inbound to promote it.
