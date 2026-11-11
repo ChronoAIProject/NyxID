@@ -35,7 +35,7 @@ export function notificationBellLabel(
   needsDecision: number,
 ): string {
   let label = "Notifications";
-  if (unread > 0) label += `, ${unread} unread`;
+  if (unread > 0 || needsDecision > 0) label += `, ${unread} unread`;
   if (needsDecision > 0)
     label += `, ${needsDecision} ${needsDecision === 1 ? "needs" : "need"} your decision`;
   return label;

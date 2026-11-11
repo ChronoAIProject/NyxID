@@ -16,7 +16,9 @@ describe("NotificationBell", () => {
     expect(screen.getByText(String(badge))).toBeTruthy();
     expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ position: "absolute", top: -6, right: -8 });
     expect(screen.getByTestId("notification-bell-glyph")).toHaveStyle({ position: "relative" });
-    expect(screen.getByTestId("notification-bell-attention")).toBeTruthy();
+    expect(screen.queryByTestId("notification-bell-attention")).toBeNull();
+    const { lightColors } = jest.requireActual("../../theme/mobileTheme");
+    expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ backgroundColor: lightColors.warningTone.bg });
     await fireEvent.press(bell);
     expect(onPress).toHaveBeenCalledTimes(1);
   });
@@ -29,4 +31,16 @@ describe("NotificationBell", () => {
     await fireEvent.press(bell);
     expect(onPress).not.toHaveBeenCalled();
   });
+});
+
+
+it("shows one decision-count pill at zero unread, and a neutral pill without decisions", async () => {
+  const { lightColors } = jest.requireActual("../../theme/mobileTheme");
+  const view = await render(<NotificationBell unread={0} needsDecision={2} onPress={() => {}} />);
+  expect(screen.getByRole("button", { name: "Notifications, 0 unread, 2 need your decision" })).toBeTruthy();
+  expect(screen.getByText("2")).toBeTruthy();
+  expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ backgroundColor: lightColors.warningTone.bg });
+  await view.rerender(<NotificationBell unread={10} needsDecision={0} onPress={() => {}} />);
+  expect(screen.getByText("10")).toBeTruthy();
+  expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ backgroundColor: lightColors.card });
 });

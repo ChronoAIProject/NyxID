@@ -54,7 +54,7 @@ it("is absent, and reads nothing, without the Notifications feature", async () =
   expect(summaryReads).toBe(0);
 });
 
-it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("shows %s unread as %s and keeps the decision marker separate", async (count, badge) => {
+it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("shows %s unread as %s and uses one amber count pill", async (count, badge) => {
   signIn([FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS]);
   summary = { unread_count: count, needs_decision_count: 2, by_source: [] };
   renderBell();
@@ -63,7 +63,8 @@ it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("shows %s unread as %s
   expect(countBadge).toHaveTextContent(String(badge));
   expect(countBadge).toHaveClass("absolute", "tabular-nums");
   expect(countBadge.parentElement).toHaveClass("relative");
-  expect(bell.querySelector("[data-needs-decision]")).not.toBeNull();
+  expect(bell.querySelector("[data-needs-decision]")).toBeNull();
+  expect(countBadge).toHaveClass("bg-warning/10", "text-warning", "light:text-amber-700");
   expect(countBadge).not.toHaveAttribute("data-needs-decision");
   expect(bell).toHaveAttribute("aria-haspopup", "dialog");
   expect(bell).toHaveAttribute("aria-expanded", "false");
@@ -75,6 +76,7 @@ it("uses the neutral badge when nothing needs a decision and none at zero", asyn
   const view = renderBell();
   const bell = await screen.findByRole("button", { name: "Notifications, 3 unread" });
   expect(bell).toHaveTextContent("3");
+  expect(bell.querySelector("[data-notification-count]")).toHaveClass("bg-muted", "text-muted-foreground");
   expect(bell.querySelector("[data-needs-decision]")).toBeNull();
   view.unmount();
   summary = { unread_count: 0, needs_decision_count: 0, by_source: [] };
@@ -104,4 +106,16 @@ it("formats the badge and label", () => {
   expect(notificationBadgeText(100)).toBe("99+");
   expect(notificationBellLabel(0, 0)).toBe("Notifications");
   expect(notificationBellLabel(1, 1)).toBe("Notifications, 1 unread, 1 needs you");
+});
+
+
+it("shows the decision count in the single amber pill when unread is zero", async () => {
+  signIn([FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS]);
+  summary = { unread_count: 0, needs_decision_count: 2, by_source: [] };
+  renderBell();
+  const bell = await screen.findByRole("button", { name: "Notifications, 0 unread, 2 need you" });
+  expect(bell.querySelectorAll("[data-notification-count]")).toHaveLength(1);
+  expect(bell.querySelector("[data-notification-count]")).toHaveTextContent("2");
+  expect(bell.querySelector("[data-notification-count]")).toHaveClass("bg-warning/10");
+  expect(bell.querySelector("[data-needs-decision]")).toBeNull();
 });

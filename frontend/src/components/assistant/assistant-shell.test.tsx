@@ -72,7 +72,11 @@ it.each(["sidebar", "mobile", "drawer"])("keeps the %s header actions in one non
     const actions = header.querySelector("[data-header-actions]")!;
     expect(actions).not.toBeNull();
     expect(actions).toHaveClass("flex-nowrap", "shrink-0");
-    expect(header).toHaveClass("flex-wrap");
+    expect(header).toHaveClass("flex-wrap", "justify-between");
+    expect(actions).not.toHaveClass("ml-auto");
+    // justify-between places the cluster at the end of a shared flex line;
+    // on a wrapped line its sole item starts flush with the brand.
+    expect(actions).not.toHaveClass("justify-end", "self-end");
     for (const button of header.querySelectorAll("button")) expect(actions).toContainElement(button);
     expect(within(actions as HTMLElement).getByRole("button", { name: "Search" })).toBeInTheDocument();
     expect(actions.parentElement).toBe(header);

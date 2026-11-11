@@ -144,7 +144,9 @@ test("rows show title, preview, counts and unread state; tapping marks read and 
   assert.ok(first.some((n) => n.type === "Text" && n.props.children === "Support chat"));
   assert.ok(first.some((n) => n.type === "Text" && n.props.children === "Thanks!"));
   assert.ok(first.some((n) => n.type === "Text" && n.props.children === "3 new"));
-  assert.ok(first.some((n) => n.props.testID === "notification-unread-dot"));
+  assert.equal(first.some((n) => n.props.testID === "notification-unread-dot"), false);
+  assert.equal(rows[0].props.accessibilityState.selected, true);
+  assert.equal(rows[0].props.style[1].backgroundColor, lightColors.cardSoft);
   assert.match(rows[0].props.accessibilityLabel, /^Support chat, Thanks!, .*3 new, unread$/);
   const decision = nodes(rows[1]);
   assert.ok(decision.some((n) => n.type === "Text" && n.props.children === "Needs you"));

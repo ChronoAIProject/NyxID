@@ -8,7 +8,7 @@ import {
   notificationBellLabel,
 } from "./notificationPresentation";
 
-/** Header bell: a compact 99+ count pill and a separate decision marker. */
+/** Header bell: a compact 99+ count pill tinted amber for waiting decisions. */
 export function NotificationBell({
   unread,
   needsDecision,
@@ -21,7 +21,7 @@ export function NotificationBell({
   disabled?: boolean;
 }) {
   const { colors } = useTheme();
-  const badge = notificationBadge(unread);
+  const badge = notificationBadge(unread > 0 ? unread : needsDecision);
   const attention = needsDecision > 0;
   return (
     <Pressable
@@ -44,20 +44,19 @@ export function NotificationBell({
             style={[
               styles.badge,
               {
-                backgroundColor: colors.card,
-                borderColor: colors.bg,
+                backgroundColor: attention ? colors.warningTone.bg : colors.card,
+                borderColor: attention ? colors.warningTone.border : colors.bg,
               },
             ]}
           >
             <Text
               maxFontSizeMultiplier={1.2}
-              style={[styles.badgeText, { color: colors.textPrimary }]}
+              style={[styles.badgeText, { color: attention ? colors.warningTone.text : colors.textPrimary }]}
             >
               {badge}
             </Text>
           </View>
         ) : null}
-        {attention ? <View testID="notification-bell-attention" style={[styles.attention, { backgroundColor: colors.warning, borderColor: colors.bg }]} /> : null}
       </View>
     </Pressable>
   );
@@ -88,5 +87,4 @@ const styles = StyleSheet.create({
     ...typeScale.badge,
     fontVariant: ["tabular-nums"],
   },
-  attention: { position: "absolute", bottom: -2, right: -2, width: 8, height: 8, borderRadius: radius.full, borderWidth: 1 },
 });

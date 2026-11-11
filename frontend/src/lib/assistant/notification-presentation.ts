@@ -22,7 +22,7 @@ export function notificationBadgeText(unread: number): string {
 }
 
 export function notificationBellLabel(unread: number, needsDecision: number): string {
-  if (unread <= 0) return translateUi("Notifications");
+  if (unread <= 0 && needsDecision <= 0) return translateUi("Notifications");
   const parts = [translateUi("{{count}} unread", { count: unread })];
   if (needsDecision > 0) {
     parts.push(needsDecision === 1

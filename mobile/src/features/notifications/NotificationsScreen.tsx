@@ -173,7 +173,7 @@ export function NotificationRow({
       testID={`notification-${item.id}`}
       style={({ pressed }) => [
         styles.row,
-        { backgroundColor: pressed ? colors.navActive : "transparent" },
+        { backgroundColor: pressed ? colors.navActive : !item.read ? colors.cardSoft : "transparent" },
       ]}
     >
       <View style={[styles.iconTile, { backgroundColor: palette.bg }]}>
@@ -214,16 +214,7 @@ export function NotificationRow({
           </View>
         ) : null}
       </View>
-      {!item.read ? (
-        <View
-          accessibilityLabel="Unread"
-          testID="notification-unread-dot"
-          style={[
-            styles.dot,
-            { backgroundColor: pending ? colors.warning : colors.primary },
-          ]}
-        />
-      ) : null}
+
     </Pressable>
   );
 }
@@ -475,7 +466,6 @@ function createStyles(colors: ThemeColors) {
       paddingVertical: 1,
     },
     chipText: { fontFamily: fonts.bodySemi, fontSize: 11, lineHeight: 15 },
-    dot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
     footer: { paddingVertical: spacing.lg },
     empty: {
       paddingVertical: spacing.xxl,

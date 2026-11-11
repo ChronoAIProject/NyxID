@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 
 /**
  * The bell beside Search in the assistant header. Hidden entirely without
- * the Notifications feature; a separate amber dot marks waiting decisions.
+ * the Notifications feature; waiting decisions tint the single count pill amber.
  */
 export function NotificationsBell() {
   useUiTranslation();
@@ -32,6 +32,7 @@ export function NotificationsBell() {
   if (!enabled) return null;
   const unread = summary.data?.unread_count ?? 0;
   const needsDecision = summary.data?.needs_decision_count ?? 0;
+  const count = unread > 0 ? unread : needsDecision;
   const label = notificationBellLabel(unread, needsDecision);
   const active = current.panel === "notifications";
   return (
@@ -54,19 +55,18 @@ export function NotificationsBell() {
           >
             <span aria-hidden="true" className="relative flex h-4 w-4 items-center justify-center">
               <Bell className="h-4 w-4" />
-              {unread > 0 ? (
+              {count > 0 ? (
                 <span
                   aria-hidden="true"
                   data-notification-count=""
                   className={cn(
-                    badgeVariants({ variant: "secondary" }),
-                    "absolute right-0 top-0 min-w-4 -translate-y-1/2 translate-x-1/2 justify-center rounded-full border-hairline px-1 py-0 tabular-nums text-foreground",
+                    badgeVariants({ variant: needsDecision > 0 ? "warning" : "secondary" }),
+                    "absolute right-0 top-0 min-w-4 -translate-y-1/2 translate-x-1/2 justify-center rounded-full border-hairline px-1 py-0 tabular-nums",
                   )}
                 >
-                  {notificationBadgeText(unread)}
+                  {notificationBadgeText(count)}
                 </span>
               ) : null}
-              {needsDecision > 0 ? <span data-needs-decision="" className="absolute -bottom-1 -right-1 h-1.5 w-1.5 rounded-full bg-warning ring-2 ring-sidebar" /> : null}
             </span>
           </button>
         </TooltipTrigger>

@@ -231,7 +231,7 @@ per-row audit noise.
 ## Web and mobile behavior
 
 A bell in the assistant shell opens Notifications. The badge shows exact counts
-through **99**, then **99+**. A separate amber marker shows pending decisions. Filters are **All**, **Needs you**,
+through **99**, then **99+**. The single count pill uses the warning tone while decisions are pending; when unread is zero it shows the pending-decision count. Filters are **All**, **Needs you**,
 **Automations** and **Chats**. Rows show their kind, current source title, bounded
 preview, age, unread state and a count chip when activity coalesced. The panel
 supports cursor pagination, empty/error states and mark-all with the viewed

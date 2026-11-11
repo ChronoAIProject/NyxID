@@ -121,7 +121,8 @@ describe("NotificationsScreen", () => {
     expect(screen.getByText("3 new")).toBeTruthy();
     // The filter tab and the pending card's chip both read "Needs you".
     expect(screen.getAllByText("Needs you").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByTestId("notification-unread-dot")).toHaveLength(2);
+    expect(screen.queryByTestId("notification-unread-dot")).toBeNull();
+    expect(screen.getByTestId("notification-n1").props.accessibilityState).toEqual({ selected: true });
     await fireEvent.press(screen.getByTestId("notification-n1"));
     expect(mockReads).toEqual([{ ids: ["n1"] }]);
     expect(mockOpened).toEqual([
