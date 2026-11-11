@@ -205,7 +205,7 @@ export function ApiKeyTable({
                   <div className="mt-auto flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                     <span>{ownerLabel}</span>
                     <span>{servicesSummary(key)}</span>
-                    <span>{key.bindings_count > 0 ? translateUi("{{value1}} binding{{value2}}", { value1: String(key.bindings_count), value2: key.bindings_count === 1 ? "" : "s" }) : translateUi("No bindings")}</span>
+                    <span>{key.bindings_count > 0 ? translateUi("{{count}} bindings", { count: key.bindings_count }) : translateUi("No bindings")}</span>
                     <span>{key.last_used_at ? translateUi("Used {{value1}}", { value1: formatRelativeTime(key.last_used_at) }) : translateUi("Never used")}</span>
                   </div>
                 </CardContent>

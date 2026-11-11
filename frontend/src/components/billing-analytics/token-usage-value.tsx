@@ -95,9 +95,7 @@ export function TokenUsageValue({
             </p>
             {(usage.cached_tokens > 0 || usage.cache_creation_tokens > 0) && (
               <p className="text-13 text-muted-foreground">{translateUi("Cache read ")}{number(usage.cached_tokens)}{translateUi(" · cache write")}{" "}
-                {number(usage.cache_creation_tokens)}. These can overlap input
-                counts and are not added to the total.
-              </p>
+                {number(usage.cache_creation_tokens)}{translateUi(". These can overlap input counts and are not added to the total. ")}</p>
             )}
           </div>
         )}

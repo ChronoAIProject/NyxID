@@ -83,9 +83,7 @@ export function RemoteMachineBilling({
             onClick={() => selectRun(undefined)}
           >{translateUi("View current contract")}</Button>
           {selectedRunId && (
-            <p className="break-all text-14 text-muted-foreground">{translateUi("Viewing historical run ")}{selectedRunId}. Each run retains its
-              accepted rate version.
-            </p>
+            <p className="break-all text-14 text-muted-foreground">{translateUi("Viewing historical run ")}{selectedRunId}{translateUi(". Each run retains its accepted rate version. ")}</p>
           )}
           <p className="text-14 text-muted-foreground">{translateUi("Historical summaries contain accepted rates and state. Open a contract to read its settled and reserved amounts separately.")}</p>
           {runs.isPending && (

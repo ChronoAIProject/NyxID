@@ -460,8 +460,7 @@ function UsageWindows({ slug }: { readonly slug: string }) {
               `${slot.label}: ${slot.calls.toLocaleString(getFormattingLocale())} ${slot.calls === 1 ? "call" : "calls"}`,
           )
           .join(" · ")}
-        . A day-by-day graph replaces this once NyxID reports usage by day.
-      </figcaption>
+        {translateUi(". A day-by-day graph replaces this once NyxID reports usage by day. ")}</figcaption>
     </figure>
   );
 }

@@ -458,7 +458,7 @@ function RemoteMachineDetailView({
           )}
           {acceptancePending && acceptedAction && (
             <p role="status" className="text-14">
-              {readable(acceptedAction)}{translateUi(" request accepted. Waiting for the resource and runtime result.")}</p>
+              {translateUi(readable(acceptedAction))}{translateUi(" request accepted. Waiting for the resource and runtime result.")}</p>
           )}
           {activeOperation && (
             <RemoteMachineOperationCard
@@ -897,9 +897,7 @@ function LifecycleActionDialog({
       <GroupedDialogContent>
         <DialogHeader>
           <DialogTitle>{label}</DialogTitle>
-          <DialogDescription>{translateUi("Review resource revision ")}{String(reviewRevision)}. Only the
-            signed-in owner can authorize this lifecycle action.
-          </DialogDescription>
+          <DialogDescription>{translateUi("Review resource revision ")}{String(reviewRevision)}{translateUi(". Only the signed-in owner can authorize this lifecycle action. ")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(submit)} className="space-y-6">
@@ -923,9 +921,7 @@ function LifecycleActionDialog({
                         {policy
                           ? translateUi("{{value1}} days", { value1: policy.operation_history_days })
                           : translateUi("the published retention period")}
-                        . Required audit and financial evidence is retained
-                        separately.
-                      </p>
+                        {translateUi(". Required audit and financial evidence is retained separately. ")}</p>
                     </>
                   ) : action === "pause" ? (
                     <>
@@ -935,11 +931,8 @@ function LifecycleActionDialog({
                   ) : (
                     <>
                       <p>{translateUi("Resume this free machine only after live eligibility and current Kubernetes lifecycle checks. A new runtime uses the retained workspace without restoring old processes or jobs. It will never silently switch to paid.")}</p>
-                      <p>{translateUi("Retained profile: ")}{machine.profile.profile_version}.
-                        Policy: {machine.policy_version}. Data policy:{" "}
-                        {machine.data_policy_version}. Resume preserves the
-                        saved specification and workspace.
-                      </p>
+                      <p>{translateUi("Retained profile: ")}{machine.profile.profile_version}{translateUi(". Policy: ")}{machine.policy_version}{translateUi(". Data policy:")}{" "}
+                        {machine.data_policy_version}{translateUi(". Resume preserves the saved specification and workspace. ")}</p>
                       <p>{translateUi("Temporary storage has no fixed capacity commitment.")}{" "}{translateUi("Temporary data may be lost after pause or Pod recreation. All granted clients share the OS user and workspace. File roots do not isolate shell commands.")}</p>
                     </>
                   )}
@@ -1316,15 +1309,9 @@ function RemoteMachinePolicyPanel({
           <div className="space-y-2">
             <p>{translateUi("Job metadata retention:")}{" "}
               {policy ? translateUi("{{value1}} days", { value1: policy.job_history_days }) : translateUi("not reported")}{translateUi("; terminal operation retention:")}{" "}
-              {policy ? translateUi("{{value1}} days", { value1: policy.operation_history_days }) : translateUi("not reported")}.
-              Output is read only from the currently authorized live node,
-              retained at most one hour after a job finishes, and can disappear
-              earlier after cache eviction or runtime loss.
-            </p>
+              {policy ? translateUi("{{value1}} days", { value1: policy.operation_history_days }) : translateUi("not reported")}{translateUi(". Output is read only from the currently authorized live node, retained at most one hour after a job finishes, and can disappear earlier after cache eviction or runtime loss. ")}</p>
             <p>{translateUi("Deletion confirms Sandbox and related namespace object cleanup, terminal creation responsibilities and accounting. Underlying storage follows its reclaim policy; physical storage release or erasure is not verified. Cleanup target:")}{" "}
-              {policy ? translateUi("{{value1}} hours", { value1: policy.cleanup_target_hours }) : translateUi("not reported")}.
-              A target is not a completion guarantee.
-            </p>
+              {policy ? translateUi("{{value1}} hours", { value1: policy.cleanup_target_hours }) : translateUi("not reported")}{translateUi(". A target is not a completion guarantee. ")}</p>
             <p>{translateUi("Paused workspaces have no automatic expiry and no storage fee. A free machine never implies free downstream services. Runtime and gateway service charges are separate.")}</p>
             <p>{translateUi("Paid runs require an accepted rate and account-balance funding, with no per-instance cap. Account funds and runtime estimates are shared with other Machines and services, and do not promise a duration. Manual resume requires a new accepted quote after earlier liability is closed.")}</p>
           </div>

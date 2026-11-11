@@ -514,7 +514,7 @@ function AgentDetailsContent({
                         search={{ id: "ownership", title: "Ownership", keywords: [agent.owner_kind === "org" ? agent.owner_name ?? agent.owner_id : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}` : "Personal agent", agent.org_role, agent.share_role].filter(Boolean).join(" ") }}
                         footer={
                           agent.owner_kind === "org"
-                            ? translateUi("Maintained by Admins and Members. Your role: {{value1}}.{{value2}}", { value1: agent.org_role ?? "member", value2: agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization." })
+                            ? translateUi("Maintained by Admins and Members. Your role: {{value1}}.{{value2}}", { value1: translateUi(agent.org_role ?? "member"), value2: agent.can_maintain === false ? translateUi(" Read-only; viewers cannot maintain or chat.") : translateUi(" Chats are private to you; memory is shared with the organization.") })
                             : agent.share_role
                               ? translateUi("Your role: {{value1}}. Your chats and notes stay private.", { value1: agent.share_role })
                               : undefined
@@ -764,9 +764,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="basis-full type-secondary text-text-tertiary">{translateUi("Shown instead of ")}{nyxbot ? translateUi("NyxBot") : translateUi("@{{name}}", { name: agent.name })}.
-                        Leave empty to use it.
-                      </FormDescription>
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">{translateUi("Shown instead of ")}{nyxbot ? translateUi("NyxBot") : translateUi("@{{name}}", { name: agent.name })}{translateUi(". Leave empty to use it. ")}</FormDescription>
                     <GroupedFooter>
                       <FormMessage />
                     </GroupedFooter>

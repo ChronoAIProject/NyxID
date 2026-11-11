@@ -101,7 +101,7 @@ export function ChannelActivities({
               ? translateUi("Activity count unavailable")
               : query.isPending
                 ? translateUi("Loading activity count…")
-                : translateUi("{{value1}} {{value2}} {{value3}} in the last {{value4}} days", { value1: query.data.total, value2: kind === "all" ? "received" : "matching", value3: query.data.total === 1 ? "activity" : "activities", value4: query.data.retention_days })}
+                : kind === "all" ? translateUi("{{count}} received activities in the last {{days}} days", { count: query.data.total, days: query.data.retention_days }) : translateUi("{{count}} matching activities in the last {{days}} days", { count: query.data.total, days: query.data.retention_days })}
           </p>
           <Select
             value={kind}

@@ -116,8 +116,7 @@ export function UserCredentialsDialog({
             {hasExisting ? translateUi("Manage") : translateUi("Setup")}{translateUi(" OAuth App for ")}{provider.name}
           </DialogTitle>
           <DialogDescription>{translateUi("Enter your own OAuth app credentials to connect with ")}{provider.name}
-            . Public or PKCE-only clients can leave Client Secret blank.
-          </DialogDescription>
+            {translateUi(". Public or PKCE-only clients can leave Client Secret blank. ")}</DialogDescription>
         </DialogHeader>
 
         {isLoading ? (

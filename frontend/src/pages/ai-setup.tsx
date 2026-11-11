@@ -198,12 +198,11 @@ function AiSkillSetupCard({
           <code className="rounded bg-muted px-1 py-0.5 text-14">
             {baseUrl}/llms.txt
           </code>
-          . Tools with auto-refresh fetch the latest version automatically.
-          Check skill status:{" "}
+          {translateUi(". Tools with auto-refresh fetch the latest version automatically. Check skill status:")}{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-14">
             nyxid ai-setup status
           </code>
-          . Update the CLI by re-running the installer:{" "}
+          {translateUi(". Update the CLI by re-running the installer:")}{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-14">
             bash -c &quot;$(curl -fsSL ...install.sh)&quot;
           </code>

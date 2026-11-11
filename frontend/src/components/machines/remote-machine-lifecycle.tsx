@@ -107,7 +107,7 @@ export function RemoteMachineOperationCard({
     Date.parse(operation.deadline_at) < now;
   return (
     <DetailSection
-      title={translateUi("{{value1}} operation", { value1: readable(operation.action) })}
+      title={translateUi("{{value1}} operation", { value1: translateUi(readable(operation.action)) })}
       className="text-14 max-sm:[&_div.flex.text-14]:flex-col max-sm:[&_div.flex.text-14]:items-start max-sm:[&_div.flex.text-14]:gap-1 max-sm:[&_div.flex.text-14>div]:max-w-full max-sm:[&_.text-right]:text-left"
       action={
         <Badge
@@ -129,9 +129,7 @@ export function RemoteMachineOperationCard({
       {operation.action === "delete" && (
         <div className="space-y-2 px-4 py-3 text-14">
           {stopped ? (
-            <p role="status">{translateUi("Automatic deletion attempts stopped. The current round’s server limit is ")}{operation.delete_retry_limit ?? translateUi("not reported")}. Cleanup
-              and accounting retain their responsibilities.
-            </p>
+            <p role="status">{translateUi("Automatic deletion attempts stopped. The current round’s server limit is ")}{operation.delete_retry_limit ?? translateUi("not reported")}{translateUi(". Cleanup and accounting retain their responsibilities. ")}</p>
           ) : pending(operation) ? (
             <p>{translateUi("Deletion is still pending. Acceptance and scheduled attempts do not confirm cleanup or accounting completion.")}</p>
           ) : null}

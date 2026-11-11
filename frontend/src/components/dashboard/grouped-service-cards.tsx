@@ -532,7 +532,7 @@ function GroupCard({
                 }}
                 aria-expanded={expanded && !routingOpen}
                 aria-controls={contentId}
-                aria-label={translateUi("{{value1}} {{value2}} connections", { value1: expanded && !routingOpen ? "Collapse" : "Expand", value2: group.name })}
+                aria-label={expanded && !routingOpen ? translateUi("Collapse {{name}} connections", { name: group.name }) : translateUi("Expand {{name}} connections", { name: group.name })}
               >
                 <ChevronRight
                   className={cn(
@@ -542,7 +542,7 @@ function GroupCard({
                 />
                 {expanded && !routingOpen
                   ? translateUi("Hide connections")
-                  : translateUi("View {{value1}} {{value2}}", { value1: matchingCount, value2: matchingCount === 1 ? "connection" : "connections" })}
+                  : translateUi("View {{count}} connections", { count: matchingCount })}
               </Button>
             </Glide>
             <Glide className="ml-auto flex flex-wrap items-center gap-2 pr-2">

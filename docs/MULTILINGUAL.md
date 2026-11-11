@@ -68,7 +68,9 @@ The interface preference does not set an LLM response-language override. NyxBot
 continues to follow its existing instructions to respond in the user's language.
 
 The main app downloads each large Chinese Studio/NyxBot catalog only when that
-language is selected. Initial rendering waits for the selected catalog; later
+language is selected. Initial rendering waits up to 1.5 seconds for the selected
+catalog, then permits English fallback while a slow download finishes. Transient
+download failures retry; mounted controls update when the catalog arrives. Later
 language changes wait for their catalog without losing drafts. English phrases
 serve as fallback keys, with only plural and other distinct English values
 included in the runtime overrides. The smaller shared setup, landing, and

@@ -604,5 +604,15 @@
   "audio output tokens": "audio output tokens",
   "audio output token": "audio output token",
   "e.g. media.write": "e.g. media.write",
-  "e.g. repo,read:org": "e.g. repo,read:org"
+  "e.g. repo,read:org": "e.g. repo,read:org",
+  "Cannot save — {{count}} fields need attention: {{message}}": "Cannot save — {{count}} fields need attention: {{message}}",
+  "Cannot save — {{count}} fields need attention: {{message}}_one": "Cannot save — {{count}} field needs attention: {{message}}",
+  "Cannot save — {{count}} fields need attention: {{message}}_other": "Cannot save — {{count}} fields need attention: {{message}}",
+  "Cannot save — {{count}} fields need attention._one": "Cannot save — {{count}} field needs attention.",
+  "Cannot save — {{count}} fields need attention._other": "Cannot save — {{count}} fields need attention.",
+  ". Leave blank to let NyxID derive it from the label. ": ". Leave blank to let NyxID derive it from the label. ",
+  ". Custom strings are rejected by the backend. ": ". Custom strings are rejected by the backend. ",
+  "Refresh the key details to confirm its expiry.": "Refresh the key details to confirm its expiry.",
+  "This key has no expiry.": "This key has no expiry.",
+  "Expires {{date}}.": "Expires {{date}}."
 }

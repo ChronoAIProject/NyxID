@@ -207,10 +207,7 @@ export function AvailableBenefits({
             <h3 className="type-secondary-strong">{translateUi("Individual grants")}</h3>
             <p className="my-1 type-secondary text-text-tertiary">
               {data.total_grants.toLocaleString(getFormattingLocale())}{" "}
-              {data.total_grants === 1 ? translateUi("credit grant") : translateUi("credit grants")}{translateUi(" · page ")}{data.page}.
-              The available total includes every eligible grant, across all
-              pages.
-            </p>
+              {data.total_grants === 1 ? translateUi("credit grant") : translateUi("credit grants")}{translateUi(" · page ")}{data.page}{translateUi(". The available total includes every eligible grant, across all pages. ")}</p>
             <ul className="divide-y divide-border/50">
               {data.grants.map((g) => (
                 <li
@@ -292,9 +289,7 @@ export function AvailableBenefits({
               allowances={data.allowances}
               catalog={catalog}
             />
-            <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}.
-              Allowances apply first, then eligible grants, then wallet credits.
-            </p>
+            <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}{translateUi(". Allowances apply first, then eligible grants, then wallet credits. ")}</p>
           </div>
         )}
       </CardContent>

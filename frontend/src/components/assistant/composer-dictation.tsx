@@ -635,9 +635,7 @@ export function useComposerDictation({
         <details className="mt-2 text-13 text-text-tertiary">
           <summary className="cursor-pointer">{translateUi("Transcription source")}</summary>
           <p className="mt-1">
-            {option?.model_label ?? translateUi("Platform transcription")}. Review before
-            inserting; never auto-sends. Maximum 2 minutes.
-          </p>
+            {option?.model_label ?? translateUi("Platform transcription")}{translateUi(". Review before inserting; never auto-sends. Maximum 2 minutes. ")}</p>
           {choices.length > 1 && (
             <select
               aria-label={translateUi("Dictation source")}

@@ -56,7 +56,7 @@ function TargetPicker({
   if (kind === "group") return <GroupChoices choose={choose} />;
   return (
     <div className="space-y-2">
-      <Field title={translateUi("Find {{value1}}", { value1: kind === "org" ? "organization" : "person" })}>
+      <Field title={kind === "org" ? translateUi("Find organization") : translateUi("Find person")}>
         <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -153,7 +153,7 @@ export function AccessEditor({
                           rules.filter((_, n) => n !== i),
                         )
                       }
-                    >{translateUi("Remove ")}{rule.effect}{translateUi(" rule ")}{i + 1}
+                    >{translateUi("Remove ")}{translateUi(rule.effect)}{translateUi(" rule ")}{i + 1}
                     </Button>
                   )}
                 </li>

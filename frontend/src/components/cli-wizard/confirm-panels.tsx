@@ -246,9 +246,7 @@ export function ApiKeyCreateConfirm({
                     <p className="text-muted-foreground">{translateUi("Values are a fixed allowlist —")}{" "}
                       <code>claude-code</code>, <code>cursor</code>,{" "}
                       <code>codex</code>, <code>openclaw</code>,{" "}
-                      <code>generic</code>. Custom strings are rejected
-                      by the backend.
-                    </p>
+                      <code>generic</code>{translateUi(". Custom strings are rejected by the backend. ")}</p>
                     <p className="text-muted-foreground">{translateUi("Leave as ")}<code>— none —</code>{translateUi(" if you don't want the tag.")}</p>
                   </div>
                 </TooltipContent>

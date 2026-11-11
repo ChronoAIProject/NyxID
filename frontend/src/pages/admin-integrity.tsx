@@ -114,7 +114,7 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
               <dd>
                 {status.anchor_seq == null
                   ? translateUi("none yet")
-                  : translateUi("seq {{value1}}{{value2}}", { value1: status.anchor_seq, value2: status.anchor_valid === false ? " (invalid)" : "" })}
+                  : translateUi("seq {{value1}}{{value2}}", { value1: status.anchor_seq, value2: status.anchor_valid === false ? translateUi(" (invalid)") : "" })}
               </dd>
             </div>
           ) : (

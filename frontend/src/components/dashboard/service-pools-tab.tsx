@@ -188,9 +188,7 @@ export function ServicePoolsTab({
             {orgId
               ? translateUi("{{value1}}’s connections", { value1: ownerLabel })
               : translateUi("your personal connections")}
-            . Put your preferred connection first and add a backup for when it
-            reaches its limit.
-          </p>
+            {translateUi(". Put your preferred connection first and add a backup for when it reaches its limit. ")}</p>
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-14 text-muted-foreground">
             <span className="rounded-lg border border-border/50 px-3 py-2">{translateUi("1. Choose connections")}</span>
             <span aria-hidden="true">→</span>

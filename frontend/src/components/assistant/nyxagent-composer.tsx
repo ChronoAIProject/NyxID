@@ -61,7 +61,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   const connectionLocked = Boolean(props.active || props.sending || submitting || props.disabled);
 
   return <UploadComposer {...props}
-    imageWarning={cannotViewImages ? "This model can’t view images. You can still send, choose another model, or describe the image in text." : undefined}
+    imageWarning={cannotViewImages ? translateUi("This model can’t view images. You can still send, choose another model, or describe the image in text.") : undefined}
     onVoiceSettings={onVoiceSettings}
     footerControls={<ComposerSettings
       conversationId={conversation?.id}

@@ -627,10 +627,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                     data.totals.allowance_cost ??
                       data.totals.allowance_cost_micros,
                   )}
-                  . Token total is input + output; provider cache counts can
-                  overlap input. Quantities include each billing component and
-                  resale event.
-                </p>
+                  {translateUi(". Token total is input + output; provider cache counts can overlap input. Quantities include each billing component and resale event. ")}</p>
                 <div className="flex justify-end">
                   <TokenMetricPicker
                     label={translateUi("Token view")}

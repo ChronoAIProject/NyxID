@@ -199,7 +199,7 @@ export function OAuthIncrementalConsentPage({
                         className="type-card-title text-foreground"
                       >
                         {additions.length
-                          ? translateUi("Allow {{value1}} additional {{value2}}", { value1: additions.length, value2: additions.length === 1 ? "service" : "services" })
+                          ? translateUi("Allow {{count}} additional services", { count: additions.length })
                           : translateUi("No additional services needed")}
                       </h2>
                       <p className="mt-1.5 text-14 text-muted-foreground">

@@ -97,11 +97,7 @@ export function RouteReadiness({
     <div className="space-y-2 rounded-lg border border-border bg-muted/50 p-3 text-14 text-muted-foreground">
       <p className="font-medium text-foreground">{translateUi("Agent setup · ")}{ownerLabel}</p>
       <p>{translateUi(message)}</p>
-      <p>{translateUi("Register the intended agent runtime with a key owned by ")}{ownerLabel}.
-        The runtime must recognize that key, authenticate NyxID callbacks, and
-        send asynchronous replies. Setting a callback URL alone does not
-        register the runtime.
-      </p>
+      <p>{translateUi("Register the intended agent runtime with a key owned by ")}{ownerLabel}{translateUi(". The runtime must recognize that key, authenticate NyxID callbacks, and send asynchronous replies. Setting a callback URL alone does not register the runtime. ")}</p>
       {keys
         .filter((key) => routeAgentIssue(key, ownerOrgId) === "No callback URL")
         .map((key) => (

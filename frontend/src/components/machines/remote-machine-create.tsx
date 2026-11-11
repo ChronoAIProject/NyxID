@@ -466,9 +466,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
                       </p>
                       <p>{translateUi("Rate version: ")}{offer.rate_version}</p>
                       <p>{translateUi("Quote expires:")}{" "}
-                        {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}. Quotes are
-                        valid for 15 minutes.
-                      </p>
+                        {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}{translateUi(". Quotes are valid for 15 minutes. ")}</p>
                     </>
                   ) : (
                     <p role="alert">{translateUi("A synchronized, priced runtime quote is unavailable. Review a fresh quote before starting.")}</p>
@@ -500,8 +498,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
               ) : null}
               <p>
                 {preflight ? (
-                  <>{translateUi("Profile: ")}{preflight.profile.profile_version}. New Machine
-                    fixed specification: {preflight.profile.cpu_millis / 1000}{" "}{translateUi("vCPU · ")}{preflight.profile.memory_mib / 1024}{translateUi(" GiB memory ·")}{" "}
+                  <>{translateUi("Profile: ")}{preflight.profile.profile_version}{translateUi(". New Machine fixed specification: ")}{preflight.profile.cpu_millis / 1000}{" "}{translateUi("vCPU · ")}{preflight.profile.memory_mib / 1024}{translateUi(" GiB memory ·")}{" "}
                     {preflight.profile.workspace_gib}{translateUi(" GiB /workspace.")}{" "}
                   </>
                 ) : (
@@ -513,16 +510,13 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
                 {available === null
                   ? translateUi("Unavailable")
                   : translateUi("{{value1}} Credits", { value1: formatExactCredits(available, 12) })}
-                . Free runtime does not require a funded wallet. Downstream services
-                use their own billing and authorization.
-              </p>
+                {translateUi(". Free runtime does not require a funded wallet. Downstream services use their own billing and authorization. ")}</p>
               <p>{translateUi("Paid creation requires a live synchronized quote and explicit account-balance acceptance. An occupied free slot never switches this request to paid. Paid running Machines share account funds and have no per-instance spending cap; adding funds never resumes a paused Machine automatically.")}</p>
               <p>{translateUi("All clients share the OS and workspace. File roots do not isolate shell commands. No inbound ports, public IP, persistent environment variables, snapshots or restore. Only /workspace persists; HOME, /tmp, browser profiles and downloads are temporary unless safely saved in the workspace. Job environment variables are temporary.")}</p>
               <p>{translateUi("At most two jobs run concurrently. Default command timeout is 120 seconds, maximum one hour. Each output cache is bounded to 1 MiB; the Machine cache is bounded to 32 MiB. Raw output remains only on the Node, lasts at most one hour after termination, and may disappear sooner.")}</p>
               <p>{translateUi("Job metadata remains for 30 days and terminal operation history for 90 days. Deletion queues workspace cleanup, targets completion within 24 hours, and retains necessary billing, cleanup and idempotency evidence. Underlying storage follows its reclaim policy; physical storage release is not verified. Paused workspace storage is free.")}</p>
               {policy || saved ? (
-                <p>{translateUi("Policy: ")}{saved?.body.policy_version ?? policy?.policy_version}.
-                  Data policy:{" "}
+                <p>{translateUi("Policy: ")}{saved?.body.policy_version ?? policy?.policy_version}{translateUi(". Data policy:")}{" "}
                   {saved?.body.data_policy_version ?? policy?.data_policy_version}.
                 </p>
               ) : null}

@@ -1,5 +1,18 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { composerInput, openAssistant } from "./helpers";
+
+async function openAccountMenu(page: Page) {
+  const menu = page.getByRole("button", { name: /^(Account menu|账号菜单|帳號選單)$/ });
+  if (!await menu.isVisible()) {
+    await page.getByRole("button", { name: /^(Open chats|打开聊天|開啟聊天)$/ }).click();
+  }
+  await menu.click();
+}
+
+async function closeMobileChats(page: Page) {
+  const close = page.getByRole("button", { name: /^(Close chats|关闭聊天|關閉聊天)$/ });
+  if (await close.isVisible()) await close.click();
+}
 
 for (const width of [1280, 390]) {
   test(`language changes survive navigation and reload at ${width}px`, async ({
@@ -9,25 +22,23 @@ for (const width of [1280, 390]) {
     await openAssistant(page, { faults: { nyxagentEnabled: true } });
     const editor = composerInput(page);
     await editor.fill("Keep my draft 保留草稿");
-    await page
-      .getByRole("button", { name: width < 768 ? "User menu" : "Account menu" })
-      .click();
+    await openAccountMenu(page);
     await expect(page.getByRole("menuitem", { name: "Language", exact: true })).toHaveCount(0);
     await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
     await page.getByRole("combobox", { name: "Language", exact: true }).selectOption("zh-CN");
     await page.getByRole("button", { name: "关闭", exact: true }).click();
+    await closeMobileChats(page);
     await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
     await expect(
       page.getByRole("button", { name: "发送消息", exact: true }),
     ).toBeVisible();
     await expect(editor).toHaveText("Keep my draft 保留草稿");
 
-    await page
-      .getByRole("button", { name: width < 768 ? "用户菜单" : "账号菜单" })
-      .click();
+    await openAccountMenu(page);
     await page.getByRole("menuitem", { name: "设置", exact: true }).click();
     await page.getByRole("combobox", { name: "语言", exact: true }).selectOption("zh-TW");
     await page.getByRole("button", { name: "關閉", exact: true }).click();
+    await closeMobileChats(page);
     await expect(page.locator("html")).toHaveAttribute("lang", "zh-TW");
     await expect(
       page.getByRole("button", { name: "傳送訊息", exact: true }),
@@ -37,9 +48,7 @@ for (const width of [1280, 390]) {
       path: testInfo.outputPath(`nyxbot-zh-TW-${width}.png`),
     });
 
-    await page
-      .getByRole("button", { name: width < 768 ? "使用者選單" : "帳號選單" })
-      .click();
+    await openAccountMenu(page);
     await page
       .getByRole("menuitem", { name: "開啟 Studio", exact: true })
       .click();

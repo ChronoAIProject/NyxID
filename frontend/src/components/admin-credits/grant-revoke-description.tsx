@@ -28,9 +28,7 @@ export function GrantRevokeDescription({
           {grant.period_start
             ? translateUi(" · period starting {{value1}}", { value1: new Date(grant.period_start).toLocaleString(getFormattingLocale()) })
             : ""}
-          . This reclaim affects this allocation only. Pausing the schedule
-          stops future issuance.
-        </span>
+          {translateUi(". This reclaim affects this allocation only. Pausing the schedule stops future issuance. ")}</span>
       ) : null}
     </DialogDescription>
   );

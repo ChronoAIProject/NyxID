@@ -131,7 +131,7 @@ export function DashboardPage() {
         <h1
           className="type-compact-page-title sm:type-page-title"
           style={{ letterSpacing: "-0.03em" }}
-        >{translateUi("Welcome back, ")}{user?.display_name ?? translateUi("there")}
+        >{translateUi("Welcome back, {{name}}", { name: user?.display_name ?? translateUi("there") })}
         </h1>
         <p className="text-14 text-muted-foreground mt-1">
           {user?.email ?? ""}
@@ -336,7 +336,7 @@ function OnboardingChecklist({
         <div>
           <h2 className="type-card-title text-foreground">{translateUi("Getting started")}</h2>
           <p className="text-13 text-muted-foreground mt-0.5">
-            {steps.filter((s) => s.done).length}{translateUi(" of ")}{steps.length}{translateUi(" complete")}</p>
+            {translateUi("{{done}} of {{total}} complete", { done: steps.filter((s) => s.done).length, total: steps.length })}</p>
         </div>
         <button
           type="button"

@@ -264,7 +264,7 @@ function AutomationsContent() {
                       : row.next_run_at
                         ? translateUi("Next: {{value1}}", { value1: formatAutomationTime(row.next_run_at, zone) })
                         : translateUi("No run scheduled")} · {row.last_run?.outcome
-                    ? translateUi("Last run: {{value1}}", { value1: row.last_run.outcome.replaceAll("_", " ") })
+                    ? translateUi("Last run: {{value1}}", { value1: translateUi(row.last_run.outcome.replaceAll("_", " ")) })
                     : translateUi("Not run yet")}
                 </span>
                 {row.last_run?.notification_delivery?.message && (

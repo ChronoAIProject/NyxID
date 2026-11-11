@@ -62,7 +62,7 @@ const displayProps = new Set([
   "searchPlaceholder", "heading", "subtitle", "triggerLabel", "desc",
   "compactLabel", "serviceName", "personalLabel", "itemLabel", "emptyLabel",
   "activeLabel", "inactiveLabel", "submitLabel", "copyLabel", "allLabel", "firstHeading", "error",
-  "footer", "caption", "saveLabel", "discardLabel", "tooltip",
+  "footer", "caption", "saveLabel", "discardLabel", "tooltip", "imageWarning",
   "ackButtonLabel", "ownerLabel", "backLabel", "defaultLabel", "contentTitle", "actionLabel", "groupLabel", "currentLabel", "customPlaceholder", "activePlaceholder", "sendLabel", "connectionLabel", "showLabel", "subtitleTitle",
 ]);
 const isDisplayProp = (attribute) => displayProps.has(attribute.name.getText()) ||
@@ -78,7 +78,7 @@ const decodeEntities = (text) => text.replace(
   (_, name) => ({ amp: "&", quot: '"', apos: "'", lt: "<", gt: ">", ldquo: "“", rdquo: "”", middot: "·", rarr: "→", "#39": "'" })[name],
 );
 const isCopy = (text) => /[A-Za-z]{2}/.test(text) &&
-  !verbatim.has(text) && !protocolExamples.has(text) && !/^(?:https?:|\/|\.|~\/)/.test(text);
+  !verbatim.has(text) && !protocolExamples.has(text) && !/^(?:https?:|\/|~\/|\.(?!\s))/.test(text);
 const files = execFileSync("rg", ["--files", "src"], { cwd: root, encoding: "utf8" })
   .trim().split("\n").filter((file) => /\.tsx?$/.test(file) &&
     !/\.test\.|fixtures?|mock|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));

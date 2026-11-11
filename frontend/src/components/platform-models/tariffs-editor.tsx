@@ -338,7 +338,7 @@ export function TariffsEditor({
             className="rounded-lg border border-border/40 p-4 space-y-2"
           >
             <h3 className="type-card-title">
-              {titleCase(p.lane)}{translateUi(" price readiness")}</h3>
+              {translateUi(titleCase(p.lane))}{translateUi(" price readiness")}</h3>
             <p className="type-body">
               {p.available
                 ? translateUi("Prices ready")

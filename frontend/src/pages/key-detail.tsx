@@ -944,8 +944,7 @@ function ServiceSection({
             <span className="font-medium text-foreground">
               {credentialStatus}
             </span>
-            . Real requests will fail until the credential is restored.
-          </p>
+            {translateUi(". Real requests will fail until the credential is restored. ")}</p>
         )}
 
         {credentialMissing && (

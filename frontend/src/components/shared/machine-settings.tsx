@@ -209,13 +209,11 @@ export function MachineSettings({
                     {machine.computer_permissions.screen_recording
                       ? translateUi("allowed")
                       : translateUi("not granted")}
-                    . Accessibility:{" "}
+                    {translateUi(". Accessibility:")}{" "}
                     {machine.computer_permissions.accessibility
                       ? translateUi("allowed")
                       : translateUi("not granted")}
-                    . Enable permissions for the app running the node in macOS
-                    System Settings.
-                  </p>
+                    {translateUi(". Enable permissions for the app running the node in macOS System Settings. ")}</p>
                 )
               }
             >

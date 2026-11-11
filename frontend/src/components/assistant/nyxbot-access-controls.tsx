@@ -54,7 +54,7 @@ export function AccessModeBadge({
       variant={mode === "autopilot" ? "warning" : "secondary"}
       className={cn("gap-1", className)}
       title={ACCESS_MODE_DESCRIPTION[mode]}
-      aria-label={translateUi("Access mode: {{value1}}{{value2}}", { value1: ACCESS_MODE_LABEL[mode], value2: overridden ? " (this agent)" : "" })}
+      aria-label={translateUi("Access mode: {{value1}}{{value2}}", { value1: translateUi(ACCESS_MODE_LABEL[mode]), value2: overridden ? translateUi(" (this agent)") : "" })}
     >
       <ShieldCheck aria-hidden="true" className="h-3 w-3" />
       {ACCESS_MODE_LABEL[mode]}

@@ -148,12 +148,7 @@ export function SshServiceInstructions({
             <code className="rounded bg-muted px-1 text-14">
               /etc/ssh/auth_principals/{primaryPrincipal}
             </code>
-            . This means even if someone has a valid NyxID certificate, they can
-            only access accounts whose principals file includes their
-            certificate&apos;s principal. NyxID verifies the user&apos;s
-            identity (via JWT or API key) before signing any certificate, and
-            only signs principals from the service&apos;s allowed list.
-          </p>
+            {translateUi(". This means even if someone has a valid NyxID certificate, they can only access accounts whose principals file includes their certificate's principal. NyxID verifies the user's identity (via JWT or API key) before signing any certificate, and only signs principals from the service's allowed list. ")}</p>
         </div>
       )}
 

@@ -173,7 +173,7 @@ export function AssistantServiceDeleteDialog({
             <div className="space-y-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
               <p className="flex items-start gap-2 text-warning">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{translateUi("Deleting this ")}{cascade.provider_name}{translateUi(" connection will also revoke the shared grant")}{cascade.siblings.length
-                  ? translateUi(" used by {{value1}} other service{{value2}}", { value1: String(cascade.siblings.length), value2: cascade.siblings.length === 1 ? "" : "s" })
+                  ? translateUi(" used by {{count}} other services", { count: cascade.siblings.length })
                   : ""}
                 .
               </p>

@@ -1929,7 +1929,7 @@ function OAuthStep({
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
-        title={translateUi("{{value1}} to {{value2}}", { value1: reconnectMode ? "Reconnect" : "Connect", value2: catalogEntry.name })}
+        title={reconnectMode ? translateUi("Reconnect to {{service}}", { service: catalogEntry.name }) : translateUi("Connect to {{service}}", { service: catalogEntry.name })}
         description={translateUi("This service uses OAuth to authenticate. Click the button below to connect your account.")}
       />
 

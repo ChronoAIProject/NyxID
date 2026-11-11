@@ -434,7 +434,7 @@ export function DesignSystemPage() {
                 <AddCtaButton label={translateUi("Register Node")} onClick={() => toast.info(translateUi("Register Node clicked"))} />
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">{translateUi("All \"+\" CTA buttons use ")}<code className="text-nyx-secondary-400">AddCtaButton</code>{translateUi(" at ")}<code className="text-nyx-secondary-400">h-8 rounded-lg</code>. Icon in a <code className="text-nyx-secondary-400">rounded-[6px]</code>{translateUi(" bordered container.")}</p>
+                <p className="text-13 text-text-tertiary">{translateUi("All \"+\" CTA buttons use ")}<code className="text-nyx-secondary-400">AddCtaButton</code>{translateUi(" at ")}<code className="text-nyx-secondary-400">h-8 rounded-lg</code>{translateUi(". Icon in a ")}<code className="text-nyx-secondary-400">rounded-[6px]</code>{translateUi(" bordered container.")}</p>
               </div>
             </ComponentShowcase>
 
@@ -446,7 +446,7 @@ export function DesignSystemPage() {
                 <Button variant="primary"><ButtonIcon variant="primary"><Search className="h-3 w-3" /></ButtonIcon>{translateUi(" Get app")}</Button>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">{translateUi("Icons use ")}<code className="text-nyx-secondary-400">ButtonIcon</code>{translateUi(" wrapper: ")}<code className="text-nyx-secondary-400">rounded-[6px] border-hairline bg-overlay</code>. Destructive variant uses <code className="text-nyx-secondary-400">border-destructive/20 bg-destructive/10</code>. Primary/gradient variant uses <code className="text-nyx-secondary-400">border-white/20 bg-white/10</code>.
+                <p className="text-13 text-text-tertiary">{translateUi("Icons use ")}<code className="text-nyx-secondary-400">ButtonIcon</code>{translateUi(" wrapper: ")}<code className="text-nyx-secondary-400">rounded-[6px] border-hairline bg-overlay</code>{translateUi(". Destructive variant uses ")}<code className="text-nyx-secondary-400">border-destructive/20 bg-destructive/10</code>{translateUi(". Primary/gradient variant uses ")}<code className="text-nyx-secondary-400">border-white/20 bg-white/10</code>.
                 </p>
               </div>
             </ComponentShowcase>
@@ -589,7 +589,7 @@ export function DesignSystemPage() {
 
             <ComponentShowcase title={translateUi("Card Hover Rules")}>
               <div className="rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">{translateUi("All interactive cards: ")}<code className="text-nyx-secondary-400">transition-all duration-300</code>. Hover border: <code className="text-nyx-secondary-400">border-hairline-strong</code>{translateUi(" (neutral) or ")}<code className="text-nyx-secondary-400">border-nyx-500/40</code>{translateUi(" (brand). Icon: ")}<code className="text-nyx-secondary-400">group-hover:-translate-y-0.5</code>.
+                <p className="text-13 text-text-tertiary">{translateUi("All interactive cards: ")}<code className="text-nyx-secondary-400">transition-all duration-300</code>{translateUi(". Hover border: ")}<code className="text-nyx-secondary-400">border-hairline-strong</code>{translateUi(" (neutral) or ")}<code className="text-nyx-secondary-400">border-nyx-500/40</code>{translateUi(" (brand). Icon: ")}<code className="text-nyx-secondary-400">group-hover:-translate-y-0.5</code>.
                 </p>
               </div>
             </ComponentShowcase>
@@ -686,8 +686,7 @@ export function DesignSystemPage() {
               </DropdownMenu>
             </div>
             <div className="mt-4 rounded-lg bg-muted/50 p-3">
-              <p className="text-13 text-text-tertiary">{translateUi("Container: ")}<code className="text-nyx-secondary-400">p-2 rounded-xl</code>. Items: <code className="text-nyx-secondary-400">rounded-lg px-2 py-2</code>. No separators — use spacing instead.
-              </p>
+              <p className="text-13 text-text-tertiary">{translateUi("Container: ")}<code className="text-nyx-secondary-400">p-2 rounded-xl</code>{translateUi(". Items: ")}<code className="text-nyx-secondary-400">rounded-lg px-2 py-2</code>{translateUi(". No separators — use spacing instead. ")}</p>
             </div>
           </ComponentShowcase>
         </Section>
@@ -717,7 +716,7 @@ export function DesignSystemPage() {
               </DialogContent>
             </Dialog>
             <div className="mt-4 rounded-lg bg-muted/50 p-3">
-              <p className="text-13 text-text-tertiary">{translateUi("Padding: ")}<code className="text-nyx-secondary-400">p-6</code>. Radius: <code className="text-nyx-secondary-400">rounded-xl</code>. Gap: <code className="text-nyx-secondary-400">gap-6</code>. Overlay: <code className="text-nyx-secondary-400">bg-black/60 backdrop-blur-sm</code>.
+              <p className="text-13 text-text-tertiary">{translateUi("Padding: ")}<code className="text-nyx-secondary-400">p-6</code>{translateUi(". Radius: ")}<code className="text-nyx-secondary-400">rounded-xl</code>{translateUi(". Gap: ")}<code className="text-nyx-secondary-400">gap-6</code>{translateUi(". Overlay: ")}<code className="text-nyx-secondary-400">bg-black/60 backdrop-blur-sm</code>.
               </p>
             </div>
           </ComponentShowcase>
@@ -829,7 +828,7 @@ export function DesignSystemPage() {
                 </div>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">{translateUi("Nav sidebar: ")}<code className="text-nyx-secondary-400">16px</code>. Top bar chrome: <code className="text-nyx-secondary-400">18px</code>. Inline buttons: <code className="text-nyx-secondary-400">14px</code>. Stat cards: <code className="text-nyx-secondary-400">14px</code>. Tiny indicators: <code className="text-nyx-secondary-400">12px</code>.
+                <p className="text-13 text-text-tertiary">{translateUi("Nav sidebar: ")}<code className="text-nyx-secondary-400">16px</code>{translateUi(". Top bar chrome: ")}<code className="text-nyx-secondary-400">18px</code>{translateUi(". Inline buttons: ")}<code className="text-nyx-secondary-400">14px</code>{translateUi(". Stat cards: ")}<code className="text-nyx-secondary-400">14px</code>{translateUi(". Tiny indicators: ")}<code className="text-nyx-secondary-400">12px</code>.
                 </p>
               </div>
             </ComponentShowcase>

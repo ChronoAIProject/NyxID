@@ -119,10 +119,7 @@ function LibraryEditor({
   };
   return (
     <div className="space-y-4 text-14">
-      <p>{translateUi("Published revision ")}{library.published_revision}. Publishing updates
-        every manager assigned to this library. Started replies keep their
-        reviewed revision.
-      </p>
+      <p>{translateUi("Published revision ")}{library.published_revision}{translateUi(". Publishing updates every manager assigned to this library. Started replies keep their reviewed revision. ")}</p>
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
       {stale && (
         <div className="space-y-2">

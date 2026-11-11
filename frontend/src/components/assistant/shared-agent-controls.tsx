@@ -511,9 +511,7 @@ export function SharedConsentCards({
           title={translateUi("Connection consent")}
           footer={
             <>
-              <p>{translateUi("Your connection: ")}{row.connection_name ?? row.connection_id}.
-                Model and metered-service usage bills you.
-              </p>
+              <p>{translateUi("Your connection: ")}{row.connection_name ?? row.connection_id}{translateUi(". Model and metered-service usage bills you. ")}</p>
               <p>{translateUi("Applies to this exact operation, or this turn’s stateless model calls. Always remembers this scope until you revoke it or the agent or connection changes. Your connection is never shared with the owner.")}</p>
               {row.audience ? <p>{row.audience}</p> : null}
             </>

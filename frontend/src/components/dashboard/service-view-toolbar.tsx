@@ -155,7 +155,7 @@ export function ServiceViewToolbar({
             variant={filters.source === "all" ? "outline" : "secondary"}
             size={stuck ? "icon" : "default"}
             className="min-w-0 max-w-full h-auto whitespace-normal rounded-full break-words"
-            aria-label={translateUi("Service view: {{value1}}", { value1: filters.source === "all" ? "All services" : SOURCE_LABELS[filters.source] })}
+            aria-label={translateUi("Service view: {{value1}}", { value1: translateUi(filters.source === "all" ? "All services" : SOURCE_LABELS[filters.source]) })}
             aria-pressed={filters.source !== "all"}
             onClick={() =>
               setFilters({
@@ -219,7 +219,7 @@ export function ServiceViewToolbar({
             size={stuck ? "icon" : "default"}
             className="min-w-0 max-w-full h-auto whitespace-normal rounded-full break-words"
             aria-pressed={filters.show_auto_connected}
-            aria-label={translateUi("Auto-connected services: {{value1}}", { value1: filters.show_auto_connected ? "shown" : "hidden" })}
+            aria-label={translateUi("Auto-connected services: {{value1}}", { value1: filters.show_auto_connected ? translateUi("shown") : translateUi("hidden") })}
             onClick={() =>
               setFilters({
                 ...filters,

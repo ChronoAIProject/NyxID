@@ -152,7 +152,7 @@ export function ChannelThreads({
             </ul>
           ) : (
             <GroupedRow
-              title={translateUi("No {{value1}} threads.", { value1: history ? "recorded" : "active" })}
+              title={history ? translateUi("No recorded threads.") : translateUi("No active threads.")}
             />
           )}
           {threads.hasNextPage ? (

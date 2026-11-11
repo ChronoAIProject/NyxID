@@ -308,18 +308,16 @@ function PaidStartContent({
                     </p>
                     <p className="break-all">{translateUi("Rate version: ")}{offer.rate_version}</p>
                     <p>{translateUi("Quote expires:")}{" "}
-                      {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}. Quotes are
-                      valid for 15 minutes.
-                    </p>
+                      {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}{translateUi(". Quotes are valid for 15 minutes. ")}</p>
                     {expired ? (
                       <p role="alert" className="text-destructive">{translateUi("This quote has expired. Review a fresh quote before starting.")}</p>
                     ) : null}
-                    <p>{translateUi("Profile: ")}{offer.profile.profile_version}. Fixed{" "}
+                    <p>{translateUi("Profile: ")}{offer.profile.profile_version}{translateUi(". Fixed")}{" "}
                       {offer.profile.cpu_millis / 1000}{translateUi(" vCPU,")}{" "}
                       {offer.profile.memory_mib / 1024}{translateUi(" GiB memory,")}{" "}
                       {offer.profile.workspace_gib}{translateUi(" GiB /workspace.")}</p>
                     <p>{translateUi("Temporary storage is managed by the deployment environment. No fixed capacity commitment, selectable size or extra storage charge. Temporary data may be lost after pause or Pod recreation. Full disks can cause writes to fail, and disk pressure can evict the Pod. Review Machine details for recovery guidance.")}</p>
-                    <p>{translateUi("Policy: ")}{offer.policy.policy_version}. Data policy:{" "}
+                    <p>{translateUi("Policy: ")}{offer.policy.policy_version}{translateUi(". Data policy:")}{" "}
                       {offer.policy.data_policy_version}.
                     </p>
                   </>
@@ -352,9 +350,7 @@ function PaidStartContent({
                   {available === null
                     ? translateUi("Unavailable")
                     : translateUi("{{value1}} Credits", { value1: formatExactCredits(available, 12) })}
-                  . The server checks current eligibility, subscription, provider
-                  readiness, and finite funding when you submit.
-                </p>
+                  {translateUi(". The server checks current eligibility, subscription, provider readiness, and finite funding when you submit. ")}</p>
                 {machine ? (
                   <p>{translateUi("Resume requires a new accepted quote and resolution of the previous run’s pending liability. Adding funds never resumes this Machine automatically.")}</p>
                 ) : null}

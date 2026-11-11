@@ -202,7 +202,7 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
           {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-12">{translateUi("Platform accepted")}</Badge>}
         </div>
         {!isInbound && message.delivery && <DeliveryDetails delivery={message.delivery} />}
-        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-13 text-muted-foreground break-all">{translateUi("Platform message ID: ")}{message.platform_message_id}. Acceptance does not confirm recipient delivery.</p>}
+        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-13 text-muted-foreground break-all">{translateUi("Platform message ID: ")}{message.platform_message_id}{translateUi(". Acceptance does not confirm recipient delivery.")}</p>}
       </div>
     </div>
   );
@@ -428,7 +428,7 @@ export function ChannelConversationDetailPage() {
     <div className="space-y-8">
       <PageHeader
         title={activities.length ? translateUi("Channel activity") : translateUi("Messages")}
-        description={activities.length ? translateUi("Conversation {{value1}}…", { value1: conversationId.slice(0, 12) }) : translateUi("Conversation {{value1}}... -- {{value2}} message{{value3}}", { value1: conversationId.slice(0, 12), value2: String(total), value3: total === 1 ? "" : "s" })}
+        description={activities.length ? translateUi("Conversation {{value1}}…", { value1: conversationId.slice(0, 12) }) : translateUi("Conversation {{id}}... -- {{count}} messages", { id: conversationId.slice(0, 12), count: total })}
         actions={
           <Button
             variant="outline"

@@ -964,9 +964,7 @@ function CustomServiceForm({
             }}
             placeholder={translateUi("auto-generated from label")}
           />
-          <p className="text-13 text-muted-foreground">{translateUi("URL segment at ")}<code>/proxy/s/&lt;slug&gt;/…</code>. Leave
-            blank to let NyxID derive it from the label.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("URL segment at ")}<code>/proxy/s/&lt;slug&gt;/…</code>{translateUi(". Leave blank to let NyxID derive it from the label. ")}</p>
         </div>
       </div>
 

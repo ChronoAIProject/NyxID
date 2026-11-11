@@ -50,7 +50,7 @@ export function CodexConnectionSection() {
       <Dialog open={reviewed !== null} onOpenChange={(value) => { if (!value) setReviewed(null); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>{translateUi("Verify OpenAI connection")}</DialogTitle>
-            <DialogDescription>{translateUi("A small paid Responses request will use the saved connection for ")}{reviewed?.account_email}. No local credentials are read.</DialogDescription></DialogHeader>
+            <DialogDescription>{translateUi("A small paid Responses request will use the saved connection for ")}{reviewed?.account_email}{translateUi(". No local credentials are read.")}</DialogDescription></DialogHeader>
           <DialogFooter><Button variant="outline" onClick={() => setReviewed(null)}>{translateUi("Cancel")}</Button>
             <Button variant="primary" disabled={!reviewed?.connection} onClick={() => {
               setReviewed(null);

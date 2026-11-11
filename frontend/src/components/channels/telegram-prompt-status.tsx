@@ -40,7 +40,7 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
       {request.status === "waiting_bot" && <p>{translateUi("Waiting for a verified bot creation from the Telegram account that opened this setup.")}</p>}
       {request.can_open_creation_form && recoveryUnexpired && request.status === "waiting_bot" && (
         <>
-          <p>{translateUi("Button missing? Open the same creation form for ")}<strong className="break-words">{request.label}</strong>. Use the same Telegram account and check the NyxID destination shown in the setup chat.</p>
+          <p>{translateUi("Button missing? Open the same creation form for ")}<strong className="break-words">{request.label}</strong>{translateUi(". Use the same Telegram account and check the NyxID destination shown in the setup chat.")}</p>
           {request.username_suggestions && (
             <div className="space-y-2 type-secondary" aria-label={translateUi("Username suggestions")}>
               <p>{translateUi("Suggested username: ")}<code>{request.username_suggestions[0]}</code></p>

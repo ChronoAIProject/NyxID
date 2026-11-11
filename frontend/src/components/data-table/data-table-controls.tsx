@@ -759,7 +759,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
               <div
                 className="flex flex-wrap gap-1.5 pt-1"
                 role="group"
-                aria-label={translateUi("Selected {{value1}} dates", { value1: field.label.toLocaleLowerCase() })}
+                aria-label={translateUi("Selected {{value1}} dates", { value1: translateUi(field.label) })}
               >
                 {selectedDates.map((date) => (
                   <button

@@ -126,7 +126,7 @@ function AnalyticsPanelCard({
       <div className="mb-3">
         <AnalyticsSelect
           label={translateUi("Group by")}
-          ariaLabel={translateUi("Break down {{value1}} by", { value1: panel.title || "panel" })}
+          ariaLabel={translateUi("Break down {{value1}} by", { value1: panel.title || translateUi("panel") })}
           value={panel.breakdown}
           options={Object.entries(BREAKDOWN_LABELS).map(([value, label]) => ({
             value,

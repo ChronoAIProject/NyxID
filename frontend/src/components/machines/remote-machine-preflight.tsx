@@ -100,10 +100,10 @@ export function RemoteMachineBillingPreflight({
       </p>
       {preflight && matches && (
         <>
-          <p>{translateUi("Wallet: ")}{preflight.wallet}. Subscription:{" "}
-            {preflight.subscription.replaceAll("_", " ")}. Provider:{" "}
-            {preflight.provider}. Exact accounting:{" "}
-            {preflight.exact_ready ? translateUi("ready") : translateUi("not ready")}. Pricing:{" "}
+          <p>{translateUi("Wallet: ")}{preflight.wallet}{translateUi(". Subscription:")}{" "}
+            {preflight.subscription.replaceAll("_", " ")}{translateUi(". Provider:")}{" "}
+            {preflight.provider}{translateUi(". Exact accounting:")}{" "}
+            {preflight.exact_ready ? translateUi("ready") : translateUi("not ready")}{translateUi(". Pricing:")}{" "}
             {preflight.pricing}.
           </p>
           {preflight.reason && <p>{preflight.reason.replaceAll("_", " ")}.</p>}

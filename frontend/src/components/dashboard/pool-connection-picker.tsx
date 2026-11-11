@@ -148,7 +148,7 @@ export function PoolConnectionPicker({
           >
             <span className="min-w-0 truncate">
               {selectedIds.length
-                ? translateUi("{{value1}} {{value2}} selected", { value1: selectedIds.length, value2: selectedIds.length === 1 ? "connection" : "connections" })
+                ? translateUi("{{count}} connections selected", { count: selectedIds.length })
                 : translateUi("Search and select connections")}
             </span>
             <ChevronsUpDown className="size-4 shrink-0" aria-hidden="true" />

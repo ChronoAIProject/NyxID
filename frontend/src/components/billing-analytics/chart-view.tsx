@@ -471,7 +471,7 @@ export function ChartView({
           {temporal
             ? translateUi("{{value1}} · UTC", { value1: INTERVAL_LABELS[data.granularity] })
             : panel.top
-              ? translateUi("Top {{value1}}{{value2}}", { value1: panel.top, value2: data.slices.some((s) => s.is_other) ? " + Other" : "" })
+              ? translateUi("Top {{value1}}{{value2}}", { value1: panel.top, value2: data.slices.some((s) => s.is_other) ? translateUi(" + Other") : "" })
               : translateUi("All usage")}
         </span>
       </div>

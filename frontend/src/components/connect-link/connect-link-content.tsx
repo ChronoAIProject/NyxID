@@ -1146,7 +1146,7 @@ export function TerminalPanel({
       ) : null}
       <h1 className="type-metric text-foreground sm:type-metric">
         {completed
-          ? translateUi("{{value1}} connected", { value1: serviceName ?? "Service" })
+          ? translateUi("{{value1}} connected", { value1: serviceName ?? translateUi("Service") })
           : status === "cancelled"
             ? translateUi("Connection cancelled")
             : translateUi("Connection request expired")}

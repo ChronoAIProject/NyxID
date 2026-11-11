@@ -236,7 +236,7 @@
   "Invalid endpoint rule": "端點規則無效",
   "Invalid invite code": "邀請碼無效",
   "Invalid redirect URI": "重新導向 URI 無效",
-  "Invalid scopes": "權限範圍無效",
+  "Invalid scopes": "無效的權限範圍",
   "Invite code has already been redeemed": "邀請碼已被兌換",
   "Invite code has been deactivated": "邀請碼已被停用",
   "Invite code has been used up": "邀請碼的使用次數已用完",
@@ -391,5 +391,9 @@
   "Choose a file between 1 byte and 20 MB.": "請選擇大小介於 1 位元組到 20 MB 的檔案。",
   "Select the conversation to retry.": "請選擇要重試的對話。",
   "Approval required": "需要批准",
-  "Attachment expired per retention policy. Upload it again to continue.": "根據保留策略，附件已過期。重新上傳以繼續。"
+  "Attachment expired per retention policy. Upload it again to continue.": "根據保留策略，附件已過期。重新上傳以繼續。",
+  "OAuth authority is temporarily unavailable; retry the request": "OAuth 授權服務暫時無法使用；請重試該要求",
+  "Service monitoring is unavailable": "服務監控無法使用",
+  "Service monitoring is not configured": "服務監控未設定",
+  "Security rollout is not ready; inspect admin security readiness": "安全推出尚未就緒；請檢查管理員安全就緒狀態"
 }

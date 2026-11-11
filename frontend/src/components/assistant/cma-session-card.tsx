@@ -176,7 +176,7 @@ export function CmaSessionIndicator({
           ? translateUi("CMA is working in this session")
           : translateUi("CMA activity in this session")
       }
-      title={translateUi("{{value1}} CMA session{{value2}}", { value1: sessions.length, value2: sessions.length === 1 ? "" : "s" })}
+      title={translateUi("{{count}} CMA sessions", { count: sessions.length })}
       className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 type-group-label text-muted-foreground"
     >
       <CmaGlyph aria-hidden="true" className="h-3.5 w-3.5" />{translateUi(" CMA")}<span

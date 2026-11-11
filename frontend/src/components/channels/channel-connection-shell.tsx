@@ -61,7 +61,7 @@ export function ChannelConnectionShell({
             <div
               className="mb-6 flex items-start justify-center"
               role="img"
-              aria-label={translateUi("NyxID connects to {{value1}}", { value1: platformName ?? "your channel" })}
+              aria-label={translateUi("NyxID connects to {{value1}}", { value1: platformName ?? translateUi("your channel") })}
             >
               <div className="flex w-20 flex-col items-center gap-2.5">
                 <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">

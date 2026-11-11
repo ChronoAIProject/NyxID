@@ -532,7 +532,7 @@ function OptionSelection({
         <div
           id={listId}
           role="listbox"
-          aria-label={translateUi("{{value1}} suggestions", { value1: label })}
+          aria-label={translateUi("{{value1}} suggestions", { value1: translateUi(label) })}
           aria-multiselectable="true"
           className="max-h-64 overflow-y-auto overscroll-contain"
         >

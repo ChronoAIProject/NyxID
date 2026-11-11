@@ -133,8 +133,7 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                 {...form.register(name, { valueAsNumber: true })}
               />
               <p className="text-13 text-muted-foreground">
-                {description}{translateUi(" Default: ")}{data.defaults[name]}. Range: 1–
-                {max.toLocaleString(getFormattingLocale())}.
+                {description}{translateUi(" Default: ")}{data.defaults[name]}{translateUi(". Range: 1– ")}{max.toLocaleString(getFormattingLocale())}.
               </p>
               {form.formState.errors[name] && (
                 <p role="alert" className="text-13 text-destructive">{translateUi("Enter a whole number from 1 to ")}{max.toLocaleString(getFormattingLocale())}.
@@ -197,12 +196,12 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
         <Card className="space-y-2 p-4 text-13 text-muted-foreground">
           <p>
             <strong className="font-medium text-foreground">{translateUi("NyxID’s copy only.")}</strong>{" "}{translateUi("Images an agent already saw may remain in its NyxAgent session until that session expires. Model providers also process those images; this setting does not delete their copies.")}</p>
-          <p role="status">{translateUi("Policy revision ")}{data.revision}. This replica has revision{" "}
+          <p role="status">{translateUi("Policy revision ")}{data.revision}{translateUi(". This replica has revision")}{" "}
             {data.replica_revision}
             {data.replica_revision === data.revision
               ? translateUi(" (current)")
               : translateUi(" (refresh pending)")}
-            . Replicas refresh every {data.refresh_seconds}{translateUi(" seconds. Attachment reads always check the current policy.")}</p>
+            {translateUi(". Replicas refresh every ")}{data.refresh_seconds}{translateUi(" seconds. Attachment reads always check the current policy.")}</p>
           {data.replica_refreshed_at && (
             <p>{translateUi("Replica last refreshed:")}{" "}
               {new Date(data.replica_refreshed_at).toLocaleString(getFormattingLocale())}.

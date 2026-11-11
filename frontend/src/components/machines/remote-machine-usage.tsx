@@ -26,7 +26,7 @@ function Volume({
         <>
           <p>
             {formatBytes(volume.used_bytes)}{translateUi(" used")}{volume.capacity_bytes == null
-              ? ". Capacity: Unknown; no fixed capacity declared."
+              ? translateUi(". Capacity: Unknown; no fixed capacity declared.")
               : translateUi(" / {{value1}} capacity.", { value1: formatBytes(volume.capacity_bytes) })}
           </p>
           <p>{translateUi("Available:")}{" "}
@@ -90,7 +90,7 @@ export function RemoteMachineUsage({
                 {usage.sampled_at
                   ? new Date(usage.sampled_at).toLocaleString(getFormattingLocale())
                   : translateUi("Unknown")}
-                . Received:{" "}
+                {translateUi(". Received:")}{" "}
                 {usage.received_at
                   ? new Date(usage.received_at).toLocaleString(getFormattingLocale())
                   : translateUi("Unknown")}
@@ -117,12 +117,11 @@ export function RemoteMachineUsage({
                   {podUsedBytes == null
                     ? translateUi("Total Pod usage unknown")
                     : translateUi("{{value1}} reported used", { value1: formatBytes(podUsedBytes) })}
-                  . No fixed capacity declared. Available: Unknown.
-                </p>
+                  {translateUi(". No fixed capacity declared. Available: Unknown. ")}</p>
                 <p>
                   {usage.platform_storage.stale
                     ? translateUi("Stale platform observation; fresh Node reports do not refresh this reading.")
-                    : translateUi("Latest platform observation.")}{" "}{translateUi("Source: ")}{usage.platform_storage.source}. Received:{" "}
+                    : translateUi("Latest platform observation.")}{" "}{translateUi("Source: ")}{usage.platform_storage.source}{translateUi(". Received:")}{" "}
                   {new Date(
                     usage.platform_storage.received_at,
                   ).toLocaleString(getFormattingLocale())}
@@ -156,24 +155,17 @@ export function RemoteMachineUsage({
             )}
           </section>
           <p>{translateUi("Node decoded file-write limit:")}{" "}
-            {formatBytes(usage.write_limit_bytes)}. This limits decoded content,
-            not the size of the complete request.
-          </p>
+            {formatBytes(usage.write_limit_bytes)}{translateUi(". This limits decoded content, not the size of the complete request. ")}</p>
           <p>{translateUi("NyxBot whole-JSON argument limit:")}{" "}
             {usage.assistant_arguments_json_limit_bytes === undefined
               ? translateUi("Not reported by this server")
               : formatBytes(usage.assistant_arguments_json_limit_bytes)}
-            . Escaped content and every other argument count toward this smaller
-            transport limit, so a write below the Node limit can still be too
-            large for NyxBot.
-          </p>
+            {translateUi(". Escaped content and every other argument count toward this smaller transport limit, so a write below the Node limit can still be too large for NyxBot. ")}</p>
           <p>{translateUi("Exact-edit original and result file limit:")}{" "}
             {usage.edit_file_limit_bytes === undefined
               ? translateUi("Not reported by this server")
               : formatBytes(usage.edit_file_limit_bytes)}
-            . This does not mean an equally large edit request fits the
-            transport; request and protocol limits still apply.
-          </p>
+            {translateUi(". This does not mean an equally large edit request fits the transport; request and protocol limits still apply. ")}</p>
           <p className="text-muted-foreground">{translateUi("Temporary storage is managed by the deployment environment, with no fixed capacity commitment. Temporary data may be lost after pause or Pod recreation. Disk pressure can evict the Pod; full disks can cause writes and jobs to fail.")}</p>
           <p className="text-muted-foreground">{usage.recovery}</p>
         </>

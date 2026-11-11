@@ -355,7 +355,7 @@ function ChannelThreadsGroup({
       <button
         type="button"
         aria-expanded={open}
-        aria-label={translateUi("{{value1}} on {{value2}}, {{value3}} {{value4}}{{value5}}", { value1: group.label, value2: platform, value3: String(count), value4: count === 1 ? "chat" : "chats", value5: running ? ", working" : "" })}
+        aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", { label: group.label, platform, count, status: running ? translateUi(", working") : "" })}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
         className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"

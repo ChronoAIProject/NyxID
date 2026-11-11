@@ -599,9 +599,7 @@ export function MachineOutput({
       <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
         <p>{translateUi("Output is fetched on demand from the live authorized node and held only in this open view. It is never copied into Query caches, browser storage, or history. It may disappear before the one-hour maximum after job completion.")}</p>
         {!available && (
-          <p role="status">{translateUi("Output ")}{expired ? translateUi("expired") : job.output_availability}. Lost or
-            expired output cannot be recovered from job history.
-          </p>
+          <p role="status">{translateUi("Output ")}{expired ? translateUi("expired") : job.output_availability}{translateUi(". Lost or expired output cannot be recovered from job history. ")}</p>
         )}
         <div className="flex flex-wrap gap-2">
           <Button
@@ -635,8 +633,7 @@ export function MachineOutput({
               "_",
               " ",
             )}
-            . Expired or evicted bytes cannot be recovered from history.
-          </p>
+            {translateUi(". Expired or evicted bytes cannot be recovered from history. ")}</p>
         )}
         {error && (
           <div role="alert">

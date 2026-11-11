@@ -369,9 +369,7 @@ export function BillingQuantityChart({
       )}
       {selected.length > 0 && (
         <p className="fine-print">{translateUi("Each point is a period total for one")}{" "}
-          {dimensions[comparison].toLowerCase()}. Token metrics can overlap;
-          each metric is shown separately. Different units use separate graphs.
-        </p>
+          {dimensions[comparison].toLowerCase()}{translateUi(". Token metrics can overlap; each metric is shown separately. Different units use separate graphs. ")}</p>
       )}
       <details className="quantity-exact-values">
         <summary>

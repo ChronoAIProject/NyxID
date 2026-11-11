@@ -132,9 +132,7 @@ export function AdminPlatformModelDetailPage() {
             ? translateUi("Execution ready")
             : translateUi("Execution unavailable: {{value1}}", { value1: titleCase(model.blocking_reason) })}
         </p>
-        <p className="type-secondary text-muted-foreground">{translateUi("Required fleet readiness: ")}{model.required_readiness.join(", ")}.
-          Feature access does not override model readiness or entitlements.
-        </p>
+        <p className="type-secondary text-muted-foreground">{translateUi("Required fleet readiness: ")}{model.required_readiness.join(", ")}{translateUi(". Feature access does not override model readiness or entitlements. ")}</p>
       </div>
       <Tabs defaultValue="contract">
         <TabsList className="flex flex-wrap h-auto">

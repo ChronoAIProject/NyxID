@@ -832,13 +832,13 @@ function FlagTableRows({
             <DataTableBadgeCell>
               <Badge
                 variant={globallyOn ? "success" : "secondary"}
-                title={translateUi("Global · {{value1}}", { value1: word(globalState) })}
+                title={translateUi("Global · {{value1}}", { value1: translateUi(word(globalState)) })}
               >
                 {globalState === "enabled"
                   ? translateUi("On globally")
                   : globalState === "disabled"
                     ? translateUi("Off globally")
-                    : translateUi("Default · {{value1}}", { value1: flag.defaultEnabled ? "on" : "off" })}
+                    : translateUi("Default · {{value1}}", { value1: flag.defaultEnabled ? translateUi("on") : translateUi("off") })}
               </Badge>
               {targeted.length > 0 && (
                 <Badge

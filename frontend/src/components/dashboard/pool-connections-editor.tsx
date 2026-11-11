@@ -370,11 +370,7 @@ export function PoolConnectionsEditor({
                   <p className="mt-1 text-13 text-muted-foreground">
                     {invalidPriority
                       ? translateUi("Priority tier needs a valid number · configured share unavailable")
-                      : translateUi("Priority tier {{value1}} · {{value2}}", { value1: member.priority ?? 0, value2: share
-                            ? `configured tier share ${share}`
-                            : member.enabled === false
-                              ? "disabled · excluded from tier share"
-                              : "configured share unavailable until enabled weights in this tier are valid" })}
+                      : translateUi("Priority tier {{value1}} · {{value2}}", { value1: member.priority ?? 0, value2: share ? translateUi("configured tier share {{share}}", { share }) : translateUi("configured tier share unavailable") })}
                   </p>
                 )}
                 {candidate?.reason && (
@@ -404,7 +400,7 @@ export function PoolConnectionsEditor({
                     variant="outline"
                     size="icon"
                     className="size-7"
-                    aria-label={translateUi("Move connection {{value1}} earlier {{value2}}", { value1: position + 1, value2: priority ? `within priority ${member.priority ?? 0}` : "in the cycle" })}
+                    aria-label={translateUi("Move connection {{value1}} earlier {{value2}}", { value1: position + 1, value2: priority ? translateUi("within priority {{priority}}", { priority: member.priority ?? 0 }) : translateUi("in the cycle") })}
                     disabled={tierPosition === 0}
                     onClick={() => moveMember(id, -1)}
                   >
@@ -415,7 +411,7 @@ export function PoolConnectionsEditor({
                     variant="outline"
                     size="icon"
                     className="size-7"
-                    aria-label={translateUi("Move connection {{value1}} later {{value2}}", { value1: position + 1, value2: priority ? `within priority ${member.priority ?? 0}` : "in the cycle" })}
+                    aria-label={translateUi("Move connection {{value1}} later {{value2}}", { value1: position + 1, value2: priority ? translateUi("within priority {{priority}}", { priority: member.priority ?? 0 }) : translateUi("in the cycle") })}
                     disabled={tierPosition === tierMembers.length - 1}
                     onClick={() => moveMember(id, 1)}
                   >

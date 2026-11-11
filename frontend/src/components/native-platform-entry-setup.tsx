@@ -191,9 +191,7 @@ export function NativePlatformEntrySetup({
           </select>
         </Label>
         {bot && !transports.includes("gateway") && (
-          <p>{translateUi("Gateway transport is unavailable for ")}{bot.platform}. Select direct
-            native delivery to continue.
-          </p>
+          <p>{translateUi("Gateway transport is unavailable for ")}{bot.platform}{translateUi(". Select direct native delivery to continue. ")}</p>
         )}
         <div className="flex flex-wrap gap-2">
           <Button disabled={!available || busy} onClick={() => convert()}>

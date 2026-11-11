@@ -313,7 +313,7 @@ export function AgentDrawerSearch({
           </div>
         </div>, host)}
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-        {searching ? translateUi("{{value1}}{{value2}} {{value3}} for {{value4}}", { value1: matches.length, value2: matches.length === 80 ? " or more" : "", value3: matches.length === 1 ? "result" : "results", value4: query }) : ""}
+        {searching ? matches.length === 80 ? translateUi("80 or more results for {{query}}", { query }) : translateUi("{{count}} results for {{query}}", { count: matches.length, query }) : ""}
       </p>
       {searching && (
         <CompactScroll level={100}

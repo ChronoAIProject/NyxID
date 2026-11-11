@@ -649,7 +649,7 @@ export function CollaborationCards({
           <p>
             {card.can_decide
               ? card.summary
-              : translateUi("Waiting for {{value1}}", { value1: group.participants?.find((p) => p.id === card.requester_id)?.display_name ?? "participant" })}
+              : translateUi("Waiting for {{value1}}", { value1: group.participants?.find((p) => p.id === card.requester_id)?.display_name ?? translateUi("participant") })}
           </p>
           {card.can_decide ? (
             <>

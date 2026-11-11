@@ -822,8 +822,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                       )}
                       {problems.length > 0 && (
                         <p role="alert" className="text-12 text-warning">{translateUi("Unknown permissions or services: ")}{problems.join(", ")}
-                          . Remove them or clear the filters.
-                        </p>
+                          {translateUi(". Remove them or clear the filters. ")}</p>
                       )}
                       {choice !== "new" ? (
                         <>
@@ -869,7 +868,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                       >
                                         {comparison.exact
                                           ? translateUi("Exact match")
-                                          : translateUi("Matched + {{value1}} extra{{value2}}", { value1: comparison.extras.length, value2: comparison.extras.length === 1 ? "" : "s" })}
+                                          : translateUi("Matched + {{count}} extras", { count: comparison.extras.length })}
                                       </span>
                                     </span>
                                     <span className="block break-words pl-6 text-11 text-muted-foreground">

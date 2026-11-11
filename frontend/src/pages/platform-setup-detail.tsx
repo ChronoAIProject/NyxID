@@ -145,7 +145,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
               <p>{translateUi("Specialist:")}{" "}
                 {approval.data.specialist_name ??
                   approval.data.setup.facts.name}
-                . Customer payer:{" "}
+                {translateUi(". Customer payer:")}{" "}
                 {approval.data.funding_owner_name ?? translateUi("Your account")}{translateUi(" (personal wallet). Model service:")}{" "}
                 {approval.data.model_service_name ??
                   translateUi("Configured platform inference service")}
@@ -153,9 +153,9 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
               </p>
               <details className="break-all">
                 <summary>{translateUi("Exact resource identifiers")}</summary>
-                <p>{translateUi("Specialist: ")}{approval.data.agent_id}. Creation request:{" "}
-                  {approval.data.creation_request_id}. Inference service:{" "}
-                  {approval.data.model_service_id}. Customer payer:{" "}
+                <p>{translateUi("Specialist: ")}{approval.data.agent_id}{translateUi(". Creation request:")}{" "}
+                  {approval.data.creation_request_id}{translateUi(". Inference service:")}{" "}
+                  {approval.data.model_service_id}{translateUi(". Customer payer:")}{" "}
                   {approval.data.funding_owner_user_id}.
                 </p>
               </details>
@@ -169,10 +169,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
               }}
             >{translateUi("Refresh approval snapshot")}</Button>
 
-            <p>{translateUi("Model: ")}{approval.data.model_id}. Your account funds customer
-              replies. No connectors, private account context or machine access
-              are enabled.
-            </p>
+            <p>{translateUi("Model: ")}{approval.data.model_id}{translateUi(". Your account funds customer replies. No connectors, private account context or machine access are enabled. ")}</p>
             {approval.data.child_bot_id !== null && (
               <p>{translateUi("Telegram bot: @")}{approval.data.child_username ?? translateUi("unknown")} (
                 {approval.data.child_bot_id}{translateUi("), management revision")}{" "}

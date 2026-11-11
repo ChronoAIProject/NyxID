@@ -96,7 +96,10 @@ function FormSubmitErrors({ className }: { readonly className?: string }) {
   const first = firstNestedErrorMessage(Object.fromEntries(fieldErrors));
   const count = fieldErrors.length;
   return (
-    <p role="alert" className={cn(`${TEXT_STYLES.validationError} text-destructive unthemed:text-xs`, className)}>{translateUi("Cannot save — ")}{count} {count === 1 ? translateUi("field needs") : translateUi("fields need")}{" "}{translateUi("attention")}{first ? `: ${translateUi(first)}` : "."}
+    <p role="alert" className={cn(`${TEXT_STYLES.validationError} text-destructive unthemed:text-xs`, className)}>
+      {first
+        ? translateUi("Cannot save — {{count}} fields need attention: {{message}}", { count, message: translateUi(first) })
+        : translateUi("Cannot save — {{count}} fields need attention.", { count })}
     </p>
   );
 }

@@ -74,7 +74,7 @@ function VoiceCreditUsage({ option }: { option: VoiceOption }) {
     <details className="mt-3 text-14 text-text-tertiary">
       <summary className="cursor-pointer">{translateUi("Credit usage")}</summary>
       <p className="mt-2">
-        {tariff(option)}. Paid by{" "}
+        {tariff(option)}{translateUi(". Paid by")}{" "}
         {option.billing_owner === "organization" ? translateUi("the organization") : translateUi("you")}.
       </p>
       <p className="mt-1">{translateUi("Assistant tasks are billed separately. Muting keeps the call running and billed.")}{" "}
@@ -662,11 +662,7 @@ export function VoicePanel({
                 />{translateUi("Notify when a task finishes")}</Label>
               <p className="text-text-tertiary">
                 {isGrok ? translateUi("Grok requires Hold to talk. ") : ""}{translateUi("Audio goes to")}{" "}
-                {isGrok ? translateUi("xAI through NyxID") : translateUi("OpenAI")}. NyxID keeps the
-                transcript, never an audio recording. Use headphones if the
-                assistant hears itself. Calls end after 30 minutes or 3 minutes
-                without user speech.
-              </p>
+                {isGrok ? translateUi("xAI through NyxID") : translateUi("OpenAI")}{translateUi(". NyxID keeps the transcript, never an audio recording. Use headphones if the assistant hears itself. Calls end after 30 minutes or 3 minutes without user speech. ")}</p>
               {option && <VoiceCreditUsage option={option} />}
               {active && (
                 <Button
@@ -858,10 +854,7 @@ export function VoicePanel({
         <p className="mt-2 text-muted-foreground">{translateUi("Saved for your account across conversations. Changes apply to your next call.")}</p>
       )}
       {!active && (
-        <p className="mt-2 text-muted-foreground">{translateUi("Audio goes to ")}{isGrok ? translateUi("xAI through NyxID") : translateUi("OpenAI")}. NyxID keeps
-          the transcript, never an audio recording. Calls end after 30 minutes
-          or 3 minutes without user speech.
-        </p>
+        <p className="mt-2 text-muted-foreground">{translateUi("Audio goes to ")}{isGrok ? translateUi("xAI through NyxID") : translateUi("OpenAI")}{translateUi(". NyxID keeps the transcript, never an audio recording. Calls end after 30 minutes or 3 minutes without user speech. ")}</p>
       )}
       {voice.conflictSession && !active && (
         <div className="mt-4 rounded-lg border border-warning/40 p-3">

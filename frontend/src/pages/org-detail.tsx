@@ -252,8 +252,8 @@ export function OrgDetailPage() {
         title={org.display_name ?? translateUi("Untitled org")}
         description={
           org.contact_email
-            ? translateUi("{{value1}} · {{value2}} member{{value3}}", { value1: org.contact_email, value2: String(org.member_count), value3: org.member_count === 1 ? "" : "s" })
-            : translateUi("{{value1}} member{{value2}}", { value1: String(org.member_count), value2: org.member_count === 1 ? "" : "s" })
+            ? translateUi("{{email}} · {{count}} members", { email: org.contact_email, count: org.member_count })
+            : translateUi("{{count}} members", { count: org.member_count })
         }
         leading={
           isAdmin ? (

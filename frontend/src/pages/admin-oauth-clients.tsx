@@ -1209,7 +1209,7 @@ function BrokerPolicyRow({
         </div>
         <p className="text-13 text-muted-foreground">{translateUi("Env default: ")}{setting.env_default ? translateUi("enabled") : translateUi("disabled")}
           {overridden
-            ? translateUi(" · Override: {{value1}}", { value1: setting.override ? "enabled" : "disabled" })
+            ? translateUi(" · Override: {{value1}}", { value1: setting.override ? translateUi("enabled") : translateUi("disabled") })
             : ""}
         </p>
       </div>

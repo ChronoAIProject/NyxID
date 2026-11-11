@@ -215,7 +215,7 @@ export function AgentOperationScopes({
             }
             data-operation-view={service.service_id}
             data-grouped-level={1}
-            aria-label={translateUi("{{value1}} {{value2}}operation details", { value1: service.service_name, value2: guests ? "guest " : "" })}
+            aria-label={guests ? translateUi("{{service}} guest operation details", { service: service.service_name }) : translateUi("{{service}} operation details", { service: service.service_name })}
             className="absolute inset-0 z-10 flex flex-col bg-background p-4"
           >
             <div className="relative shrink-0 pb-4 pr-6">
@@ -354,7 +354,7 @@ export function OperationSelectionForm({
   }
   return (
     <form
-      aria-label={translateUi("{{value1}} {{value2}}operations", { value1: service.service_name, value2: guests ? "guest " : "" })}
+      aria-label={guests ? translateUi("{{service}} guest operations", { service: service.service_name }) : translateUi("{{service}} operations", { service: service.service_name })}
       onSubmit={form.handleSubmit(save)}
       className="space-y-6"
     >
@@ -388,7 +388,7 @@ export function OperationSelectionForm({
             }}
           >
             <GroupedSelectTrigger
-              aria-label={translateUi("{{value1}} {{value2}}operation access", { value1: service.service_name, value2: guests ? "guest " : "" })}
+              aria-label={guests ? translateUi("{{service}} guest operation access", { service: service.service_name }) : translateUi("{{service}} operation access", { service: service.service_name })}
             >
               <SelectValue />
             </GroupedSelectTrigger>

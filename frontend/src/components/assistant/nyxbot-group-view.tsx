@@ -443,7 +443,7 @@ function MemberButton({
         <button
           type="button"
           onClick={onOpen}
-          aria-label={translateUi("{{value1}}{{value2}} — agent details", { value1: agentTitle(member), value2: member.destroyed ? " (destroyed)" : member.unavailable ? " (unavailable)" : member.shared ? " (shared agent)" : "" })}
+          aria-label={translateUi("{{value1}}{{value2}} — agent details", { value1: agentTitle(member), value2: member.destroyed ? translateUi(" (destroyed)") : member.unavailable ? translateUi(" (unavailable)") : member.shared ? translateUi(" (shared agent)") : "" })}
           className={cn(
             "relative rounded-full transition-opacity hover:opacity-80",
             (member.destroyed || member.unavailable) && "opacity-50",
@@ -530,7 +530,7 @@ function GroupHeader({
         </HeaderBar>
         {compact ? null : (
           <p className="text-13 text-text-tertiary">
-            {group?.collaboration ? translateUi("Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only.") : group ? translateUi("{{value1}}; selected recipients stay active until changed. @mention someone to change them.", { value1: lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent" }) : translateUi("Loading members…")}
+            {group?.collaboration ? translateUi("Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only.") : group ? translateUi("{{value1}}; selected recipients stay active until changed. @mention someone to change them.", { value1: lead ? translateUi("Messages go to {{agent}}", { agent: agentTitle(lead) }) : translateUi("Messages go to the first agent") }) : translateUi("Loading members…")}
           </p>
         )}
       </div>

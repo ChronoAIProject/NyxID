@@ -332,7 +332,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
         type="button"
         onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
-        aria-label={translateUi("Turn details: {{value1}}", { value1: [...parts, failed ? `${String(failed)} failed` : "", deliveryFailed ? "delivery failed" : ""].filter(Boolean).join(", ") })}
+        aria-label={translateUi("Turn details: {{value1}}", { value1: [...parts, failed ? translateUi("{{count}} failed", { count: failed }) : "", deliveryFailed ? translateUi("delivery failed") : ""].filter(Boolean).join(", ") })}
         className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
       >
         <ActivitySummaryIcon status={message.status} />

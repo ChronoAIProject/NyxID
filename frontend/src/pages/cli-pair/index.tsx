@@ -1040,10 +1040,7 @@ function NotifyingCliPanel({
       <WizardHeading title={translateUi("Notifying CLI...")}>{translateUi("Your ")}{describeResultKind(result.kind)}{translateUi(" is ready on the server. Once the CLI acknowledges, we'll show the secret here to copy. If this page closes before then, the CLI will time out cleanly — re-run the command to try again.")}</WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}. The server-side
-            action succeeded; retry to receive the secret, or run
-            the CLI command again for a fresh pairing.
-          </p>
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}{translateUi(". The server-side action succeeded; retry to receive the secret, or run the CLI command again for a fresh pairing. ")}</p>
           <button
             type="button"
             onClick={onRetry}
@@ -1108,9 +1105,9 @@ function SecretPanel({
           <DisplayOncePanel
             title={translateUi("API key created")}
             description={translateUi("Copy this key into your CLI / agent environment. NyxID will never show it again. {{value1}}", { value1: result.expires_at === undefined
-              ? "Refresh the key details to confirm its expiry."
-              : result.expires_at === null ? "This key has no expiry."
-              : `Expires ${new Date(result.expires_at).toLocaleString(getFormattingLocale())}.` })}
+              ? translateUi("Refresh the key details to confirm its expiry.")
+              : result.expires_at === null ? translateUi("This key has no expiry.")
+              : translateUi("Expires {{date}}.", { date: new Date(result.expires_at).toLocaleString(getFormattingLocale()) }) })}
             secret={result.full_key}
             ackButtonLabel={translateUi("Close — I've saved the key")}
             onAcknowledge={onAcknowledged}

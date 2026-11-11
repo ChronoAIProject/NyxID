@@ -217,9 +217,7 @@ function BindingReview({ code }: { code: string }) {
               </div>
             ) : user ? (
               <>
-                <p>{translateUi("Linking to ")}<strong>{user.email}</strong>. To use another
-                  account, sign out before continuing.
-                </p>
+                <p>{translateUi("Linking to ")}<strong>{user.email}</strong>{translateUi(". To use another account, sign out before continuing. ")}</p>
                 <Label className="flex items-start gap-2">
                   <Checkbox
                     checked={replace}
@@ -340,7 +338,7 @@ export function CreateSetupForm({
   });
   return (
     <DetailSection
-      title={translateUi("Start {{value1}} setup", { value1: template === "restaurant-starter" ? "a restaurant" : "an assistant" })}
+      title={template === "restaurant-starter" ? translateUi("Start restaurant setup") : translateUi("Start assistant setup")}
     >
       <Form {...form}>
         <form

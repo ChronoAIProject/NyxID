@@ -382,7 +382,7 @@ function ApprovalSuccess({ device }: { readonly device: ApproveDeviceResponse })
           <DetailRow label={translateUi("API key")} value={maskIdentifier(device.api_key_id)} />
           <DetailRow label={translateUi("Node")} value={maskIdentifier(device.node_id)} />
           <DetailRow label={translateUi("Key expires")} value={device.api_key_expires_at === undefined
-            ? "Not reported; refresh key details" : device.api_key_expires_at ?? "No expiry"} />
+            ? translateUi("Not reported; refresh key details") : device.api_key_expires_at ?? translateUi("No expiry")} />
         </dl>
       </CardContent>
     </Card>

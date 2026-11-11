@@ -101,7 +101,7 @@ export function FlagBrowserControls({
       <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-13 text-text-tertiary">
         <span>
           {visibleCount}{translateUi(" of ")}{totalCount}{translateUi(" flags")}{lifecycle === "active" && sunsetCount > 0
-            ? translateUi(" · {{value1}} sunset {{value2}}", { value1: sunsetCount, value2: sunsetCount === 1 ? "flag hidden" : "flags hidden" })
+            ? translateUi(" · {{count}} sunset flags hidden", { count: sunsetCount })
             : ""}
         </span>
         {(q || tag || groupFilter) && (

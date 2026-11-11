@@ -284,7 +284,7 @@ export function ChannelBotSetup({
         <DialogHeader>
           <DialogTitle>
             {completedId
-              ? translateUi("{{value1}} Bot {{value2}}", { value1: getPlatform(createdBot?.platform ?? platform).label, value2: createdBot ? "Created" : "Connected" })
+              ? createdBot ? translateUi("{{platform}} Bot Created", { platform: getPlatform(createdBot.platform).label }) : translateUi("{{platform}} Bot Connected", { platform: getPlatform(platform).label })
               : translateUi("Add Channel Bot")}
           </DialogTitle>
           <DialogDescription>

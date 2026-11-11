@@ -488,7 +488,7 @@ export function ServiceConnectionTable({
                       <Badge
                         className="mt-1"
                         variant="secondary"
-                        aria-label={translateUi("Saved order position {{value1}}; {{value2}}", { value1: ordering ? rankedIds.indexOf(key.id) + 1 : key.preference_position, value2: key.is_active ? `${key.service_type.toUpperCase()} connections are not part of connected MCP discovery` : "disabled connections are not listed to agents" })}
+                        aria-label={translateUi("Saved order position {{value1}}; {{value2}}", { value1: ordering ? rankedIds.indexOf(key.id) + 1 : key.preference_position, value2: key.is_active ? translateUi("{{type}} connections are not part of connected MCP discovery", { type: key.service_type.toUpperCase() }) : translateUi("disabled connections are not listed to agents") })}
                       >{translateUi("Saved #")}{ordering
                           ? rankedIds.indexOf(key.id) + 1
                           : key.preference_position}{" "}
@@ -825,7 +825,7 @@ export function ServiceConnectionTable({
                               type="button"
                               onClick={() => onViewPool?.(pool.id)}
                               className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-13 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
-                              title={translateUi("{{value1}} · {{value2}} connections{{value3}}{{value4}}", { value1: poolStrategyLabel(pool), value2: pool.members.length, value3: !pool.is_active ? " · pool disabled" : "", value4: !member.enabled ? " · member disabled" : "" })}
+                              title={translateUi("{{value1}} · {{value2}} connections{{value3}}{{value4}}", { value1: poolStrategyLabel(pool), value2: pool.members.length, value3: !pool.is_active ? translateUi(" · pool disabled") : "", value4: !member.enabled ? translateUi(" · member disabled") : "" })}
                             >
                               <PoolStrategyIcon
                                 strategy={pool.strategy}

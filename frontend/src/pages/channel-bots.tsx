@@ -450,9 +450,7 @@ function CreateDeviceChannelDialog({
             <code className="text-14">
               POST /api/v1/channel-events/&#123;conversation_id&#125;
             </code>
-            . No bot token is required — authenticate with the agent API key
-            configured below.
-          </DialogDescription>
+            {translateUi(". No bot token is required — authenticate with the agent API key configured below. ")}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">

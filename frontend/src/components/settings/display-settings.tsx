@@ -352,7 +352,7 @@ function ColorEditor() {
       </section>
 
       <GroupedList
-        title={translateUi("{{value1}} theme colors", { value1: editMode === "light" ? "Light" : "Dark" })}
+        title={editMode === "light" ? translateUi("Light theme colors") : translateUi("Dark theme colors")}
       >
         <ul aria-label={translateUi("{{value1}} theme colors", { value1: editMode })}>
           {EDITABLE_COLORS.map(({ key, label }) => {

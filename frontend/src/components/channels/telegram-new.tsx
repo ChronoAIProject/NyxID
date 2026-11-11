@@ -254,8 +254,7 @@ export function TelegramNew({
             {connected ? <Check className="size-3 text-success" /> : <Loader2 className="size-3 animate-spin" />}
             {connected ? translateUi("@{{value1}} is connected.", { value1: request?.bot_username }) : translateUi("Connecting @{{value1}}…", { value1: request?.bot_username })}
           </p>
-          <p className="text-13 text-muted-foreground">{translateUi("You can close this ")}{stayInPlace ? translateUi("dialog") : translateUi("page")}. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("You can close this ")}{stayInPlace ? translateUi("dialog") : translateUi("page")}{translateUi(". NyxID will finish connecting your bot and send a message in the Telegram setup chat. ")}</p>
           {request?.connection_error && <p role="status" className="text-13 text-muted-foreground">{request.connection_error}</p>}
         </div>
       ) : fullPage ? (

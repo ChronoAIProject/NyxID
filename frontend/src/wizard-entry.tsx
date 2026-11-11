@@ -572,9 +572,9 @@ function SecretDispatcher({
       <DisplayOncePanel
         title={translateUi("API key created")}
         description={translateUi("Save this key now — it won't be shown again. {{value1}}", { value1: result.expires_at === undefined
-          ? "Refresh the key details to confirm its expiry."
-          : result.expires_at === null ? "This key has no expiry."
-          : `Expires ${new Date(result.expires_at).toLocaleString(getFormattingLocale())}.` })}
+          ? translateUi("Refresh the key details to confirm its expiry.")
+          : result.expires_at === null ? translateUi("This key has no expiry.")
+          : translateUi("Expires {{date}}.", { date: new Date(result.expires_at).toLocaleString(getFormattingLocale()) }) })}
         secret={result.full_key}
         ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}

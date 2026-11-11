@@ -177,7 +177,7 @@ export function ProviderDetailPage() {
             {provider.provider_type === "oauth2" && (
               <DetailRow
                 label={translateUi("Authorization nonce required")}
-                value={provider.authorization_nonce_required ? "Yes (hosted OAuth)" : "No"}
+                value={provider.authorization_nonce_required ? translateUi("Yes (hosted OAuth)") : translateUi("No")}
               />
             )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (

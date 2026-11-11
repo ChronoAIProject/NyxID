@@ -538,7 +538,7 @@ export function ChannelBotsManager({
                         <Button
                           variant="ghost"
                           disabled={busy || !target}
-                          aria-label={translateUi("Connect {{value1}}{{value2}}", { value1: bot.label, value2: targetName ? ` to ${targetName}` : "" })}
+                          aria-label={targetName ? translateUi("Connect {{bot}} to {{target}}", { bot: bot.label, target: targetName }) : translateUi("Connect {{bot}}", { bot: bot.label })}
                           onClick={() => void requestLink(bot.id, target)}
                         >{translateUi("Connect")}</Button>
                       </div>
@@ -617,11 +617,11 @@ function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
   if (row.discord_intake) {
     const intake = row.discord_intake;
     return <div className="space-y-1 type-secondary text-muted-foreground">
-      <p>{translateUi("Receiving side: ")}{intake.receiving_side === "native_gateway" ? translateUi("Agent Event Gateway") : intake.receiving_side === "interactions_only" ? translateUi("Discord interactions") : translateUi("NyxID relay")}. Intake: {intake.state}.</p>
+      <p>{translateUi("Receiving side: ")}{intake.receiving_side === "native_gateway" ? translateUi("Agent Event Gateway") : intake.receiving_side === "interactions_only" ? translateUi("Discord interactions") : translateUi("NyxID relay")}{translateUi(". Intake: ")}{intake.state}.</p>
       <p>{translateUi("Last confirmed inbound: ")}{intake.last_inbound_at ? formatDateTime(intake.last_inbound_at) : translateUi("not observed")}.</p>
       {intake.handed_over_at ? <p>{translateUi("Handed over: ")}{formatDateTime(intake.handed_over_at)}.</p> : null}
       {intake.block_reason ? <p>{translateUi("Intake blocked by: ")}{intake.block_reason}.</p> : null}
-      {row.gateway_native_activation ? <p>{translateUi("Native selection: ")}{row.gateway_native_activation_detail ?? row.gateway_native_activation}. Selection does not confirm connection health.</p> : null}
+      {row.gateway_native_activation ? <p>{translateUi("Native selection: ")}{row.gateway_native_activation_detail ?? row.gateway_native_activation}{translateUi(". Selection does not confirm connection health.")}</p> : null}
     </div>;
   }
   if (row.transport === "gateway") {

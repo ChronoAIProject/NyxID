@@ -1042,17 +1042,13 @@ function SessionsTab() {
                   <span className="font-medium">
                     {humanizeUserAgent(revokeTarget?.user_agent)}
                   </span>
-                  . Revoking it will sign you out immediately and you&apos;ll
-                  need to sign in again.
-                </>
+                  {translateUi(". Revoking it will sign you out immediately and you'll need to sign in again. ")}</>
               ) : (
                 <>{translateUi("This will immediately invalidate the session on")}{" "}
                   <span className="font-medium">
                     {humanizeUserAgent(revokeTarget?.user_agent)}
                   </span>
-                  . The person using it will be signed out next time they load a
-                  page.
-                </>
+                  {translateUi(". The person using it will be signed out next time they load a page. ")}</>
               )}
             </DialogDescription>
           </DialogHeader>
