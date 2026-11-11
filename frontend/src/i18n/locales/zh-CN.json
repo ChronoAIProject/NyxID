@@ -12000,5 +12000,12 @@
   "{{suggestion}} options": "{{suggestion}}选项",
   "Checking your connections…": "正在检查已连接的账户…",
   "Choose a provider to connect your account.": "选择服务商以连接你的账户。",
-  "Connect {{provider}}": "连接 {{provider}}"
+  "Connect {{provider}}": "连接 {{provider}}",
+  "Reply accepted": "回复已被接受",
+  "No problem detected": "未发现问题",
+  "Last outbound attempt": "上次出站尝试",
+  "Last inbound outcome": "上次入站处理结果",
+  "Inbound diagnostics": "入站诊断",
+  "{{code}} at {{time}}": "{{code}}，时间：{{time}}",
+  "{{count}} observed; last {{time}}": "共记录 {{count}} 次；最近一次：{{time}}"
 }

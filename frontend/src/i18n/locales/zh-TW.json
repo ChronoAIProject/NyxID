@@ -12000,5 +12000,12 @@
   "{{suggestion}} options": "{{suggestion}}選項",
   "Checking your connections…": "正在檢查已連結的帳號…",
   "Choose a provider to connect your account.": "選擇服務供應商以連結你的帳號。",
-  "Connect {{provider}}": "連結 {{provider}}"
+  "Connect {{provider}}": "連結 {{provider}}",
+  "Reply accepted": "回覆已被接受",
+  "No problem detected": "未發現問題",
+  "Last outbound attempt": "上次傳出嘗試",
+  "Last inbound outcome": "上次傳入處理結果",
+  "Inbound diagnostics": "傳入診斷",
+  "{{code}} at {{time}}": "{{code}}，時間：{{time}}",
+  "{{count}} observed; last {{time}}": "共記錄 {{count}} 次；最近一次：{{time}}"
 }

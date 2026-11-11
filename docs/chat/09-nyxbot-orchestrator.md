@@ -1984,3 +1984,17 @@ The existing `update_channel_access` action summary discloses the live customer-
 These are structural facts, not a business-readiness verdict: even a ready model with populated fields may lack correct store information or a successful customer test. Existing guest admission remains authoritative: pending model setup holds eligible source-bound customer work briefly in its encrypted queue (up to the existing 60-second deadline), then resumes with the guest policy or returns the existing safe setup failure. It never grants owner tools or invents an answer while model admission is unavailable. Ready models still require appropriate instructions and testing by the owner.
 
 Old watches omit `source_turn_id`; old servers omit configuration facts, which the UI describes as unchecked. Web and mobile action cards retain their existing summary renderer and one-use decision contract. No schema enum or guest permission changes.
+
+### X direct-message verification diagnostics
+
+A successful owner-link receipt immediately projects the persisted verified
+sender onto the current chat (`owner_chat`, `owner_seen`, and the private title).
+The channel's verified sender IDs remain the execution authority; chat display
+fields grant no permissions. A consumed link-code CAS never reports a second
+successful link. Private X callbacks retain admission dispositions, including
+empty content, policy refusals and processing failures, and project bounded
+outcomes into bot Health. An organization-owned X bot may still reach its linking
+admin's personal specialist while that admin retains live org-admin authority.
+The org owns the bot/route/route key and pays channel usage; this is distinct from
+an enrolled organization-specialist execution lane. See
+[authenticated X outcomes](../CHANNEL_ACTIVITY.md#authenticated-inbound-outcomes-and-x-chat-limits).

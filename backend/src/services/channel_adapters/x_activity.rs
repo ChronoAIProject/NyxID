@@ -107,7 +107,11 @@ pub(super) fn parse_chat(body: &Value, own_id: &str) -> AppResult<Vec<InboundMes
     if sender == own_id {
         return Ok(vec![]);
     }
-    let id = payload["id"]
+    // Preserve the existing identity when present so old/new workers dedup
+    // the same notification. The live Chat guide uses event_uuid instead.
+    let id = payload
+        .get("id")
+        .unwrap_or(&body["data"]["event_uuid"])
         .as_str()
         .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
         .ok_or_else(protocol_error)?;
@@ -123,7 +127,13 @@ pub(super) fn parse_chat(body: &Value, own_id: &str) -> AppResult<Vec<InboundMes
         .ok_or_else(protocol_error)?;
     // Direct chat IDs contain both participants. Opaque group IDs are bound by
     // the signed, selected user filter checked by verify_webhook.
-    let participants: Vec<_> = conversation.split(':').collect();
+    let participants: Vec<_> = if conversation.contains(':') {
+        conversation.split(':').collect()
+    } else if conversation.split('-').count() == 2 && conversation.split('-').all(numeric_id) {
+        conversation.split('-').collect()
+    } else {
+        vec![conversation]
+    };
     if participants.len() > 1
         && (participants.len() != 2
             || !participants.contains(&own_id)

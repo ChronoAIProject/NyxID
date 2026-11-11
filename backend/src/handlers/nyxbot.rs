@@ -13,6 +13,7 @@
 //! they cannot become owners, approve cards or queue owner work.
 use crate::models::nyxbot_gateway_release::ReleaseReason;
 use crate::services::assistant_links::AssistantPage;
+use crate::services::channel_inbound_diagnostics::{self as x_diagnostics, Outcome as XOutcome};
 use crate::services::nyxbot_gateway_release_service as releases;
 use crate::services::org_channel_service::OrgAccess;
 use axum::{
@@ -3328,13 +3329,20 @@ async fn inbound_message(
         }
     } else {
         if let Some(linked) = link_owner(state, row, sender, text, private).await? {
+            // Linking changes the persisted sender set after record_chat used
+            // the pre-link snapshot. Project only the identity actually saved.
+            let current = load_channel(state, &row.user_id, &row.id).await?;
+            chats::note_owner_presence(state, &current, chat, sender.id).await?;
             return Ok(linked);
         }
         current_chat = chats::note_owner_presence(state, row, chat, sender.id).await?;
         match chats::admission(row, &current_chat, sender.id, addressed) {
             chats::Admission::Owner => false,
             chats::Admission::Guest => true,
-            chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
+            chats::Admission::Refuse => {
+                x_diagnostics::for_channel(&state.db, row, XOutcome::PolicyRefused).await;
+                return Ok(Inbound::Reply(PRIVATE_REFUSAL.into()));
+            }
             chats::Admission::Silent => {
                 return Ok(Inbound::Silent(
                     if addressed == Some(false) && chat.reply_mode.as_deref() != Some("all") {
@@ -3409,7 +3417,7 @@ async fn link_owner(
                 .into()
         })
     {
-        state
+        let linked = state
             .db
             .collection::<NyxbotChannel>(CHANNELS)
             .update_one(
@@ -3419,6 +3427,9 @@ async fn link_owner(
                 "$set": {"updated_at": bson::DateTime::now()}},
             )
             .await?;
+        if linked.matched_count != 1 {
+            return Ok(Some(Inbound::Silent("refused_link_consumed")));
+        }
         return Ok(Some(owner_linked(state, row, "link_code").await));
     }
     if !known
@@ -6512,6 +6523,7 @@ pub async fn relay_callback(
     .await
     .is_err()
     {
+        x_diagnostics::for_channel(&state.db, &row, XOutcome::AuthorityChanged).await;
         return problem(
             StatusCode::FORBIDDEN,
             "shared_entry_requires_native_receipt",
@@ -6521,12 +6533,17 @@ pub async fn relay_callback(
     match org_access(&state, &row).await {
         Ok(OrgAccess::Holds) => {}
         Ok(OrgAccess::Lost) => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::OrgAccessLost).await;
             if let Err(error) = release_org_channel(&state, &row).await {
-                tracing::warn!(%error, "NyxBot org channel release deferred");
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "NyxBot org channel release deferred"
+                );
             }
             return problem(StatusCode::FORBIDDEN, "org_access_lost");
         }
         Ok(OrgAccess::Unavailable) | Err(_) => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::OrgAccessUnavailable).await;
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
         }
     }
@@ -6663,6 +6680,7 @@ pub async fn relay_callback(
     {
         Ok(_) => {}
         Err(error) if is_duplicate(&error) => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::Duplicate).await;
             if crate::services::channel_media_events::record_duplicate(&state.db, &admitted)
                 .await
                 .is_err()
@@ -6716,7 +6734,9 @@ pub async fn relay_callback(
         .as_str()
         .map(str::to_owned);
     let message_id = claims.message_id.clone();
-    let admission_facts = if kind != "private" {
+    // Private chats are tracked only where inbound diagnostics exist.
+    let track_admission = kind != "private" || row.platform == "x";
+    let admission_facts = if track_admission {
         match crate::services::nyxbot_admission_service::begin(
             &state.db,
             &row,
@@ -6751,7 +6771,7 @@ pub async fn relay_callback(
                 let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
                 let own = own_user_id(&state, &bot).await;
                 if kind == "private" || !chats::foreign_bot(&bot, own.as_deref(), &sender_id) {
-                    if kind != "private" {
+                    if track_admission {
                         crate::services::nyxbot_admission_service::finish(
                             &state.db,
                             &row,
@@ -6848,7 +6868,7 @@ pub async fn relay_callback(
             if sender_id.is_empty()
                 || (text.trim().is_empty() && admitted.source_media_declared.unwrap_or(0) == 0)
             {
-                if kind != "private" {
+                if track_admission {
                     crate::services::nyxbot_admission_service::finish(
                         &state.db,
                         &row,
@@ -6931,7 +6951,7 @@ pub async fn relay_callback(
                 &admitted.id,
             ))
             .await;
-            if kind != "private" {
+            if track_admission {
                 admission_diagnostics::outcome(
                     &state,
                     &row,
@@ -6957,29 +6977,34 @@ pub async fn relay_callback(
                     None
                 }
             };
-            if let Some(reply) = reply
-                && let Err(error) = direct_reply(
+            if let Some(reply) = reply {
+                let result = direct_reply(
                     &state,
                     &row,
                     &message_id,
                     &reply,
                     reply_token.as_deref().map(String::as_str),
                 )
-                .await
-            {
-                // The bot moved to the gateway while answering: its route now
-                // answers as the new route key.
-                let current = load_channel(&state, &row.user_id, &row.id).await?;
-                if current.route_api_key_id == row.route_api_key_id || current.status != "active" {
-                    return Err(error);
+                .await;
+                if let Err(error) = result {
+                    x_diagnostics::for_channel(&state.db, &row, XOutcome::ReplyUnconfirmed).await;
+                    // The bot moved to the gateway while answering: its route now
+                    // answers as the new route key.
+                    let current = load_channel(&state, &row.user_id, &row.id).await?;
+                    if current.route_api_key_id == row.route_api_key_id
+                        || current.status != "active"
+                    {
+                        return Err(error);
+                    }
+                    direct_reply(&state, &current, &message_id, &reply, None).await?;
                 }
-                direct_reply(&state, &current, &message_id, &reply, None).await?;
+                x_diagnostics::for_channel(&state.db, &row, XOutcome::ReplySent).await;
             }
             Ok(())
         }
         .await;
         if let Err(error) = result {
-            if kind != "private" {
+            if track_admission {
                 let _ = crate::services::nyxbot_admission_service::finish(
                     &state.db,
                     &row,
@@ -6988,7 +7013,10 @@ pub async fn relay_callback(
                 )
                 .await;
             }
-            tracing::debug!(%error, "NyxBot direct channel message not answered");
+            tracing::debug!(
+                error_code = error.error_code(),
+                "NyxBot direct channel message not answered"
+            );
         } else if admitted.media.is_some() {
             // Intentional silence is a completed disposition, not a crash.
             let _ = state

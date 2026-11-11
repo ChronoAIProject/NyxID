@@ -12000,5 +12000,12 @@
   "{{suggestion}} options": "{{suggestion}} options",
   "Checking your connections…": "Checking your connections…",
   "Choose a provider to connect your account.": "Choose a provider to connect your account.",
-  "Connect {{provider}}": "Connect {{provider}}"
+  "Connect {{provider}}": "Connect {{provider}}",
+  "Reply accepted": "Reply accepted",
+  "No problem detected": "No problem detected",
+  "Last outbound attempt": "Last outbound attempt",
+  "Last inbound outcome": "Last inbound outcome",
+  "Inbound diagnostics": "Inbound diagnostics",
+  "{{code}} at {{time}}": "{{code}} at {{time}}",
+  "{{count}} observed; last {{time}}": "{{count}} observed; last {{time}}"
 }
