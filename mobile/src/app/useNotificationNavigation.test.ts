@@ -281,21 +281,28 @@ test("an initial direct link supersedes a notification waiting for navigation", 
   f.h.unmount();
 });
 
-test("an untrusted direct URL does not discard a guarded notification", async () => {
-  const f = setup();
-  await f.signIn();
-  const guard = Symbol();
-  f.guards.current.add(guard);
-  f.tap(response({ conversation_id: "trusted-notification-thread" }));
-  const unsubscribe = f.linking.appLinking.subscribe(() => {});
-  f.directLink("https://untrusted.example/assistant?c=ignored");
-  f.guards.current.delete(guard);
-  f.h.value().flush();
-  assert.equal(f.actions.length, 1);
-  assert.match(JSON.stringify(f.actions[0]), /trusted-notification-thread/);
-  unsubscribe();
-  f.h.unmount();
-});
+for (const url of [
+  "https://untrusted.example/assistant?c=ignored",
+  "nyxid://unsupported-route",
+  "https://nyx.example/unsupported-route",
+  "nyxid://keys",
+]) {
+  test(`an unsupported direct URL keeps a guarded notification: ${url}`, async () => {
+    const f = setup();
+    await f.signIn();
+    const guard = Symbol();
+    f.guards.current.add(guard);
+    f.tap(response({ conversation_id: "trusted-notification-thread" }));
+    const unsubscribe = f.linking.appLinking.subscribe(() => {});
+    f.directLink(url);
+    f.guards.current.delete(guard);
+    f.h.value().flush();
+    assert.equal(f.actions.length, 1);
+    assert.match(JSON.stringify(f.actions[0]), /trusted-notification-thread/);
+    unsubscribe();
+    f.h.unmount();
+  });
+}
 test("actual response extraction covers APNs trigger payload and FCM remote message data", () => {
   const f = setup();
   for (const trigger of [

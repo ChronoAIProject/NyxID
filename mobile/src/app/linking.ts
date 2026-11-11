@@ -44,12 +44,25 @@ export function subscribeDirectLinkOpened(listener: () => void): () => void {
 }
 
 function reportDirectLinkOpened(url: string): void {
-  // React Navigation owns direct links; supersede older queued notification
-  // intent before it receives this destination. Ignore untrusted URL events.
-  if (nativeNotificationUrl(url, notificationLinkConfig)) {
+  // Supersede queued intent only for a destination the native router supports.
+  if (isSupportedDirectLink(url)) {
     for (const listener of directLinkListeners) listener();
   }
   reportDeepLinkOpened(url);
+}
+
+function isSupportedDirectLink(url: string): boolean {
+  if (!nativeNotificationUrl(url, notificationLinkConfig)) return false;
+  try {
+    const parsed = new URL(rewriteChallengeUrl(url));
+    const path =
+      (parsed.protocol === `${NYXID_APP_SCHEME}:` ? parsed.host : "") +
+      parsed.pathname +
+      parsed.search;
+    return Boolean(appLinking.getStateFromPath?.(path, appLinking.config));
+  } catch {
+    return false;
+  }
 }
 
 export function extractChallengeIdFromUrl(url: string): string | null {
