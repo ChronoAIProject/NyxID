@@ -5,8 +5,8 @@
  * Flow:
  *   1. expo prebuild --platform android --clean  (android/ is gitignored)
  *   2. patch-android-build-gradle.js (force androidx.core 1.15.0)
- *   3. ./gradlew bundleRelease  — signing via -Pandroid.injected.signing.* flags
- *      that read from env (no need to patch build.gradle)
+ *   3. ./gradlew bundleRelease  — signing via Gradle project properties passed
+ *      through the child environment (no need to patch build.gradle)
  *
  * Required env (in .env.{dev,prod} or .env.local):
  *   ANDROID_KEYSTORE_PATH        (default: ./credentials/release.keystore)
@@ -28,6 +28,10 @@
 const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const {
+  buildGradleSigningEnvironment,
+  runFile,
+} = require("./android-build-command");
 
 const { loadEnv, resolveProfile, MOBILE_ROOT } = require("./lib/load-env");
 
@@ -91,13 +95,16 @@ run(`node ${path.join("scripts", "patch-android-build-gradle.js")}`);
 console.log("\n[build-android] Step 3/3: gradlew bundleRelease");
 const gradleArgs = [
   ":app:bundleRelease",
-  `-Pandroid.injected.signing.store.file=${keystoreAbs}`,
-  `-Pandroid.injected.signing.store.password=${KEYSTORE_PASSWORD}`,
-  `-Pandroid.injected.signing.key.alias=${KEY_ALIAS}`,
-  `-Pandroid.injected.signing.key.password=${KEY_PASSWORD}`,
 ];
-run(`./gradlew ${gradleArgs.join(" ")}`, {
+const gradleEnv = buildGradleSigningEnvironment(process.env, {
+  storeFile: keystoreAbs,
+  storePassword: KEYSTORE_PASSWORD,
+  keyAlias: KEY_ALIAS,
+  keyPassword: KEY_PASSWORD,
+});
+runFile("./gradlew", gradleArgs, {
   cwd: path.join(MOBILE_ROOT, "android"),
+  env: gradleEnv,
 });
 
 const aabPath = path.join(

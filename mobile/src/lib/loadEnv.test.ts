@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { extractAuthDeviceUserCodeFromQr } from "../features/auth/deviceUserCode";
 
@@ -14,6 +17,7 @@ type ResolvedProfile = {
   universalLinkPathPrefix: string;
   iosBundleId: string;
   androidPackage: string;
+  androidGoogleServicesFile: string;
   iosBuildNumber: string;
   androidVersionCode: string;
 };
@@ -21,7 +25,10 @@ type ResolvedProfile = {
 type ResolveProfile = (
   appEnv: "dev" | "prod",
   env: Record<string, string>,
-  options?: { warnOnFrontendUrlFallback?: boolean }
+  options?: {
+    warnOnFrontendUrlFallback?: boolean;
+    validateAndroidGoogleServices?: boolean;
+  }
 ) => ResolvedProfile;
 
 const require = createRequire(import.meta.url);
@@ -149,6 +156,44 @@ test("embeds both production domain sets while keeping app identity", () => {
   assert.equal(resolved.androidPackage, "fun.chronoai.nyxid");
   assert.equal(resolved.iosBuildNumber, "37");
   assert.equal(resolved.androidVersionCode, "37");
+  assert.equal(resolved.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("keeps Firebase configuration profile-local instead of falling back to production", () => {
+  const dev = resolveProfile("dev", profileEnv());
+  assert.equal(dev.androidGoogleServicesFile, "");
+
+  const prod = resolveProfile("prod", productionEnv());
+  assert.equal(prod.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("rejects a Firebase file that does not contain the active Android package", () => {
+  assert.throws(
+    () => resolveProfile(
+      "dev",
+      profileEnv({ DEV_GOOGLE_SERVICES_FILE: "./google-services.json" }),
+      { validateAndroidGoogleServices: true },
+    ),
+    /does not contain a client for dev\.nyxid\.test/,
+  );
+});
+
+test("rejects a Firebase file with an invalid top-level JSON shape", () => {
+  const directory = mkdtempSync(join(tmpdir(), "nyxid-google-services-"));
+  const file = join(directory, "google-services.json");
+  writeFileSync(file, "null");
+  try {
+    assert.throws(
+      () => resolveProfile(
+        "dev",
+        profileEnv({ DEV_GOOGLE_SERVICES_FILE: file }),
+        { validateAndroidGoogleServices: true },
+      ),
+      /does not contain a client for dev\.nyxid\.test/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("builds without new URLs keep a single domain set", () => {
