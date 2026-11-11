@@ -21,6 +21,10 @@ case "$(dpkg --print-architecture)" in
     ;;
 esac
 
+# Canonical DNS outages make every *.ubuntu.com lookup time out on hosted
+# runners. Best effort only: this never fails the install on its own.
+bash "$(dirname "${BASH_SOURCE[0]}")/ensure-ubuntu-archive-dns.sh" || true
+
 sources_dir="$(mktemp -d)"
 trap 'rm -rf "$sources_dir"' EXIT
 sources_file="$sources_dir/ubuntu.sources"
