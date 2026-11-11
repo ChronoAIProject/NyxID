@@ -12031,5 +12031,14 @@
   "Requested permissions unavailable on NyxID's shared app: {{scopes}}. Remove them or connect with your own OAuth app.": "NyxID 的共享应用不提供所请求的权限：{{scopes}}。请移除这些权限，或使用自己的 OAuth 应用连接。",
   "Remove requested permission: {{scope}}": "移除请求的权限：{{scope}}",
   "Removing a permission re-authorizes this connection and may stop apps that rely on it. Review the removed permissions before continuing. Revoking older access depends on the provider.": "移除权限会重新授权此连接，并可能导致依赖该权限的应用停止工作。继续前请检查要移除的权限。能否撤销旧授权取决于服务提供方。",
-  "Scopes marked “granted” are already authorized and locked. NyxID supports adding permissions here; removing older access requires managing the grant at the provider.": "标记为“已授权”的权限已获授权并已锁定。NyxID 支持在此添加权限；移除旧权限需要在服务提供方管理授权。"
+  "Scopes marked “granted” are already authorized and locked. NyxID supports adding permissions here; removing older access requires managing the grant at the provider.": "标记为“已授权”的权限已获授权并已锁定。NyxID 支持在此添加权限；移除旧权限需要在服务提供方管理授权。",
+  "Already done in the previous attempt; skipped this time.": "上次尝试中已完成；本次已跳过。",
+  "A resource needed for this step is unavailable.": "此步骤所需的资源不可用。",
+  "Activity details unavailable in this app version.": "此应用版本无法显示该操作的详细信息。",
+  "Status unavailable": "状态不可用",
+  "Skipped": "已跳过",
+  "Workspace details unavailable": "工作区详细信息不可用",
+  "Conversation history could not be loaded. Please try again.": "无法加载对话记录，请重试。",
+  "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "此应用版本无法显示部分操作或确认信息。请刷新对话记录或更新应用。",
+  "Refresh history": "刷新对话记录"
 }

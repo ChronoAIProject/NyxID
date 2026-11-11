@@ -24,7 +24,7 @@ export interface ChatMessage {
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
   readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;
   readonly continuation_of?: string | null;
-  readonly steering?: import("@/schemas/assistant-nyxagent").NyxAgentSteering | null;
+  readonly steering?: Omit<import("@/schemas/assistant-nyxagent").NyxAgentSteering, "outcome"> & { readonly outcome: string } | null;
   readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;
   readonly role: ChatMessageRole;
@@ -76,7 +76,7 @@ export interface ChatImage {
   readonly size?: number;
   readonly expiresAt?: string;
   readonly expired?: boolean;
-  readonly imageInput?: "sent" | "unavailable";
+  readonly imageInput?: "sent" | "unavailable" | "unknown";
   readonly imageInputReason?: string;
   readonly id: string;
   /** Assistant API endpoint, relative to the API root. */

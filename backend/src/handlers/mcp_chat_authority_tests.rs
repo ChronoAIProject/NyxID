@@ -1443,6 +1443,10 @@ async fn nyxbot_guest_turns_call_no_tools() {
     let auth = authenticate(&f).await;
     assert!(auth.chat.as_ref().unwrap().guest);
     for (name, args) in [
+        (
+            "nyxid__read_tool_result",
+            json!({"ref": uuid::Uuid::new_v4().to_string(), "part": 0}),
+        ),
         ("nyx__search_tools", json!({"query": "mail"})),
         ("nyx__list_connected_services", json!({})),
         (
@@ -8294,3 +8298,6 @@ async fn approval_gated_native_activity_keeps_tool_bytes_and_reconciles_after_al
     assert!(tool_failure(&forged).is_some());
     f.state.db.drop().await.unwrap();
 }
+
+#[path = "mcp_chat_large_result_tests.rs"]
+mod large_results;

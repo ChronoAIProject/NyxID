@@ -4,7 +4,7 @@ export const cmaOperationSchema = z.object({
   id: z.string(),
   turn_id: z.string(),
   service_id: z.string().optional(),
-  kind: z.enum(["cma_provisioning", "cma_response", "cma_agent"]),
+  kind: z.string(),
   operation_id: z.string().nullable(),
   agent_id: z.string().nullable(),
   idempotency_key: z.string().nullable(),
