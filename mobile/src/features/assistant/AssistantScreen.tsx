@@ -130,7 +130,7 @@ import { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 import { AssistantVoiceConversation } from "./voice/AssistantVoiceConversation";
 import {
   NATIVE_VOICE_ENTRY_ENABLED,
-  showVoiceComposer,
+  composerTrailingControl,
 } from "./voice/voiceSelection";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
@@ -386,23 +386,32 @@ export function AssistantScreen({
     !uploads.picking &&
     !!draft.trim() &&
     [...draft].length <= guidance.maxChars;
-  const voiceAvailable = showVoiceComposer({
+  const trailingControl = composerTrailingControl({
     enabled:
       NATIVE_VOICE_ENTRY_ENABLED &&
       voiceFeatures.data?.includes("assistant:voice") === true,
     running,
+    conversationId: assistant.conversationId,
     text: draft,
     attachmentCount: uploads.files.length,
     uploadBlocked:
       !!connection.connection ||
       uploads.blocked ||
       uploads.picking ||
-      uploads.session.sending ||
-      dictation.active,
+      uploads.session.sending,
+    recording: dictation.active,
     channel: conversation?.channel,
-    subagent: conversation?.role === "subagent",
     destroyed: !!destroyed,
+    canCompose,
+    canSend,
+    voiceOpen: !!voiceThread && voiceThread === assistant.conversationId,
+    openingVoice,
+    stopDisabled:
+      stopProtected ||
+      assistant.mutating ||
+      conversation?.active_turn?.stop_requested,
   });
+  const voiceAvailable = trailingControl.kind === "voice";
   const voiceContext = useRef({
     agentId: assistant.agentId,
     conversationId: assistant.conversationId,
@@ -1564,36 +1573,25 @@ export function AssistantScreen({
                       onPress={() => void sendDraft()}
                     />
                   ) : null}
-                  {running && assistant.conversationId ? (
-                    <ComposerSubmitButton
-                      kind="stop"
-                      label="Stop assistant"
-                      disabled={
-                        stopProtected ||
-                        assistant.mutating ||
-                        conversation?.active_turn?.stop_requested
-                      }
-                      onPress={() => {
+                  <ComposerSubmitButton
+                    {...trailingControl}
+                    label={
+                      trailingControl.kind === "stop"
+                        ? "Stop assistant"
+                        : trailingControl.kind === "voice"
+                          ? "Open voice call"
+                          : "Send message"
+                    }
+                    onPress={() => {
+                      if (trailingControl.kind === "stop") {
                         if (composerPress.current("stop")) void assistant.stop();
-                      }}
-                    />
-                  ) : voiceAvailable &&
-                    (!voiceThread || voiceThread !== assistant.conversationId) ? (
-                    <ComposerSubmitButton
-                      kind="voice"
-                      label="Open voice call"
-                      disabled={!canCompose || openingVoice}
-                      busy={openingVoice}
-                      onPress={() => void openVoice()}
-                    />
-                  ) : (
-                    <ComposerSubmitButton
-                      kind="send"
-                      label="Send message"
-                      disabled={!canSend}
-                      onPress={() => void sendDraft()}
-                    />
-                  )}
+                      } else if (trailingControl.kind === "voice") {
+                        void openVoice();
+                      } else {
+                        void sendDraft();
+                      }
+                    }}
+                  />
                 </ChatComposerRow>
               )}
             />
