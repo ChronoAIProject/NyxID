@@ -38,7 +38,7 @@ export function CopyableUrlCallout({
     try {
       await copyToClipboard(url);
       setCopied(true);
-      toast.success(translateUi(`${label} copied`));
+      toast.success(translateUi("{{value1}} copied", { value1: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error(translateErrorMessage("Failed to copy"));

@@ -98,10 +98,10 @@ export function AdminNodesPage() {
     try {
       if (action === "disconnect") {
         await disconnectMutation.mutateAsync(node.id);
-        toast.success(translateUi(`Node "${node.name}" disconnected`));
+        toast.success(translateUi("Node \"{{value1}}\" disconnected", { value1: node.name }));
       } else {
         await deleteMutation.mutateAsync(node.id);
-        toast.success(translateUi(`Node "${node.name}" deleted`));
+        toast.success(translateUi("Node \"{{value1}}\" deleted", { value1: node.name }));
       }
     } catch (err) {
       toast.error(

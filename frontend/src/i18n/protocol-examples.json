@@ -24,6 +24,7 @@
   "my-home-server",
   "my-team:new-feature",
   "nyxid node credentials setup --service {{value}}",
+  "nyxid node credentials setup --service {{value1}}",
   "openclaw",
   "org",
   "proxy_only",

@@ -251,7 +251,7 @@ export function AdminFeatureFlagsPage() {
           toast.error(
             translateErrorMessage(`Applied ${successful.length}; failed: ${failed.map(({ item, reason }) => `${item.flagKey} / ${item.type} ${item.id}${reason ? ` (${reason})` : ""}`).join(", ")}. Review remaining changes before retrying.`),
           );
-        else toast.success(translateUi(`${successful.length} changes applied`));
+        else toast.success(translateUi("{{value1}} changes applied", { value1: successful.length }));
       } finally {
         setApplying(false);
       }

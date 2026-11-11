@@ -191,7 +191,7 @@ export function NodeDetailPage() {
         data: { new_owner_user_id: transferTargetOwnerId },
       });
       toast.success(
-        translateUi(`Node transferred to ${nodeOwnerLabel(result.new_owner, currentUserId)}`),
+        translateUi("Node transferred to {{value1}}", { value1: nodeOwnerLabel(result.new_owner, currentUserId) }),
       );
       setShowTransferDialog(false);
       setTransferOwnerId(null);

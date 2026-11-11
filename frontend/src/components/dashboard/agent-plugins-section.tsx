@@ -13,7 +13,7 @@ export function AgentPluginsSection() {
   async function copyCommand(name: string, command: string) {
     try {
       await copyToClipboard(command);
-      toast.success(translateUi(`${name} install command copied`));
+      toast.success(translateUi("{{value1}} install command copied", { value1: name }));
     } catch {
       toast.error(translateErrorMessage("Failed to copy install command"));
     }

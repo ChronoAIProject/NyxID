@@ -19,7 +19,7 @@ export function WhatsappRollbackTokenSection({ botId, revision }: { readonly bot
     replace.reset();
   }
   function copy(value: string, label: string) {
-    void copyToClipboard(value).then(() => toast.success(translateUi(`${label} copied`))).catch(() => toast.error(translateErrorMessage("Could not copy")));
+    void copyToClipboard(value).then(() => toast.success(translateUi("{{value1}} copied", { value1: label }))).catch(() => toast.error(translateErrorMessage("Could not copy")));
   }
   return <div className="space-y-3 border-t border-border p-5">
     <p role="status" className="text-14">{translateUi("Restore the NyxID relay callback in Meta with a new Verify Token, then verify the callback before the gateway can be released.")}</p>

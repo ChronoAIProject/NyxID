@@ -59,7 +59,7 @@ function CopyButton({
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success(translateUi(`${label} copied to clipboard`));
+      toast.success(translateUi("{{value1}} copied to clipboard", { value1: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error(translateErrorMessage("Failed to copy to clipboard"));

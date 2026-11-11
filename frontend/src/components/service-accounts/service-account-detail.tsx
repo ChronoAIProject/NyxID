@@ -282,7 +282,7 @@ function ServiceAccountDetailEditor({
   async function handleRevokeTokens() {
     try {
       const result = await revokeMutation.mutateAsync(saId);
-      toast.success(translateUi(`${String(result.revoked_count)} token(s) revoked`));
+      toast.success(translateUi("{{value1}} token(s) revoked", { value1: String(result.revoked_count) }));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to revoke tokens"),

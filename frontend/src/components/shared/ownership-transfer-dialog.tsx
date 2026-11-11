@@ -100,7 +100,7 @@ export function OwnershipTransferDialog({
         expected_version: review.preview.version,
         request_id: review.requestId,
       });
-      toast.success(translateUi(`Ownership of ${review.preview.name} transferred`));
+      toast.success(translateUi("Ownership of {{value1}} transferred", { value1: review.preview.name }));
       onClose();
       onTransferred?.();
     } catch (cause) {

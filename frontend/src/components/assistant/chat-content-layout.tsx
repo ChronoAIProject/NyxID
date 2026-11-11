@@ -151,7 +151,7 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
             >
               <div
                 role="separator"
-                aria-label={side === "left" ? translateUi("Resize chat content from the left") : translateUi("Resize chat content from the right")}
+                aria-label={side === "left" ? translateUi("Resize chat content from left") : translateUi("Resize chat content from right")}
                 aria-orientation="vertical"
                 aria-valuemin={CHAT_CONTENT_WIDTH.min}
                 aria-valuemax={maximum}

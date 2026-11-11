@@ -1,3 +1,4 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { flushSync } from "react-dom";
@@ -76,7 +77,7 @@ export function ChangeReview({ entries, save, disabled, children }: {
               flushSync(() => {});
               await afterGroupedFormCommit();
               const saved = [...new Set(result ?? attempted.filter((entry) => entry.changes ? entry.changes().length === 0 : !latest.current.some((current) => current.label === entry.label && current.dirty)).map((entry) => entry.label))];
-              if (saved.length) toast.success(translateUi(`Saved ${new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(saved)}`));
+              if (saved.length) toast.success(translateUi("Saved {{value1}}", { value1: new Intl.ListFormat(getFormattingLocale(), { style: "long", type: "conjunction" }).format(saved) }));
             } catch { /* The form keeps its own error and draft. */ }
             finally { setReview(null); setSaving(false); }
           }}>{saving ? translateUi("Saving…") : translateUi("Save changes")}</Button>

@@ -73,7 +73,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
         apiKey,
         label,
       });
-      toast.success(translateUi(`Connected ${connectDialogProvider.name}`));
+      toast.success(translateUi("Connected {{value1}}", { value1: connectDialogProvider.name }));
       setConnectDialogProvider(null);
     } catch (err) {
       if (err instanceof ApiError) {

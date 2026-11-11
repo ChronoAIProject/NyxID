@@ -125,7 +125,7 @@ export function AllocateDialog({
       });
       if (response.kind === "one_time") {
         toast.success(
-          translateUi(`Allocated credits to ${String(response.result.created_count)} owners${response.result.pending_activation_count ? `; ${String(response.result.pending_activation_count)} pending activation` : ""}`),
+          response.result.pending_activation_count ? translateUi("Allocated credits to {{value1}} owners; {{value2}} pending activation", { value1: response.result.created_count, value2: response.result.pending_activation_count }) : translateUi("Allocated credits to {{value1}} owners", { value1: response.result.created_count }),
         );
         const warning = rolloutWarningMessage(response.result.recipients);
         if (warning) toast.warning(translateUi(warning));

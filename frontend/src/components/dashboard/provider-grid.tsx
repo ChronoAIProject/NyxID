@@ -129,7 +129,7 @@ export function ProviderGrid() {
         label,
         gatewayUrl,
       });
-      toast.success(translateUi(`Connected to ${apiKeyDialog.name}`));
+      toast.success(translateUi("Connected to {{value1}}", { value1: apiKeyDialog.name }));
       setApiKeyDialog(null);
     } catch (error) {
       if (error instanceof ApiError) {

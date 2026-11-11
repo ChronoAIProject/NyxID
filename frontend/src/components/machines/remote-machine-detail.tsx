@@ -1346,7 +1346,7 @@ function RemoteMachineClientSetup() {
                 aria-label={translateUi("Copy {{value1}} HTTP MCP config", { value1: name })}
                 onClick={() =>
                   void copyToClipboard(value).then(
-                    () => toast.success(translateUi(`${name} config copied`)),
+                    () => toast.success(translateUi("{{value1}} config copied", { value1: name })),
                     () => toast.error(translateErrorMessage("Could not copy config")),
                   )}>
                 <Copy className="size-[1.125em]" />

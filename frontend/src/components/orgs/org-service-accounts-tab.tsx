@@ -455,7 +455,7 @@ function CredentialRow({
           className="h-8 w-8"
           onClick={() =>
             void copyToClipboard(value).then(
-              () => toast.success(translateUi(`${copyLabel} copied`)),
+              () => toast.success(translateUi("{{value1}} copied", { value1: copyLabel })),
               () => toast.error(translateErrorMessage("Failed to copy")),
             )
           }

@@ -17,7 +17,7 @@ interface DiscoveryEndpointsProps {
 async function handleCopy(text: string, label: string) {
   try {
     await copyToClipboard(text);
-    toast.success(translateUi(`${label} copied to clipboard`));
+    toast.success(translateUi("{{value1}} copied to clipboard", { value1: label }));
   } catch {
     toast.error(translateErrorMessage("Failed to copy to clipboard"));
   }

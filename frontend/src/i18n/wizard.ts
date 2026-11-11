@@ -24,6 +24,7 @@ export function translateWizard(key: string, options?: TOptions): string {
     keySeparator: false,
     nsSeparator: false,
     defaultValue: key,
+    nest: false,
   });
 }
 

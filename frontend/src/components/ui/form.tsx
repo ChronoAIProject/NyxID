@@ -55,7 +55,7 @@ function useAppForm<
     previousLanguage.current = language;
     const fields = Object.keys(form.formState.errors).filter((name) => {
       const type = form.getFieldState(name as FieldPath<TFieldValues>).error?.type;
-      return name !== "root" && type !== "manual" && type !== "server";
+      return name !== "root" && type !== undefined && type !== "manual" && type !== "server";
     }) as FieldPath<TFieldValues>[];
     if (fields.length) void form.trigger(fields);
   }, [form, language]);

@@ -15,6 +15,7 @@ export function translateUi(key: string, options?: TOptions): string {
     keySeparator: false,
     nsSeparator: false,
     defaultValue: key,
+    nest: false,
   });
 }
 

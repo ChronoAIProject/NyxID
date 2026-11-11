@@ -222,10 +222,10 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
                               onSuccess: (result) =>
                                 result.synced
                                   ? toast.success(
-                                      translateUi(`${service.name} prices synced to Lago`),
+                                      translateUi("{{value1}} prices synced to Lago", { value1: service.name }),
                                     )
                                   : toast.warning(
-                                      translateUi(`${service.name}: nothing synced; check the sync errors`),
+                                      translateUi("{{value1}}: nothing synced; check the sync errors", { value1: service.name }),
                                     ),
                               onError: (error) =>
                                 toast.error(translateErrorMessage(errorText(error, "Resync failed"))),
@@ -309,7 +309,7 @@ function LaneForm({
       { serviceId: service.id, billing },
       {
         onSuccess: () => {
-          toast.success(translateUi(`${name} prices saved`));
+          toast.success(translateUi("{{value1}} prices saved", { value1: name }));
           onDone();
         },
         onError: (error) =>

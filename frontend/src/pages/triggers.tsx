@@ -451,7 +451,7 @@ export function TriggersPage() {
     const status = trigger.status === "active" ? "disabled" : "active";
     try {
       await updateMutation.mutateAsync({ id: trigger.id, data: { status } });
-      toast.success(translateUi(`Trigger ${status === "active" ? "enabled" : "disabled"}`));
+      toast.success(status === "active" ? translateUi("Trigger enabled") : translateUi("Trigger disabled"));
     } catch (error) {
       toast.error(
         translateErrorMessage(error instanceof ApiError ? error.message : "Failed to update trigger"),

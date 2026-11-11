@@ -133,7 +133,7 @@ export function SshServiceInstructions({
             label={translateUi("4. Restart SSH daemon (macOS)")}
             value={restartSshdMac}
           />
-          <p className="text-13 text-muted-foreground">{translateUi("macOS: ensure Remote Login is enabled in System Settings > General > Sharing (&nbsp;or")}{" "}
+          <p className="text-13 text-muted-foreground">{translateUi("macOS: ensure Remote Login is enabled in System Settings > General > Sharing ( or")}{" "}
             <code className="rounded bg-muted px-1 text-14">
               sudo systemsetup -setremotelogin on
             </code>{translateUi("). The sshd_config path is")}{" "}

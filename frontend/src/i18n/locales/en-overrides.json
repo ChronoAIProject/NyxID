@@ -54,5 +54,7 @@
   "Allow {{count}} additional services_one": "Allow {{count}} additional service",
   "Allow {{count}} additional services_other": "Allow {{count}} additional services",
   "{{email}} · {{count}} members_one": "{{email}} · {{count}} member",
-  "{{email}} · {{count}} members_other": "{{email}} · {{count}} members"
+  "{{email}} · {{count}} members_other": "{{email}} · {{count}} members",
+  " · {{count}} sunset flags hidden_one": " · {{count}} sunset flag hidden",
+  " · {{count}} sunset flags hidden_other": " · {{count}} sunset flags hidden"
 }

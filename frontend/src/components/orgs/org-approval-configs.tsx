@@ -297,7 +297,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
                   <Shield className="h-4 w-4" aria-hidden="true" />
                 </span>{translateUi("Org Approval Policies")}</CardTitle>
-              <CardDescription>{translateUi("Require approval when members of this org use shared services. When an org policy is set, it takes precedence over the member&rsquo;s personal approval settings, and admins of this org are notified to decide.")}</CardDescription>
+              <CardDescription>{translateUi("Require approval when members of this org use shared services. When an org policy is set, it takes precedence over the member’s personal approval settings, and admins of this org are notified to decide.")}</CardDescription>
             </div>
             <Button
               variant="outline"
@@ -495,7 +495,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
                 <p className="type-row-title">{translateUi("Require Approval")}</p>
-                <p className="text-13 text-muted-foreground">{translateUi("Whether members must get an admin&rsquo;s approval to use this service.")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Whether members must get an admin’s approval to use this service.")}</p>
               </div>
               <Switch
                 checked={selectedApprovalRequired}

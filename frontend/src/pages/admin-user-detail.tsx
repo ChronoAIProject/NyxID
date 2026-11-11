@@ -205,7 +205,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         userId,
         role: pendingRole,
       });
-      toast.success(translateUi(`Role updated to ${ROLE_LABEL[pendingRole]}`));
+      toast.success(translateUi("Role updated to {{value1}}", { value1: translateUi(ROLE_LABEL[pendingRole]) }));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to update role"),
@@ -280,7 +280,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
     try {
       const result = await revokeSessionsMutation.mutateAsync(userId);
       toast.success(
-        translateUi(`${String(result.revoked_count)} session(s) revoked. Session-bound access is blocked on the next protected request. Credentials without a session binding have separate revocation controls.`),
+        translateUi("{{value1}} session(s) revoked. Session-bound access is blocked on the next protected request. Credentials without a session binding have separate revocation controls.", { value1: String(result.revoked_count) }),
       );
     } catch (err) {
       toast.error(

@@ -314,7 +314,7 @@ export function NodesPage() {
     if (!deleteTarget) return;
     try {
       await deleteMutation.mutateAsync(deleteTarget.id);
-      toast.success(translateUi(`Node "${deleteTarget.name}" deleted`));
+      toast.success(translateUi("Node \"{{value1}}\" deleted", { value1: deleteTarget.name }));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete node"),

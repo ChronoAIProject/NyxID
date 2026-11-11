@@ -741,7 +741,7 @@ function WizardLostPanel() {
     <div className="flex flex-col gap-4">
       <WizardHeading title={translateUi("Wizard interrupted")}>
         <p>{translateUi("Lost contact with the ")}<code>nyxid</code>{translateUi(" CLI. The CLI may have finished and exited successfully, or the connection was interrupted before the result reached this page.")}</p>
-        <p className="mt-2">{translateUi("Run ")}<code>nyxid status</code>{translateUi(" in your terminal to see whether the service was created. If it&rsquo;s missing, re-run the wizard command.")}</p>
+        <p className="mt-2">{translateUi("Run ")}<code>nyxid status</code>{translateUi(" in your terminal to see whether the service was created. If it’s missing, re-run the wizard command.")}</p>
       </WizardHeading>
     </div>
   )
@@ -770,7 +770,7 @@ function NoBootstrapFallback() {
     <NotFoundPage
       title={translateUi("Wizard not available here")}
       description={
-        <>{translateUi("This page is served by the ")}<code>nyxid</code>{translateUi(" CLI&rsquo;s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.")}</>
+        <>{translateUi("This page is served by the ")}<code>nyxid</code>{translateUi(" CLI’s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.")}</>
       }
     />
   )

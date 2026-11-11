@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
@@ -21,12 +20,16 @@ if (JSON.stringify(englishOverrides) !== JSON.stringify(expectedOverrides)) {
 }
 const placeholders = (text) =>
   [...text.matchAll(/{{\s*([^}]+?)\s*}}/g)].map((match) => match[1]).sort().join("\0");
+const htmlEntity = /&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
 
 for (const prefix of ["", "wizard-", "common-", "errors-"]) {
   const english = JSON.parse(fs.readFileSync(path.join(locales, `${prefix}en.json`), "utf8"));
   catalogs.set(prefix, english);
   for (const key of protocolExamples) {
     if (key in english) issues.push(`${prefix}en: protocol example must stay outside catalogs: ${key}`);
+  }
+  for (const [key, value] of Object.entries(english)) {
+    if (htmlEntity.test(key) || htmlEntity.test(value)) issues.push(`${prefix}en: use literal characters instead of HTML entities: ${key}`);
   }
   for (const language of ["zh-CN", "zh-TW"]) {
     const translated = JSON.parse(fs.readFileSync(path.join(locales, `${prefix}${language}.json`), "utf8"));
@@ -36,6 +39,7 @@ for (const prefix of ["", "wizard-", "common-", "errors-"]) {
       } else if (placeholders(english[key]) !== placeholders(translated[key])) {
         issues.push(`${prefix}${language}: interpolation differs: ${key}`);
       }
+      if (htmlEntity.test(translated[key] ?? "")) issues.push(`${prefix}${language}: use literal characters instead of HTML entities: ${key}`);
       for (const term of glossary) {
         if (new RegExp(`\\b${term}\\b`).test(english[key] ?? "") && !translated[key]?.includes(term)) {
           issues.push(`${prefix}${language}: preserve ${term}: ${key}`);
@@ -79,8 +83,13 @@ const decodeEntities = (text) => text.replace(
 );
 const isCopy = (text) => /[A-Za-z]{2}/.test(text) &&
   !verbatim.has(text) && !protocolExamples.has(text) && !/^(?:https?:|\/|~\/|\.(?!\s))/.test(text);
-const files = execFileSync("rg", ["--files", "src"], { cwd: root, encoding: "utf8" })
-  .trim().split("\n").filter((file) => /\.tsx?$/.test(file) &&
+function sourceFiles(dir) {
+  return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) => {
+    const file = `${dir}/${entry.name}`;
+    return entry.isDirectory() ? sourceFiles(file) : entry.isFile() ? [file] : [];
+  });
+}
+const files = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) &&
     !/\.test\.|fixtures?|mock|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
 let checkedKeys = 0;
 const errorHelperFiles = new Set([
@@ -136,6 +145,8 @@ for (const file of files) {
         } else if (ts.isConditionalExpression(key)) {
           checkKey(key.whenTrue);
           checkKey(key.whenFalse);
+        } else if (ts.isTemplateExpression(key)) {
+          report(node, "use a literal translation key with named interpolation values");
         }
       };
       if (argument) checkKey(argument);

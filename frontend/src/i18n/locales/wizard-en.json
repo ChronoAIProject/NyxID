@@ -575,8 +575,6 @@
   "fields need": "fields need",
   "attention": "attention",
   "Save this key now — it won't be shown again. {{value1}}": "Save this key now — it won't be shown again. {{value1}}",
-  " in your terminal to see whether the service was created. If it&rsquo;s missing, re-run the wizard command.": " in your terminal to see whether the service was created. If it&rsquo;s missing, re-run the wizard command.",
-  " CLI&rsquo;s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.": " CLI&rsquo;s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.",
   "Back": "Back",
   "NyxID connects to {{value1}}": "NyxID connects to {{value1}}",
   "Which OAuth app authorizes this?": "Which OAuth app authorizes this?",

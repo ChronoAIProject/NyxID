@@ -425,7 +425,7 @@ function CreateDeviceChannelDialog({
           // POST /api/v1/channel-events/{conversation_id}, NOT the
           // logical `platform_conversation_id` the user typed in.
           toast.success(
-            translateUi(`Device channel created (ID: ${created.id}). Copy this ID — it's the path parameter for /channel-events.`),
+            translateUi("Device channel created (ID: {{value1}}). Copy this ID — it's the path parameter for /channel-events.", { value1: created.id }),
           );
           reset();
           onOpenChange(false);

@@ -216,7 +216,7 @@ export function AdminInviteCodesPage() {
     if (!deactivateTarget) return;
     try {
       await deactivateMutation.mutateAsync(deactivateTarget.id);
-      toast.success(translateUi(`Invite code ${deactivateTarget.code} deactivated`));
+      toast.success(translateUi("Invite code {{value1}} deactivated", { value1: deactivateTarget.code }));
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to deactivate code"),

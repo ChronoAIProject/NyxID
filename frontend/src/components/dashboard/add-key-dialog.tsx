@@ -1300,7 +1300,7 @@ function NodeSetupStep({
           <div className="space-y-3">
             <p className="text-13 text-muted-foreground">{translateUi("Run this on your node to auto-setup credentials. It detects the service type and guides you through the right flow:")}</p>
             <CopyableCode>
-              {translateUi("nyxid node credentials setup --service {{value1}}", { value1: slug || "<slug>" })}
+              {`nyxid node credentials setup --service ${slug || "<slug>"}`}
             </CopyableCode>
             {isCustom && (
               <p className="text-13 text-muted-foreground">{translateUi("The exact service slug will be shown on the service detail page after creation. Update the")}{" "}

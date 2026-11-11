@@ -100,7 +100,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
           credential,
           credentialLabel: label,
         });
-        toast.success(translateUi(`Connected to ${service.name}`));
+        toast.success(translateUi("Connected to {{value1}}", { value1: service.name }));
       } else {
         await updateConnectionCredentialMutation.mutateAsync({
           saId,

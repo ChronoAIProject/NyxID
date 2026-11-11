@@ -370,7 +370,7 @@ export function PoolConnectionsEditor({
                   <p className="mt-1 text-13 text-muted-foreground">
                     {invalidPriority
                       ? translateUi("Priority tier needs a valid number · configured share unavailable")
-                      : translateUi("Priority tier {{value1}} · {{value2}}", { value1: member.priority ?? 0, value2: share ? translateUi("configured tier share {{share}}", { share }) : translateUi("configured tier share unavailable") })}
+                      : translateUi("Priority tier {{value1}} · {{value2}}", { value1: member.priority ?? 0, value2: share ? translateUi("configured tier share {{share}}", { share }) : member.enabled === false ? translateUi("disabled · excluded from tier share") : translateUi("configured share unavailable until enabled weights in this tier are valid") })}
                   </p>
                 )}
                 {candidate?.reason && (

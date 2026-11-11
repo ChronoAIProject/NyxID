@@ -59,7 +59,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
   async function onSubmit(data: CreateOrgRequest) {
     try {
       const org = await createMutation.mutateAsync(data);
-      toast.success(translateUi(`Organization "${org.display_name ?? "Untitled"}" created`));
+      toast.success(translateUi("Organization \"{{value1}}\" created", { value1: org.display_name ?? translateUi("Untitled") }));
       handleOpenChange(false);
       void navigate({ to: "/orgs/$orgId", params: { orgId: org.id } });
     } catch (error) {

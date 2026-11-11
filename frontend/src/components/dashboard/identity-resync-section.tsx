@@ -52,7 +52,7 @@ export function IdentityResyncSection({
       onSuccess: (response) => {
         setResult(response);
         setConfirming(false);
-        toast.success(translateUi(`Resync finished: ${resyncResultLabel(response)}`));
+        toast.success(translateUi("Resync finished: {{value1}}", { value1: resyncResultLabel(response) }));
       },
       onError: (error) => {
         toast.error(
