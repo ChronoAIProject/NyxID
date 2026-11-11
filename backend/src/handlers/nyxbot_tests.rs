@@ -2841,6 +2841,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
@@ -3920,6 +3921,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,

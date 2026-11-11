@@ -11991,5 +11991,9 @@
   "Model not active": "模型未處於啟用狀態",
   "Model disabled": "模型已停用",
   "Explicit deny": "明確拒絕",
-  "No entitlement": "沒有存取授權"
+  "No entitlement": "沒有存取授權",
+  "{{suggestion}} options": "{{suggestion}}選項",
+  "Checking your connections…": "正在檢查已連結的帳號…",
+  "Choose a provider to connect your account.": "選擇服務供應商以連結你的帳號。",
+  "Connect {{provider}}": "連結 {{provider}}"
 }

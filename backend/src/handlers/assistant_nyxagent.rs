@@ -2570,6 +2570,13 @@ pub async fn turns(
     start.org_access = org_access;
     if super::login_client_context::require_first_party_human(&auth).is_ok() {
         start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
+        start.title_language = parts
+            .headers
+            .get("accept-language")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .and_then(|v| v.split(';').next())
+            .and_then(crate::services::assistant_title_service::language);
     }
     if start.conversation_id.is_none() && start.agent_id.is_none() && start.model.is_none() {
         start.model = Some(

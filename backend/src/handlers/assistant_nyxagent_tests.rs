@@ -6262,3 +6262,29 @@ fn activity_decision_projection_is_additive_and_excludes_internal_execution_flag
         json!({"kind":"acknowledgement","id":"card","state":"waiting"})
     );
 }
+
+#[tokio::test]
+async fn first_party_turn_persists_ui_language_without_forwarding_it_to_nyxagent() {
+    for language in ["en-US", "zh-CN"] {
+        let (state, calls, server) = setup_options(None, Duration::ZERO, vec![], false).await;
+        let mut request = turn_request(None);
+        request
+            .headers_mut()
+            .insert("accept-language", language.parse().unwrap());
+        let response = turns(State(state.clone()), test_auth_user(OWNER), request)
+            .await
+            .unwrap();
+        let _ = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let row = settled(&state).await;
+        assert_eq!(row.title_language.as_deref(), Some(language));
+        for call in calls.lock().await.iter() {
+            assert!(!call.headers.contains_key("accept-language"));
+            assert!(!call.body.to_string().contains("title_language"));
+            assert!(!call.body.to_string().contains("output_language"));
+            assert!(!call.body.to_string().contains("ui_language"));
+        }
+        server.abort();
+    }
+}

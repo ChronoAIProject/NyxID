@@ -3889,6 +3889,7 @@ async fn start_chat_turn(
         note.push_str(&telegram_input.note);
     }
     let start = TurnStart {
+        title_language: None,
         automation_work: None,
         automation_parent: None,
         execution_enrollment: crate::services::execution_permission_channel::verified_owner(

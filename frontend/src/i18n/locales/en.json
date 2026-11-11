@@ -11991,5 +11991,9 @@
   "Model not active": "Model not active",
   "Model disabled": "Model disabled",
   "Explicit deny": "Explicit deny",
-  "No entitlement": "No entitlement"
+  "No entitlement": "No entitlement",
+  "{{suggestion}} options": "{{suggestion}} options",
+  "Checking your connections…": "Checking your connections…",
+  "Choose a provider to connect your account.": "Choose a provider to connect your account.",
+  "Connect {{provider}}": "Connect {{provider}}"
 }

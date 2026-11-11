@@ -2973,6 +2973,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_onboarding::save_onboarding),
         )
         .route(
+            "/nyxagent/onboarding/suggestions/{id}",
+            get(handlers::assistant_onboarding::suggestion_setup),
+        )
+        .route(
             "/nyxagent/onboarding/suggestions/hide",
             post(handlers::assistant_onboarding::hide_suggestions),
         )

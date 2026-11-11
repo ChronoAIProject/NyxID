@@ -11991,5 +11991,9 @@
   "Model not active": "模型未处于活动状态",
   "Model disabled": "模型已停用",
   "Explicit deny": "明确拒绝",
-  "No entitlement": "没有访问授权"
+  "No entitlement": "没有访问授权",
+  "{{suggestion}} options": "{{suggestion}}选项",
+  "Checking your connections…": "正在检查已连接的账户…",
+  "Choose a provider to connect your account.": "选择服务商以连接你的账户。",
+  "Connect {{provider}}": "连接 {{provider}}"
 }
