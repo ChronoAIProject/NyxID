@@ -12026,5 +12026,7 @@
   "Authorize your bot's permissions below, then finish callback setup.": "Authorize your bot's permissions below, then finish callback setup.",
   "Grant bot permissions": "Grant bot permissions",
   "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.": "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.",
-  "Authorize {{platform}}": "Authorize {{platform}}"
+  "Authorize {{platform}}": "Authorize {{platform}}",
+  "Paste the callback URL, then subscribe to {{messageEvent}} and {{cardEvent}}.": "Paste the callback URL, then subscribe to {{messageEvent}} and {{cardEvent}}.",
+  "Open Events & Callbacks": "Open Events & Callbacks"
 }

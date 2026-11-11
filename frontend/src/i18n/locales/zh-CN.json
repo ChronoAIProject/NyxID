@@ -12026,5 +12026,7 @@
   "Authorize your bot's permissions below, then finish callback setup.": "请先在下方授权机器人的权限，再完成回调配置。",
   "Grant bot permissions": "授予机器人权限",
   "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.": "所需权限已预选。打开链接并确认，即可在 {{platform}} 中开通。",
-  "Authorize {{platform}}": "授权 {{platform}}"
+  "Authorize {{platform}}": "授权 {{platform}}",
+  "Paste the callback URL, then subscribe to {{messageEvent}} and {{cardEvent}}.": "粘贴回调地址，然后订阅 {{messageEvent}} 和 {{cardEvent}}。",
+  "Open Events & Callbacks": "打开事件与回调"
 }

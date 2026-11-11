@@ -49,6 +49,7 @@ import type {
   CreateChannelBotResponse,
 } from "@/types/channels";
 import { ChannelBotConnect } from "./channel-bot-connect";
+import { LarkEventSetupLink } from "./lark-event-setup-link";
 
 /** Shape of a complete BotFather token; partial input is not looked up. */
 const TELEGRAM_TOKEN = /^\d{5,}:[\w-]{30,}$/;
@@ -356,11 +357,17 @@ export function ChannelBotSetup({
             </div>
           )}
           {createdBot?.webhook_url && (
-            <CopyableUrlCallout
-              label={createdBot.platform === "discord" ? translateUi("Interactions Endpoint URL") : translateUi("Callback URL")}
-              url={createdBot.webhook_url}
-              docsHref={getPlatform(createdBot.platform).webhookDocs}
-            />
+            <div className="space-y-3">
+              <CopyableUrlCallout
+                label={createdBot.platform === "discord" ? translateUi("Interactions Endpoint URL") : translateUi("Callback URL")}
+                url={createdBot.webhook_url}
+                docsHref={getPlatform(createdBot.platform).webhookDocs}
+              />
+              <LarkEventSetupLink
+                platform={createdBot.platform}
+                permissionSetupUrl={createdBot.permission_setup_url}
+              />
+            </div>
           )}
           {createdBot?.webhook_secret && (
             <CopyableUrlCallout

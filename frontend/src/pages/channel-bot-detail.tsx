@@ -2,6 +2,7 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { LarkBotSetupStatus, LARK_VERIFY_SUCCESS } from "@/components/channels/lark-bot-setup-status";
+import { LarkEventSetupLink } from "@/components/channels/lark-event-setup-link";
 import { ChannelActivities, LatestActivity } from "@/components/channels/channel-activities";
 import { WhatsappNativeSection } from "@/components/channels/whatsapp-native";
 import { useChannelActivities } from "@/hooks/use-channel-activities";
@@ -1016,6 +1017,7 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
         description={isDiscord ? translateUi("For slash commands/components, paste this into Discord Developer Portal > General Information > Interactions Endpoint URL. Do not use Event Webhooks.") : translateUi("Paste this into {{value1}}'s Event Subscriptions / webhook settings.", { value1: getPlatform(bot.platform).label })}
         docsHref={getPlatform(bot.platform).webhookDocs}
       />
+      <LarkEventSetupLink platform={bot.platform} permissionSetupUrl={bot.permission_setup_url} />
 
       <ul className="space-y-2 pt-1">
         {rows.map((row) => (
@@ -1211,6 +1213,7 @@ export function ChannelBotDetailPage() {
         <DetailSection title={translateUi("{{value1}} Setup", { value1: getPlatform(bot.platform).label })}>
           <div className="space-y-4 p-5">
             <CopyableUrlCallout label={bot.platform === "discord" ? translateUi("Interactions Endpoint URL") : translateUi("Callback URL")} url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
+            <LarkEventSetupLink platform={bot.platform} permissionSetupUrl={bot.permission_setup_url} />
             <ol className="list-decimal space-y-2 pl-4 text-13 text-muted-foreground">
               {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
             </ol>
