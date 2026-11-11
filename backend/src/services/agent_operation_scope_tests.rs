@@ -1131,7 +1131,7 @@ async fn receipt_bot_recipe_saves_real_lark_operations_and_checks_final_inputs()
             lark_base_writes, mcp_service, service_endpoint_service,
         },
     };
-    use mongodb::bson::doc;
+    use mongodb::bson::{self, doc};
     use serde_json::{Value, json};
 
     let f = direct_fixture("receipt_bot_operation_scope_recipe").await;
@@ -1434,19 +1434,88 @@ async fn receipt_bot_recipe_saves_real_lark_operations_and_checks_final_inputs()
         proxy_operation_policy: None,
     };
     let args = json!({"app_token": "bascnReceiptApp", "table_id": "tblReceipts"});
+    // Preserve the original incomplete fixture as a negative regression: it
+    // claimed to be executable, but connected() supplied no connection credential.
+    let error = match lark_base_writes::prepare(
+        db,
+        &f.state.encryption_keys,
+        auth.assistant_chat.as_deref(),
+        &managed_service,
+        &tool,
+        &args,
+        &valid,
+    )
+    .await
+    {
+        Ok(_) => panic!("a no-auth connection cannot upload to Lark"),
+        Err(error) => error,
+    };
+    eprintln!("Original Receipt-Bot fixture refusal: {error}");
     assert!(
-        lark_base_writes::prepare(
-            db,
-            &f.state.encryption_keys,
-            auth.assistant_chat.as_deref(),
-            &managed_service,
-            &tool,
-            &args,
-            &valid,
+        matches!(error, AppError::Forbidden(ref message)
+        if message.starts_with("attachment_write_credential_unavailable:")),
+        "{error}"
+    );
+
+    // Real catalog-backed Lark callers carry an owner credential. Keep the
+    // specialist, live turn, flag and saved operation/input scopes unchanged.
+    let credential = uuid::Uuid::new_v4().to_string();
+    let encrypted = f
+        .state
+        .encryption_keys
+        .encrypt(b"receipt-owner-oauth-test-token")
+        .await
+        .unwrap();
+    db.collection::<bson::Document>("user_api_keys")
+        .insert_one(doc! {
+            "_id": &credential, "user_id": &f.owner, "label": "Receipt account",
+            "credential_type": "oauth2", "status": "active",
+            "access_token_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted,
+            },
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    db.collection::<user_service::UserService>(user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &service},
+            doc! {"$set": {"api_key_id": credential, "auth_method": "bearer"}},
         )
         .await
-        .is_ok()
-    );
+        .unwrap();
+    // The production producer also supplies durable operation generations;
+    // hand-constructing an executable tool silently omitted that contract.
+    let managed_service = mcp_service::load_operation_catalog(
+        db,
+        &f.state.node_ws_manager,
+        &f.owner,
+        mcp_service::NodeScope::Unrestricted,
+        mcp_service::ServiceScope::Allowed(std::slice::from_ref(&service)),
+    )
+    .await
+    .unwrap()
+    .services
+    .into_iter()
+    .find(|row| row.service_id == service)
+    .unwrap();
+    assert!(managed_service.executable);
+    let tool = managed_service
+        .endpoints
+        .iter()
+        .find(|row| row.name == COMPOSITE_OPERATION)
+        .unwrap();
+    lark_base_writes::prepare(
+        db,
+        &f.state.encryption_keys,
+        auth.assistant_chat.as_deref(),
+        &managed_service,
+        tool,
+        &args,
+        &valid,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("Receipt-Bot preparation refused: {error}"));
     let mut empty_photos = valid.clone();
     empty_photos["attachments"]["Receipt Photos"] = json!([]);
     // Array scopes have only a maximum; the real composite supplies the minimum.
@@ -1465,7 +1534,7 @@ async fn receipt_bot_recipe_saves_real_lark_operations_and_checks_final_inputs()
             &f.state.encryption_keys,
             auth.assistant_chat.as_deref(),
             &managed_service,
-            &tool,
+            tool,
             &args,
             &empty_photos,
         )
