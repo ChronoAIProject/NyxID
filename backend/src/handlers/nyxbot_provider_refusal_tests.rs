@@ -493,8 +493,9 @@ async fn provider_refused_cold_telegram_new_guest_then_established_owner_one_tur
         1,
         "success creates no refusal audit"
     );
-    // A real unbind can leave the local channel active if the remote delete
-    // does not finish. This reproduces the NyxID side without production calls.
+    // Provider unbind is not proof of terminal deletion. Retain the current
+    // binding and keys when the gateway still has this record, so both the
+    // established owner and a cold guest can continue without reconnecting.
     let unbound = delete_binding(
         State(state.clone()),
         Path("bnd_current".into()),
@@ -504,7 +505,8 @@ async fn provider_refused_cold_telegram_new_guest_then_established_owner_one_tur
     assert_eq!(unbound.status(), StatusCode::NO_CONTENT);
     let after_unbind = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert_eq!(after_unbind.status, "active");
-    assert!(after_unbind.binding_id.is_none());
+    assert_eq!(after_unbind.binding_id.as_deref(), Some("bnd_current"));
+    assert!(key_service::validate_api_key(&state.db, &key).await.is_ok());
     assert_eq!(after_unbind.agent_api_key_id, row.agent_api_key_id);
     assert_eq!(after_unbind.route_api_key_id, row.route_api_key_id);
     owner["event_context"]["activity"]["event_id"] = json!("owner-after-drift");
@@ -529,19 +531,18 @@ async fn provider_refused_cold_telegram_new_guest_then_established_owner_one_tur
         bearer(&key),
     )
     .await;
-    assert_eq!(refused.status(), StatusCode::NOT_FOUND);
-    assert!(body_text(refused).await.contains("binding_not_found"));
-    let data = assert_audit(
-        &state,
-        &row.id,
-        "conversation_put",
-        404,
-        "binding_not_found",
-    )
-    .await;
-    assert_eq!(data.get_bool("binding_match"), Ok(false));
-    assert_eq!(data.get_bool("partition_known"), Ok(false));
-    assert_eq!(calls.lock().await.len(), 3, "no cold guest turn admitted");
+    assert_eq!(refused.status(), StatusCode::OK);
+    let answer = respond(&state, &key, &cold, "guest-after-drift-retry").await;
+    assert_eq!(answer.status(), StatusCode::OK);
+    assert!(body_text(answer).await.contains("Here is your answer"));
+    assert_eq!(
+        calls.lock().await.len(),
+        4,
+        "one cold guest turn admitted after retained unbind"
+    );
+    assert!(!audits(&state).await.iter().any(|audit| {
+        audit.get_document("event_data").unwrap().get_str("code") == Ok("binding_not_found")
+    }));
 
     server.abort();
     state.db.drop().await.unwrap();

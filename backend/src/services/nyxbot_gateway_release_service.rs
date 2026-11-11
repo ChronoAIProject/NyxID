@@ -26,6 +26,9 @@ const MIGRATIONS: &str = "schema_migrations";
 /// Shared by the provisional deadline and stale transport-move selection.
 pub(crate) const SETUP_MINUTES: i64 = 30;
 const UNCERTAIN_HOURS: i64 = 24;
+const BINDING_REPAIR_WINDOW_MINUTES: i64 = 15;
+const BINDING_REPAIR_REFUSED_HOURS: i64 = 6;
+const BINDING_REPAIR_BATCH: i64 = 8;
 
 fn conflict() -> AppError {
     AppError::Conflict("Gateway lifecycle changed; reload and retry".into())
@@ -84,6 +87,18 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
     db.collection::<Document>(CHANNELS).create_index(IndexModel::builder().keys(doc! {"_id":1,"status":1})
         .options(IndexOptions::builder().name("gateway_release_reconcile".to_owned()).partial_filter_expression(
             doc! {"$or":[{"gateway_channel_id":{"$type":"string"}},{"gateway_record_id":{"$type":"string"}}]}).build()).build()).await?;
+    db.collection::<Document>(CHANNELS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"status":1,"transport":1,"gateway_binding_repair_checked_at":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("gateway_binding_repair".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -753,6 +768,464 @@ pub(crate) async fn destination(state: &AppState, release: &Release) -> AppResul
         && state.config.accepts_jwt_issuer(&release.creator_issuer))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindingRepairOutcome {
+    Repaired,
+    Refused(&'static str),
+    Deferred(&'static str),
+}
+
+/// Return the only binding that can belong to a gateway record created by
+/// NyxID. This is deliberately strict: malformed or non-canonical record IDs
+/// are never repaired from a caller-provided binding.
+fn derived_binding(row: &NyxbotChannel) -> Option<String> {
+    let record = row.gateway_record_id.as_deref()?;
+    let uuid = Uuid::parse_str(record).ok()?;
+    (uuid.to_string() == record).then(|| format!("bnd_{}", uuid.simple()))
+}
+
+fn repair_candidate(row: &NyxbotChannel) -> Option<String> {
+    if row.status != "active"
+        || row.transport != "gateway"
+        || row.gateway_source.is_some()
+        || row.bot_owner_id.is_some()
+        || row.org_specialist.is_some()
+        || row.gateway_setup_release_id.is_some()
+        || row.pending_agent_api_key_id.is_some()
+        || row.pending_route_api_key_id.is_some()
+        || row.gateway_channel_id.as_deref().is_none_or(str::is_empty)
+        || row.gateway_version.is_none_or(|version| version <= 0)
+        || row.route_id.as_deref().is_none_or(str::is_empty)
+        || row.agent_api_key_id.as_deref().is_none_or(str::is_empty)
+    {
+        return None;
+    }
+    let expected = derived_binding(row)?;
+    (row.binding_id.as_deref() != Some(expected.as_str())).then_some(expected)
+}
+
+async fn audit_binding_repair_event(
+    state: &AppState,
+    row: &NyxbotChannel,
+    event: &'static str,
+    trigger: &'static str,
+    reason: &'static str,
+) {
+    let actor = super::audit_service::AuditActor {
+        user_id: row.user_id.clone(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    let _ = super::audit_service::log_actor_event(
+        state.db.clone(),
+        &actor,
+        event,
+        Some(json!({
+            "channel_agent_id": row.id,
+            "trigger": trigger,
+            "mode": "in_place",
+            "reason": reason,
+        })),
+    )
+    .await;
+}
+
+fn binding_repair_due(now: chrono::DateTime<Utc>) -> Document {
+    doc! {"$and": [
+        {"$or": [
+            {"gateway_binding_repair_checked_at": bson::Bson::Null},
+            {"gateway_binding_repair_checked_at": {"$lte": bson::DateTime::from_chrono(now - Duration::minutes(BINDING_REPAIR_WINDOW_MINUTES))}},
+        ]},
+        {"$or": [
+            {"gateway_binding_repair_retry_at": bson::Bson::Null},
+            {"gateway_binding_repair_retry_at": {"$lte": bson::DateTime::from_chrono(now)}},
+        ]},
+    ]}
+}
+
+async fn claim_binding_repair(
+    state: &AppState,
+    row: &NyxbotChannel,
+    trigger: &'static str,
+) -> AppResult<Option<(NyxbotChannel, String, bson::DateTime)>> {
+    let Some(expected) = repair_candidate(row) else {
+        return Ok(None);
+    };
+    let now = bson::DateTime::now();
+    let mut filter = doc! {
+        "_id": &row.id,
+        "user_id": &row.user_id,
+        "status": "active",
+        "transport": "gateway",
+        "gateway_source": bson::Bson::Null,
+        "bot_owner_id": bson::Bson::Null,
+        "org_specialist": bson::Bson::Null,
+        "gateway_record_id": row.gateway_record_id.as_deref(),
+        "gateway_channel_id": row.gateway_channel_id.as_deref(),
+        "gateway_version": row.gateway_version,
+        "agent_api_key_id": &row.agent_api_key_id,
+        "route_api_key_id": &row.route_api_key_id,
+        "route_id": &row.route_id,
+        "channel_bot_id": &row.channel_bot_id,
+        "$expr":{"$eq":[{"$ifNull":["$execution_policy_revision",0_i64]},row.execution_policy_revision]},
+        "gateway_setup_release_id": bson::Bson::Null,
+        "pending_agent_api_key_id": bson::Bson::Null,
+        "pending_route_api_key_id": bson::Bson::Null,
+        "binding_id": {"$ne": &expected},
+    };
+    filter.extend(binding_repair_due(now.to_chrono()));
+    let update = doc! {
+        "$set": {
+            "gateway_binding_repair_checked_at": now,
+        },
+    };
+    let db = state.db.clone();
+    let mut session = db.client().start_session().await?;
+    let claimed = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let work: AppResult<_> = Box::pin(async {
+                let updated = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one_and_update(filter.clone(), update.clone())
+                    .session(&mut *session)
+                    .await?;
+                let Some(claimed) = updated else {
+                    return Ok(None);
+                };
+                audit(
+                    &db,
+                    session,
+                    &claimed.user_id,
+                    "nyxbot_gateway_binding_repair_scheduled",
+                    json!({
+                        "channel_agent_id": claimed.id,
+                        "trigger": trigger,
+                        "mode": "in_place",
+                    }),
+                )
+                .await?;
+                Ok(Some((claimed, expected.clone(), now)))
+            })
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
+    Ok(claimed)
+}
+
+async fn prove_and_repair_binding(
+    state: &AppState,
+    row: &NyxbotChannel,
+    expected: &str,
+    checked: bson::DateTime,
+    trigger: &'static str,
+) -> AppResult<BindingRepairOutcome> {
+    let refused = |reason| async move {
+        // Persist before reporting Refused. The claim fence prevents an old
+        // proof from extending a newer attempt's cooldown.
+        state.db.collection::<Document>(CHANNELS).update_one(
+            doc! {"_id": &row.id, "user_id": &row.user_id, "gateway_binding_repair_checked_at": checked},
+            doc! {"$set": {"gateway_binding_repair_retry_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(BINDING_REPAIR_REFUSED_HOURS))}},
+        ).await?;
+        audit_binding_repair_event(
+            state,
+            row,
+            "nyxbot_gateway_binding_repair_refused",
+            trigger,
+            reason,
+        )
+        .await;
+        Ok(BindingRepairOutcome::Refused(reason))
+    };
+    let deferred = |reason| async move {
+        audit_binding_repair_event(
+            state,
+            row,
+            "nyxbot_gateway_binding_repair_deferred",
+            trigger,
+            reason,
+        )
+        .await;
+        Ok(BindingRepairOutcome::Deferred(reason))
+    };
+    if row.gateway_source.is_some() || row.bot_owner_id.is_some() {
+        return refused("authority_scope").await;
+    }
+    match super::platform_bot_authority::require_personal_routes(&state.db, &row.channel_bot_id)
+        .await
+    {
+        Ok(()) => {}
+        Err(AppError::Forbidden(_)) => return refused("native_entry").await,
+        Err(_) => return deferred("authority_unavailable").await,
+    }
+    if state
+        .db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.channel_bot_id,"user_id":&row.user_id,"is_active":true})
+        .await?
+        .is_none()
+    {
+        return refused("bot_authority_changed").await;
+    }
+    let Some(agent_key_id) = row.agent_api_key_id.as_deref() else {
+        return refused("provider_key_missing").await;
+    };
+    let owner = row.user_id.as_str();
+    let keys = state.db.collection::<ApiKey>(KEYS);
+    let Some(agent_key) = keys
+        .find_one(doc! {"_id":agent_key_id,"user_id":owner,"is_active":true})
+        .await?
+    else {
+        return refused("provider_key_revoked").await;
+    };
+    if agent_key
+        .expires_at
+        .is_some_and(|expires| expires <= Utc::now())
+    {
+        return refused("provider_key_expired").await;
+    }
+    let Some(route_key) = keys
+        .find_one(doc! {"_id":&row.route_api_key_id,"user_id":owner,"is_active":true})
+        .await?
+    else {
+        return refused("route_key_revoked").await;
+    };
+    if route_key
+        .expires_at
+        .is_some_and(|expires| expires <= Utc::now())
+    {
+        return refused("route_key_expired").await;
+    }
+    let Some(route_id) = row.route_id.as_deref() else {
+        return refused("route_missing").await;
+    };
+    if state
+        .db
+        .collection::<crate::models::channel_conversation::ChannelConversation>(
+            crate::models::channel_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {
+            "_id": route_id,
+            "user_id": owner,
+            "agent_api_key_id": &row.route_api_key_id,
+            "is_active": true,
+        })
+        .await?
+        .is_none()
+    {
+        return refused("route_changed").await;
+    }
+    if state
+        .db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":owner,"is_active":true})
+        .await?
+        .is_none()
+    {
+        return refused("owner_revoked").await;
+    }
+    let mut release = new_release(state, row, row.gateway_record_id.clone()).await?;
+    release.gateway_channel_id = row.gateway_channel_id.clone();
+    release.binding_id = expected.to_owned();
+    release.agent_api_key_id = agent_key.id.clone();
+    release.route_api_key_id = route_key.id.clone();
+    release.expected_version = row.gateway_version;
+    if !destination(state, &release).await? {
+        return refused("gateway_destination_changed").await;
+    }
+    let Some(record) = release.record_id.as_deref() else {
+        return refused("record_missing").await;
+    };
+    let bearer =
+        crate::services::nyxbot_gateway_service::creator_bearer(state, &release.owner_user_id)?;
+    let response = match crate::services::nyxbot_gateway_service::gateway_call_at_base(
+        &release.gateway_base_url,
+        reqwest::Method::GET,
+        &format!("/channel-records/{}", encoded(record)),
+        &bearer,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => return deferred("gateway_unavailable").await,
+    };
+    let matching = match response.status {
+        200 => matches!(
+            remote_identity(&release, &response.body),
+            Observation::Matching { .. }
+        ),
+        401 | 403 => return refused("gateway_authority_refused").await,
+        404 => return refused("remote_record_missing").await,
+        400..=499 => false,
+        _ => return deferred("gateway_unavailable").await,
+    };
+    if !matching {
+        return refused("remote_identity_mismatch").await;
+    }
+    let old_binding = row
+        .binding_id
+        .as_deref()
+        .map(|value| bson::Bson::String(value.to_owned()))
+        .unwrap_or(bson::Bson::Null);
+    // Recheck and write-fence local authority after the remote read. Revoking
+    // a key, converting the bot or replacing the link must win over stale proof.
+    let db = state.db.clone();
+    let row = row.clone();
+    let expected = expected.to_owned();
+    let mut session = db.client().start_session().await?;
+    let applied = session.start_transaction().and_run2(async move |session| {
+        let work: AppResult<()> = Box::pin(async {
+            super::platform_bot_authority::fence_personal_routes(&db, &row.channel_bot_id, &row.user_id, session).await?;
+            if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .find_one(doc! {"_id":&row.channel_bot_id,"user_id":&row.user_id,"is_active":true})
+                .session(&mut *session).await?.is_none() { return Err(conflict()); }
+            for key in [row.agent_api_key_id.as_deref().unwrap_or_default(), row.route_api_key_id.as_str()] {
+                let live = db.collection::<Document>(KEYS).update_one(
+                    doc! {"_id":key,"user_id":&row.user_id,"is_active":true,
+                        "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
+                    doc! {"$inc":{"route_binding_revision":1_i64}},
+                ).session(&mut *session).await?;
+                if live.matched_count != 1 { return Err(conflict()); }
+            }
+            let owner = db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(
+                doc! {"_id":&row.user_id,"is_active":true},
+                doc! {"$inc":{"gateway_binding_repair_revision":1_i64}},
+            ).session(&mut *session).await?;
+            if owner.matched_count != 1 { return Err(conflict()); }
+            let route = db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME).update_one(
+                doc! {"_id":&row.route_id,"user_id":&row.user_id,"channel_bot_id":&row.channel_bot_id,
+                    "agent_api_key_id":&row.route_api_key_id,"is_active":true},
+                doc! {"$set":{"updated_at":bson::DateTime::now()}},
+            ).session(&mut *session).await?;
+            if route.matched_count != 1 { return Err(conflict()); }
+            let updated = db.collection::<Document>(CHANNELS).update_one(
+                doc! {
+                    "_id": &row.id, "user_id": &row.user_id, "channel_bot_id": &row.channel_bot_id,
+                    "status": "active", "transport": "gateway",
+                    "gateway_source":bson::Bson::Null, "bot_owner_id":bson::Bson::Null,
+                    "org_specialist":bson::Bson::Null, "gateway_setup_release_id":bson::Bson::Null,
+                    "pending_agent_api_key_id":bson::Bson::Null,"pending_route_api_key_id":bson::Bson::Null,
+                    "gateway_record_id": &row.gateway_record_id,"gateway_channel_id": &row.gateway_channel_id,
+                    "gateway_version": row.gateway_version,"route_id": &row.route_id,
+                    "route_api_key_id": &row.route_api_key_id,"agent_api_key_id": &row.agent_api_key_id,
+                    "gateway_binding_repair_checked_at": checked,
+                    "$expr":{"$eq":[{"$ifNull":["$execution_policy_revision",0_i64]},row.execution_policy_revision]},
+                    "binding_id": &old_binding,
+                },
+                doc! {"$set":{"binding_id":&expected,"updated_at":bson::DateTime::now()}},
+            ).session(&mut *session).await?;
+            if updated.matched_count != 1 { return Err(conflict()); }
+            audit(&db, session, &row.user_id, "nyxbot_gateway_binding_repaired",
+                json!({"channel_agent_id":row.id,"trigger":trigger,"mode":"in_place","reason":"remote_identity_verified"})).await?;
+            Ok(())
+        }).await;
+        transactions::transaction_result(work)
+    }).await.map_err(transactions::map_transaction_error);
+    match applied {
+        Ok(()) => {}
+        Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
+            return refused("concurrent_change").await;
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(BindingRepairOutcome::Repaired)
+}
+
+pub(crate) async fn repair_binding_on_refusal(
+    state: &AppState,
+    row: &NyxbotChannel,
+    trigger: &'static str,
+) -> AppResult<BindingRepairOutcome> {
+    let Some((claimed, expected, checked)) = claim_binding_repair(state, row, trigger).await?
+    else {
+        return Ok(BindingRepairOutcome::Deferred("not_due"));
+    };
+    match prove_and_repair_binding(state, &claimed, &expected, checked, trigger).await {
+        Ok(outcome) => Ok(outcome),
+        Err(_) => {
+            audit_binding_repair_event(
+                state,
+                &claimed,
+                "nyxbot_gateway_binding_repair_deferred",
+                trigger,
+                "repair_unavailable",
+            )
+            .await;
+            Ok(BindingRepairOutcome::Deferred("repair_unavailable"))
+        }
+    }
+}
+
+/// Bounded legacy repair. Only rows with a deterministic identity are sent to
+/// the authenticated remote proof; all other rows remain refused.
+pub(crate) async fn repair_stale_bindings_sweep(state: &AppState) -> AppResult<()> {
+    let now = Utc::now();
+    let mut filter = doc! {
+        "status": "active",
+        "transport": "gateway",
+        "gateway_source": bson::Bson::Null,
+        "bot_owner_id": bson::Bson::Null,
+        "org_specialist": bson::Bson::Null,
+        "gateway_record_id": {"$regex":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+        "gateway_channel_id": {"$type":"string","$ne":""},
+        "gateway_version": {"$gt":0_i64},
+        "gateway_setup_release_id": bson::Bson::Null,
+        "pending_agent_api_key_id": bson::Bson::Null,
+        "pending_route_api_key_id": bson::Bson::Null,
+        "route_id":{"$type":"string","$ne":""},
+        "agent_api_key_id":{"$type":"string","$ne":""},
+        "$expr":{"$ne":[{"$ifNull":["$binding_id",""]},{"$concat":["bnd_",{"$replaceAll":{
+            "input":{"$convert":{"input":"$gateway_record_id","to":"string","onError":"","onNull":""}},"find":"-","replacement":""}}]}]},
+    };
+    filter.extend(binding_repair_due(now));
+    let rows: Vec<Document> = state
+        .db
+        .collection(CHANNELS)
+        .find(filter)
+        .sort(doc! {"gateway_binding_repair_checked_at":1,"_id":1})
+        .limit(BINDING_REPAIR_BATCH)
+        .await?
+        .try_collect()
+        .await?;
+    let mut malformed = false;
+    for document in rows {
+        let row = match bson::from_document::<NyxbotChannel>(document.clone()) {
+            Ok(row) => row,
+            Err(_) => {
+                malformed = true;
+                // Rotate malformed rows out of the bounded batch. Match the
+                // observed timestamps so concurrent claims/repairs still win.
+                state.db.collection::<Document>(CHANNELS).update_one(
+                    doc! {
+                        "_id": document.get("_id").cloned().unwrap_or(bson::Bson::Null),
+                        "gateway_binding_repair_checked_at": document.get("gateway_binding_repair_checked_at").cloned().unwrap_or(bson::Bson::Null),
+                        "gateway_binding_repair_retry_at": document.get("gateway_binding_repair_retry_at").cloned().unwrap_or(bson::Bson::Null),
+                    },
+                    doc! {"$set": {
+                        "gateway_binding_repair_checked_at": bson::DateTime::from_chrono(now),
+                        "gateway_binding_repair_retry_at": bson::DateTime::from_chrono(now + Duration::hours(BINDING_REPAIR_REFUSED_HOURS)),
+                    }},
+                ).await?;
+                continue;
+            }
+        };
+        let _ = repair_binding_on_refusal(state, &row, "sweep").await;
+    }
+    if malformed {
+        tracing::warn!(
+            code = "gateway_binding_repair_row_invalid",
+            "Gateway binding repair skipped malformed rows"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Observation {
@@ -1242,6 +1715,12 @@ pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
 }
 
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
+    if repair_stale_bindings_sweep(state).await.is_err() {
+        tracing::warn!(
+            code = "gateway_binding_repair_scan_failed",
+            "Gateway binding repair scan deferred"
+        );
+    }
     repair_direct_attempts(state).await?;
     settle_native_drains(&state.db).await?;
     let stale: Vec<Release> = state

@@ -3308,3 +3308,1099 @@ async fn provider_refused_setup_never_overwrites_reserved_binding_with_missing_o
     upstream.abort();
     state.db.drop().await.unwrap();
 }
+
+async fn stale_gateway_fixture(
+    name: &str,
+    binding: Option<&str>,
+) -> (
+    AppState,
+    NyxbotChannel,
+    String,
+    Release,
+    MockServer,
+    tokio::task::JoinHandle<()>,
+) {
+    let (state, mut row, raw, server, upstream) = fixture(name).await;
+    let reserved = reserve(&state, &row).await;
+    let expected = reserved.binding_id.clone();
+    row.status = "active".into();
+    row.gateway_record_id = reserved.record_id.clone();
+    row.gateway_channel_id = Some("cmaeg1.ch.remote".into());
+    row.gateway_version = Some(1);
+    row.gateway_setup_release_id = None;
+    row.binding_id = binding.map(str::to_owned);
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    assert_ne!(expected, row.binding_id.clone().unwrap_or_default());
+    // Activation has consumed its provisional obligation on a real active row.
+    state
+        .db
+        .collection::<Release>(RELEASES)
+        .delete_one(doc! {"_id":&reserved.id})
+        .await
+        .unwrap();
+    mount_remote(&server, &reserved, 1).await;
+    (state, row, raw, reserved, server, upstream)
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_repairs_null_and_wrong_rows_once_and_guest_can_retry() {
+    for (index, binding) in [None, Some("bnd_wrong")].into_iter().enumerate() {
+        let (state, row, raw, reserved, server, upstream) =
+            stale_gateway_fixture(&format!("binding_repair_{index}"), binding).await;
+        let (first, second) = tokio::join!(
+            release::repair_binding_on_refusal(&state, &row, "conversation_put"),
+            release::repair_binding_on_refusal(&state, &row, "conversation_put"),
+        );
+        let outcomes = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == release::BindingRepairOutcome::Repaired)
+                .count(),
+            1
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, release::BindingRepairOutcome::Deferred(_)))
+        );
+        let repaired = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(
+            repaired.execution_policy_revision,
+            row.execution_policy_revision
+        );
+        assert_eq!(repaired.route_api_key_id, row.route_api_key_id);
+        assert_eq!(repaired.agent_api_key_id, row.agent_api_key_id);
+        assert_eq!(
+            repaired.binding_id.as_deref(),
+            Some(reserved.binding_id.as_str())
+        );
+        let partition = format!("conv_{:032x}", index + 1);
+        let response = put_conversation(
+            State(state.clone()),
+            Path((reserved.binding_id.clone(), partition.clone())),
+            bearer(&raw),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let owner_partition = format!("conv_{:032x}", index + 100);
+        assert_eq!(
+            put_conversation(
+                State(state.clone()),
+                Path((reserved.binding_id.clone(), owner_partition)),
+                bearer(&raw),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let rows: Vec<bson::Document> = state
+            .db
+            .collection(crate::models::audit_log::COLLECTION_NAME)
+            .find(doc! {"event_type":"nyxbot_gateway_binding_repaired"})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .binding_id
+                .as_deref(),
+            Some(reserved.binding_id.as_str())
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].headers.contains_key("authorization"));
+        let serialized = serde_json::to_string(&rows).unwrap();
+        for secret in [
+            &raw,
+            row.agent_api_key_id.as_ref().unwrap(),
+            &row.route_api_key_id,
+            &reserved.binding_id,
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_sweep_repairs_before_a_customer_message() {
+    let (state, row, _, reserved, server, upstream) =
+        stale_gateway_fixture("binding_repair_sweep", None).await;
+    release::repair_stale_bindings_sweep(&state).await.unwrap();
+    let repaired = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        repaired.binding_id.as_deref(),
+        Some(reserved.binding_id.as_str())
+    );
+    upstream.abort();
+    server.received_requests().await.unwrap();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_never_repairs_unproven_or_forever_refused_rows() {
+    let (state, row, _, reserved, server, upstream) =
+        stale_gateway_fixture("binding_repair_mismatch", None).await;
+    server.reset().await;
+    let mut wrong = remote(&reserved, 1);
+    wrong["provider"]["binding_id"] = json!("bnd_other");
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/channel-records/{}",
+            reserved.record_id.as_deref().unwrap()
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wrong))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        release::repair_binding_on_refusal(&state, &row, "test")
+            .await
+            .unwrap(),
+        release::BindingRepairOutcome::Refused("remote_identity_mismatch")
+    );
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .binding_id
+            .is_none()
+    );
+    upstream.abort();
+    state.db.drop().await.unwrap();
+
+    let cases = [
+        "native",
+        "org",
+        "revoked",
+        "owner_revoked",
+        "wrong_provider",
+        "route_revoked",
+        "expired_provider",
+        "bot_inactive",
+        "disconnected",
+        "pending_move",
+    ];
+    for case in cases {
+        let (state, row, _, reserved, server, upstream) =
+            stale_gateway_fixture(&format!("binding_repair_{case}"), None).await;
+        match case {
+            "native" => {
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&row.channel_bot_id},
+                        doc! {"$set":{"platform_entry_version":1}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "org" => {
+                state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"_id":&row.id},
+                        doc! {"$set":{"bot_owner_id":"org-owner"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "bot_inactive" => {
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&row.channel_bot_id},
+                        doc! {"$set":{"is_active":false}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "route_revoked" => {
+                state
+                    .db
+                    .collection::<bson::Document>(KEYS)
+                    .update_one(
+                        doc! {"_id":&row.route_api_key_id},
+                        doc! {"$set":{"is_active":false}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "expired_provider" => {
+                state
+                    .db
+                    .collection::<bson::Document>(KEYS)
+                    .update_one(
+                        doc! {"_id":&row.agent_api_key_id},
+                        doc! {"$set":{"expires_at":bson::DateTime::from_millis(0)}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "disconnected" => {
+                state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"_id":&row.id},
+                        doc! {"$set":{"status":"disconnected"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "pending_move" => {
+                state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"_id":&row.id},
+                        doc! {"$set":{"pending_agent_api_key_id":"replacement"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "revoked" => {
+                state
+                    .db
+                    .collection::<bson::Document>(KEYS)
+                    .update_one(
+                        doc! {"_id":row.agent_api_key_id.as_deref().unwrap()},
+                        doc! {"$set":{"is_active":false}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "owner_revoked" => {
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                    .update_one(doc! {"_id":OWNER}, doc! {"$set":{"is_active":false}})
+                    .await
+                    .unwrap();
+            }
+            "wrong_provider" => {
+                state
+                    .db
+                    .collection::<bson::Document>(KEYS)
+                    .update_one(
+                        doc! {"_id":row.agent_api_key_id.as_deref().unwrap()},
+                        doc! {"$set":{"user_id":"wrong-owner"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let outcome = release::repair_binding_on_refusal(&state, &row, "test")
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            release::BindingRepairOutcome::Refused(_)
+                | release::BindingRepairOutcome::Deferred("not_due")
+        ));
+        assert!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .binding_id
+                .is_none()
+        );
+        let _ = reserved;
+        upstream.abort();
+        server.received_requests().await.unwrap();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_cold_guest_recovers_and_existing_owner_history_is_unchanged() {
+    for missing_field in [false, true] {
+        let (state, row, raw, reserved, server, upstream) =
+            stale_gateway_fixture("binding_repair_cold", None).await;
+        if missing_field {
+            // Partial old provider unbind used $unset; pre-#1991 setup wrote null.
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .update_one(doc! {"_id":&row.id}, doc! {"$unset":{"binding_id":""}})
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"owner_sender_ids":["7"],"private_chats":"everyone"}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.channel_bot_id},
+                doc! {"$set":{"platform":"telegram-new"}},
+            )
+            .await
+            .unwrap();
+        let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+        // The established owner partition already exists, which is why the
+        // production owner could get an answer while cold guest PUT failed.
+        state.db.collection::<NyxbotThread>(THREADS).update_one(doc! {"channel_id":&row.id,"partition":PARTITION},
+            doc! {"$setOnInsert":crate::services::nyxbot_chat_settings_service::placeholder(&row,Utc::now())}).upsert(true).await.unwrap();
+        let owner_answer = body_text(
+            respond(
+                &state,
+                &raw,
+                &event("Owner before repair", "7", "repair-owner-before"),
+                "repair-owner-before",
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            owner_answer.contains("Here is your answer"),
+            "{owner_answer}"
+        );
+        let owner_thread = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"channel_id":&row.id,"partition":PARTITION})
+            .await
+            .unwrap()
+            .unwrap();
+        let owner_conversation = owner_thread.conversation_id.clone().unwrap();
+        settle(&state, &owner_conversation).await;
+        let guest_partition = "conv_00000000000000000000000000000042";
+        let mut guest = event("Guest after automatic repair", "42", "repair-guest");
+        guest["conversation"] = json!(guest_partition);
+        guest["event_context"]["conversation_id"] = json!(guest_partition);
+        let first = respond(&state, &raw, &guest, "repair-guest").await;
+        assert_eq!(first.status(), StatusCode::NOT_FOUND);
+        assert!(body_text(first).await.contains("conversation_not_found"));
+        let refused = put_conversation(
+            State(state.clone()),
+            Path((reserved.binding_id.clone(), guest_partition.into())),
+            bearer(&raw),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        assert!(body_text(refused).await.contains("binding_not_found"));
+        wait_for_binding_repair(&state, &row.id, &reserved.binding_id).await;
+        // The failed message was not replayed. The next gateway request uses
+        // the same live keys and owner/chat settings after the local repair.
+        assert_eq!(
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .count_documents(doc! {"channel_id":&row.id,"partition":guest_partition})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            put_conversation(
+                State(state.clone()),
+                Path((reserved.binding_id.clone(), guest_partition.into())),
+                bearer(&raw)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let answer = body_text(respond(&state, &raw, &guest, "repair-guest-next").await).await;
+        assert!(answer.contains("Here is your answer"), "{answer}");
+        let guest_thread = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"channel_id":&row.id,"partition":guest_partition})
+            .await
+            .unwrap()
+            .unwrap();
+        let guest_conversation = engine::get(
+            &state.db,
+            OWNER,
+            guest_thread.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(guest_conversation.guest_turn);
+        let owner_answer = body_text(
+            respond(
+                &state,
+                &raw,
+                &event("Owner after repair", "7", "repair-owner-after"),
+                "repair-owner-after",
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            owner_answer.contains("Here is your answer"),
+            "{owner_answer}"
+        );
+        let after = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"_id":&owner_thread.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.conversation_id.as_deref(),
+            Some(owner_conversation.as_str())
+        );
+        let repaired = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(repaired.owner_sender_ids, ["7"]);
+        assert_eq!(repaired.private_chats.as_deref(), Some("everyone"));
+        assert_eq!(repaired.agent_api_key_id, row.agent_api_key_id);
+        assert_eq!(repaired.route_api_key_id, row.route_api_key_id);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_sweep_skips_healthy_rows_and_throttles_failed_proof() {
+    let (state, row, _, reserved, server, upstream) =
+        stale_gateway_fixture("binding_repair_scan", None).await;
+    for index in 0..10 {
+        let (mut healthy, _) = channel(&state, "gateway").await;
+        healthy.gateway_record_id = Some(Uuid::new_v4().to_string());
+        healthy.gateway_channel_id = Some(format!("cmaeg1.ch.healthy{index}"));
+        healthy.gateway_version = Some(1);
+        healthy.binding_id = Some(format!(
+            "bnd_{}",
+            Uuid::parse_str(healthy.gateway_record_id.as_deref().unwrap())
+                .unwrap()
+                .simple()
+        ));
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&healthy.id}, &healthy)
+            .await
+            .unwrap();
+    }
+    server.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    release::repair_stale_bindings_sweep(&state).await.unwrap();
+    release::repair_stale_bindings_sweep(&state).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .binding_id
+            .is_none()
+    );
+    let events = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    assert_eq!(
+        events
+            .count_documents(doc! {"event_type":"nyxbot_gateway_binding_repair_scheduled"})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(events.count_documents(doc! {"event_type":"nyxbot_gateway_binding_repair_deferred","event_data.reason":"gateway_unavailable"}).await.unwrap(),1);
+    // A later periodic pass retries a temporary proof failure without an owner action.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"gateway_binding_repair_checked_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    server.reset().await;
+    mount_remote(&server, &reserved, 1).await;
+    release::repair_stale_bindings_sweep(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .binding_id
+            .as_deref(),
+        Some(reserved.binding_id.as_str())
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_revocation_during_remote_proof_wins() {
+    for case in [
+        "provider_key",
+        "route_key",
+        "owner",
+        "native",
+        "replacement",
+    ] {
+        let (state, row, _, reserved, server, upstream) =
+            stale_gateway_fixture("binding_repair_live_fences", None).await;
+        server.reset().await;
+        let read_started = Arc::new(tokio::sync::Notify::new());
+        let signal = read_started.clone();
+        let body = remote(&reserved, 1);
+        Mock::given(method("GET"))
+            .respond_with(move |_: &wiremock::Request| {
+                signal.notify_one();
+                ResponseTemplate::new(200)
+                    .set_body_json(&body)
+                    .set_delay(std::time::Duration::from_millis(150))
+            })
+            .mount(&server)
+            .await;
+        let (outcome, ()) = tokio::join!(
+            release::repair_binding_on_refusal(&state, &row, "conversation_put"),
+            async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_started.notified())
+                    .await
+                    .unwrap();
+                match case {
+                    "provider_key" | "route_key" => {
+                        let id = if case == "provider_key" {
+                            row.agent_api_key_id.as_deref().unwrap()
+                        } else {
+                            &row.route_api_key_id
+                        };
+                        state
+                            .db
+                            .collection::<bson::Document>(KEYS)
+                            .update_one(doc! {"_id":id}, doc! {"$set":{"is_active":false}})
+                            .await
+                            .unwrap();
+                    }
+                    "owner" => {
+                        state
+                            .db
+                            .collection::<bson::Document>(USERS)
+                            .update_one(doc! {"_id":OWNER}, doc! {"$set":{"is_active":false}})
+                            .await
+                            .unwrap();
+                    }
+                    "native" => {
+                        state
+                            .db
+                            .collection::<bson::Document>(
+                                crate::models::channel_bot::COLLECTION_NAME,
+                            )
+                            .update_one(
+                                doc! {"_id":&row.channel_bot_id},
+                                doc! {"$set":{"platform_entry_version":1}},
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    _ => {
+                        state
+                            .db
+                            .collection::<NyxbotChannel>(CHANNELS)
+                            .update_one(
+                                doc! {"_id":&row.id},
+                                doc! {"$set":{"gateway_record_id":Uuid::new_v4().to_string()}},
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        );
+        assert_eq!(
+            outcome.unwrap(),
+            release::BindingRepairOutcome::Refused("concurrent_change"),
+            "{case}"
+        );
+        assert!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .binding_id
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"nyxbot_gateway_binding_repaired"})
+                .await
+                .unwrap(),
+            0
+        );
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_provider_refusals_cannot_trigger_repair() {
+    for case in ["revoked", "wrong_key", "native", "invalid_partition"] {
+        let (state, row, raw, reserved, server, upstream) =
+            stale_gateway_fixture("binding_repair_auth", None).await;
+        let mut bearer_key = raw.clone();
+        let mut partition = PARTITION.to_owned();
+        let expected = match case {
+            "revoked" => {
+                state
+                    .db
+                    .collection::<bson::Document>(KEYS)
+                    .update_one(
+                        doc! {"_id":&row.agent_api_key_id},
+                        doc! {"$set":{"is_active":false}},
+                    )
+                    .await
+                    .unwrap();
+                (StatusCode::UNAUTHORIZED, "not_authenticated")
+            }
+            "wrong_key" => {
+                bearer_key = key(&state, "unrelated provider").await.full_key;
+                (StatusCode::FORBIDDEN, "forbidden")
+            }
+            "native" => {
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&row.channel_bot_id},
+                        doc! {"$set":{"platform_entry_version":1}},
+                    )
+                    .await
+                    .unwrap();
+                (
+                    StatusCode::FORBIDDEN,
+                    "shared_entry_requires_native_receipt",
+                )
+            }
+            _ => {
+                partition = "invalid".into();
+                (StatusCode::NOT_FOUND, "binding_not_found")
+            }
+        };
+        let response = put_conversation(
+            State(state.clone()),
+            Path((reserved.binding_id.clone(), partition)),
+            bearer(&bearer_key),
+        )
+        .await;
+        assert_eq!(response.status(), expected.0, "{case}");
+        assert!(body_text(response).await.contains(expected.1), "{case}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .binding_id
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"nyxbot_gateway_binding_repair_scheduled"})
+                .await
+                .unwrap(),
+            0
+        );
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_requires_every_remote_identity_field() {
+    let (state, row, _, reserved, server, upstream) =
+        stale_gateway_fixture("binding_repair_remote_proof", None).await;
+    for (pointer, value) in [
+        ("/record_id", json!(Uuid::new_v4().to_string())),
+        ("/channel_id", json!("cmaeg1.ch.different")),
+        ("/version", json!(2)),
+        ("/provider/slug", json!("another-provider")),
+        ("/provider/binding_id", json!("bnd_other")),
+        ("/definition/owner/subject", json!("another-owner")),
+        ("/definition/owner/kind", json!("organization")),
+        ("/definition/sources/0/key_id", json!("different-route-key")),
+        (
+            "/definition/sources/0/issuer",
+            json!("https://different.example"),
+        ),
+        ("/definition/sources/0/platform", json!("discord")),
+    ] {
+        server.reset().await;
+        let mut body = remote(&reserved, 1);
+        *body.pointer_mut(pointer).unwrap() = value;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$unset":{"gateway_binding_repair_checked_at":"","gateway_binding_repair_retry_at":""}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            release::repair_binding_on_refusal(&state, &row, "sweep")
+                .await
+                .unwrap(),
+            release::BindingRepairOutcome::Refused("remote_identity_mismatch"),
+            "{pointer}"
+        );
+        assert!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .binding_id
+                .is_none()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}
+
+async fn wait_for_binding_repair(state: &AppState, channel_id: &str, binding: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if load_channel(state, OWNER, channel_id)
+                .await
+                .unwrap()
+                .binding_id
+                .as_deref()
+                == Some(binding)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("detached repair must converge after remote proof");
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_put_returns_404_while_remote_proof_is_paused() {
+    let (state, row, raw, reserved, _server, upstream) =
+        stale_gateway_fixture("binding_repair_detached", None).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let wait = resume.clone();
+    let proof = remote(&reserved, 1);
+    let app = axum::Router::new().route(
+        "/channel-records/{record}",
+        axum::routing::get(move || {
+            let signal = signal.clone();
+            let wait = wait.clone();
+            let proof = proof.clone();
+            async move {
+                signal.notify_one();
+                wait.notified().await;
+                Json(proof)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let gateway = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(doc! {"slug":"cmaeg"}, doc! {"$set":{"base_url":base}})
+        .await
+        .unwrap();
+    let put_state = state.clone();
+    let binding = reserved.binding_id.clone();
+    let mut request = tokio::spawn(async move {
+        put_conversation(
+            State(put_state),
+            Path((binding, PARTITION.to_owned())),
+            bearer(&raw),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    // No remote response exists yet; the provider PUT must already be free to
+    // return 404, including its normal refusal audit, without re-entrant I/O.
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), &mut request)
+        .await
+        .expect("provider PUT waited for the paused gateway proof")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(body_text(response).await.contains("binding_not_found"));
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .binding_id
+            .is_none()
+    );
+    resume.notify_one();
+    wait_for_binding_repair(&state, &row.id, &reserved.binding_id).await;
+    gateway.abort();
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_odd_batch_and_scan_error_do_not_block_maintenance() {
+    for refuse_quarantine in [false, true] {
+        let (state, row, _, reserved, _server, upstream) =
+            stale_gateway_fixture("binding_repair_odd_batch", None).await;
+        let channels = state.db.collection::<bson::Document>(CHANNELS);
+        // All eight slots sort before the valid candidate. They must rotate out
+        // after decode failure so subsequent passes can reach the valid row.
+        for index in 0..8 {
+            let mut odd = bson::to_document(&row).unwrap();
+            odd.insert("_id", format!("!odd-{index}"));
+            odd.insert("bot_label", doc! {"unexpected":"never-log-this-row"});
+            channels.insert_one(odd).await.unwrap();
+        }
+        let (mut pending, _) = channel(&state, "gateway").await;
+        pending.status = "pending".into();
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&pending.id}, &pending)
+            .await
+            .unwrap();
+        let abandoned = reserve(&state, &pending).await;
+        expire(&state, &abandoned.id).await;
+        if refuse_quarantine {
+            // Isolated storage failure inside the new scan, without a global
+            // Mongo failpoint or disrupting another test's database.
+            state
+                .db
+                .run_command(doc! {"collMod":CHANNELS,
+                "validationLevel":"strict", "validator":{
+                    "gateway_binding_repair_checked_at":{"$exists":false}
+                }})
+                .await
+                .unwrap();
+        }
+        use tracing::instrument::WithSubscriber;
+        let output = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let log_output = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || CapturedReleaseLog(log_output.clone()))
+            .finish();
+        release::sweep(&state)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let code = if refuse_quarantine {
+            "gateway_binding_repair_scan_failed"
+        } else {
+            "gateway_binding_repair_row_invalid"
+        };
+        assert_eq!(logged.matches(code).count(), 1);
+        assert!(!logged.contains("never-log-this-row"));
+        assert!(!logged.contains("!odd-"));
+        assert_eq!(
+            current(&state, &abandoned.id).await.state,
+            ReleaseState::Settled,
+            "existing provisional retirement must run even if the new scan fails"
+        );
+        assert!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .binding_id
+                .is_none()
+        );
+        if refuse_quarantine {
+            state
+                .db
+                .run_command(doc! {"collMod":CHANNELS,"validator":{}})
+                .await
+                .unwrap();
+            release::sweep(&state).await.unwrap();
+        }
+        assert_eq!(
+            channels
+                .count_documents(doc! {"_id":{"$regex":"^!odd-"},
+                "gateway_binding_repair_retry_at":{"$gt":bson::DateTime::now()}})
+                .await
+                .unwrap(),
+            8
+        );
+        release::sweep(&state).await.unwrap();
+        assert_eq!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .binding_id
+                .as_deref(),
+            Some(reserved.binding_id.as_str()),
+            "invalid rows must not starve later candidates"
+        );
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_gateway_binding_refused_waits_six_hours_deferred_waits_fifteen_minutes() {
+    for status in [404, 503] {
+        let (state, row, _, _, server, upstream) =
+            stale_gateway_fixture("binding_repair_windows", None).await;
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let started = Utc::now();
+        let outcome = release::repair_binding_on_refusal(&state, &row, "conversation_put")
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            if status == 404 {
+                release::BindingRepairOutcome::Refused("remote_record_missing")
+            } else {
+                release::BindingRepairOutcome::Deferred("gateway_unavailable")
+            }
+        );
+        let channels = state.db.collection::<bson::Document>(CHANNELS);
+        let saved = channels
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        if status == 404 {
+            let retry = saved
+                .get_datetime("gateway_binding_repair_retry_at")
+                .unwrap()
+                .to_chrono();
+            // BSON stores milliseconds, so compare at that precision.
+            assert!(
+                retry.timestamp_millis() >= (started + ChronoDuration::hours(6)).timestamp_millis()
+            );
+        } else {
+            assert!(!saved.contains_key("gateway_binding_repair_retry_at"));
+        }
+        let blocked_minutes = if status == 404 {
+            vec![0, 14, 16, 359]
+        } else {
+            vec![0, 14]
+        };
+        for minutes in blocked_minutes {
+            let now = Utc::now();
+            let mut times = doc! {"gateway_binding_repair_checked_at":bson::DateTime::from_chrono(now-ChronoDuration::minutes(minutes))};
+            if status == 404 {
+                times.insert(
+                    "gateway_binding_repair_retry_at",
+                    bson::DateTime::from_chrono(now + ChronoDuration::minutes(360 - minutes)),
+                );
+            }
+            channels
+                .update_one(doc! {"_id":&row.id}, doc! {"$set":times})
+                .await
+                .unwrap();
+            // Both triggers use the same filter, with no new GET or audit pair.
+            release::repair_stale_bindings_sweep(&state).await.unwrap();
+            assert_eq!(
+                release::repair_binding_on_refusal(&state, &row, "conversation_put")
+                    .await
+                    .unwrap(),
+                release::BindingRepairOutcome::Deferred("not_due")
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+        let audit = state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        assert_eq!(
+            audit
+                .count_documents(doc! {"event_type":{"$regex":"^nyxbot_gateway_binding_repair"}})
+                .await
+                .unwrap(),
+            2
+        );
+        if status == 404 {
+            // An older full batch still inside the six-hour refusal window
+            // must be filtered before LIMIT, not repeatedly starve this row.
+            for index in 0..8 {
+                let mut cooling = bson::to_document(&row).unwrap();
+                cooling.insert("_id", format!("!cooling-{index}"));
+                cooling.insert(
+                    "gateway_binding_repair_checked_at",
+                    bson::DateTime::from_millis(0),
+                );
+                cooling.insert(
+                    "gateway_binding_repair_retry_at",
+                    bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(5)),
+                );
+                channels.insert_one(cooling).await.unwrap();
+            }
+        }
+        // After the appropriate window, the sweep claims one new proof and
+        // the provider cannot duplicate it. Cooling-down older rows are skipped.
+        let elapsed = if status == 404 { 361 } else { 16 };
+        let mut times = doc! {"gateway_binding_repair_checked_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(elapsed))};
+        if status == 404 {
+            times.insert(
+                "gateway_binding_repair_retry_at",
+                bson::DateTime::from_chrono(Utc::now() - ChronoDuration::minutes(1)),
+            );
+        }
+        channels
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":times})
+            .await
+            .unwrap();
+        release::repair_stale_bindings_sweep(&state).await.unwrap();
+        assert_eq!(
+            release::repair_binding_on_refusal(&state, &row, "conversation_put")
+                .await
+                .unwrap(),
+            release::BindingRepairOutcome::Deferred("not_due")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(
+            audit
+                .count_documents(doc! {"event_type":{"$regex":"^nyxbot_gateway_binding_repair"}})
+                .await
+                .unwrap(),
+            4
+        );
+        upstream.abort();
+        state.db.drop().await.unwrap();
+    }
+}

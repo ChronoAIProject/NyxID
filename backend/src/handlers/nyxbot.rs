@@ -4662,7 +4662,11 @@ pub async fn delete_binding(
             "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
             "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
             "pending_agent_api_key_id": &row.pending_agent_api_key_id},
-            doc! {"$inc":{"execution_policy_revision":1_i64},"$unset": {"binding_id": ""}, "$set": {"gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
+            // Unbind is also used by rollback/consumer cleanup and precedes
+            // remote deletion. It is not authority to disconnect a live link
+            // or revoke keys. Preserve its binding so cold partitions/rebinds
+            // keep working if the gateway retains the record.
+            doc! {"$set": {"gateway_binding_unbound_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()}},
         )
         .await
     {
@@ -4745,6 +4749,15 @@ async fn put_conversation_inner(
     provider_refusal::binding(row.binding_id.as_deref() == Some(binding_id.as_str()));
     if row.binding_id.as_deref() != Some(binding_id.as_str()) || !valid_partition(&conversation_id)
     {
+        if row.binding_id.as_deref() != Some(binding_id.as_str())
+            && valid_partition(&conversation_id)
+        {
+            // The gateway is waiting on this PUT. Remote proof must not make
+            // a re-entrant request on that path or delay its unchanged 404.
+            tokio::spawn(async move {
+                let _ = releases::repair_binding_on_refusal(&state, &row, "conversation_put").await;
+            });
+        }
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
     }
     let now = bson::DateTime::now();
