@@ -53,7 +53,7 @@ export function DashboardPage() {
 
   const activeKeys = apiKeys?.filter((k) => k.is_active).length ?? 0;
   const serviceCount = services?.length ?? 0;
-  const onlineNodes = nodes?.filter((n) => n.status === "Online").length ?? 0;
+  const onlineNodes = nodes?.filter((n) => n.is_connected).length ?? 0;
   const totalNodes = nodes?.length ?? 0;
 
   const [aiDismissed, setAiDismissed] = useState(
