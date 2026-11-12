@@ -1006,6 +1006,31 @@ pub async fn home_thread_for(
 // Grants
 // ---------------------------------------------------------------------------
 
+/// One authorization inventory for grant editors and all grant writers. Tool
+/// publication affects discovery, not whether an HTTP connection can be granted.
+pub async fn grant_catalog(
+    db: &Database,
+    nodes: &NodeWsManager,
+    actor: &str,
+    scope: mcp_service::ServiceScope<'_>,
+    targets: &[String],
+) -> AppResult<Vec<mcp_service::McpToolService>> {
+    let catalog = mcp_service::load_authorization_catalog(db, nodes, actor, scope, targets).await?;
+    Ok(catalog
+        .services
+        .into_iter()
+        .chain(catalog.unpublished_services)
+        .filter(|service| {
+            !matches!(service.source, mcp_service::McpToolSource::Internal)
+                && !is_engine(&service.service_slug)
+        })
+        .collect())
+}
+
+fn is_engine(target: &str) -> bool {
+    target.eq_ignore_ascii_case(engine::SERVICE_SLUG) || target.eq_ignore_ascii_case("nyxagent")
+}
+
 /// Services resolved from slugs or IDs exactly as MCP enforces them: user
 /// services by `UserService` ID, platform services by catalog ID.
 #[derive(Clone, Debug, Default)]
@@ -1068,9 +1093,7 @@ pub async fn resolve_each_target(
         Some(access) => mcp_service::ServiceScope::Organization { access },
         None => mcp_service::ServiceScope::Preferring(&trimmed_targets),
     };
-    let catalog =
-        mcp_service::load_authorization_catalog(db, node_manager, actor, scope, &trimmed_targets)
-            .await?;
+    let catalog = grant_catalog(db, node_manager, actor, scope, &trimmed_targets).await?;
     for target in &trimmed_targets {
         let target = target.as_str();
         let refuse = |reason: String| Refused {
@@ -1079,9 +1102,7 @@ pub async fn resolve_each_target(
         };
         // Every agent runs on NyxAgent and thinks with NyxID's model
         // services; the engine itself is not a service an agent calls.
-        if target.eq_ignore_ascii_case(crate::services::assistant_nyxagent::SERVICE_SLUG)
-            || target.eq_ignore_ascii_case("nyxagent")
-        {
+        if is_engine(target) {
             refused.push(refuse(
                 "NyxAgent is the assistant engine every agent already runs on; it is not \
                 granted as a service"
@@ -1107,7 +1128,6 @@ pub async fn resolve_each_target(
             continue;
         }
         let Some(service) = catalog
-            .services
             .iter()
             .find(|service| service.service_slug == target || service.service_id == target)
         else {

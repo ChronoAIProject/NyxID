@@ -1384,6 +1384,63 @@ async fn load_user_tools_with_grants(
             .await?
     };
 
+    // This management view must not expose private legacy master/no-auth
+    // services just because they are auto-connected candidates. Reuse the same
+    // live consent check as provisioning and master-credential authorization.
+    // Executable discovery does not acquire any new reads here.
+    let private_app_ids: Vec<&str> = if options.authorization_targets.is_some() {
+        connected_services
+            .iter()
+            .chain(&auto_services)
+            .filter(|service| {
+                !service.requires_user_credential
+                    && service.platform_key.is_none()
+                    && service.visibility == "private"
+            })
+            .filter_map(|service| service.developer_app_ids.as_ref())
+            .flatten()
+            .map(String::as_str)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let private_consents = if private_app_ids.is_empty() {
+        HashSet::new()
+    } else {
+        super::unified_key_service::load_valid_app_consents(db, user_id, &private_app_ids).await?
+    };
+    let authorizable_platform = |service: &DownstreamService| {
+        if options.authorization_targets.is_none() {
+            return true;
+        }
+        if super::retired_service_service::is_retired(service) {
+            return false;
+        }
+        if service.requires_user_credential {
+            return true; // Its personal connection/credential is checked below.
+        }
+        if service.platform_key.is_some() {
+            return if super::platform_key_service::no_auth_platform_service(service) {
+                super::platform_key_service::no_auth_available_with_grants(service, user_id, grants)
+            } else {
+                super::platform_key_service::available_with_grants(
+                    service,
+                    service
+                        .provider_config_id
+                        .as_ref()
+                        .and_then(|id| options.providers.get(id)),
+                    user_id,
+                    grants,
+                )
+            };
+        }
+        service.visibility != "private"
+            || service
+                .developer_app_ids
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| private_consents.contains(id)))
+    };
+
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
@@ -1393,6 +1450,9 @@ async fn load_user_tools_with_grants(
             || crate::services::platform_key_service::model_only(svc)
             || crate::services::retired_service_service::is_retired(svc)
         {
+            continue;
+        }
+        if !authorizable_platform(svc) {
             continue;
         }
         let mut executable = true;
@@ -1416,6 +1476,9 @@ async fn load_user_tools_with_grants(
 
     for svc in &auto_services {
         if seen_ids.contains(&svc.id) || crate::services::platform_key_service::model_only(svc) {
+            continue;
+        }
+        if !authorizable_platform(svc) {
             continue;
         }
         if let Some(conn) = conn_map.get(svc.id.as_str())
@@ -1443,15 +1506,17 @@ async fn load_user_tools_with_grants(
     )
     .await?;
 
-    // Collect catalog IDs and slugs from *executable* user services for dedup
+    // Executable discovery deduplicates executable rows. Authorization retains
+    // an offline connection's identity too; a platform copy must not silently
+    // replace that configured credential when the grant editor saves its slug.
     let executable_catalog_ids: HashSet<&str> = all_user_services
         .iter()
-        .filter(|r| r.executable)
+        .filter(|r| options.authorization_targets.is_some() || r.executable)
         .filter_map(|r| r.service.catalog_service_id.as_deref())
         .collect();
     let executable_slugs: HashSet<&str> = all_user_services
         .iter()
-        .filter(|r| r.executable)
+        .filter(|r| options.authorization_targets.is_some() || r.executable)
         .map(|r| r.service.slug.as_str())
         .collect();
 
@@ -1674,6 +1739,14 @@ async fn load_user_tools_with_grants(
         }
         let retired_catalog =
             catalog_policy.is_some_and(crate::services::retired_service_service::is_retired);
+        if options.authorization_targets.is_some()
+            && (retired_catalog
+                || catalog_policy
+                    .is_some_and(|catalog| catalog.slug == super::assistant_nyxagent::SERVICE_SLUG)
+                || !endpoints_by_id.contains_key(us.endpoint_id.as_str()))
+        {
+            continue;
+        }
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
@@ -2491,7 +2564,15 @@ async fn load_callable_user_services(
         .authorization_targets
         .map(ServiceScope::Preferring)
         .unwrap_or(service_scope);
-    let winner_indices = select_slug_winner_indices(&candidates, preference_scope, user_id);
+    // Org grants address exact connection IDs; same-slug connections must all
+    // round-trip through the editor. Executable tool discovery still picks one.
+    let winner_indices = if options.authorization_targets.is_some()
+        && matches!(service_scope, ServiceScope::Organization { .. })
+    {
+        (0..candidates.len()).collect()
+    } else {
+        select_slug_winner_indices(&candidates, preference_scope, user_id)
+    };
     let shadowed_connections = candidates.len().saturating_sub(winner_indices.len());
     let mut selected: Vec<ResolvedUserService> = candidates
         .into_iter()
