@@ -274,7 +274,7 @@ function ConversationRow({
           align="end"
           className="min-w-[160px]"
           onCloseAutoFocus={(event) => {
-            // A channel pin moves between groups. Search the same sidebar instance:
+            // Reordering may remount a row. Search the same sidebar instance:
             // the hidden desktop sidebar also stays mounted beside the mobile drawer.
             const channelKey = conversation.channel
               ? conversation.channel.channel_agent_id ?? `platform:${conversation.channel.platform}`
@@ -388,7 +388,8 @@ function ChannelThreadsGroup({
   const open =
     pinned && (pinned.active === activeThreadId || !holdsActive) ? pinned.open : holdsActive;
   const running = group.threads.some((thread) => thread.active_turn);
-  const visible = group.threads.filter(
+  const pinnedIds = usePinnedConversationIds();
+  const visible = pinnedConversationsFirst(group.threads, pinnedIds).filter(
     (thread, index) => index < shown || thread.id === activeThreadId,
   );
   const hidden = group.threads.length - visible.length;
@@ -478,9 +479,8 @@ function AgentRow({
   const expanded = selected && !(folded && folded.active === activeThreadId);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
   const pinnedIds = usePinnedConversationIds();
-  const pinnedThreads = expanded ? model.threads.filter((thread) => pinnedIds.has(thread.id)) : [];
   const threads = expanded
-    ? splitChannelThreads(model.threads.filter((thread) => !pinnedIds.has(thread.id)))
+    ? splitChannelThreads(model.threads)
     : { own: [], bots: [] };
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
@@ -641,7 +641,7 @@ function AgentRow({
           aria-label={translateUi("Threads with {{value1}}", { value1: name })}
           className="mb-1 ml-[22px] mt-0.5 space-y-px border-l border-border/60 pl-1"
         >
-          {[...pinnedThreads, ...threads.own].map(renderThread)}
+          {pinnedConversationsFirst(threads.own, pinnedIds).map(renderThread)}
           {model.threadsLoading && !model.threads.length ? (
             <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading threads...")}</p>
           ) : null}
@@ -1563,7 +1563,26 @@ function RailAgentChats({
     queryFn: () => nyxAgentTransport.list(agent.id),
     enabled: !selected && Boolean(userId),
   });
-  const chats = pinnedConversationsFirst(selected ? model.threads : (threads.data ?? []), pinnedIds);
+  // Preserve recent-list scope slots; a pin never moves a chat across bots.
+  const sourceChats = selected ? model.threads : (threads.data ?? []);
+  const scopes = new Map<string | null, Conversation[]>();
+  const scopeOf = (chat: Conversation) => chat.channel
+    ? chat.channel.channel_agent_id ?? `platform:${chat.channel.platform}`
+    : null;
+  for (const chat of sourceChats) {
+    const key = scopeOf(chat);
+    const scope = scopes.get(key) ?? [];
+    scope.push(chat);
+    scopes.set(key, scope);
+  }
+  const ordered = new Map([...scopes].map(([key, chats]) => [key, pinnedConversationsFirst(chats, pinnedIds)]));
+  const offsets = new Map<string | null, number>();
+  const chats = sourceChats.map((chat) => {
+    const key = scopeOf(chat);
+    const index = offsets.get(key) ?? 0;
+    offsets.set(key, index + 1);
+    return ordered.get(key)![index]!;
+  });
   const loading = selected ? Boolean(model.threadsLoading) : threads.isPending;
   return (
     <div className="space-y-1 text-14">

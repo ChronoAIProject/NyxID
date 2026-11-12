@@ -99,7 +99,10 @@ the canonical actor/history page. Direct conversations are not persisted.
 
 浏览器侧栏的会话菜单提供「置顶会话」和「取消置顶」。同一列表支持多个置顶项，
 以中性图钉区分，保留标题、草稿、选中态及现有未读展示。NyxAgent 的置顶项排在
-所属 agent 的会话列表最前（包括该 agent 的 channel chats），不改变 agent 的排序。
+所属 agent 的普通会话列表最前；channel chats 只在所属机器人分组内置顶，
+不移动机器人分组，也不改变其计数、展开状态或 parent chat 上下文。先分组再组内排序，
+之后应用 Show more 上限；rail 保留 recent 顺序中的各 scope 原始槽位，只在同一
+普通会话或机器人 scope 的槽位间重排，再取前 8 项；没有置顶时原顺序完全不变。
 展开列表与折叠 rail 均先进行 O(n) 稳定分组，再应用已有展示上限；置顶和普通项
 各自保留原来的顺序，取消后回到正常位置。共享 transport 的列表顺序保持不变，
 进入 agent 时仍默认选择最新会话。置顶操作不导航、不执行已读操作。
@@ -107,7 +110,12 @@ the canonical actor/history page. Direct conversations are not persisted.
 The browser conversation menu offers **Pin chat** and **Unpin chat**. Multiple
 pins lead their existing list with a neutral pin glyph, retaining titles,
 drafts, selection and existing unread presentation. NyxAgent pins lead their
-own agent's thread list, including channel chats; agent ordering stays intact.
+own agent's ordinary thread list. Channel chats pin only inside their own bot
+group; bot order, counts, expansion and parent chat context stay intact. Split
+groups before sorting within each list, then apply Show more limits. Rail
+previews retain each scope’s original recent-list slots, reorder only within
+ordinary-chat or same-bot slots, then take eight rows. With no pins the original
+recent order is unchanged.
 Expanded lists and rail popovers use an O(n) stable partition before their
 existing display limits. Each partition retains its original order; unpinning
 restores normal placement. Transport ordering and the latest-thread default

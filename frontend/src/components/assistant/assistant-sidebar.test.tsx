@@ -622,23 +622,42 @@ describe("NyxBot agents in the sidebar", () => {
     return { ...handlers, onSelect, queryClient };
   }
 
-  it("promotes pinned channel chats above ordinary threads without pruning another agent's pins", async () => {
+  it("keeps channel pins inside their bot without changing bot order, counts or expansion", async () => {
     const user = userEvent.setup();
-    const own = { ...thread, id: "nyxa-own", title: "Newest own chat", channel: null };
+    const own = { ...thread, id: "nyxa-own", title: "Ordinary chat", channel: null };
+    const botChats = (bot: string) => Array.from({ length: 7 }, (_, index) => ({
+      ...thread, id: `nyxa-${bot}-${index}`, title: `${bot} chat ${index}`,
+      channel: { platform: "telegram", channel_agent_id: bot, bot_label: bot },
+    }));
+    const first = botChats("First bot");
+    const second = botChats("Second bot");
     useAssistantPinsStore.getState().toggle(USER.id, "nyxa-other-agent");
-    const { onSelect } = renderAgents({ threads: [own, thread] });
-    await user.click(screen.getByRole("button", { name: "Options for Morning briefing" }));
-    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
-    const threads = within(screen.getByRole("group", { name: "Threads with NyxBot" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Options for Morning briefing" })).toHaveFocus());
-    expect(threads.getAllByRole("button")[0]).toHaveAccessibleName("Morning briefing");
-    expect(threads.getByRole("button", { name: "Morning briefing" })).toHaveAttribute("aria-current", "page");
+    const { onSelect } = renderAgents({ threads: [own, ...first, ...second] });
+    const firstHeader = screen.getByRole("button", { name: "First bot on Telegram, 7 chats" });
+    const secondHeader = screen.getByRole("button", { name: "Second bot on Telegram, 7 chats" });
+    await user.click(secondHeader);
+    await user.click(screen.getByRole("button", { name: "Show 2 more" }));
+    for (const index of [6, 5]) {
+      await user.click(screen.getByRole("button", { name: `Options for Second bot chat ${index}` }));
+      await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: `Options for Second bot chat ${index}` })).toHaveFocus());
+    }
+    expect(firstHeader).toHaveAttribute("aria-expanded", "false");
+    expect(secondHeader).toHaveAttribute("aria-expanded", "true");
+    const list = screen.getByRole("group", { name: "Threads with NyxBot" });
+    const buttons = within(list).getAllByRole("button").filter((button) => !button.getAttribute("aria-label")?.startsWith("Options for"));
+    expect(buttons.slice(0, 5).map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Ordinary chat", "First bot on Telegram, 7 chats", "Second bot on Telegram, 7 chats", "Second bot chat 5", "Second bot chat 6",
+    ]);
+    expect(within(secondHeader.parentElement!).getAllByLabelText("Pinned chat")).toHaveLength(2);
     expect(onSelect).not.toHaveBeenCalled();
     expect(useAssistantPinsStore.getState().ids).toContain("nyxa-other-agent");
-    await user.click(screen.getByRole("button", { name: "Options for Morning briefing" }));
+    await user.click(screen.getByRole("button", { name: "Options for Second bot chat 5" }));
     await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
-    expect(threads.getAllByRole("button")[0]).toHaveAccessibleName("Newest own chat");
-    expect(threads.getByRole("button", { name: "Morning briefing" })).toBeVisible();
+    expect(within(secondHeader.parentElement!).getAllByRole("button")[1]).toHaveAccessibleName("Second bot chat 6");
+    await user.click(secondHeader);
+    await user.click(secondHeader);
+    expect(screen.getByRole("button", { name: "Second bot chat 6" })).toBeVisible();
   });
 
   it.each([true, false])("sorts rail pins before the eight-chat limit (selected agent: %s)", async (selected) => {
@@ -656,6 +675,51 @@ describe("NyxBot agents in the sidebar", () => {
     expect(list.getByRole("button", { name: thread.title })).toHaveAttribute("aria-current", "page");
     expect(list.getByLabelText("Pinned chat")).toBeVisible();
     expect(rows[0]?.title).toBe("Chat 0");
+  });
+
+  it.each([true, false])("keeps rail channel pins in their original scope slots (selected: %s)", async (selected) => {
+    const user = userEvent.setup();
+    const own = { ...thread, id: "nyxa-own", title: "Own", channel: null };
+    const botRows = (bot: string, count: number) => Array.from({ length: count }, (_, index) => ({
+      ...thread, id: `nyxa-${bot}-${index}`, title: `${bot} ${index}`,
+      channel: { platform: "telegram", channel_agent_id: bot, bot_label: bot },
+    }));
+    const first = botRows("First", 2);
+    const second = botRows("Second", 7);
+    const rows = [first[0]!, second[0]!, own, first[1]!, ...second.slice(1)];
+    useAssistantPinsStore.getState().toggle(USER.id, second[6]!.id);
+    const { queryClient } = renderAgents({ threads: selected ? rows : [], selectedAgentId: selected ? "agent-nyxbot" : "agent-researcher" }, { rail: true });
+    queryClient.setQueryData(nyxBotQueryKeys.threads(USER.id, "agent-nyxbot"), rows);
+    await user.click(screen.getByRole("button", { name: /^NyxBot/ }));
+    const list = within(screen.getByRole("list", { name: "NyxBot chats" }));
+    expect(list.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "First 0", "Second 6", "Own", "First 1", "Second 0", "Second 1", "Second 2", "Second 3",
+    ]);
+    act(() => useAssistantPinsStore.getState().toggle(USER.id, second[6]!.id));
+    expect(list.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(rows.slice(0, 8).map((row) => row.title));
+  });
+
+  it("applies saved pins before Show more while keeping parent chat context", async () => {
+    const user = userEvent.setup();
+    const rows = Array.from({ length: 7 }, (_, index) => ({
+      ...thread, id: `nyxa-topic-${index}`, title: `Topic ${index}`,
+      channel: { platform: "telegram", channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: "parent", parent_title: "Engineering group", thread_id: String(index) },
+    }));
+    useAssistantPinsStore.getState().toggle(USER.id, rows[6]!.id);
+    renderAgents({ threads: rows });
+    const header = screen.getByRole("button", { name: "Topics bot on Telegram, 7 chats" });
+    await user.click(header);
+    expect(screen.getByText("Engineering group")).toBeVisible();
+    const group = within(header.parentElement!);
+    expect(group.getAllByRole("button")[1]).toHaveAccessibleName("Topic 6");
+    expect(group.queryByRole("button", { name: "Topic 4" })).not.toBeInTheDocument();
+    expect(group.getByRole("button", { name: "Show 2 more" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Options for Topic 6" }));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    expect(group.queryByRole("button", { name: "Topic 6" })).not.toBeInTheDocument();
+    expect(group.getAllByRole("button")[1]).toHaveAccessibleName("Topic 0");
+    await waitFor(() => expect(header).toHaveFocus());
+    expect(screen.getByText("Engineering group")).toBeVisible();
   });
 
   it.each([null, { seq: 2, status: "completed", text: "Hello", created_at: at }])(

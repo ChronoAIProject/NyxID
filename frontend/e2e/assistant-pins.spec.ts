@@ -82,17 +82,63 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   });
 }
 
-test("keyboard pinning and unpinning a channel chat keeps focus when its group remounts", async ({ page }) => {
+test("channel pins stay within their bot across keyboard actions, reload and Show more", async ({ page }, testInfo) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  // Extend the existing HTTP fixture's durable history, keeping its real schema.
+  await page.evaluate(() => {
+    const key = "nyxagent-http-fixture-v4";
+    const state = JSON.parse(sessionStorage.getItem(key)!);
+    const source = state.rows.find(([, row]: [string, { history: { conversation: { channel: unknown } } }]) => row.history.conversation.channel);
+    const extra = [];
+    for (const [botIndex, bot] of ["First bot", "Second bot"].entries()) {
+      for (let index = 0; index < 7; index++) {
+        const row = structuredClone(source[1]);
+        const id = `nyxa-${String(botIndex + 1)}${String(index).padStart(31, "0")}`;
+        row.history.conversation = { ...row.history.conversation,
+          id, title: `${bot} chat ${index}`, last_message_at: `2026-11-${String(12 - botIndex).padStart(2, "0")}T00:0${6-index}:00.000Z`,
+          channel: { ...row.history.conversation.channel, channel_agent_id: `bot-${botIndex}`, bot_label: bot },
+        };
+        extra.push([id, row]);
+      }
+    }
+    state.rows = [...state.rows.filter(([id]: [string]) => id !== source[0]), ...extra];
+    sessionStorage.setItem(key, JSON.stringify(state));
+  });
+  await page.reload();
   const nav = await showChats(page);
-  const channel = nav.getByRole("button", { name: "Telegram bot on Telegram, 1 chat", exact: true });
-  await channel.click();
-  await togglePin(page, "Morning briefing");
-  await expect(channel).toHaveCount(0);
-  await togglePin(page, "Morning briefing", true, channel);
-  await expect(channel).toHaveAttribute("aria-expanded", "false");
+  const first = nav.getByRole("button", { name: "First bot on Telegram, 7 chats", exact: true });
+  const second = nav.getByRole("button", { name: "Second bot on Telegram, 7 chats", exact: true });
+  const group = second.locator("..");
+  const rows = group.locator("[data-conversation-options]");
+  await second.click();
+  await group.getByRole("button", { name: "Show 2 more" }).click();
+  await togglePin(page, "Second bot chat 6");
+  await togglePin(page, "Second bot chat 5");
+  await expect(first).toHaveAttribute("aria-expanded", "false");
+  await expect(second).toHaveAttribute("aria-expanded", "true");
+  await expect(rows).toHaveCount(7);
+  await expect(rows.nth(0)).toHaveAttribute("data-conversation-options", `nyxa-2${"5".padStart(31, "0")}`);
+  await expect(rows.nth(1)).toHaveAttribute("data-conversation-options", `nyxa-2${"6".padStart(31, "0")}`);
+  await expect(nav.locator("[data-channel-group]").nth(0)).toHaveAttribute("data-channel-group", "bot-0");
+  await expect(nav.locator("[data-channel-group]").nth(1)).toHaveAttribute("data-channel-group", "bot-1");
+  await testInfo.attach("channel-pins-in-bot", { body: await page.screenshot({ path: testInfo.outputPath("channel-pins-in-bot.png") }), contentType: "image/png" });
+  await page.reload();
+  await showChats(page);
+  await expect(second).toHaveAttribute("aria-expanded", "false");
+  await second.click();
+  await expect(rows).toHaveCount(5);
+  await expect(rows.nth(0)).toHaveAttribute("aria-label", "Options for Second bot chat 5");
+  await expect(rows.nth(1)).toHaveAttribute("aria-label", "Options for Second bot chat 6");
+  await togglePin(page, "Second bot chat 5", true, second);
+  await expect(rows.nth(0)).toHaveAttribute("aria-label", "Options for Second bot chat 6");
+  // Unpinning beyond the preview limit returns focus to the bot header.
+  const options = page.getByRole("button", { name: "Options for Second bot chat 6", exact: true });
+  await options.focus();
   await page.keyboard.press("Enter");
-  await expect(conversationRow(page, "Morning briefing")).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(second).toBeFocused();
+  await expect(rows.nth(0)).toHaveAttribute("aria-label", "Options for Second bot chat 0");
+  await expect(first).toHaveAttribute("aria-expanded", "false");
 });
 
 test("storage failures remain retryable and account changes clear saved pins", async ({ page }) => {
