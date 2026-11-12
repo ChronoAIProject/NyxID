@@ -20,11 +20,15 @@ on:
       - "**/Cargo.toml"
       - .github/workflows/release.yml
       - .github/workflows/release-cache.yml
+      - .github/scripts/dist_cargo.py
+      - scripts/dist-build.sh
   # Pull requests that change this workflow build the matrix to verify it,
   # without saving: caches from pull request refs are not visible to tags.
   pull_request:
     paths:
       - .github/workflows/release-cache.yml
+      - .github/scripts/dist_cargo.py
+      - scripts/dist-build.sh
   schedule:
     - cron: "23 2 * * *"
   workflow_dispatch:
@@ -117,4 +121,4 @@ jobs:
             export CC=clang
             export CXX=clang++
           fi
-          dist build --print=linkage --output-format=json ${{ matrix.dist_args }} > /dev/null
+          scripts/dist-build.sh --print=linkage --output-format=json ${{ matrix.dist_args }} > /dev/null

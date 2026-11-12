@@ -36,6 +36,9 @@ targets = [
     "x86_64-unknown-linux-gnu",
 ]
 packages = ["nyxid-cli"]
+# Keep the release's workspace feature unification. The release workflows use
+# scripts/dist-build.sh to select only the distributed binary for compilation.
+precise-builds = false
 install-path = "~/.local/bin"
 hosting = "github"
 install-updater = false
@@ -54,6 +57,7 @@ aarch64-unknown-linux-gnu = "2.31"
 clang = { version = "*", targets = ["aarch64-unknown-linux-gnu"] }
 libdbus-1-dev = "*"
 pkg-config = "*"
+python3 = "*"
 
 # Pure-Rust RSA keygen and big-int math are catastrophically slow when compiled
 # without optimizations (a single 4096-bit keypair can take 30-120s in `cargo

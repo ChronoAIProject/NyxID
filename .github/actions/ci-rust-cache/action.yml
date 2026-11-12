@@ -8,11 +8,38 @@ inputs:
     description: Keep workspace crates and a lane-scoped incremental target cache.
     default: 'false'
   save-if:
-    description: Only CI Cache Warm opts in to writing ordinary main-branch caches.
+    description: Only CI Cache Warm opts in. Push still writes main only.
     default: 'false'
+outputs:
+  save-enabled:
+    description: True when this run may write ordinary caches for its ref.
+    value: ${{ steps.save-policy.outputs.enabled }}
+  incremental-key:
+    description: Primary incremental cache key. Empty unless incremental is true.
+    value: ${{ steps.incremental-contract.outputs.key }}
+  incremental-path:
+    description: Exact actions/cache path list. Writers must pass this unchanged.
+    value: ${{ steps.incremental-contract.outputs.path }}
 runs:
   using: composite
   steps:
+    # Push publishes main only. workflow_dispatch also publishes the selected
+    # ref; Actions scopes that entry to the branch and does not replace main.
+    # Ordinary CI passes save-if false, so it never writes.
+    - name: Decide whether this run may write ordinary caches
+      id: save-policy
+      shell: bash
+      env:
+        SAVE_IF: ${{ inputs.save-if }}
+        EVENT: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+      run: |
+        set -euo pipefail
+        enabled=false
+        if [[ "$SAVE_IF" == "true" && ( "$EVENT" == "workflow_dispatch" || "$REF" == "refs/heads/main" ) ]]; then
+          enabled=true
+        fi
+        echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
     # rust-cache hashes *every* installed compiler. Unused runner stable updates
     # (1.99.0 vs 1.99.1) duplicated caches even though CI builds with 1.98.1.
     - name: Keep only the active pinned toolchain
@@ -38,7 +65,7 @@ runs:
         # changes the cache contents without changing rust-cache's environment
         # hash. Keep the legacy key for non-incremental lanes.
         prefix-key: ${{ inputs.incremental == 'true' && 'v1-rust-incremental' || 'v0-rust' }}
-        save-if: ${{ github.ref == 'refs/heads/main' && inputs.save-if == 'true' }}
+        save-if: ${{ steps.save-policy.outputs.enabled }}
         # taiki-e installs these tools by pinned version already. Keep compiled
         # dependencies, not another copy of each nextest/llvm-cov executable.
         cache-bin: false
@@ -49,19 +76,42 @@ runs:
       if: inputs.incremental == 'true'
       shell: bash
       run: echo 'CARGO_INCREMENTAL=1' >> "$GITHUB_ENV"
+    # The actions/cache version is the path list, not only the key. Restore and
+    # every save must use this step's outputs. A second copy of the expression
+    # changes the version and the lookup misses.
+    - name: Define the incremental cache contract
+      id: incremental-contract
+      if: inputs.incremental == 'true'
+      shell: bash
+      env:
+        INCREMENTAL_KEY: v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+      run: |
+        set -euo pipefail
+        commit="${INCREMENTAL_KEY##*-}"
+        without_commit="${INCREMENTAL_KEY%-"$commit"}"
+        manifest_prefix="${without_commit}-"
+        # Drop the manifest hash as well. An unrelated member lock change can
+        # reuse this lane; a version bump may spend a few minutes downloading
+        # a graph rustc will not use.
+        broad_prefix="${without_commit%-*}-"
+        {
+          echo "key<<EOF"
+          printf '%s\n' "$INCREMENTAL_KEY"
+          echo "EOF"
+          echo "path<<EOF"
+          printf '%s\n' target/debug/incremental target/llvm-cov-target/debug/incremental
+          echo "EOF"
+          echo "restore-keys<<EOF"
+          printf '%s\n' "$manifest_prefix" "$broad_prefix"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
     # rust-cache intentionally removes incremental directories before saving.
-    # Restore them separately; CI Cache Warm alone saves these paths after its
-    # builds. Ordinary CI is a reader even on main, keeping checks reusable.
+    # Ordinary CI is a reader even on main. CI Cache Warm saves the same path
+    # list through ci-rust-incremental-save.
     - name: Restore incremental build cache
       if: inputs.incremental == 'true'
       uses: actions/cache/restore@v4
       with:
-        path: |
-          target/debug/incremental
-          target/llvm-cov-target/debug/incremental
-        # Actions caches are immutable; include the commit so main can publish
-        # a fresh incremental generation while PRs restore the newest prefix.
-        key: v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
-        restore-keys: |
-          v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-
-          v0-rust-incremental-${{ inputs.shared-key }}-${{ runner.os }}-${{ runner.arch }}-
+        path: ${{ steps.incremental-contract.outputs.path }}
+        key: ${{ steps.incremental-contract.outputs.key }}
+        restore-keys: ${{ steps.incremental-contract.outputs.restore-keys }}

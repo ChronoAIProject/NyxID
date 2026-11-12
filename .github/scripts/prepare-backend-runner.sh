@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+swap_record="${RUNNER_TEMP:?}/nyxid-ci-swap-path"
+if [[ "${1:-}" == --release && $# == 1 ]]; then
+  # Compilation has finished. Return the reserve's disk space before the
+  # cache action creates its compressed archive; never touch runner-owned swap.
+  if [[ ! -e "$swap_record" ]]; then
+    exit 0
+  fi
+  swap_file="$(cat "$swap_record")"
+  if [[ "$swap_file" != "$RUNNER_TEMP"/nyxid-ci-swap.?????? || ! -f "$swap_file" || -L "$swap_file" ]]; then
+    echo 'Invalid backend swap record; refusing to release it.' >&2
+    exit 1
+  fi
+  sudo -n swapoff "$swap_file"
+  rm -f "$swap_file" "$swap_record"
+  echo 'Released the backend compile reserve before cache compression.'
+  df -h "$RUNNER_TEMP"
+  exit 0
+elif (($# != 0)); then
+  echo 'usage: prepare-backend-runner.sh [--release]' >&2
+  exit 1
+fi
+
 # A measured backend test compile used 2.4 GiB of the runner's 3 GiB swap;
 # by October 2026 a single nyxid rustc exhausted 16 GiB RAM plus 8 GiB swap,
 # and later that month the test-binary compile peaked at 29.7-31.5 GiB of
@@ -40,6 +62,7 @@ fallocate -l "${additional_mib}M" "$swap_file"
 sudo -n mkswap "$swap_file" >/dev/null
 sudo -n swapon "$swap_file"
 activated=true
+printf '%s\n' "$swap_file" > "$swap_record"
 
 actual_swap_kib="$(awk '$1 == "SwapTotal:" { print $2 }' /proc/meminfo)"
 if ((actual_swap_kib < minimum_swap_kib)); then

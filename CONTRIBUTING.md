@@ -214,6 +214,32 @@ If your change touches authentication, encryption, or credential handling, it wi
 
 ### Running Tests
 
+Plain Cargo builds watch this worktree's Git HEAD and HEAD reflog, so unchanged
+builds remain fresh and commits, checkouts, resets, rebases and pulls refresh
+the embedded identity without reacting to another worktree's branch updates.
+The build scripts resolve relative `git rev-parse --git-path` results themselves;
+this also works with Git 2.25 in the Focal release container.
+If a Git worktree has neither a HEAD reflog nor a loose branch ref, the build
+script reruns on every invocation until it can watch one of those files.
+This keeps stamps current when reflogs are disabled and the branch is packed.
+If Git cannot return the reflog path, a deliberately missing sentinel forces
+the same rerun behavior without failing the build.
+Source archives and Docker contexts without Git emit no Git watch.
+The local `-dirty` suffix is sampled when the build script runs, so it reflects
+the tree at the last HEAD movement or other build-script rerun; it is not
+recomputed for every Cargo invocation. Release and image artifacts are
+unaffected because they use fresh checkouts or explicit/runtime Git stamps.
+
+The pre-commit hook remains a lint hook, not the full validation gate: tests,
+KMS feature builds, coverage, frontend checks, and image validation are separate
+checks. See [CI build measurements](docs/CI_PERFORMANCE.md) for costs and commands.
+
+The backend CI archive build preserves instrumented compiler artifacts but clears
+raw coverage counters. Reports take their object list from the current nextest
+archive, and a regression fixture compares this cached path against a clean
+report after deleting source and renaming a test binary. Do not add `--no-clean`
+to ordinary directory-scanning coverage reports: those can include stale objects.
+
 The full backend suite needs a dedicated, ephemeral MongoDB 8 replica set. It
 creates and drops a database per DB-backed test, so start that test-only mongod
 with `minSnapshotHistoryWindowInSeconds=0`; MongoDB's 300-second default retains
@@ -221,19 +247,30 @@ dropped WiredTiger idents and file descriptors long enough to exhaust a full
 run. This is a server-wide parameter: do not set it on a shared development,
 staging, or production MongoDB.
 
+The test Compose override keeps the data and journal on tmpfs, caps WiredTiger
+at 2 GiB, and enables the MongoDB fault commands used by the uncertain-write
+test. The 8 GiB data limit is a ceiling, not a reservation. Use a dedicated
+project and loopback port; this override is only for disposable test data.
+
 ```bash
-docker run --rm --detach --name nyxid-test-mongodb --publish 27017:27017 \
-  --ulimit nofile=65536:65536 \
-  mongo:8.0 --replSet rs0 --bind_ip_all \
-  --setParameter minSnapshotHistoryWindowInSeconds=0
-docker exec nyxid-test-mongodb mongosh --quiet --eval \
-  'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
-export NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true'
+export NYXID_TEST_MONGODB_PORT=27019
+docker compose -p nyxid-tests -f docker-compose.yml -f docker-compose.test.yml up -d mongodb
+docker compose -p nyxid-tests -f docker-compose.yml -f docker-compose.test.yml exec -T mongodb \
+  mongosh --port "$NYXID_TEST_MONGODB_PORT" --quiet --eval \
+  "rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:$NYXID_TEST_MONGODB_PORT'}]})"
+export NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:$NYXID_TEST_MONGODB_PORT/?replicaSet=rs0&directConnection=true"
 ```
 
 Wait until `db.hello().isWritablePrimary` is `true` before starting the suite.
-The CI workflow uses the same startup contract and verifies the effective
-parameter with `getParameter` before running tests.
+Set `NYXID_TEST_MONGODB_PORT` and use another project name for concurrent runs.
+The container listens on the same port it publishes and advertises, so tests
+that exercise replica discovery can reconnect to the advertised member.
+CI uses the same tmpfs, cache, snapshot-window and fault-command settings.
+Remove the test container and project volumes after testing:
+
+```bash
+docker compose -p nyxid-tests -f docker-compose.yml -f docker-compose.test.yml down -v
+```
 
 Database setup shares one 90-second readiness deadline across ping, a unique
 probe write, and initial run-lease publication. A busy shared mongod can recover
@@ -327,23 +364,39 @@ Every pull request runs the following checks automatically via GitHub Actions. J
 | **Rust Clippy** | `cargo clippy --workspace --all-targets -- -D warnings` -- catches common mistakes and enforces idioms | any Rust change |
 | **Backend Test** | `cargo nextest run -p nyxid -p nyxid-service-adapters` against a MongoDB 8.0 replica set -- handler, service, and integration tests | `backend/**` or shared workspace files |
 | **Backend Billing Smoke** | Runs the standalone billing route smoke test with its original Cargo feature set | backend changes |
-| **Backend Image Inputs** | Builds the production backend binary and checks that Docker stages every embedded input | backend changes |
+| **Backend Image Inputs** | Checks the release-profile GCP backend and its exact Docker input closure; linked KMS builds and real release image/publish builds retain codegen/link validation | backend changes |
 | **Coverage (Backend)** | Measures PR-head coverage and enforces the line threshold | backend changes |
-| **Coverage (Backend Base)** | Reuses an exact-commit report or measures the base branch for the informational PR delta | backend PRs |
+| **Coverage (Backend Base)** | Reuses an exact-commit, matching-recipe report for the informational PR delta; reports N/A if unavailable | backend PRs |
 | **CLI Test** | `cargo nextest run -p nyxid-cli` -- CLI + node-agent unit and integration tests | `cli/**` or shared workspace files |
 | **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile | `backend/**` or shared workspace files |
 | **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check | `frontend/**` or `.node-version` |
 | **CLI Wizard Bundle Freshness** | Re-hashes the wizard's source closure (from `cli/src/wizard/bundle-meta/index.manifest`) and fails if it no longer matches the committed hash. No npm install or vite rebuild in CI. See [CLI Wizard Bundle](#cli-wizard-bundle). | `frontend/**`, `cli/src/wizard/**`, or `.node-version` |
 | **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles | `sdk/**` or `.node-version` |
+| **CodeQL (Rust)** | Analyzes production and mixed Rust files on PRs; generated `cfg(test)`-only files remain covered by full non-PR scans | Rust sources, Cargo files, toolchain/config or CodeQL changes; detection failure includes Rust |
+| **CodeQL (other languages)** | Analyzes Actions, JavaScript/TypeScript and Python | every PR |
 | **CI Pipeline** | Aggregator for all correctness checks above; the base coverage comparison is informational. Treats `skipped` as success. | always |
 
 A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` or `.github/scripts/**` forces every job to run.
 
+CodeQL selects languages inside its workflow with an uncapped Git diff, so
+large PRs cannot skip Rust because of GitHub's 300-file workflow filter or
+3,000-file REST listing limit. Only a successful, explicit no-Rust result
+omits Rust. All non-PR scans retain full scope under the historical categories.
+Test-file alerts excluded from a scoped PR can appear fixed in that PR's view;
+their default-branch state is unchanged. The CodeQL job only generates its
+config; helper tests run once in CI's Detect Changes job.
+
+For this CI optimization, use the [GitHub Actions confirmation checklist](docs/CI_PERFORMANCE.md#github-actions-confirmation-checklist)
+for the exact checks before merge and those requiring main, schedule or tagged
+release runs after merge.
+
 Wait for a green `CI Pipeline` before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
 Backend test and coverage builds use `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
-to keep the large test binary within hosted-runner memory. Each mode compiles
-one archive, then runs four isolated shards with one MongoDB per runner.
+for source locations without full variable/type debug information. Local
+measurements found faster compilation but not lower peak RSS; see the build
+measurements above. Each mode compiles
+one archive, then runs eight isolated shards with one MongoDB per runner.
 Inventory verification checks that every expected test ran exactly once across
 the shards; coverage profiles are merged before enforcing the existing threshold.
 When a runner exits with code 143 during compilation, inspect the last completed
@@ -357,8 +410,8 @@ timing windows. The profile and reusable workflow are included in the coverage
 fingerprint. Base coverage reuses an exact-commit published report when available;
 it is informational and does not rerun the base suite.
 The reusable backend workflow sets `RUST_MIN_STACK=8388608` (8 MiB) for ordinary
-and instrumented native journeys. Each build and execution shard has a 60-minute
-budget. Tests retain the CI profile's five-minute deadline and one retry; every
+and instrumented native journeys. Archive builds have a 90-minute budget;
+execution shards have 60 minutes. Tests retain the CI profile's five-minute deadline and one retry; every
 retried test is named in the job summary, and a second failure fails the run.
 
 For failed backend runs, open the verification job summary or download

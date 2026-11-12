@@ -69,6 +69,14 @@ jobs:
           python3 .github/scripts/ci_resources.py backend-build
           cargo nextest archive -p nyxid -p nyxid-service-adapters
           --archive-file backend-tests.tar.zst
+      - name: Verify cached coverage archive isolation
+        if: inputs.coverage
+        run: python3 .github/scripts/test_coverage_archive_cache.py
+      - name: Clear coverage counters
+        if: inputs.coverage
+        run: cargo llvm-cov clean --profraw-only
+      # nextest archives list current Cargo executables explicitly. Reporting
+      # from that archive excludes stale objects without deleting build caches.
       - name: Build instrumented test archive
         if: inputs.coverage
         run: >-
@@ -76,7 +84,7 @@ jobs:
           --log-file "$RUNNER_TEMP/coverage-build.log" --
           python3 .github/scripts/ci_resources.py coverage-build
           cargo llvm-cov nextest-archive --package nyxid
-          --archive-file backend-tests.tar.zst
+          --archive-file backend-tests.tar.zst --no-clean
       - name: Record full test inventory
         env:
           LLVM_PROFILE_FILE: ${{ runner.temp }}/list-%p.profraw

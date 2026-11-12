@@ -10,7 +10,7 @@ The script reads the inventory produced by:
 
 ```sh
 gh cache list --repo ChronoAIProject/NyxID --limit 10000 \
-  --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt
+  --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version
 ```
 
 It is a dry run unless `--apply` is supplied. Only the trusted main-branch
@@ -36,12 +36,30 @@ environment value for local reports.
   remove non-main copies. On main, retain the union of the newest 30 entries and
   every entry created in the last 14 days. This preserves exact-base-SHA lookup
   coverage while bounding old generations.
-- **Known Rust lanes** keep the newest main generation and remove older or
-  non-main copies only after that main replacement exists. Billing and wizard
-  lanes share their current backend/CLI replacements as configured in the script.
-- **Incremental Rust caches** (`v0-rust-incremental-<lane>-<os>-<arch>-...`)
-  use the same newest-main rule, grouped by lane and runner OS/architecture.
-  A lane with no main replacement is preserved.
+- **Known Rust lanes** (`v0-rust-<lane>-<os>-<arch>-<8 hex>-<8 hex>` and
+  `v1-rust-incremental-<lane>-<os>-<arch>-<8 hex>-<8 hex>`) keep the newest main
+  generation and remove older or non-main copies only after that main
+  replacement exists with the same key prefix and cache version. Incremental
+  jobs publish the `v1-rust-incremental` Swatinem prefix; a leftover `v0-rust`
+  entry cannot replace it because the reader cannot restore that prefix.
+  Non-incremental lanes stay on `v0-rust`. Billing and wizard lanes share their
+  current backend/CLI replacements as configured in the script.
+- **Incremental Rust caches** (`v0-rust-incremental-<lane>-<os>-<arch>-<manifest>-<commit>`)
+  use the same newest-main rule, grouped by lane, runner OS/architecture, and
+  the actions cache `version`. That version is the hash of the exact path list.
+  The one-path version `a625e3a14900daf5` and the two-path version
+  `f98f77cfa579f3b1` do not replace each other. A branch-scoped manual save is
+  kept until a main entry with the same version exists. An inventory row with
+  no version is not a replacement for a versioned row.
+  The obsolete one-path main entries are deliberately left to GitHub's
+  seven-day unused-cache eviction, not retired by this script. They occupy
+  about 9 GiB across six lanes in the reviewed inventory. The two-path reader
+  cannot restore them, so it cannot refresh their last-access time. Once main
+  uses the corrected writers, no new one-path generations are saved; existing
+  entries expire after seven unused days from their last save/access. This
+  temporary cost fits the 100 GB repository limit. The 40 GB soft cap can warn
+  during the transition but does not force eviction. Version-aware retention
+  still protects new branch caches from incompatible old main entries.
 - **Retired Docker BuildKit blobs/indexes** are removable because Docker jobs now
   import and export the per-platform registry cache. No workflow restores these
   GitHub Actions cache records.
@@ -60,7 +78,7 @@ each review:
 
 ```sh
 gh cache list --repo ChronoAIProject/NyxID --limit 10000 \
-  --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt > /tmp/caches.json
+  --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version > /tmp/caches.json
 python3 .github/scripts/cache_budget.py /tmp/caches.json \
   --repo ChronoAIProject/NyxID --soft-cap-gb 40
 ```
@@ -88,10 +106,51 @@ incremental caches. `ci.yml` and the reusable `backend-tests.yml` explicitly pas
 defaults to read-only; warm jobs explicitly opt in. Release caches and backend
 coverage baseline publication retain their separate writers.
 
+Incremental restore prefers the same lane, runner OS/architecture, and
+manifest/lock/toolchain/config hash, then reuses another commit in that prefix.
+It also falls back to the same lane and runner without that hash. An unrelated
+member manifest or lock change can therefore reuse the lane's graph. The
+tradeoff is a wasted download when the change invalidates crate identity: run
+43210236259 spent 178 seconds downloading 7.7 GB after a backend version bump,
+and a similar miss costs about 3–6 minutes. Cargo still rebuilds crates whose
+identity changed. A global version segment would miss on unrelated member bumps
+the same way the full manifest hash does, so the key does not add one. The
+dependency cache remains separate. See [the measurements](../CI_PERFORMANCE.md)
+for the cache evidence and limitations.
+
+`actions/cache` versions `path1|path2|zstd-without-long|1.0`. Readers restore
+`target/debug/incremental` and `target/llvm-cov-target/debug/incremental`
+together (version `f98f77cfa579f3b1`). A save of only the first path is version
+`a625e3a14900daf5` and cannot hit. The restore action defines the key and both
+paths once; every warm save passes those outputs through
+`ci-rust-incremental-save` and does not restate them.
+
+Push warming writes main only. A manual `workflow_dispatch` also writes the
+selected ref. Actions scopes that entry to the branch; the key itself has no
+branch segment, so ordinary readers still restore main with the same key.
+Ordinary CI passes `save-if: false` and never writes dependency or incremental
+caches. Warm compiles run under `ci_resources.py`, which logs elapsed time,
+peak RSS, and swap, and each warm job uploads those samples.
+
+Coverage archive producers preserve compiler artifacts with `--no-clean` after
+clearing raw counters using `clean --profraw-only`. The pinned
+llvm-cov's default archive command otherwise deletes the workspace graph just
+restored from cache. Coverage reports select objects from the current nextest
+archive; a real-tool regression fixture checks deleted sources, renamed test
+binaries, unchanged-build reuse and equality with a clean coverage report.
+
+The backend warm jobs release only their own compile-time swap reserve after
+all compilation finishes and before cache compression. Ordinary cache saves in
+runs 43174155488 and 43247779268 failed with disk exhaustion despite successful
+job conclusions. This returns roughly 37 GiB on the measured runner while
+preserving the compile-time 40 GiB swap capacity and runner-owned swap. A failed
+swap release leaves the active file intact and fails the non-blocking warm job.
+
 The warm workflow runs on main changes to Rust workspace sources, manifests,
 embedded inputs, build scripts, toolchain/configuration and CI workflows/actions,
 including backend-only pushes, and supports manual dispatch. It is non-blocking
-and cancels older warm runs so only the newest main tree publishes generations.
+and cancels older warm runs on the same ref. Manual branch measurements do not
+cancel main warming.
 It covers ten separate lanes: ordinary and instrumented backend archives,
 clippy, three KMS feature variants, CLI tests (also used by wizard freshness),
 CLI coverage, permissions and backend image inputs. No lanes are combined and
@@ -113,6 +172,11 @@ that did not exercise Machine Container E2E cannot reuse that check, so it may
 still determine publication time even when Rust checks are reusable.
 
 The tests cover newest-per-target dist retention, non-main dist cleanup, node
-family retention, coverage newest-30 plus 14-day retention, known Rust lanes,
-incremental-lane retention, Docker retirement, unknown-family protection,
-malformed-date conservatism and soft-cap warning behavior.
+family retention, coverage newest-30 plus 14-day retention, known Rust lanes
+including the `v1-rust-incremental` prefix, incremental retention per cache
+version, Docker retirement, unknown-family protection, malformed-date
+conservatism and soft-cap warning behavior.
+
+The [hosted confirmation checklist](../CI_PERFORMANCE.md#github-actions-confirmation-checklist)
+separates branch warming checks before merge from main replacement and obsolete
+entry eviction checks after merge.
