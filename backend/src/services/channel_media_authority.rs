@@ -1,5 +1,6 @@
 //! Source authority for relay channel media. Provider handles come solely
 //! from authenticated NyxID ingress metadata, never from a gateway attachment.
+use super::channel_platform::canonical_platform;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -27,7 +28,7 @@ pub fn supported_relay(platform: &str) -> bool {
 /// Lark/Feishu audio and video keep their pre-v2 behavior. The new adapters
 /// retain originals even when the document parser cannot interpret them.
 pub fn supported_source(source: &ChannelMessage) -> bool {
-    expanded_relay(&source.platform)
+    expanded_relay(canonical_platform(&source.platform))
         || source
             .attachments
             .iter()
@@ -72,7 +73,8 @@ fn refused() -> AppError {
 /// decision. It does not authorize downloads.
 pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelMessage> {
     let channel = &request.channel;
-    if !(supported_relay(&channel.platform) || channel.platform == "telegram")
+    if !(supported_relay(canonical_platform(&channel.platform))
+        || canonical_platform(&channel.platform) == "telegram")
         || channel.gateway_source.is_some()
     {
         return Err(refused());
@@ -81,24 +83,29 @@ pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelM
         "_id": &request.source_message_id, "direction": "inbound",
         "channel_bot_id": &channel.channel_bot_id,
         "user_id": channel.bot_owner_id.as_deref().unwrap_or(&channel.user_id),
-        "platform": &channel.platform, "agent_api_key_id": &channel.route_api_key_id,
+        "agent_api_key_id": &channel.route_api_key_id,
         "platform_conversation_id": &request.chat_id, "sender_platform_id": &request.sender_id,
         "thread_id": &request.native_thread_id,
     };
     if let Some(route) = &channel.route_id {
         filter.insert("conversation_id", route);
     }
-    db.collection::<ChannelMessage>(MESSAGES)
+    let source = db
+        .collection::<ChannelMessage>(MESSAGES)
         .find_one(filter)
         .await?
-        .ok_or_else(refused)
+        .ok_or_else(refused)?;
+    if canonical_platform(&source.platform) != canonical_platform(&channel.platform) {
+        return Err(refused());
+    }
+    Ok(source)
 }
 
 /// All live checks precede credential materialization and provider I/O. Call
 /// immediately before each fetch, including a larger-limit retry.
 pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<AuthorizedMedia> {
     let source = source(db, request).await?;
-    if expanded_relay(&source.platform) {
+    if expanded_relay(canonical_platform(&source.platform)) {
         super::security_readiness_service::require(db, READINESS).await?;
     }
     let captured = &request.channel;
@@ -108,7 +115,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         .await?
         .ok_or_else(refused)?;
     if channel.channel_bot_id != captured.channel_bot_id
-        || channel.platform != captured.platform
+        || canonical_platform(&channel.platform) != canonical_platform(&captured.platform)
         || channel.bot_owner_id != captured.bot_owner_id
         || channel.route_api_key_id != captured.route_api_key_id
         || channel.route_id != captured.route_id
@@ -186,8 +193,11 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     super::platform_bot_authority::require_personal_routes(db, &channel.channel_bot_id).await?;
     let bot = db.collection::<ChannelBot>(BOTS).find_one(doc! {
         "_id": &channel.channel_bot_id, "user_id": channel.bot_owner_id.as_deref().unwrap_or(&channel.user_id),
-        "platform": &channel.platform, "is_active":true, "status":"active"
+        "is_active":true, "status":"active"
     }).await?.ok_or_else(refused)?;
+    if canonical_platform(&bot.platform) != canonical_platform(&channel.platform) {
+        return Err(refused());
+    }
     let route = super::channel_routing_service::resolve_agent(
         db,
         &bot.id,
@@ -204,7 +214,9 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     }
     let mut requires_nyxbot = false;
     if let Some(origin) = &request.origin {
-        if origin.nyxbot_channel_id != channel.id || origin.platform != channel.platform {
+        if origin.nyxbot_channel_id != channel.id
+            || canonical_platform(&origin.platform) != canonical_platform(&channel.platform)
+        {
             return Err(refused());
         }
         let chat = db.collection::<NyxbotThread>(THREADS).find_one(doc! {

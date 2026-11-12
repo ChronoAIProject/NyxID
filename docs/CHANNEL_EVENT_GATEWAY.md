@@ -935,7 +935,19 @@ ID names an existing row outside its authorized owner/chat/sender/route returns
 HTTP **403** with problem code `media_source_refused`. This refusal is terminal
 and must not be retried. Database failures still return **503**
 `provider_unavailable`; a missing source row produces the fixed unavailable-media
-note in the turn. Source presence does not authorize a provider download.
+note in the turn. A media-free activity does not assert a source and is never
+refused by this presence check, even when its source ID is missing or belongs to
+an unrelated row. Source presence does not authorize a provider download.
+
+The source fence compares platform families through NyxID's existing
+`channel_platform::canonical_platform` mapping. In particular, the managed
+Telegram adapter stores `telegram-new` on the inbound `ChannelMessage` while the
+NyxBot channel uses canonical `telegram`; this is the same authenticated bot,
+route key, conversation, sender and thread fence. Other platform identities are
+still exact. The terminal `media_source_refused` contract therefore applies only
+to a media-bearing activity whose source row exists but fails that complete
+owner/chat/sender/route/thread and platform-family fence. This is additive and
+mixed-fleet safe; no callback or API shape changes.
 
 Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
 `api/crates/cmaeg/src/{turns,tools/reply_targets}`:
