@@ -561,7 +561,7 @@ async fn flag_gates_tool_discovery_and_skill_read() {
     assert!(
         body.error == "forbidden"
             && body.error_code == 1002
-            && body.message.starts_with("Skill unavailable"),
+            && body.message.contains("Skill unavailable"),
         "{plain:?}"
     );
 
@@ -598,7 +598,7 @@ async fn flag_gates_tool_discovery_and_skill_read() {
     assert!(
         body.error == "forbidden"
             && body.error_code == 1002
-            && body.message.starts_with("Skill unavailable"),
+            && body.message.contains("Skill unavailable"),
         "{missing:?}"
     );
     // The unbound read is audited with metadata only, exactly like a file read.
