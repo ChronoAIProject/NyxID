@@ -1915,7 +1915,7 @@ async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_w
         "generation",
         "expired",
         "body",
-        "deployment",
+        "connection_target",
         "disabled",
     ] {
         let (a, provider, _) = lost_creation_fixture("/api/v1/sandboxes").await;
@@ -1962,14 +1962,26 @@ async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_w
                         .unwrap();
                 db.collection::<bson::Document>(SANDBOXES).update_one(doc! {"_id":&creation.sandbox_ref_id}, doc! {"$set":{"request_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext}}}).await.unwrap();
             }
-            "deployment" => {
-                db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+            "connection_target" => {
+                let connection = db
+                    .collection::<crate::models::user_service::UserService>(
+                        crate::models::user_service::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id":&creation.user_service_id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                // Recovery is pinned to the original connection's URL.
+                // Catalog-only changes do not retarget this custom connection.
+                let changed = db
+                    .collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
                     .update_one(
-                        doc! {"_id":&creation.cma_service_id},
-                        doc! {"$set":{"base_url":format!("{}/changed-deployment", provider.uri())}},
+                        doc! {"_id":&connection.endpoint_id,"user_id":&a.f.owner},
+                        doc! {"$set":{"url":format!("{}/changed-deployment", provider.uri())}},
                     )
                     .await
                     .unwrap();
+                assert_eq!(changed.matched_count, 1);
             }
             "disabled" => {
                 crate::services::feature_flag_service::set_platform_override(
