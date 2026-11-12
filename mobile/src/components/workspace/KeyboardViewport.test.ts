@@ -13,7 +13,12 @@ type Element = {
   };
 };
 
-function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
+function setup(
+  initialKeyboard?: Frame,
+  safeAreaTop = 0,
+  platform = "android",
+  safeAreaFrame = { y: 0, height: 852 },
+) {
   const keyboardListeners = new Map<
     string,
     (event: { endCoordinates: Frame }) => void
@@ -24,9 +29,11 @@ function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
   const harness = hookHarness<Element>({
     "react-native": {
       View: "View",
+      Platform: { OS: platform },
       StyleSheet: { create: (styles: unknown) => styles },
       Keyboard: {
         metrics: () => metrics,
+        scheduleLayoutAnimation: () => {},
         addListener: (
           name: string,
           callback: (event: { endCoordinates: Frame }) => void,
@@ -46,6 +53,7 @@ function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
       jsx: (_type: unknown, props: unknown) => ({ props }),
     },
     "react-native-safe-area-context": {
+      useSafeAreaFrame: () => safeAreaFrame,
       useSafeAreaInsets: () => ({
         top: safeAreaTop,
         bottom: 24,
@@ -54,12 +62,10 @@ function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
       }),
     },
   });
-  const { AndroidKeyboardAvoidingView } = harness.load(
-    fileURLToPath(
-      new URL("./AndroidKeyboardAvoidingView.tsx", import.meta.url),
-    ),
-  ) as { AndroidKeyboardAvoidingView: (props: object) => Element };
-  const element = harness.mount(() => AndroidKeyboardAvoidingView({}));
+  const { KeyboardViewport } = harness.load(
+    fileURLToPath(new URL("./KeyboardViewport.tsx", import.meta.url)),
+  ) as { KeyboardViewport: (props: object) => Element };
+  const element = harness.mount(() => KeyboardViewport({}));
   element.props.ref.current = {
     measureInWindow: (callback) => measurements.push(callback),
   };
@@ -162,4 +168,61 @@ test("unmount removes all listeners and ignores pending measurement callbacks", 
   assert.equal(env.bottom(), 0);
   assert.equal(env.keyboardListeners.size, 0);
   assert.equal(env.hasDimensionListener(), false);
+});
+
+test("iOS measures the actual page or sheet origin without a guessed header or status-bar offset", () => {
+  const env = setup(undefined, 59, "ios");
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 552, height: 300 },
+  });
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(
+    env.bottom(),
+    266,
+    "only the page covered by the keyboard is reserved",
+  );
+  env.layout();
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(
+    env.bottom(),
+    266,
+    "padding does not accumulate when the child remeasures",
+  );
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 852, height: 0 },
+  });
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(env.bottom(), 0);
+  env.harness.unmount();
+});
+
+for (const [windowHeight, sheetHeight, keyboardHeight] of [
+  [667, 637, 258],
+  [956, 894, 328],
+]) {
+  test(`iOS ${windowHeight}pt native sheet keeps the entire toolbar above the keyboard`, () => {
+    const env = setup(undefined, 0, "ios", { y: 0, height: sheetHeight! });
+    env.show({
+      screenY: windowHeight! - keyboardHeight!,
+      height: keyboardHeight!,
+    });
+    env.measurements.shift()!(0, 44, 375, sheetHeight! - 44);
+    assert.equal(env.bottom(), keyboardHeight);
+    env.layout();
+    env.measurements.shift()!(0, 44, 375, sheetHeight! - 44);
+    assert.equal(
+      env.bottom(),
+      keyboardHeight,
+      "the sheet offset is applied once",
+    );
+    env.harness.unmount();
+  });
+}
+
+test("an iOS drawer with an existing safe-area origin does not add that origin twice", () => {
+  const env = setup(undefined, 0, "ios", { y: 70, height: 782 });
+  env.show({ screenY: 552, height: 300 });
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(env.bottom(), 266);
+  env.harness.unmount();
 });

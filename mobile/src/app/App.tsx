@@ -1,4 +1,7 @@
+import { LanguageProvider } from "../i18n/LanguageProvider";
 import "react-native-gesture-handler";
+import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
+import { useNotificationNavigation } from "./useNotificationNavigation";
 import {
   WorkspaceAccessibilityContext,
   workspaceAccessibilityState,
@@ -33,6 +36,7 @@ import {
   findNodeHandle,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import {
@@ -67,16 +71,12 @@ import {
 import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
-import {
-  appLinking,
-  extractChallengeIdFromNotificationResponse,
-} from "./linking";
+import { appLinking, notificationLinkConfig } from "./linking";
 import {
   isWorkspaceSidebarRoot,
   openWorkspaceSheetAction,
   workspaceDestinationMatches,
   workspaceContentIdentity,
-  challengeNavigationAction,
   workspaceNavigateAction,
 } from "./navigationHierarchy";
 import type {
@@ -87,7 +87,6 @@ import {
   consumePendingPushSyncSignal,
   initializeNotificationRuntime,
   PushSyncSignal,
-  setForegroundNotificationHandler,
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
 import { ToastOverlay, type ToastState } from "../components/ToastOverlay";
@@ -105,11 +104,9 @@ import {
   type WorkspaceRoute,
 } from "../components/workspace/WorkspaceDrawer";
 import { notificationsApi } from "../lib/api/notificationsApi";
-import { NYXID_APP_SCHEME, NYXID_TRUSTED_FRONTEND_URLS } from "../lib/env";
 import { createNotificationPushController } from "../lib/notifications/notificationPushController";
-import { notificationPushSignalFromResponse } from "../lib/notifications/notificationPushSignal";
-import { canonicalLinkNavigation } from "./workspaceCanonicalLinks";
 import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
+import { workspaceSidebarLayout } from "../components/workspace/workspacePushState";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 import {
   activeWorkspaceChatTarget,
@@ -178,56 +175,25 @@ export default function App() {
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,
   );
-  const pendingChallengeFromTapRef = useRef<string | null>(null);
   const navigationGuardsRef = useRef(new Set<symbol>());
   const criticalNavigationGuards = useRef(new Set<symbol>());
   const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
-  const [pushToast, setPushToast] = useState<ToastState | null>(null);
-  // NyxBot notification pushes (SPEC D9): one controller routes a tap from
-  // the OS, a cold start or the in-app toast to its canonical workspace page
-  // through the same parser as universal links, then marks the row read.
-  // `appLinking` leaves these responses alone, so nothing routes them twice.
+
   const [pushController] = useState(() =>
     createNotificationPushController({
       api: notificationsApi,
       queryClient,
-      frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
-      appScheme: NYXID_APP_SCHEME,
       isForeground: () => AppState.currentState === "active",
       isOnline: () => onlineManager.isOnline(),
-      openPath: (path) => {
-        if (!navigationRef.isReady() || navigationGuardsRef.current.size > 0)
-          return false;
-        const state = navigationRef.getRootState();
-        if (!state?.routeNames.includes("Workspace")) return false;
-        const next = canonicalLinkNavigation(path);
-        if (!next) return false;
-        if (next.type === "action") navigationRef.dispatch(next.action);
-        else navigationRef.resetRoot(next.state);
-        return true;
-      },
     }),
   );
-
-  const flushPendingChallengeTapNavigation = useCallback(() => {
-    if (!navigationRef.isReady()) return;
-    // A notification tap waits for the same moments: ready, signed in, guards lifted.
-    void pushController.flush();
-
-    const pendingChallengeId = pendingChallengeFromTapRef.current;
-    if (!pendingChallengeId) return;
-
-    const action = challengeNavigationAction(
-      navigationRef.getRootState(),
-      pendingChallengeId,
-      navigationGuardsRef.current.size > 0,
+  const { open: openNotification, flush: flushPendingNotificationNavigation } =
+    useNotificationNavigation(
+      navigationRef,
+      navigationGuardsRef,
+      pushController.navigated,
     );
-    if (!action) return;
-
-    pendingChallengeFromTapRef.current = null;
-    navigationRef.dispatch(action);
-  }, [navigationRef, pushController]);
 
   const onNavigationGuardChange = useCallback<WorkspaceNavigationGuardChange>(
     (id, blocked, critical = false) => {
@@ -247,8 +213,8 @@ export default function App() {
   // Guard cleanup schedules a normal effect; it never dispatches during the
   // header's layout effect or re-enters an in-progress navigation transition.
   useEffect(() => {
-    flushPendingChallengeTapNavigation();
-  }, [navigationGuardRevision, flushPendingChallengeTapNavigation]);
+    flushPendingNotificationNavigation();
+  }, [navigationGuardRevision, flushPendingNotificationNavigation]);
 
   // Tapping the in-app toast resolves to exactly the same navigation as
   // tapping an OS notification, including the "Activity route not mounted
@@ -256,10 +222,11 @@ export default function App() {
   // and `onStateChange` flushes it.
   const openChallengeFromNotification = useCallback(
     (challengeId: string) => {
-      pendingChallengeFromTapRef.current = challengeId;
-      flushPendingChallengeTapNavigation();
+      openNotification(
+        `${notificationLinkConfig.scheme}://activity?${new URLSearchParams({ challengeId })}`,
+      );
     },
-    [flushPendingChallengeTapNavigation],
+    [openNotification],
   );
 
   const [fontsLoaded] = useFonts({
@@ -376,72 +343,11 @@ export default function App() {
     };
   }, [pushController]);
 
-  useEffect(() => {
-    const handleResponse = (
-      response: Notifications.NotificationResponse | null,
-    ) => {
-      // Background taps and the cold-start last response take the same path.
-      if (pushController.tapped(notificationPushSignalFromResponse(response)))
-        return;
-      const challengeId = extractChallengeIdFromNotificationResponse(response);
-      if (!challengeId) return;
-
-      pendingChallengeFromTapRef.current = challengeId;
-      flushPendingChallengeTapNavigation();
-    };
-
-    const responseSubscription =
-      Notifications.addNotificationResponseReceivedListener((response) => {
-        handleResponse(response);
-      });
-
-    void Notifications.getLastNotificationResponseAsync()
-      .then((response) => {
-        handleResponse(response);
-      })
-      .catch((error) => {
-        if (__DEV__) {
-          console.warn("[push] getLastNotificationResponseAsync failed", error);
-        }
-      });
-
-    return () => {
-      responseSubscription.remove();
-    };
-  }, [flushPendingChallengeTapNavigation, pushController]);
-
-  // In-app replacement for the OS banner suppressed while the app is
-  // foregrounded (see `configureNotificationHandler`). Without this, a push
-  // arriving with the app open would be silent to the user. Reuses the same
-  // toast the rest of the app uses; the backend's push body is boilerplate
-  // ("A service is requesting access"), so the title alone loses nothing.
-  useEffect(() => {
-    return setForegroundNotificationHandler((notification) => {
-      const message = notification.title ?? notification.body;
-      if (!message) return;
-
-      const { challengeId, deeplink, notificationId } = notification;
-      setPushToast({
-        message,
-        kind: "info",
-        action: challengeId
-          ? {
-              label: "Review",
-              onPress: () => openChallengeFromNotification(challengeId),
-            }
-          : deeplink
-            ? {
-                label: "Open",
-                // In-app, like a tapped push: a universal link opened from
-                // its own app would go to Safari instead.
-                onPress: () => {
-                  pushController.tapped({ notificationId, deeplink });
-                },
-              }
-            : undefined,
-      });
-    });
-  }, [openChallengeFromNotification, pushController]);
+  const { toast: pushToast, toastKey: pushToastKey } =
+    useForegroundNotificationToast(
+      openChallengeFromNotification,
+      openNotification,
+    );
 
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal | null) => {
@@ -499,25 +405,28 @@ export default function App() {
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
             <ThemeProvider>
-              <ChatLayoutProvider>
-                <MobileConsentProvider>
-                  <AuthSessionProvider>
-                    <ThemedAppShell
-                      navigationRef={navigationRef}
-                      currentRouteName={currentRouteName}
-                      setCurrentRouteName={setCurrentRouteName}
-                      flushPendingChallengeTapNavigation={
-                        flushPendingChallengeTapNavigation
-                      }
-                      onNavigationGuardChange={onNavigationGuardChange}
-                      navigationBlocked={
-                        criticalNavigationGuards.current.size > 0
-                      }
-                      pushToast={pushToast}
-                    />
-                  </AuthSessionProvider>
-                </MobileConsentProvider>
-              </ChatLayoutProvider>
+              <LanguageProvider>
+                <ChatLayoutProvider>
+                  <MobileConsentProvider>
+                    <AuthSessionProvider>
+                      <ThemedAppShell
+                        navigationRef={navigationRef}
+                        currentRouteName={currentRouteName}
+                        setCurrentRouteName={setCurrentRouteName}
+                        flushPendingNotificationNavigation={
+                          flushPendingNotificationNavigation
+                        }
+                        onNavigationGuardChange={onNavigationGuardChange}
+                        navigationBlocked={
+                          criticalNavigationGuards.current.size > 0
+                        }
+                        pushToast={pushToast}
+                        pushToastKey={pushToastKey}
+                      />
+                    </AuthSessionProvider>
+                  </MobileConsentProvider>
+                </ChatLayoutProvider>
+              </LanguageProvider>
             </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>
@@ -530,24 +439,29 @@ function ThemedAppShell({
   navigationRef,
   currentRouteName,
   setCurrentRouteName,
-  flushPendingChallengeTapNavigation,
+  flushPendingNotificationNavigation,
   onNavigationGuardChange,
   navigationBlocked = false,
   pushToast,
+  pushToastKey,
 }: {
   navigationRef: ReturnType<
     typeof useNavigationContainerRef<RootStackParamList>
   >;
   currentRouteName: string | undefined;
   setCurrentRouteName: (name: string | undefined) => void;
-  flushPendingChallengeTapNavigation: () => void;
+  flushPendingNotificationNavigation: () => void;
   onNavigationGuardChange: WorkspaceNavigationGuardChange;
   navigationBlocked?: boolean;
   pushToast: ToastState | null;
+  pushToastKey: number;
 }) {
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
   const { isAuthenticated } = useAuthSession();
+  const { width } = useWindowDimensions();
+  const persistentSidebar =
+    isAuthenticated && workspaceSidebarLayout(width).persistent;
   const authenticatedNow = useRef(isAuthenticated);
   authenticatedNow.current = isAuthenticated;
   const edgeBacks = useRef(new Map<symbol, () => void>());
@@ -605,12 +519,13 @@ function ThemedAppShell({
     const next = workspaceAccessibilityState(state);
     const content = workspaceContentIdentity(state);
     if (
-      (pendingDrawerNavigation.current &&
+      !persistentSidebar &&
+      ((pendingDrawerNavigation.current &&
         !didNavigate.current &&
         workspaceDestinationMatches(state, pendingDrawerNavigation.current)) ||
-      (priorSheet.current.open &&
-        !next.sheetOpen &&
-        content !== priorSheet.current.content)
+        (priorSheet.current.open &&
+          !next.sheetOpen &&
+          content !== priorSheet.current.content))
     ) {
       didNavigate.current = true;
       awaitingPaint.current = content;
@@ -638,6 +553,20 @@ function ThemedAppShell({
     }
   }, [isAuthenticated]);
   useEffect(() => {
+    // Resizing changes the presentation, never the navigator or its drafts.
+    // Fence a pending compact animation before exposing both tablet columns.
+    cancelSelection();
+    didNavigate.current = false;
+    drawerOrigin.current = undefined;
+    pendingMenuFocus.current = undefined;
+    setDrawerOpen(false);
+    setDrawerPresented(false);
+  }, [persistentSidebar, cancelSelection]);
+  useEffect(
+    () => () => workspaceFocus.releaseDrawer("persistent-workspace-sidebar"),
+    [persistentSidebar, accessibility.sheetOpen],
+  );
+  useEffect(() => {
     if (drawerPresented) return;
     const origin = pendingMenuFocus.current;
     pendingMenuFocus.current = undefined;
@@ -651,10 +580,16 @@ function ThemedAppShell({
       !authenticatedNow.current ||
       !navigationRef.isReady() ||
       !action ||
+      navigationBlocked ||
       pendingDrawerNavigation.current ||
       didNavigate.current
     )
       return;
+    if (persistentSidebar) {
+      // Native before-remove guards still own dirty editors and pending writes.
+      navigationRef.dispatch(action);
+      return;
+    }
     pendingDrawerNavigation.current = action;
     if (workspaceDestinationMatches(navigationRef.getRootState(), action)) {
       didNavigate.current = true;
@@ -690,7 +625,12 @@ function ThemedAppShell({
     setDrawerPresented(false);
   }, [cancelSelection]);
   const navigateFromDrawer = (route: WorkspaceRoute) => {
-    if (!authenticatedNow.current || !navigationRef.isReady()) return;
+    if (
+      !authenticatedNow.current ||
+      !navigationRef.isReady() ||
+      navigationBlocked
+    )
+      return;
     if (route === "Assistant") return openChatFromDrawer({ kind: "home" });
     const action = workspaceNavigateAction(
       route,
@@ -718,6 +658,15 @@ function ThemedAppShell({
     setDrawerPresented(true);
   }
   function changeSidebar(open: boolean) {
+    if (persistentSidebar) {
+      if (open && !accessibility.sheetOpen && !navigationBlocked) {
+        workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
+        workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
+          findNodeHandle(sidebarFocus.current),
+        );
+      }
+      return;
+    }
     if (open) {
       if (
         !isAuthenticated ||
@@ -757,7 +706,7 @@ function ThemedAppShell({
       sidebar={
         isAuthenticated ? (
           <WorkspaceDrawer
-            visible={drawerPresented}
+            visible={persistentSidebar || drawerPresented}
             initialFocusRef={sidebarFocus}
             currentRoute={currentRouteName}
             currentChat={currentChat}
@@ -785,7 +734,12 @@ function ThemedAppShell({
             onNavigate={navigateFromDrawer}
             onHome={() => navigateFromDrawer("Assistant")}
             onQuickAction={(action) => {
-              if (!authenticatedNow.current || !navigationRef.isReady()) return;
+              if (
+                !authenticatedNow.current ||
+                !navigationRef.isReady() ||
+                navigationBlocked
+              )
+                return;
               navigationRef.dispatch(
                 action === "scanner"
                   ? openWorkspaceSheetAction("DeviceLogin", {
@@ -820,11 +774,11 @@ function ThemedAppShell({
         linking={appLinking}
         onReady={() => {
           trackCurrentRoute();
-          flushPendingChallengeTapNavigation();
+          flushPendingNotificationNavigation();
         }}
         onStateChange={() => {
           trackCurrentRoute();
-          flushPendingChallengeTapNavigation();
+          flushPendingNotificationNavigation();
         }}
       >
         <StatusBar style={mode === "dark" ? "light" : "dark"} />
@@ -848,7 +802,7 @@ function ThemedAppShell({
                 setDrawerOpen(false);
               }
             }}
-            suppressWorkspaceAnimation={drawerPresented}
+            suppressWorkspaceAnimation={persistentSidebar || drawerPresented}
             renderWorkspace={renderWorkspace}
           />
         </WorkspaceAccessibilityContext.Provider>
@@ -860,7 +814,7 @@ function ThemedAppShell({
         style={[pushToastStyles.overlay, { top: insets.top }]}
         pointerEvents="box-none"
       >
-        <ToastOverlay toast={pushToast} duration={6000} />
+        <ToastOverlay key={pushToastKey} toast={pushToast} duration={6000} />
       </View>
     </View>
   );

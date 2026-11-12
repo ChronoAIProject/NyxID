@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  isAssistantNotificationResponse,
   notificationPushSignalFromData,
   notificationPushSignalFromResponse,
 } from "./notificationPushSignal";
@@ -30,12 +29,4 @@ test("a tapped response is read from its content, then the raw push payload", ()
     "group_mention",
   );
   assert.equal(notificationPushSignalFromResponse(response({}, { type: "local" })), null);
-});
-
-test("only a push naming a notification id is an assistant notification the app routes itself", () => {
-  const response = (content: unknown) => ({ notification: { request: { content: { data: content } } } }) as any;
-  assert.equal(isAssistantNotificationResponse(response({ type: "chat_update", notification_id: "n", deeplink: "https://app/assistant?c=x" })), true);
-  assert.equal(isAssistantNotificationResponse(response({ type: "chat_update", deeplink: "https://app/assistant?c=x" })), false, "without an id the generic link router keeps it");
-  assert.equal(isAssistantNotificationResponse(response({ type: "approval_request", challenge_id: "c", deeplink: "nyxid://challenge/c" })), false);
-  assert.equal(isAssistantNotificationResponse(null), false);
 });

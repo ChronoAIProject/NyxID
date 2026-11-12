@@ -167,6 +167,16 @@ export const messageSchema = z.object({
   activities: z.array(activitySchema).default([]),
   attachments: z.array(attachmentSchema).default([]),
   via: z.string().nullish(),
+  // Already returned by chat history. Keep the segment identity and completion
+  // state so live captions can update this row instead of making a second chat.
+  voice: z
+    .object({
+      session_id: z.string(),
+      segment_id: z.string(),
+      sealed: z.boolean(),
+      complete: z.boolean(),
+    })
+    .nullish(),
   steering: z
     .object({
       outcome: z.string(),

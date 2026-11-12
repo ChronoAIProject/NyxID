@@ -761,6 +761,38 @@ async fn control_disconnect_releases_only_the_socket_and_active_is_discoverable(
     .await;
 }
 
+#[tokio::test]
+async fn account_active_call_is_found_across_conversations_until_it_closes() {
+    Box::pin(async {
+        let (state, thread, call) = setup("voice_account_active").await;
+        let found = session::active_for_user(&state.db, &call.user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, call.id);
+        assert_eq!(found.conversation_id, thread.id);
+        assert!(
+            session::active_for_user(&state.db, &Uuid::new_v4().to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "another account never sees this call"
+        );
+        session::close(&state.db, &call, "closed", true)
+            .await
+            .unwrap();
+        // A confirmed close releases the account's single live slot.
+        assert!(
+            session::active_for_user(&state.db, &call.user_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db_drop(&state).await;
+    })
+    .await;
+}
+
 async fn db_drop(state: &crate::AppState) {
     state.db.drop().await.unwrap();
 }

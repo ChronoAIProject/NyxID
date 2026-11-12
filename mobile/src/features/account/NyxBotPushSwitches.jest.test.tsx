@@ -11,6 +11,11 @@ jest.mock("../../theme/ThemeContext", () => {
   return { useTheme: () => ({ colors: lightColors, mode: "light" }) };
 });
 
+jest.mock("../../i18n/LanguageProvider", () => {
+  const { translate } = jest.requireActual("../../i18n/translate");
+  return { useAppLanguage: () => ({ t: (phrase: string, values?: Record<string, string | number>) => translate("en", phrase, values) }) };
+});
+
 const LABELS = [
   "Automation results",
   "Automation problems",

@@ -1,3 +1,10 @@
+import { notificationDestination } from "./notificationDestination";
+import {
+  NYXID_APP_SCHEME,
+  NYXID_TRUSTED_FRONTEND_URLS,
+  NYXID_TRUSTED_API_BASE_URLS,
+  NYXID_UNIVERSAL_LINK_HOST,
+} from "../env";
 import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import * as TaskManager from "expo-task-manager";
@@ -73,6 +80,7 @@ const PRESENT_OS_NOTIFICATION = {
  * equivalent -- the app shell renders it through `ToastOverlay`.
  */
 export type ForegroundNotification = {
+  url: string | null;
   title: string | null;
   body: string | null;
   challengeId: string | null;
@@ -199,12 +207,23 @@ function presentForegroundNotification(
     | { notification_id?: unknown; deeplink?: unknown; deep_link?: unknown }
     | null
     | undefined;
+  const destination = notificationDestination(content.data, {
+    scheme: NYXID_APP_SCHEME,
+    trustedUrls: [
+      ...NYXID_TRUSTED_FRONTEND_URLS,
+      ...NYXID_TRUSTED_API_BASE_URLS,
+      ...(NYXID_UNIVERSAL_LINK_HOST
+        ? [`https://${NYXID_UNIVERSAL_LINK_HOST}`]
+        : []),
+    ],
+  });
   foregroundNotificationHandler?.({
+    url: destination ?? `${NYXID_APP_SCHEME}://activity`,
     title,
     body,
     challengeId: signal?.challengeId ?? null,
     type: signal?.type ?? null,
-    notificationId: asNonEmptyString(data?.notification_id),
+    notificationId: destination ? asNonEmptyString(data?.notification_id) : null,
     deeplink:
       asNonEmptyString(data?.deeplink) ?? asNonEmptyString(data?.deep_link),
   });

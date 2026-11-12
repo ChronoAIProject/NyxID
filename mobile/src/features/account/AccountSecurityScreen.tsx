@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFocusEffect } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -42,6 +43,7 @@ function accountError(error: unknown): string {
 }
 
 export function AccountSecurityScreen() {
+  const { t } = useAppLanguage();
   const navigation =
     useNavigation<NativeStackNavigationProp<WorkspaceSheetParamList>>();
   const { isConnected } = useNetworkStatus();
@@ -341,7 +343,9 @@ export function AccountSecurityScreen() {
   return (
     <SettingsPage>
       {!isConnected ? (
-        <Notice message="You're offline. Connect to update account settings." />
+        <Notice
+          message={t("You're offline. Connect to update account settings.")}
+        />
       ) : null}
       {feedback ? <Notice {...feedback} /> : null}
 
@@ -350,14 +354,14 @@ export function AccountSecurityScreen() {
           rows={3}
           icon={false}
           title
-          accessibilityLabel="Loading your account"
+          accessibilityLabel={t("Loading your account")}
         />
       ) : (
-        <SettingsGroup title="Profile" inset={false}>
+        <SettingsGroup title={t("Profile")} inset={false}>
           {profile.isError || !profile.data ? (
             <SettingsRow
-              label="Couldn't load your profile"
-              detail="Tap to retry."
+              label={t("Couldn't load your profile")}
+              detail={t("Tap to retry.")}
               tone="action"
               onPress={() => void profile.refetch()}
             />
@@ -365,16 +369,18 @@ export function AccountSecurityScreen() {
             [
               <SettingsRow
                 key="email"
-                label="Email"
+                label={t("Email")}
                 detail={
-                  profile.data.email_verified ? "Verified" : "Not verified"
+                  profile.data.email_verified
+                    ? t("Verified")
+                    : t("Not verified")
                 }
                 value={profile.data.email}
               />,
               <SettingsRow
                 key="name"
-                label="Display name"
-                value={profile.data.display_name || "Not set"}
+                label={t("Display name")}
+                value={profile.data.display_name || t("Not set")}
                 disabled={!isConnected}
                 onPress={() =>
                   navigation.navigate("ProfileEdit", { field: "display_name" })
@@ -382,8 +388,10 @@ export function AccountSecurityScreen() {
               />,
               <SettingsRow
                 key="avatar"
-                label="Avatar"
-                value={profile.data.avatar_url ? "Custom image" : "Initial"}
+                label={t("Avatar")}
+                value={
+                  profile.data.avatar_url ? t("Custom image") : t("Initial")
+                }
                 disabled={!isConnected}
                 onPress={() =>
                   navigation.navigate("ProfileEdit", { field: "avatar_url" })
@@ -397,26 +405,38 @@ export function AccountSecurityScreen() {
       {profile.data && ownsPrivateState ? (
         <>
           <SettingsGroup
-            title="Two-factor authentication"
+            title={t("Two-factor authentication")}
             inset={false}
             footer={
               recovery.count > 0
-                ? "These codes are shown once. Keep a private copy, then choose “I've Saved the Codes”. Continue signing in with your authenticator; recovery-code sign-in is currently unavailable."
+                ? t(
+                    "These codes are shown once. Keep a private copy, then choose “I've Saved the Codes”. Continue signing in with your authenticator; recovery-code sign-in is currently unavailable.",
+                  )
                 : enrollmentPending && !mfaEnabled
-                  ? "In your authenticator, add a time-based NyxID account with this setup key, then enter its six-digit code."
+                  ? t(
+                      "In your authenticator, add a time-based NyxID account with this setup key, then enter its six-digit code.",
+                    )
                   : mfaEnabled
-                    ? "Password sign-in asks for a code from your authenticator."
+                    ? t(
+                        "Password sign-in asks for a code from your authenticator.",
+                      )
                     : passwordAccount
-                      ? "Add a six-digit authenticator code to password sign-in."
+                      ? t(
+                          "Add a six-digit authenticator code to password sign-in.",
+                        )
                       : `This account uses ${profile.data.social_provider} sign-in. You can still add an authenticator; turning it off later needs only an authenticator or recovery code.`
             }
           >
             <SettingsRow
-              label="Two-factor authentication"
+              label={t("Two-factor authentication")}
               value={mfaEnabled ? "On" : "Off"}
             />
             {recovery.count > 0 && !appActive ? (
-              <SettingsRow label="Recovery codes are hidden while the app is inactive." />
+              <SettingsRow
+                label={t(
+                  "Recovery codes are hidden while the app is inactive.",
+                )}
+              />
             ) : recovery.count > 0 ? (
               [
                 <SettingsRow
@@ -424,7 +444,9 @@ export function AccountSecurityScreen() {
                   mono
                   selectable={revealCodes}
                   accessibilityHint={
-                    revealCodes ? "Recovery codes" : "Recovery codes hidden"
+                    revealCodes
+                      ? t("Recovery codes")
+                      : t("Recovery codes hidden")
                   }
                   label={
                     revealCodes
@@ -435,13 +457,13 @@ export function AccountSecurityScreen() {
                 <SettingsRow
                   key="reveal"
                   tone="action"
-                  label={revealCodes ? "Hide Codes" : "Reveal Codes"}
+                  label={revealCodes ? t("Hide Codes") : t("Reveal Codes")}
                   onPress={() => setRevealCodes(!revealCodes)}
                 />,
                 <SettingsRow
                   key="copy"
                   tone="action"
-                  label="Copy Recovery Codes"
+                  label={t("Copy Recovery Codes")}
                   disabled={privateDisabled}
                   onPress={() =>
                     copyPrivate(
@@ -455,8 +477,8 @@ export function AccountSecurityScreen() {
                   tone="action"
                   label={
                     privateAction === "share"
-                      ? "Exporting…"
-                      : "Export Recovery Codes"
+                      ? t("Exporting…")
+                      : t("Export Recovery Codes")
                   }
                   disabled={privateDisabled}
                   onPress={exportCodes}
@@ -464,7 +486,7 @@ export function AccountSecurityScreen() {
                 <SettingsRow
                   key="saved"
                   tone="action"
-                  label="I've Saved the Codes"
+                  label={t("I've Saved the Codes")}
                   disabled={privateAction !== null}
                   onPress={clearPrivateState}
                 />,
@@ -474,21 +496,23 @@ export function AccountSecurityScreen() {
                 enrollment && appActive ? (
                   <SettingsRow
                     key="key"
-                    label="Setup key"
+                    label={t("Setup key")}
                     detail={enrollment.secret}
                     selectable
                   />
                 ) : (
                   <SettingsRow
                     key="key"
-                    label="Enter the code from the NyxID account you just added. If you did not add it, cancel and start again."
+                    label={t(
+                      "Enter the code from the NyxID account you just added. If you did not add it, cancel and start again.",
+                    )}
                   />
                 ),
                 enrollment && appActive ? (
                   <SettingsRow
                     key="copy-key"
                     tone="action"
-                    label="Copy Setup Key"
+                    label={t("Copy Setup Key")}
                     disabled={privateDisabled}
                     onPress={() =>
                       copyPrivate(
@@ -502,7 +526,7 @@ export function AccountSecurityScreen() {
                   <SettingsRow
                     key="open"
                     tone="action"
-                    label="Open Authenticator"
+                    label={t("Open Authenticator")}
                     disabled={privateDisabled}
                     onPress={() => {
                       const url = enrollment.qr_code_url;
@@ -519,8 +543,8 @@ export function AccountSecurityScreen() {
                 ) : null,
                 <SettingsTextField
                   key="code"
-                  accessibilityLabel="Authenticator code"
-                  placeholder="Six-digit code"
+                  accessibilityLabel={t("Authenticator code")}
+                  placeholder={t("Six-digit code")}
                   value={totpCode}
                   onChangeText={setTotpCode}
                   keyboardType="number-pad"
@@ -534,8 +558,8 @@ export function AccountSecurityScreen() {
                   tone="action"
                   label={
                     privateAction === "confirm"
-                      ? "Verifying…"
-                      : "Verify & Turn On"
+                      ? t("Verifying…")
+                      : t("Verify & Turn On")
                   }
                   disabled={privateDisabled || !/^\d{6}$/.test(totpCode.trim())}
                   onPress={confirmEnrollment}
@@ -543,7 +567,7 @@ export function AccountSecurityScreen() {
                 <SettingsRow
                   key="cancel"
                   tone="danger"
-                  label="Cancel Setup"
+                  label={t("Cancel Setup")}
                   disabled={privateAction !== null}
                   onPress={clearPrivateState}
                 />,
@@ -553,8 +577,8 @@ export function AccountSecurityScreen() {
                 [
                   <SettingsTextField
                     key="disable-code"
-                    accessibilityLabel="Authenticator or recovery code"
-                    placeholder="Authenticator or recovery code"
+                    accessibilityLabel={t("Authenticator or recovery code")}
+                    placeholder={t("Authenticator or recovery code")}
                     value={disableCode}
                     onChangeText={setDisableCode}
                     autoCorrect={false}
@@ -566,8 +590,8 @@ export function AccountSecurityScreen() {
                   passwordAccount ? (
                     <SettingsTextField
                       key="password"
-                      accessibilityLabel="Current password"
-                      placeholder="Current password"
+                      accessibilityLabel={t("Current password")}
+                      placeholder={t("Current password")}
                       value={password}
                       onChangeText={setPassword}
                       secureTextEntry
@@ -581,8 +605,8 @@ export function AccountSecurityScreen() {
                     tone="danger"
                     label={
                       privateAction === "disable"
-                        ? "Turning off…"
-                        : "Turn Off Two-Factor Authentication"
+                        ? t("Turning off…")
+                        : t("Turn Off Two-Factor Authentication")
                     }
                     disabled={
                       privateDisabled ||
@@ -594,7 +618,7 @@ export function AccountSecurityScreen() {
                   <SettingsRow
                     key="cancel-off"
                     tone="action"
-                    label="Cancel"
+                    label={t("Cancel")}
                     disabled={privateAction !== null}
                     onPress={clearPrivateState}
                   />,
@@ -602,7 +626,7 @@ export function AccountSecurityScreen() {
               ) : (
                 <SettingsRow
                   tone="danger"
-                  label="Turn Off Two-Factor Authentication"
+                  label={t("Turn Off Two-Factor Authentication")}
                   disabled={privateDisabled}
                   onPress={() => setDisableOpen(true)}
                 />
@@ -612,8 +636,8 @@ export function AccountSecurityScreen() {
                 tone="action"
                 label={
                   privateAction === "setup"
-                    ? "Starting…"
-                    : "Set Up Authenticator"
+                    ? t("Starting…")
+                    : t("Set Up Authenticator")
                 }
                 disabled={privateDisabled}
                 onPress={beginEnrollment}
@@ -641,7 +665,7 @@ export function AccountSecurityScreen() {
           rows={3}
           icon={false}
           title
-          accessibilityLabel="Loading security settings"
+          accessibilityLabel={t("Loading security settings")}
         />
       ) : null}
       {sessions.isPending ? (
@@ -649,23 +673,25 @@ export function AccountSecurityScreen() {
           rows={2}
           icon={false}
           title
-          accessibilityLabel="Loading sessions"
+          accessibilityLabel={t("Loading sessions")}
         />
       ) : (
         <SettingsGroup
-          title="Active sessions"
+          title={t("Active sessions")}
           inset={false}
-          footer="Where your account is signed in. Tap a session for details or to sign it out."
+          footer={t(
+            "Where your account is signed in. Tap a session for details or to sign it out.",
+          )}
         >
           {sessions.isError ? (
             <SettingsRow
-              label="Couldn't load active sessions"
-              detail="Tap to retry."
+              label={t("Couldn't load active sessions")}
+              detail={t("Tap to retry.")}
               tone="action"
               onPress={() => void sessions.refetch()}
             />
           ) : sessions.data?.length === 0 ? (
-            <SettingsRow label="No active sessions found." />
+            <SettingsRow label={t("No active sessions found.")} />
           ) : (
             sessions.data?.map((session) => (
               <SettingsRow

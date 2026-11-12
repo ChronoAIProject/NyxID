@@ -1,3 +1,21 @@
+import { ComposerDictationFrame } from "../assistant/ComposerDictation";
+import {
+  ChatComposerDock,
+  ChatIconButton as Icon,
+  ChatMessageTurn,
+  ChatTranscriptSeparator,
+  chatSurfaceStyles,
+} from "../assistant/ChatSurface";
+import { CrewVoiceComposer } from "./CrewVoiceComposer";
+import {
+  ChatComposerInput,
+  ChatComposerToolbar,
+} from "../assistant/ChatComposerInput";
+import {
+  appendDictation,
+  useComposerDictation,
+} from "../assistant/useComposerDictation";
+import { TranscriptViewport } from "../assistant/TranscriptViewport";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { transcriptColumnStyle } from "../display/chatLayout";
 import { assistantDraftStore } from "../assistant/assistantDraftStore";
@@ -15,17 +33,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  LayoutAnimation,
   Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { AssistantReplyBody } from "../assistant/AssistantReplyBody";
-import { Check, Plus, Settings2, X } from "lucide-react-native";
+import { Check, Plus, MoreHorizontal, X } from "lucide-react-native";
 import {
   ActionButton,
   Card,
@@ -42,22 +60,11 @@ import { agentsApi } from "../../lib/api/agentsApi";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
-import {
-  chatBubbleColors,
-  userBubbleCorners,
-} from "../../theme/chatAppearance";
-import { fonts, radius } from "../../theme/designTokens";
+import { chatBubbleColors } from "../../theme/chatAppearance";
+import { fonts } from "../../theme/designTokens";
 import { AssistantPendingUploads } from "../assistant/AssistantPendingUploads";
-import {
-  AssistantMentionInput,
-  type AssistantMentionOption,
-} from "../assistant/AssistantMentionInput";
-import {
-  ChatComposerFrame,
-  ChatComposerRow,
-  ComposerAttachButton,
-  ComposerSubmitButton,
-} from "../assistant/ChatComposer";
+import { type AssistantMentionOption } from "../assistant/AssistantMentionInput";
+import { ComposerSubmitButton } from "../assistant/ChatComposer";
 import {
   resolveAttachmentMentions,
   stripAttachmentMention,
@@ -164,6 +171,25 @@ function GroupChat({
   const [pickingRecipients, setPickingRecipients] = useState<
     false | "add" | "header"
   >(false);
+  const recipientPickerOpen = useRef(false);
+  const captureRevision = useRef(0);
+  const voiceCapture = useRef<(() => void) | undefined>(undefined);
+  function showRecipientPicker(next: false | "add" | "header") {
+    if (next) {
+      captureRevision.current++;
+      recipientPickerOpen.current = true;
+      voiceCapture.current?.();
+    } else recipientPickerOpen.current = false;
+    setPickingRecipients(next);
+  }
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceMinimized, setVoiceMinimized] = useState(false);
+  function resizeVoice(minimized: boolean) {
+    if (voiceMinimized === minimized) return;
+    if (!reducedMotion)
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setVoiceMinimized(minimized);
+  }
   const [localError, setLocalError] = useState<string>();
   const group = chat.isError ? undefined : chat.data?.group;
   const recipientRoster = useRef<Group["members"]>(
@@ -302,30 +328,53 @@ function GroupChat({
       detail: row.error ?? (row.item ? "Ready" : "Uploading…"),
     })),
   ];
-  const resolvedDraft = resolveAttachmentMentions(draft, attachmentMentions);
-  const ambiguous =
-    !selection.added.length &&
-    ambiguousGroupMentions(resolvedDraft, routingMembers, mentionBindings)
-      .length > 0;
-  const routingSelection = withDraft(
-    selection,
+  function routeDraft(text: string) {
+    const resolvedDraft = resolveAttachmentMentions(text, attachmentMentions);
+    const ambiguous =
+      !selection.added.length &&
+      ambiguousGroupMentions(resolvedDraft, routingMembers, mentionBindings)
+        .length > 0;
+    const routingSelection = withDraft(
+      selection,
+      resolvedDraft,
+      routingMembers,
+      mentionBindings,
+    );
+    const unavailableRecipients = unavailableGroupRecipients(
+      routingSelection,
+      routingMembers,
+    );
+    const recipients = resolveRecipients(
+      // Route from the text that will reach the server. Recompute on roster
+      // changes so an existing @file-1 cannot become a new agent's mention.
+      routingSelection,
+      defaults,
+      group?.members ?? [],
+    );
+    return {
+      resolvedDraft,
+      ambiguous,
+      routingSelection,
+      unavailableRecipients,
+      recipients,
+    };
+  }
+  const {
     resolvedDraft,
-    routingMembers,
-    mentionBindings,
-  );
-  const unavailableRecipients = unavailableGroupRecipients(
+    ambiguous,
     routingSelection,
-    routingMembers,
-  );
-  const recipients = resolveRecipients(
-    // Route from the text that will reach the server. Recompute on roster
-    // changes so an existing @file-1 cannot become a new agent's mention.
-    routingSelection,
-    defaults,
-    group?.members ?? [],
-  );
+    unavailableRecipients,
+    recipients,
+  } = routeDraft(draft);
+  const voiceRecipientKey = JSON.stringify(recipients.ids);
+  const latestVoiceRecipients = useRef(voiceRecipientKey);
+  latestVoiceRecipients.current = voiceRecipientKey;
+  const capturedRevision = captureRevision.current;
+  const captureKey = `${capturedRevision}:${voiceRecipientKey}`;
   const list = useRef<FlatList<GroupMessage>>(null);
   const transcriptScroll = useTranscriptScrollFollow(list, groupId, {
+    loading: chat.isPending,
+    historyError: chat.isError,
     reducedMotion,
   });
   const sendLock = useRef(false);
@@ -340,11 +389,11 @@ function GroupChat({
     const settings = () => (
       <WorkspaceHeaderVisibility>
         <Icon
-          label="Crew settings"
+          label="Crew options"
           onPress={onSettings}
           disabled={!group || chat.sending || uploads.session.sending}
         >
-          <Settings2 size={20} color={colors.textSecondary} />
+          <MoreHorizontal size={23} color={colors.textPrimary} />
         </Icon>
       </WorkspaceHeaderVisibility>
     );
@@ -371,7 +420,7 @@ function GroupChat({
                   : undefined
             }
             disabled={!group || chat.sending || uploads.session.sending}
-            onPress={() => setPickingRecipients("header")}
+            onPress={() => showRecipientPicker("header")}
           />
         </WorkspaceHeaderVisibility>
       ),
@@ -401,7 +450,7 @@ function GroupChat({
   });
   useEffect(() => {
     if (!chat.active) {
-      setPickingRecipients(false);
+      showRecipientPicker(false);
     }
   }, [chat.active]);
   const blocked =
@@ -412,17 +461,27 @@ function GroupChat({
     !chat.active ||
     !canParticipate ||
     chat.isError;
-  const canSend =
-    !blocked &&
-    !ambiguous &&
-    !unavailableRecipients.length &&
-    !uploads.blocked &&
-    !uploads.session.sending &&
-    (collaboration
-      ? recipients.ids.length > 0 || !uploads.files.length
-      : !!recipients.ids.length && liveMembers.length > 0) &&
-    (!!draft.trim() || uploads.files.length > 0) &&
-    [...resolvedDraft].length <= 32768;
+  const dictation = useComposerDictation({
+    scope: `${chat.epoch}:${groupId}:${composerGeneration}`,
+    enabled: !voiceOpen && !blocked && (collaboration || !!liveMembers.length),
+    onInsert: (text) => edit(appendDictation(draft, text)),
+  });
+  function canSubmit(text: string, route = routeDraft(text)) {
+    return (
+      !dictation.active &&
+      !blocked &&
+      !route.ambiguous &&
+      !route.unavailableRecipients.length &&
+      !uploads.blocked &&
+      !uploads.session.sending &&
+      (collaboration
+        ? route.recipients.ids.length > 0 || !uploads.files.length
+        : !!route.recipients.ids.length && liveMembers.length > 0) &&
+      (!!text.trim() || uploads.files.length > 0) &&
+      [...route.resolvedDraft].length <= 32768
+    );
+  }
+  const canSend = canSubmit(draft);
 
   function edit(value: string) {
     revision.current += 1;
@@ -467,18 +526,25 @@ function GroupChat({
     if (next !== draft) edit(next);
     uploads.remove(key);
   }
-  async function send() {
-    if (!canSend || sendLock.current || !chat.available()) return;
+  async function send(message = draft, capturedRecipients?: typeof recipients) {
+    const route = routeDraft(message);
+    if (!canSubmit(message, route) || sendLock.current || !chat.available())
+      return false;
     sendLock.current = true;
     setLocalError(undefined);
-    const target = recipients;
+    const target = capturedRecipients ?? route.recipients;
+    let accepted = false;
     const submittedRoster = [...recipientRoster.current];
-    const submittedMentions = [...recipientMentions.current];
+    const submittedMentions = groupMentionBindings(
+      route.resolvedDraft,
+      routingMembers,
+      mentionBindings,
+    );
     transcriptScroll.follow();
     try {
       await submitGroupDraft({
-        draft,
-        selection,
+        draft: message,
+        selection: route.routingSelection,
         updateComposer: (text, nextSelection) => {
           // A definite refusal restores the submitted handle bindings together
           // with the text/selection, even if the optimistic clear lost its roster.
@@ -518,8 +584,8 @@ function GroupChat({
           mounted.current && chat.epoch === getAuthEpoch()
             ? revision.current
             : Number.NaN,
-        send: (text) =>
-          uploads.session.submit((files) =>
+        send: async (text) => {
+          accepted = await uploads.session.submit((files) =>
             chat.post({
               text: resolveAttachmentMentions(text, attachmentMentions),
               ...(files?.attachmentIds.length
@@ -529,8 +595,11 @@ function GroupChat({
               // aliases, including a member joining between edit and POST.
               recipient_agent_ids: target.ids,
             }),
-          ),
+          );
+          return accepted;
+        },
       });
+      return accepted;
     } catch (cause) {
       if (mounted.current && chat.available())
         setLocalError(
@@ -538,10 +607,13 @@ function GroupChat({
             ? cause.message
             : "The message was not delivered. Refresh the crew before trying again.",
         );
+      return false;
     } finally {
       sendLock.current = false;
     }
   }
+  const currentSend = useRef(send);
+  currentSend.current = send;
   async function decide(action: GroupPendingAction, choice: "allow" | "deny") {
     if (
       blocked ||
@@ -600,7 +672,7 @@ function GroupChat({
         chat.error ||
         chat.actionError ||
         localError) && (
-        <View style={styles.error}>
+        <View style={styles.errorRow}>
           <AssistantErrorNotice
             message={
               chat.recoveryRequired
@@ -660,13 +732,18 @@ function GroupChat({
           ))}
         </OverflowScrollView>
       )}
-      <View style={styles.fill}>
+      <TranscriptViewport
+        ready={transcriptScroll.ready}
+        onTouchStart={() => {
+          if (voiceOpen) resizeVoice(true);
+        }}
+      >
         <FlatList
           ref={list}
           style={styles.fill}
           data={group ? (chat.data?.messages ?? []) : []}
           keyExtractor={(item) => item.id}
-          ItemSeparatorComponent={GroupSeparator}
+          ItemSeparatorComponent={ChatTranscriptSeparator}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           maintainVisibleContentPosition={
@@ -705,7 +782,7 @@ function GroupChat({
               />
             ) : null
           }
-          ListHeaderComponentStyle={styles.historyHeader}
+          ListHeaderComponentStyle={styles.transcriptHeader}
           ListEmptyComponent={
             chat.isPending ? (
               <SkeletonRows rows={4} accessibilityLabel="Loading crew" />
@@ -735,22 +812,88 @@ function GroupChat({
             />
           )}
           ListFooterComponent={
-            working.length ? (
-              <View
-                style={styles.working}
-                accessibilityRole="text"
-                accessibilityLabel={`Agents working. ${groupWorkingLabel(working.map((member) => title(member.id, member.name)))}`}
-                accessibilityLiveRegion="polite"
-              >
-                <AgentAvatar agent={working[0]!} size="md" />
-                <ActivityIndicator size="small" color={colors.primary} />
-                <Label muted>
-                  {groupWorkingLabel(
-                    working.map((member) => title(member.id, member.name)),
-                  )}
-                </Label>
-              </View>
-            ) : null
+            <View style={styles.footer}>
+              {working.length ? (
+                <View
+                  style={styles.working}
+                  accessibilityRole="text"
+                  accessibilityLabel={`Agents working. ${groupWorkingLabel(working.map((member) => title(member.id, member.name)))}`}
+                  accessibilityLiveRegion="polite"
+                >
+                  <AgentAvatar agent={working[0]!} size="md" />
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Label muted>
+                    {groupWorkingLabel(
+                      working.map((member) => title(member.id, member.name)),
+                    )}
+                  </Label>
+                </View>
+              ) : null}
+              {!!group?.collaboration &&
+                !!chat.data?.collaboration_decisions?.length && (
+                  <View
+                    style={{ gap: 8 }}
+                    accessibilityLabel="Collaboration decisions"
+                  >
+                    <CollaborationCards
+                      key={`${chat.epoch}:${group.id}`}
+                      group={group}
+                      decisions={chat.data?.collaboration_decisions ?? []}
+                    />
+                  </View>
+                )}
+              {!!group &&
+                !group.collaboration &&
+                !!chat.data?.pending_actions.length && (
+                  <View
+                    accessibilityLabel="Actions waiting for you"
+                    style={{ gap: 8 }}
+                  >
+                    {chat.data.pending_actions.map((action, index) => {
+                      const member = group?.members.find(
+                        (row) => row.id === action.agent_id,
+                      );
+                      return (
+                        <GroupPendingCard
+                          key={
+                            action.acknowledgement_id ??
+                            action.approval_request_id ??
+                            `${action.conversation_id}:${index}`
+                          }
+                          action={action}
+                          name={
+                            member ? title(member.id, member.name) : "An agent"
+                          }
+                          actorId={identity.data?.id}
+                          organization={group?.owner?.type === "org"}
+                          blocked={blocked}
+                          onReview={
+                            onOpenConversation
+                              ? () => {
+                                  if (blocked || !chat.available()) return;
+                                  const review = groupPendingReview(
+                                    action,
+                                    identity.data?.id,
+                                    group?.owner?.type === "org",
+                                  );
+                                  if (review)
+                                    onOpenConversation({
+                                      conversationId: review.conversationId,
+                                      agentId: action.agent_id ?? undefined,
+                                      acknowledgementId:
+                                        review.acknowledgementId,
+                                    });
+                                }
+                              : undefined
+                          }
+                          onDecision={(choice) => void decide(action, choice)}
+                          onAnswer={(yes) => void answer(action, yes)}
+                        />
+                      );
+                    })}
+                  </View>
+                )}
+            </View>
           }
         />
         <JumpToLatest
@@ -758,119 +901,97 @@ function GroupChat({
           onPress={transcriptScroll.follow}
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
-      </View>
-      {!!group?.collaboration && (
-        <ScrollView
-          style={styles.pending}
-          contentContainerStyle={{ gap: 8 }}
-          keyboardShouldPersistTaps="handled"
-          accessibilityLabel="Collaboration decisions"
-        >
-          <CollaborationCards
-            key={`${chat.epoch}:${group.id}`}
-            group={group}
-            decisions={chat.data?.collaboration_decisions ?? []}
-          />
-        </ScrollView>
-      )}
-      {!!group &&
-        !group.collaboration &&
-        !!chat.data?.pending_actions.length && (
-          <ScrollView
-            accessibilityLabel="Actions waiting for you"
-            style={styles.pending}
-            contentContainerStyle={{ gap: 8 }}
-            keyboardShouldPersistTaps="handled"
-          >
-            {chat.data.pending_actions.map((action, index) => {
-              const member = group?.members.find(
-                (row) => row.id === action.agent_id,
-              );
-              return (
-                <GroupPendingCard
-                  key={
-                    action.acknowledgement_id ??
-                    action.approval_request_id ??
-                    `${action.conversation_id}:${index}`
-                  }
-                  action={action}
-                  name={member ? title(member.id, member.name) : "An agent"}
-                  actorId={identity.data?.id}
-                  organization={group?.owner?.type === "org"}
-                  blocked={blocked}
-                  onReview={
-                    onOpenConversation
-                      ? () => {
-                          if (blocked || !chat.available()) return;
-                          const review = groupPendingReview(
-                            action,
-                            identity.data?.id,
-                            group?.owner?.type === "org",
-                          );
-                          if (review)
-                            onOpenConversation({
-                              conversationId: review.conversationId,
-                              agentId: action.agent_id ?? undefined,
-                              acknowledgementId: review.acknowledgementId,
-                            });
-                        }
-                      : undefined
-                  }
-                  onDecision={(choice) => void decide(action, choice)}
-                  onAnswer={(yes) => void answer(action, yes)}
-                />
-              );
-            })}
-          </ScrollView>
-        )}
+      </TranscriptViewport>
       {group && (
-        <View style={styles.composerInset}>
-          <View style={[styles.composerArea, chatColumn]}>
-            {ambiguous && (
-              <Label style={[styles.small, { color: colors.danger }]}>
-                This handle names multiple agents. Choose an exact recipient or
-                use its UUID mention before sending.
+        <ChatComposerDock>
+          {ambiguous && (
+            <Label style={[styles.small, { color: colors.danger }]}>
+              This handle names multiple agents. Choose an exact recipient or
+              use its UUID mention before sending.
+            </Label>
+          )}
+          {!!unavailableRecipients.length && (
+            <Label style={[styles.small, { color: colors.danger }]}>
+              A selected agent is no longer available. Remove it and choose
+              another recipient before sending.
+            </Label>
+          )}
+          {!recipients.ids.length &&
+            (collaboration ? (
+              <Label muted style={styles.small}>
+                {uploads.files.length
+                  ? "Attachments need an agent recipient. Add an agent or remove the attachments."
+                  : "Everyone in the group · no agent reply"}
               </Label>
-            )}
-            {!!unavailableRecipients.length && (
+            ) : (
               <Label style={[styles.small, { color: colors.danger }]}>
-                A selected agent is no longer available. Remove it and choose
-                another recipient before sending.
+                Choose at least one recipient.
               </Label>
-            )}
-            {!recipients.ids.length &&
-              (collaboration ? (
-                <Label muted style={styles.small}>
-                  {uploads.files.length
-                    ? "Attachments need an agent recipient. Add an agent or remove the attachments."
-                    : "Everyone in the group · no agent reply"}
-                </Label>
-              ) : (
-                <Label style={[styles.small, { color: colors.danger }]}>
-                  Choose at least one recipient.
-                </Label>
-              ))}
-            {!liveMembers.length &&
-              (collaboration ? (
-                <Label muted>
-                  No agent here is available to you. You can still message the
-                  people in this group.
-                </Label>
-              ) : (
-                <Label muted>
-                  All agents have been removed or destroyed. This crew is
-                  read-only.
-                </Label>
-              ))}
-            {!canParticipate && (
+            ))}
+          {!liveMembers.length &&
+            (collaboration ? (
               <Label muted>
-                This crew is read-only for your current organization role.
+                No agent here is available to you. You can still message the
+                people in this group.
               </Label>
-            )}
-            {(uploads.error || uploads.notice) && (
-              <Label muted>{uploads.error ?? uploads.notice}</Label>
-            )}
-            <ChatComposerFrame>
+            ) : (
+              <Label muted>
+                All agents have been removed or destroyed. This crew is
+                read-only.
+              </Label>
+            ))}
+          {!canParticipate && (
+            <Label muted>
+              This crew is read-only for your current organization role.
+            </Label>
+          )}
+          {(uploads.error || uploads.notice) && (
+            <Label muted>{uploads.error ?? uploads.notice}</Label>
+          )}
+          {voiceOpen ? (
+            <CrewVoiceComposer
+              crewName={group.name}
+              scope={`${chat.epoch}:${groupId}`}
+              enabled={
+                !pickingRecipients &&
+                !chat.recoveryRequired &&
+                !chat.loadingOlder &&
+                chat.active &&
+                canParticipate &&
+                !chat.isError &&
+                chat.online &&
+                !uploads.files.length
+              }
+              busy={chat.sending || uploads.session.sending}
+              messages={chat.data?.messages ?? []}
+              captureControl={voiceCapture}
+              captureKey={captureKey}
+              onSend={(text) => {
+                if (
+                  recipientPickerOpen.current ||
+                  capturedRevision !== captureRevision.current ||
+                  voiceRecipientKey !== latestVoiceRecipients.current
+                )
+                  return Promise.resolve(false);
+                return currentSend.current(text, recipients);
+              }}
+              onClose={() => setVoiceOpen(false)}
+              minimized={voiceMinimized}
+              onExpand={() => resizeVoice(false)}
+              recipientLabel={
+                recipients.ids
+                  .map((id) =>
+                    title(
+                      id,
+                      liveMembers.find((member) => member.id === id)?.name ??
+                        id,
+                    ),
+                  )
+                  .join(", ") || "everyone in the group"
+              }
+            />
+          ) : (
+            <ComposerDictationFrame dictation={dictation}>
               <OverflowScrollView
                 fadeColor={colors.composerBg}
                 horizontal
@@ -938,7 +1059,7 @@ function GroupChat({
                     accessibilityRole="button"
                     accessibilityLabel="Add recipient"
                     disabled={blocked}
-                    onPress={() => setPickingRecipients("add")}
+                    onPress={() => showRecipientPicker("add")}
                     style={styles.addRecipient}
                   >
                     <Plus size={14} color={colors.primaryOnTint} />
@@ -955,7 +1076,8 @@ function GroupChat({
                 remove={removeAttachment}
                 disabled={chat.sending || uploads.session.sending}
               />
-              <AssistantMentionInput
+              <ChatComposerInput
+                dictation={dictation}
                 generation={composerGeneration}
                 accessibilityLabel="Message the crew"
                 placeholder="Message the crew"
@@ -966,48 +1088,71 @@ function GroupChat({
                     edit(value);
                 }}
                 editable={!blocked && (collaboration || !!liveMembers.length)}
-                style={[styles.input, { color: colors.textPrimary }]}
                 renderActions={(mentionAction) => (
-                  <ChatComposerRow>
-                    <ComposerAttachButton
-                      label="Attach photos or files, or take a photo to crew"
-                      busy={uploads.picking}
-                      disabled={
+                  <ChatComposerToolbar
+                    dictation={dictation}
+                    dictationDisabled={
+                      blocked || uploads.picking || uploads.session.sending
+                    }
+                    attach={{
+                      label: "Attach photos or files, or take a photo to crew",
+                      busy: uploads.picking,
+                      disabled:
                         blocked ||
+                        dictation.active ||
                         !liveMembers.length ||
                         uploads.picking ||
-                        uploads.session.sending
-                      }
-                      onPress={uploads.choose}
-                    />
-                    {mentionAction}
-                    <View style={{ flex: 1 }} />
-
+                        uploads.session.sending ||
+                        uploads.files.length >= 10,
+                      onPress: () => uploads.choose(),
+                    }}
+                    mention={mentionAction}
+                  >
                     <ComposerSubmitButton
-                      kind="send"
-                      label="Send crew message"
+                      kind={
+                        !draft.trim() && !uploads.files.length
+                          ? "voice"
+                          : "send"
+                      }
+                      label={
+                        !draft.trim() && !uploads.files.length
+                          ? "Start crew voice"
+                          : "Send crew message"
+                      }
                       busy={chat.sending}
-                      disabled={!canSend}
-                      onPress={() => void send()}
+                      disabled={
+                        !draft.trim() && !uploads.files.length
+                          ? blocked ||
+                            !chat.online ||
+                            dictation.active ||
+                            (!collaboration && !liveMembers.length)
+                          : !canSend
+                      }
+                      onPress={() => {
+                        if (!draft.trim() && !uploads.files.length) {
+                          setVoiceMinimized(false);
+                          setVoiceOpen(true);
+                        } else void send();
+                      }}
                     />
-                  </ChatComposerRow>
+                  </ChatComposerToolbar>
                 )}
               />
-            </ChatComposerFrame>
-            {[...resolvedDraft].length > 32768 && (
-              <Label style={[styles.small, { color: colors.danger }]}>
-                Keep the message within 32,768 characters, including attachment
-                references.
-              </Label>
-            )}
-          </View>
-        </View>
+            </ComposerDictationFrame>
+          )}
+          {[...resolvedDraft].length > 32768 && (
+            <Label style={[styles.small, { color: colors.danger }]}>
+              Keep the message within 32,768 characters, including attachment
+              references.
+            </Label>
+          )}
+        </ChatComposerDock>
       )}
       <Modal
         visible={!!pickingRecipients}
         transparent
         animationType={reducedMotion ? "none" : "slide"}
-        onRequestClose={() => setPickingRecipients(false)}
+        onRequestClose={() => showRecipientPicker(false)}
       >
         <View style={styles.modalBackdrop}>
           <View
@@ -1024,7 +1169,7 @@ function GroupChat({
               </Label>
               <Icon
                 label="Close recipients"
-                onPress={() => setPickingRecipients(false)}
+                onPress={() => showRecipientPicker(false)}
               >
                 <X size={22} color={colors.textPrimary} />
               </Icon>
@@ -1060,7 +1205,7 @@ function GroupChat({
                             )
                           : withAdded(old, member.id),
                       );
-                      setPickingRecipients(false);
+                      showRecipientPicker(false);
                     }}
                   >
                     <AgentAvatar agent={member} size="lg" />
@@ -1138,10 +1283,7 @@ function GroupMessage({
           {message.agent ? (
             <AgentAvatar agent={message.agent} size="sm" />
           ) : null}
-          <Label
-            muted
-            style={styles.small}
-          >
+          <Label muted style={styles.messageLabel}>
             {user
               ? (message.author?.display_name ?? "You")
               : message.agent
@@ -1175,55 +1317,40 @@ function GroupMessage({
     </>
   );
   const footer = (
-      <AssistantMessageFooter
-        text={
-          user ? message.text : sanitizeAssistantMessageContent(message.text)
-        }
-        timestamp={message.created_at}
-        user={user}
-        report={
-          message.role === "agent" && group
-            ? {
-                kind: "group",
-                id: group.id,
-                messageId: message.id,
-                reported: isReported(message.feedback),
-              }
-            : undefined
-        }
-      />
+    <AssistantMessageFooter
+      text={user ? message.text : sanitizeAssistantMessageContent(message.text)}
+      timestamp={message.created_at}
+      user={user}
+      report={
+        message.role === "agent" && group
+          ? {
+              kind: "group",
+              id: group.id,
+              messageId: message.id,
+              reported: isReported(message.feedback),
+            }
+          : undefined
+      }
+    />
   );
-  // Your own messages: name and recipients above, time and copy below, and
-  // only what you sent inside the bubble.
-  if (user)
-    return (
-      <View style={styles.userTurn}>
-        {header}
-        <View
-          style={[
-            styles.message,
-            styles.userBubble,
-            { backgroundColor: bubble.background, ...userBubbleCorners },
-          ]}
-        >
-          <Label selectable style={{ color: bubble.foreground }}>
+  return (
+    <ChatMessageTurn user={user} author={header} footer={footer}>
+      {user ? (
+        <>
+          <Text
+            selectable
+            style={[styles.messageText, { color: bubble.foreground }]}
+          >
             {message.text}
-          </Label>
+          </Text>
           <GroupMachineReceipts
             groupId={group?.id}
             message={message}
             foreground={bubble.foreground}
           />
-        </View>
-        {footer}
-      </View>
-    );
-  return (
-    <View style={styles.message}>
-      {header}
-      {(
+        </>
+      ) : (
         <AssistantReplyBody
-          variant="crew"
           text={sanitizeAssistantMessageContent(message.text)}
           activity={
             message.activities.length || message.attachments.length ? (
@@ -1238,139 +1365,84 @@ function GroupMessage({
           }
         />
       )}
-      {footer}
-    </View>
+    </ChatMessageTurn>
   );
 }
-function GroupSeparator() {
-  return <View style={{ height: 16 }} />;
-}
-function Icon({
-  label,
-  disabled,
-  onPress,
-  children,
-}: {
-  label: string;
-  disabled?: boolean;
-  onPress: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={[styles.icon, { opacity: disabled ? 0.4 : 1 }]}
-    >
-      {children}
-    </Pressable>
-  );
-}
-const styles = StyleSheet.create({
-  row: { flexDirection: "row", alignItems: "center", gap: 6 },
-  horizontalStrip: { flexGrow: 0 },
-  feedbackInput: {
-    minHeight: 96,
-    maxHeight: 180,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    fontFamily: fonts.bodyRegular,
-    textAlignVertical: "top",
-  },
-  fill: { flex: 1, minWidth: 0 },
-  header: { flexDirection: "row", alignItems: "center", gap: 8 },
-  heading: { fontFamily: fonts.displaySemi, fontSize: 18 },
-  small: { fontSize: 11, lineHeight: 17 },
-  icon: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  members: { alignItems: "center", gap: 6 },
-  member: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    borderWidth: 1,
-    borderRadius: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-  },
-  transcript: { paddingVertical: 8, flexGrow: 1 },
-  historyHeader: { marginBottom: 16 },
-  empty: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
-  message: { gap: 6, padding: 12, maxWidth: "100%" },
-  userTurn: {
-    alignSelf: "flex-end",
-    alignItems: "flex-end",
-    marginLeft: 38,
-    gap: 4,
-    maxWidth: "100%",
-  },
-  userBubble: { paddingVertical: 10, paddingHorizontal: 14 },
-  notice: { textAlign: "center", fontSize: 11 },
-  working: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 16,
-  },
-  error: { gap: 6, marginHorizontal: 12 },
-  pending: { maxHeight: 180, marginHorizontal: 12 },
-  pendingCard: { padding: 12, gap: 8 },
-  actions: { flexDirection: "row", gap: 8 },
-  composerInset: { paddingHorizontal: 12 },
-  chatPage: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 4, gap: 8 },
-  composerArea: { gap: 6, paddingTop: 4 },
-  recipients: { gap: 6, alignItems: "center", paddingHorizontal: 10 },
-  recipient: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 20,
-    borderWidth: 1,
-    minHeight: 36,
-  },
-  addRecipient: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    minHeight: 36,
-    paddingHorizontal: 8,
-  },
-  input: {
-    fontFamily: fonts.bodyRegular,
-    fontSize: 14,
-    minHeight: 44,
-    paddingTop: 12,
-    paddingBottom: 10,
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: "#0008",
-    justifyContent: "flex-end",
-  },
-  picker: {
-    maxHeight: "60%",
-    borderWidth: 1,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 20,
-    paddingBottom: 36,
-    gap: 12,
-  },
-  pickerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    minHeight: 52,
-  },
-  unavailableMember: { gap: 4, paddingVertical: 10 },
-});
+
+const styles = {
+  ...chatSurfaceStyles,
+  ...StyleSheet.create({
+    horizontalStrip: { flexGrow: 0 },
+    feedbackInput: {
+      minHeight: 96,
+      maxHeight: 180,
+      borderWidth: 1,
+      borderRadius: 12,
+      padding: 12,
+      fontFamily: fonts.bodyRegular,
+      textAlignVertical: "top",
+    },
+    header: { flexDirection: "row", alignItems: "center", gap: 8 },
+    heading: { fontFamily: fonts.displaySemi, fontSize: 18 },
+    small: { fontSize: 11, lineHeight: 17 },
+    members: { alignItems: "center", gap: 6 },
+    member: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      borderWidth: 1,
+      borderRadius: 20,
+      paddingVertical: 8,
+      paddingHorizontal: 10,
+    },
+    empty: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
+    notice: { textAlign: "center", fontSize: 11 },
+    working: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingVertical: 16,
+    },
+    pendingCard: { padding: 12, gap: 8 },
+    actions: { flexDirection: "row", gap: 8 },
+    recipients: { gap: 6, alignItems: "center", paddingHorizontal: 10 },
+    recipient: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 20,
+      borderWidth: 1,
+      minHeight: 36,
+    },
+    addRecipient: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      minHeight: 36,
+      paddingHorizontal: 8,
+    },
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: "#0008",
+      justifyContent: "flex-end",
+    },
+    picker: {
+      maxHeight: "60%",
+      borderWidth: 1,
+      borderTopLeftRadius: 24,
+      borderTopRightRadius: 24,
+      padding: 20,
+      paddingBottom: 36,
+      gap: 12,
+    },
+    pickerRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      minHeight: 52,
+    },
+    unavailableMember: { gap: 4, paddingVertical: 10 },
+  }),
+};

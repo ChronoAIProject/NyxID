@@ -5,16 +5,23 @@ import {
   useState,
   type PropsWithChildren,
 } from "react";
-import { Dimensions, Keyboard, StyleSheet, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { keyboardOverlap, type KeyboardFrame } from "./keyboardOverlap";
+import { Dimensions, Keyboard, Platform, StyleSheet, View } from "react-native";
+import {
+  useSafeAreaFrame,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import {
+  keyboardInViewportWindow,
+  keyboardOverlap,
+  type KeyboardFrame,
+} from "./keyboardOverlap";
 
-/** Edge-to-edge Android windows can leave their content underneath the IME.
- * Measure the outer frame, which is unaffected by its own padding. If Android
- * already resized that frame above the IME, no extra space is consumed.
+/** Measure the page itself, including sheet/header placement. Padding only the
+ * actual overlap avoids a second keyboard reservation after native resize.
  */
-export function AndroidKeyboardAvoidingView({ children }: PropsWithChildren) {
+export function KeyboardViewport({ children }: PropsWithChildren) {
   const insets = useSafeAreaInsets();
+  const safeAreaFrame = useSafeAreaFrame();
   const view = useRef<View>(null);
   const keyboard = useRef<KeyboardFrame | undefined>(Keyboard.metrics());
   const measurement = useRef(0);
@@ -32,13 +39,28 @@ export function AndroidKeyboardAvoidingView({ children }: PropsWithChildren) {
       if (!mounted.current || revision !== measurement.current) return;
       // Android Fabric measures from the visible window's top, while IME
       // screenY uses screen coordinates. Restore the current top inset first.
-      setBottom(keyboardOverlap({ y: y + insets.top, height }, frame));
+      setBottom(
+        keyboardOverlap(
+          { y: y + (Platform.OS === "android" ? insets.top : 0), height },
+          Platform.OS === "ios"
+            ? keyboardInViewportWindow(frame, safeAreaFrame)
+            : frame,
+        ),
+      );
     });
-  }, [insets.top]);
+  }, [insets.top, safeAreaFrame.y, safeAreaFrame.height]);
 
   useEffect(() => {
     mounted.current = true;
     keyboard.current = Keyboard.metrics();
+    const changing =
+      Platform.OS === "ios"
+        ? Keyboard.addListener("keyboardWillChangeFrame", (event) => {
+            Keyboard.scheduleLayoutAnimation(event);
+            keyboard.current = event.endCoordinates;
+            update();
+          })
+        : undefined;
     const shown = Keyboard.addListener("keyboardDidShow", (event) => {
       keyboard.current = event.endCoordinates;
       update();
@@ -55,6 +77,7 @@ export function AndroidKeyboardAvoidingView({ children }: PropsWithChildren) {
     return () => {
       mounted.current = false;
       measurement.current++;
+      changing?.remove();
       shown.remove();
       hidden.remove();
       resized.remove();
@@ -73,4 +96,4 @@ export function AndroidKeyboardAvoidingView({ children }: PropsWithChildren) {
   );
 }
 
-const styles = StyleSheet.create({ fill: { flex: 1 } });
+const styles = StyleSheet.create({ fill: { flex: 1, minHeight: 0 } });

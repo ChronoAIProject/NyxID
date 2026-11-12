@@ -34,7 +34,8 @@ export type WorkspaceParamList = {
   /** The owner's durable notification feed (bell); hidden while the flag is off. */
   Notifications: undefined;
   AccountSettings:
-    { section?: "display" | "privacy" | "notifications" } | undefined;
+    | { section?: "display" | "privacy" | "notifications" }
+    | undefined;
 };
 
 export type SkillPageParams = {
@@ -122,6 +123,7 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   UsageCredits: UsageCreditsRouteParams | undefined;
   NotificationSettings: undefined;
   DisplaySettings: undefined;
+  LanguageSettings: undefined;
   /** `voice` false: only dictation settings (no live voice for this account). */
   VoiceSettings: { voice?: boolean } | undefined;
   PrivacySettings: undefined;
@@ -210,6 +212,7 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "UsageCredits",
   "NotificationSettings",
   "DisplaySettings",
+  "LanguageSettings",
   "VoiceSettings",
   "PrivacySettings",
   "DeviceLogin",

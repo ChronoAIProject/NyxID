@@ -111,7 +111,7 @@ test("Home keeps the selected setup mounted when refreshed suggestions remove it
   let steps: any[] = [step];
   const h = hookHarness<E>({
     "react/jsx-runtime": { jsx: (type: any, props: any) => ({ type, props }), jsxs: (type: any, props: any) => ({ type, props }) },
-    "react-native": { View: "View", Pressable: "Pressable", StyleSheet: { create: (styles: any) => styles, hairlineWidth: 1 } },
+    "react-native": { View: "View", Pressable: "Pressable", useWindowDimensions: () => ({ fontScale: 1 }), StyleSheet: { create: (styles: any) => styles, hairlineWidth: 1 } },
     "@expo/vector-icons": { Feather: "Icon" },
     "../../components/workspace/WorkspaceUI": { Label: "Label" },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },

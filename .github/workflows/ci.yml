@@ -213,9 +213,11 @@ jobs:
               - '.config/nextest.toml'
             frontend:
               - 'frontend/**'
+              - 'shared/**'
               - '.node-version'
             mobile:
               - 'mobile/**'
+              - 'shared/**'
               - '.node-version'
             sdk:
               - 'sdk/**'
@@ -742,6 +744,9 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run build
+      - name: Build frontend Docker inputs
+        working-directory: .
+        run: docker build --target builder --file frontend/Dockerfile .
 
   # ---------------------------------------------------------------------------
   # Mobile: committed native state, unit tests, and type-check

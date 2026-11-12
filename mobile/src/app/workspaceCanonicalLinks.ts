@@ -61,6 +61,8 @@ export function workspaceStateFromPath(
         ),
       );
     }
+    if (/^\/assistant\/approvals\/?$/.test(url.pathname))
+      return withWorkspaceFallback(parse("activity"));
     if (!/^\/assistant\/?$/.test(url.pathname))
       return withWorkspaceFallback(parse(path));
     search = url.searchParams;

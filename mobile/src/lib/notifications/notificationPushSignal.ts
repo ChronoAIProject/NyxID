@@ -62,11 +62,3 @@ export function notificationPushSignalFromResponse(
     notificationPushSignalFromData(trigger.remoteMessage?.data)
   );
 }
-
-/** True for a NyxBot notification push: the app routes its destination and
- * marks it read itself, so the generic link router must leave it alone. */
-export function isAssistantNotificationResponse(
-  response: ResponseLike | null,
-): boolean {
-  return !!notificationPushSignalFromResponse(response)?.notificationId;
-}

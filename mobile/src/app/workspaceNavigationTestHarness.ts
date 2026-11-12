@@ -58,6 +58,7 @@ export const settingsNames = [
   "UsageCredits",
   "NotificationSettings",
   "DisplaySettings",
+  "LanguageSettings",
   "VoiceSettings",
   "PrivacySettings",
   "ProfileEdit",
