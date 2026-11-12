@@ -2647,14 +2647,18 @@ async fn handle_tools_call(
                     state,
                     auth,
                     request,
-                    handle_tools_call_inner(
-                        state,
-                        auth,
-                        session_id,
-                        request,
-                        client_accepts_sse,
-                        billing_egress_permit,
-                    ),
+                    // Keep the large dispatch state out of the diagnostic and
+                    // task-local wrappers, including for ordinary non-Lark tools.
+                    box_tool_future(|| {
+                        handle_tools_call_inner(
+                            state,
+                            auth,
+                            session_id,
+                            request,
+                            client_accepts_sse,
+                            billing_egress_permit,
+                        )
+                    }),
                 ),
             )
             .await
@@ -12464,6 +12468,36 @@ mod decision_result_contract_tests {
                 .await
                 .unwrap(),
             axum::body::to_bytes(gated.into_body(), 4096).await.unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn tools_call_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            &'static McpAuthContext,
+            Option<&'static str>,
+            &'static JsonRpcRequest,
+            bool,
+            crate::services::billing::route_inventory::BillingEgressPermit,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn diagnostic_boundary_keeps_tools_call_future_small() {
+        // Measure the actual shared entry point without constructing a fixture
+        // or polling it. Unrelated native tools must not embed Lark's child state.
+        let size = tools_call_future_size(handle_tools_call);
+        eprintln!("shared tools/call future: {size} bytes");
+        assert!(
+            size < 64 * 1024,
+            "shared tools/call future grew to {size} bytes"
         );
     }
 }

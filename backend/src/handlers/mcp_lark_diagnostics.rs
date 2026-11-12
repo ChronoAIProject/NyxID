@@ -7,7 +7,8 @@ pub(super) async fn call(
     state: &AppState,
     auth: &McpAuthContext,
     request: &JsonRpcRequest,
-    work: impl std::future::Future<Output = Response>,
+    // Require the large child to be boxed before entering either await branch.
+    work: futures::future::BoxFuture<'_, Response>,
 ) -> Response {
     let params = request.params.as_ref();
     let name = params.and_then(|p| p["name"].as_str());
