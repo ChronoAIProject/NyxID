@@ -4655,15 +4655,24 @@ pub async fn delete_binding(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match crate::services::nyxbot_chat_settings_service::remove_binding(
-        &state.db,
-        &row,
-        &binding_id,
-    )
-    .await
+    match state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "binding_id": &binding_id,
+            "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
+            "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
+            "pending_agent_api_key_id": &row.pending_agent_api_key_id},
+            // Unbind is also used by rollback/consumer cleanup and precedes
+            // remote deletion. It is not authority to disconnect a live link
+            // or revoke keys. Preserve its binding so cold partitions/rebinds
+            // keep working if the gateway retains the record.
+            doc! {"$set": {"gateway_binding_unbound_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()}},
+        )
+        .await
     {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => problem(StatusCode::CONFLICT, "binding_conflict"),
+        Ok(updated) if updated.matched_count == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => problem(StatusCode::CONFLICT, "binding_conflict"),
         Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
 }
@@ -4741,6 +4750,17 @@ async fn put_conversation_inner(
     provider_refusal::binding(row.binding_id.as_deref() == Some(binding_id.as_str()));
     if row.binding_id.as_deref() != Some(binding_id.as_str()) || !valid_partition(&conversation_id)
     {
+        if row.binding_id.as_deref() != Some(binding_id.as_str())
+            && valid_partition(&conversation_id)
+        {
+            // The gateway is waiting on this PUT. Remote proof must not make
+            // a re-entrant request on that path or delay its unchanged 404.
+            tokio::spawn(releases::repair_binding_on_refusal(
+                state,
+                row,
+                "conversation_put",
+            ));
+        }
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
     }
     let now = bson::DateTime::now();

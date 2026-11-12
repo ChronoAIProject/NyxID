@@ -183,25 +183,6 @@ pub(crate) async fn update_as(
     .await
 }
 
-/// CMA detaches its provider binding while the channel and histories remain.
-pub(crate) async fn remove_binding(
-    db: &Database,
-    row: &NyxbotChannel,
-    binding: &str,
-) -> AppResult<bool> {
-    let context = (db.clone(), row.clone(), binding.to_owned());
-    super::transaction_service::run_db_only(db,&context,|tx,(db,row,binding)|Box::pin(async move {
-        let changed=db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {
-            "_id":&row.id,"binding_id":binding,"route_api_key_id":&row.route_api_key_id,
-            "transport":&row.transport,"status":&row.status,"agent_api_key_id":&row.agent_api_key_id,
-            "pending_agent_api_key_id":&row.pending_agent_api_key_id,
-        },doc! {"$inc":{"execution_policy_revision":1_i64},"$unset":{"binding_id":""},
-            "$set":{"gateway_no_progress":false,"updated_at":bson::DateTime::now()}}).session(&mut *tx).await?;
-        if changed.matched_count!=1 {return Ok(false)}
-        Ok(true)
-    })).await
-}
-
 /// Remove the provider's exact chat, its derived delivery state and feed rows.
 /// Deleting the exact thread serializes retirement with flagged reply settlement.
 /// Per-actor organization lanes share one public channel chat.

@@ -513,15 +513,6 @@ async fn stale_provider_binding_cannot_purge_current_notifications() {
         )
         .await
         .unwrap();
-    assert!(
-        !crate::services::nyxbot_chat_settings_service::remove_binding(
-            &state.db,
-            &row,
-            "bnd_chats"
-        )
-        .await
-        .unwrap()
-    );
     assert!(matches!(
         crate::services::nyxbot_chat_settings_service::remove_thread(&state.db, &row, PARTITION)
             .await,
