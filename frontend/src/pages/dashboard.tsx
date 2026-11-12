@@ -12,6 +12,7 @@ import { AgentPluginsSection } from "@/components/dashboard/agent-plugins-sectio
 import { HOSTED_MCP_URL } from "@/lib/agent-plugins";
 import { useRightPanel } from "@/components/layout/dashboard-layout";
 import { Skeleton } from "@/components/ui/skeleton";
+import { nodeStatusKey } from "@/lib/status-contract";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   ArrowRight,
@@ -53,7 +54,7 @@ export function DashboardPage() {
 
   const activeKeys = apiKeys?.filter((k) => k.is_active).length ?? 0;
   const serviceCount = services?.length ?? 0;
-  const onlineNodes = nodes?.filter((n) => n.status === "Online").length ?? 0;
+  const onlineNodes = nodes?.filter((n) => nodeStatusKey(n.status, n.is_connected) === "Online").length ?? 0;
   const totalNodes = nodes?.length ?? 0;
 
   const [aiDismissed, setAiDismissed] = useState(
@@ -198,7 +199,7 @@ export function DashboardPage() {
             label={translateUi("Nodes")}
             value={
               totalNodes > 0
-                ? `${String(onlineNodes)}/${String(totalNodes)} online`
+                ? translateUi("{{online}}/{{total}} online", { online: String(onlineNodes), total: String(totalNodes) })
                 : translateUi("No nodes")
             }
             loading={nodesLoading}

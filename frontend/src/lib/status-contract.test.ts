@@ -2,10 +2,23 @@ import { describe, expect, it } from "vitest";
 import {
   STATUS_REGISTRY,
   getStatusMeta,
+  nodeStatusKey,
   type StatusDomain,
 } from "./status-contract";
 
 describe("status-contract", () => {
+  it.each([
+    ["online", true, "Online"],
+    ["online", false, "Offline"],
+    ["offline", false, "Offline"],
+    ["draining", false, "Draining"],
+    ["draining", true, "Online"],
+  ] as const)("maps node %s with connection %s to registered status %s", (status, connected, expected) => {
+    const key = nodeStatusKey(status, connected);
+    expect(key).toBe(expected);
+    expect(getStatusMeta("node", key)?.label).toBe(expected);
+  });
+
   it("returns the right meta for known (domain, key) pairs", () => {
     expect(getStatusMeta("node", "Online")?.label).toBe("Online");
     expect(getStatusMeta("node", "Online")?.variant).toBe("success");
