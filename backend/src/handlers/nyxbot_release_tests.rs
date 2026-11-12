@@ -3353,8 +3353,8 @@ async fn stale_gateway_binding_repairs_null_and_wrong_rows_once_and_guest_can_re
         let (state, row, raw, reserved, server, upstream) =
             stale_gateway_fixture(&format!("binding_repair_{index}"), binding).await;
         let (first, second) = tokio::join!(
-            release::repair_binding_on_refusal(&state, &row, "conversation_put"),
-            release::repair_binding_on_refusal(&state, &row, "conversation_put"),
+            release::repair_binding_on_refusal(state.clone(), row.clone(), "conversation_put"),
+            release::repair_binding_on_refusal(state.clone(), row.clone(), "conversation_put"),
         );
         let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
@@ -3470,7 +3470,7 @@ async fn stale_gateway_binding_never_repairs_unproven_or_forever_refused_rows() 
         .mount(&server)
         .await;
     assert_eq!(
-        release::repair_binding_on_refusal(&state, &row, "test")
+        release::repair_binding_on_refusal(state.clone(), row.clone(), "test")
             .await
             .unwrap(),
         release::BindingRepairOutcome::Refused("remote_identity_mismatch")
@@ -3610,7 +3610,7 @@ async fn stale_gateway_binding_never_repairs_unproven_or_forever_refused_rows() 
             }
             _ => unreachable!(),
         }
-        let outcome = release::repair_binding_on_refusal(&state, &row, "test")
+        let outcome = release::repair_binding_on_refusal(state.clone(), row.clone(), "test")
             .await
             .unwrap();
         assert!(matches!(
@@ -3667,8 +3667,19 @@ async fn stale_gateway_binding_cold_guest_recovers_and_existing_owner_history_is
         let row = load_channel(&state, OWNER, &row.id).await.unwrap();
         // The established owner partition already exists, which is why the
         // production owner could get an answer while cold guest PUT failed.
-        state.db.collection::<NyxbotThread>(THREADS).update_one(doc! {"channel_id":&row.id,"partition":PARTITION},
-            doc! {"$setOnInsert":crate::services::nyxbot_chat_settings_service::placeholder(&row,Utc::now())}).upsert(true).await.unwrap();
+        // Match PUT's complete upsert, including the required updated_at.
+        let now = bson::DateTime::now();
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .update_one(
+                doc! {"channel_id":&row.id,"partition":PARTITION},
+                doc! {"$setOnInsert":crate::services::nyxbot_chat_settings_service::placeholder(&row,now),
+                    "$set":{"updated_at":now}},
+            )
+            .upsert(true)
+            .await
+            .unwrap();
         let owner_answer = body_text(
             respond(
                 &state,
@@ -3881,7 +3892,7 @@ async fn stale_gateway_binding_revocation_during_remote_proof_wins() {
             .mount(&server)
             .await;
         let (outcome, ()) = tokio::join!(
-            release::repair_binding_on_refusal(&state, &row, "conversation_put"),
+            release::repair_binding_on_refusal(state.clone(), row.clone(), "conversation_put"),
             async {
                 tokio::time::timeout(std::time::Duration::from_secs(5), read_started.notified())
                     .await
@@ -4071,7 +4082,7 @@ async fn stale_gateway_binding_requires_every_remote_identity_field() {
             .await
             .unwrap();
         assert_eq!(
-            release::repair_binding_on_refusal(&state, &row, "sweep")
+            release::repair_binding_on_refusal(state.clone(), row.clone(), "sweep")
                 .await
                 .unwrap(),
             release::BindingRepairOutcome::Refused("remote_identity_mismatch"),
@@ -4287,9 +4298,10 @@ async fn stale_gateway_binding_refused_waits_six_hours_deferred_waits_fifteen_mi
             .mount(&server)
             .await;
         let started = Utc::now();
-        let outcome = release::repair_binding_on_refusal(&state, &row, "conversation_put")
-            .await
-            .unwrap();
+        let outcome =
+            release::repair_binding_on_refusal(state.clone(), row.clone(), "conversation_put")
+                .await
+                .unwrap();
         assert_eq!(
             outcome,
             if status == 404 {
@@ -4337,7 +4349,7 @@ async fn stale_gateway_binding_refused_waits_six_hours_deferred_waits_fifteen_mi
             // Both triggers use the same filter, with no new GET or audit pair.
             release::repair_stale_bindings_sweep(&state).await.unwrap();
             assert_eq!(
-                release::repair_binding_on_refusal(&state, &row, "conversation_put")
+                release::repair_binding_on_refusal(state.clone(), row.clone(), "conversation_put")
                     .await
                     .unwrap(),
                 release::BindingRepairOutcome::Deferred("not_due")
@@ -4387,7 +4399,7 @@ async fn stale_gateway_binding_refused_waits_six_hours_deferred_waits_fifteen_mi
             .unwrap();
         release::repair_stale_bindings_sweep(&state).await.unwrap();
         assert_eq!(
-            release::repair_binding_on_refusal(&state, &row, "conversation_put")
+            release::repair_binding_on_refusal(state.clone(), row.clone(), "conversation_put")
                 .await
                 .unwrap(),
             release::BindingRepairOutcome::Deferred("not_due")

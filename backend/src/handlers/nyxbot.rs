@@ -4754,9 +4754,11 @@ async fn put_conversation_inner(
         {
             // The gateway is waiting on this PUT. Remote proof must not make
             // a re-entrant request on that path or delay its unchanged 404.
-            tokio::spawn(async move {
-                let _ = releases::repair_binding_on_refusal(&state, &row, "conversation_put").await;
-            });
+            tokio::spawn(releases::repair_binding_on_refusal(
+                state,
+                row,
+                "conversation_put",
+            ));
         }
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
     }

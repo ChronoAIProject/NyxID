@@ -805,9 +805,9 @@ fn repair_candidate(row: &NyxbotChannel) -> Option<String> {
 }
 
 async fn audit_binding_repair_event(
-    state: &AppState,
-    row: &NyxbotChannel,
-    event: &'static str,
+    state: AppState,
+    row: NyxbotChannel,
+    event: String,
     trigger: &'static str,
     reason: &'static str,
 ) {
@@ -846,11 +846,11 @@ fn binding_repair_due(now: chrono::DateTime<Utc>) -> Document {
 }
 
 async fn claim_binding_repair(
-    state: &AppState,
-    row: &NyxbotChannel,
+    state: AppState,
+    row: NyxbotChannel,
     trigger: &'static str,
 ) -> AppResult<Option<(NyxbotChannel, String, bson::DateTime)>> {
-    let Some(expected) = repair_candidate(row) else {
+    let Some(expected) = repair_candidate(&row) else {
         return Ok(None);
     };
     let now = bson::DateTime::now();
@@ -885,82 +885,125 @@ async fn claim_binding_repair(
     let mut session = db.client().start_session().await?;
     let claimed = session
         .start_transaction()
-        .and_run2(async move |session| {
-            let work: AppResult<_> = Box::pin(async {
-                let updated = db
-                    .collection::<NyxbotChannel>(CHANNELS)
-                    .find_one_and_update(filter.clone(), update.clone())
-                    .session(&mut *session)
-                    .await?;
-                let Some(claimed) = updated else {
-                    return Ok(None);
-                };
-                audit(
-                    &db,
-                    session,
-                    &claimed.user_id,
-                    "nyxbot_gateway_binding_repair_scheduled",
-                    json!({
-                        "channel_agent_id": claimed.id,
-                        "trigger": trigger,
-                        "mode": "in_place",
-                    }),
-                )
-                .await?;
-                Ok(Some((claimed, expected.clone(), now)))
-            })
-            .await;
-            transactions::transaction_result(work)
-        })
+        .and_run(
+            (db, filter, update, expected, now, trigger.to_owned()),
+            |session, context| {
+                let (db, filter, update, expected, now, trigger) = context.clone();
+                Box::pin(async move {
+                    let work: AppResult<_> = async {
+                        let updated = db
+                            .collection::<NyxbotChannel>(CHANNELS)
+                            .find_one_and_update(filter.clone(), update.clone())
+                            .session(&mut *session)
+                            .await?;
+                        let Some(claimed) = updated else {
+                            return Ok(None);
+                        };
+                        audit(
+                            &db,
+                            session,
+                            &claimed.user_id,
+                            "nyxbot_gateway_binding_repair_scheduled",
+                            json!({
+                                "channel_agent_id": claimed.id,
+                                "trigger": trigger,
+                                "mode": "in_place",
+                            }),
+                        )
+                        .await?;
+                        Ok(Some((claimed, expected.clone(), now)))
+                    }
+                    .await;
+                    transactions::transaction_result(work)
+                })
+            },
+        )
         .await
         .map_err(transactions::map_transaction_error)?;
     Ok(claimed)
 }
 
+async fn binding_repair_refused(
+    state: AppState,
+    row: NyxbotChannel,
+    checked: bson::DateTime,
+    trigger: &'static str,
+    reason: &'static str,
+) -> AppResult<BindingRepairOutcome> {
+    // Persist before reporting Refused. The claim fence prevents an old
+    // proof from extending a newer attempt's cooldown.
+    state.db.collection::<Document>(CHANNELS).update_one(
+        doc! {"_id": &row.id, "user_id": &row.user_id, "gateway_binding_repair_checked_at": checked},
+        doc! {"$set": {"gateway_binding_repair_retry_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(BINDING_REPAIR_REFUSED_HOURS))}},
+    ).await?;
+    audit_binding_repair_event(
+        state,
+        row,
+        "nyxbot_gateway_binding_repair_refused".to_owned(),
+        trigger,
+        reason,
+    )
+    .await;
+    Ok(BindingRepairOutcome::Refused(reason))
+}
+
+async fn binding_repair_deferred(
+    state: AppState,
+    row: NyxbotChannel,
+    trigger: &'static str,
+    reason: &'static str,
+) -> AppResult<BindingRepairOutcome> {
+    audit_binding_repair_event(
+        state,
+        row,
+        "nyxbot_gateway_binding_repair_deferred".to_owned(),
+        trigger,
+        reason,
+    )
+    .await;
+    Ok(BindingRepairOutcome::Deferred(reason))
+}
+
 async fn prove_and_repair_binding(
-    state: &AppState,
-    row: &NyxbotChannel,
-    expected: &str,
+    state: AppState,
+    row: NyxbotChannel,
+    expected: String,
     checked: bson::DateTime,
     trigger: &'static str,
 ) -> AppResult<BindingRepairOutcome> {
-    let refused = |reason| async move {
-        // Persist before reporting Refused. The claim fence prevents an old
-        // proof from extending a newer attempt's cooldown.
-        state.db.collection::<Document>(CHANNELS).update_one(
-            doc! {"_id": &row.id, "user_id": &row.user_id, "gateway_binding_repair_checked_at": checked},
-            doc! {"$set": {"gateway_binding_repair_retry_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(BINDING_REPAIR_REFUSED_HOURS))}},
-        ).await?;
-        audit_binding_repair_event(
-            state,
-            row,
-            "nyxbot_gateway_binding_repair_refused",
-            trigger,
-            reason,
-        )
-        .await;
-        Ok(BindingRepairOutcome::Refused(reason))
-    };
-    let deferred = |reason| async move {
-        audit_binding_repair_event(
-            state,
-            row,
-            "nyxbot_gateway_binding_repair_deferred",
-            trigger,
-            reason,
-        )
-        .await;
-        Ok(BindingRepairOutcome::Deferred(reason))
-    };
     if row.gateway_source.is_some() || row.bot_owner_id.is_some() {
-        return refused("authority_scope").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "authority_scope",
+        )
+        .await;
     }
     match super::platform_bot_authority::require_personal_routes(&state.db, &row.channel_bot_id)
         .await
     {
         Ok(()) => {}
-        Err(AppError::Forbidden(_)) => return refused("native_entry").await,
-        Err(_) => return deferred("authority_unavailable").await,
+        Err(AppError::Forbidden(_)) => {
+            return binding_repair_refused(
+                state.clone(),
+                row.clone(),
+                checked,
+                trigger,
+                "native_entry",
+            )
+            .await;
+        }
+        Err(_) => {
+            return binding_repair_deferred(
+                state.clone(),
+                row.clone(),
+                trigger,
+                "authority_unavailable",
+            )
+            .await;
+        }
     }
     if state
         .db
@@ -969,10 +1012,24 @@ async fn prove_and_repair_binding(
         .await?
         .is_none()
     {
-        return refused("bot_authority_changed").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "bot_authority_changed",
+        )
+        .await;
     }
     let Some(agent_key_id) = row.agent_api_key_id.as_deref() else {
-        return refused("provider_key_missing").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "provider_key_missing",
+        )
+        .await;
     };
     let owner = row.user_id.as_str();
     let keys = state.db.collection::<ApiKey>(KEYS);
@@ -980,28 +1037,63 @@ async fn prove_and_repair_binding(
         .find_one(doc! {"_id":agent_key_id,"user_id":owner,"is_active":true})
         .await?
     else {
-        return refused("provider_key_revoked").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "provider_key_revoked",
+        )
+        .await;
     };
     if agent_key
         .expires_at
         .is_some_and(|expires| expires <= Utc::now())
     {
-        return refused("provider_key_expired").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "provider_key_expired",
+        )
+        .await;
     }
     let Some(route_key) = keys
         .find_one(doc! {"_id":&row.route_api_key_id,"user_id":owner,"is_active":true})
         .await?
     else {
-        return refused("route_key_revoked").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "route_key_revoked",
+        )
+        .await;
     };
     if route_key
         .expires_at
         .is_some_and(|expires| expires <= Utc::now())
     {
-        return refused("route_key_expired").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "route_key_expired",
+        )
+        .await;
     }
     let Some(route_id) = row.route_id.as_deref() else {
-        return refused("route_missing").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "route_missing",
+        )
+        .await;
     };
     if state
         .db
@@ -1017,7 +1109,14 @@ async fn prove_and_repair_binding(
         .await?
         .is_none()
     {
-        return refused("route_changed").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "route_changed",
+        )
+        .await;
     }
     if state
         .db
@@ -1026,48 +1125,161 @@ async fn prove_and_repair_binding(
         .await?
         .is_none()
     {
-        return refused("owner_revoked").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "owner_revoked",
+        )
+        .await;
     }
-    let mut release = new_release(state, row, row.gateway_record_id.clone()).await?;
+    let mut release = new_release(&state, &row, row.gateway_record_id.clone()).await?;
     release.gateway_channel_id = row.gateway_channel_id.clone();
     release.binding_id = expected.to_owned();
     release.agent_api_key_id = agent_key.id.clone();
     release.route_api_key_id = route_key.id.clone();
     release.expected_version = row.gateway_version;
-    if !destination(state, &release).await? {
-        return refused("gateway_destination_changed").await;
+    if !destination(&state, &release).await? {
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "gateway_destination_changed",
+        )
+        .await;
     }
     let Some(record) = release.record_id.as_deref() else {
-        return refused("record_missing").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "record_missing",
+        )
+        .await;
     };
     let bearer =
-        crate::services::nyxbot_gateway_service::creator_bearer(state, &release.owner_user_id)?;
-    let response = match crate::services::nyxbot_gateway_service::gateway_call_at_base(
-        &release.gateway_base_url,
-        reqwest::Method::GET,
-        &format!("/channel-records/{}", encoded(record)),
-        &bearer,
-        None,
-        None,
-    )
-    .await
-    {
+        crate::services::nyxbot_gateway_service::creator_bearer(&state, &release.owner_user_id)?;
+    let path = format!("/channel-records/{}", encoded(record));
+    // Erase the borrowed HTTP helper's future here, before composing it into
+    // the owned task; this keeps Send checking local to these concrete borrows.
+    let request: futures::future::BoxFuture<'_, AppResult<gateway::GatewayResponse>> =
+        Box::pin(gateway::gateway_call_at_base(
+            &release.gateway_base_url,
+            reqwest::Method::GET,
+            &path,
+            &bearer,
+            None,
+            None,
+        ));
+    let response = match request.await {
         Ok(response) => response,
-        Err(_) => return deferred("gateway_unavailable").await,
+        Err(_) => {
+            return binding_repair_deferred(
+                state.clone(),
+                row.clone(),
+                trigger,
+                "gateway_unavailable",
+            )
+            .await;
+        }
     };
     let matching = match response.status {
         200 => matches!(
             remote_identity(&release, &response.body),
             Observation::Matching { .. }
         ),
-        401 | 403 => return refused("gateway_authority_refused").await,
-        404 => return refused("remote_record_missing").await,
+        401 | 403 => {
+            return binding_repair_refused(
+                state.clone(),
+                row.clone(),
+                checked,
+                trigger,
+                "gateway_authority_refused",
+            )
+            .await;
+        }
+        404 => {
+            return binding_repair_refused(
+                state.clone(),
+                row.clone(),
+                checked,
+                trigger,
+                "remote_record_missing",
+            )
+            .await;
+        }
         400..=499 => false,
-        _ => return deferred("gateway_unavailable").await,
+        _ => {
+            return binding_repair_deferred(
+                state.clone(),
+                row.clone(),
+                trigger,
+                "gateway_unavailable",
+            )
+            .await;
+        }
     };
     if !matching {
-        return refused("remote_identity_mismatch").await;
+        return binding_repair_refused(
+            state.clone(),
+            row.clone(),
+            checked,
+            trigger,
+            "remote_identity_mismatch",
+        )
+        .await;
     }
+    let applied =
+        apply_binding_repair(state.clone(), row.clone(), expected, checked, trigger).await;
+    match applied {
+        Ok(()) => {}
+        Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
+            return binding_repair_refused(
+                state.clone(),
+                row.clone(),
+                checked,
+                trigger,
+                "concurrent_change",
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(BindingRepairOutcome::Repaired)
+}
+
+/// Owned and explicitly Send: both detached provider work and maintenance use
+/// this boundary without carrying caller borrows through Mongo transactions.
+pub(crate) fn repair_binding_on_refusal(
+    state: AppState,
+    row: NyxbotChannel,
+    trigger: &'static str,
+) -> futures::future::BoxFuture<'static, AppResult<BindingRepairOutcome>> {
+    Box::pin(async move {
+        let Some((claimed, expected, checked)) =
+            claim_binding_repair(state.clone(), row, trigger).await?
+        else {
+            return Ok(BindingRepairOutcome::Deferred("not_due"));
+        };
+        match prove_and_repair_binding(state.clone(), claimed.clone(), expected, checked, trigger)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(_) => binding_repair_deferred(state, claimed, trigger, "repair_unavailable").await,
+        }
+    })
+}
+
+async fn apply_binding_repair(
+    state: AppState,
+    row: NyxbotChannel,
+    expected: String,
+    checked: bson::DateTime,
+    trigger: &'static str,
+) -> AppResult<()> {
     let old_binding = row
         .binding_id
         .as_deref()
@@ -1076,16 +1288,16 @@ async fn prove_and_repair_binding(
     // Recheck and write-fence local authority after the remote read. Revoking
     // a key, converting the bot or replacing the link must win over stale proof.
     let db = state.db.clone();
-    let row = row.clone();
-    let expected = expected.to_owned();
     let mut session = db.client().start_session().await?;
-    let applied = session.start_transaction().and_run2(async move |session| {
-        let work: AppResult<()> = Box::pin(async {
+    session.start_transaction().and_run((db, row, expected, old_binding, checked, trigger.to_owned()), |session, context| {
+        let (db, row, expected, old_binding, checked, trigger) = context.clone();
+        Box::pin(async move {
+        let work: AppResult<()> = async {
             super::platform_bot_authority::fence_personal_routes(&db, &row.channel_bot_id, &row.user_id, session).await?;
             if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
                 .find_one(doc! {"_id":&row.channel_bot_id,"user_id":&row.user_id,"is_active":true})
                 .session(&mut *session).await?.is_none() { return Err(conflict()); }
-            for key in [row.agent_api_key_id.as_deref().unwrap_or_default(), row.route_api_key_id.as_str()] {
+            for key in [row.agent_api_key_id.clone().unwrap_or_default(), row.route_api_key_id.clone()] {
                 let live = db.collection::<Document>(KEYS).update_one(
                     doc! {"_id":key,"user_id":&row.user_id,"is_active":true,
                         "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
@@ -1124,42 +1336,10 @@ async fn prove_and_repair_binding(
             audit(&db, session, &row.user_id, "nyxbot_gateway_binding_repaired",
                 json!({"channel_agent_id":row.id,"trigger":trigger,"mode":"in_place","reason":"remote_identity_verified"})).await?;
             Ok(())
-        }).await;
+        }.await;
         transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error);
-    match applied {
-        Ok(()) => {}
-        Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
-            return refused("concurrent_change").await;
-        }
-        Err(error) => return Err(error),
-    }
-    Ok(BindingRepairOutcome::Repaired)
-}
-
-pub(crate) async fn repair_binding_on_refusal(
-    state: &AppState,
-    row: &NyxbotChannel,
-    trigger: &'static str,
-) -> AppResult<BindingRepairOutcome> {
-    let Some((claimed, expected, checked)) = claim_binding_repair(state, row, trigger).await?
-    else {
-        return Ok(BindingRepairOutcome::Deferred("not_due"));
-    };
-    match prove_and_repair_binding(state, &claimed, &expected, checked, trigger).await {
-        Ok(outcome) => Ok(outcome),
-        Err(_) => {
-            audit_binding_repair_event(
-                state,
-                &claimed,
-                "nyxbot_gateway_binding_repair_deferred",
-                trigger,
-                "repair_unavailable",
-            )
-            .await;
-            Ok(BindingRepairOutcome::Deferred("repair_unavailable"))
-        }
-    }
+        })
+    }).await.map_err(transactions::map_transaction_error)
 }
 
 /// Bounded legacy repair. Only rows with a deterministic identity are sent to
@@ -1215,7 +1395,7 @@ pub(crate) async fn repair_stale_bindings_sweep(state: &AppState) -> AppResult<(
                 continue;
             }
         };
-        let _ = repair_binding_on_refusal(state, &row, "sweep").await;
+        let _ = repair_binding_on_refusal(state.clone(), row, "sweep").await;
     }
     if malformed {
         tracing::warn!(
