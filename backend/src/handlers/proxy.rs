@@ -3469,6 +3469,11 @@ async fn resolve_proxy_execution_inner(
         )
         .await?;
 
+        if crate::services::credential_verification::checking() && node_route.is_some() {
+            return Err(AppError::Conflict(
+                "Credential checks are unavailable for node routes".into(),
+            ));
+        }
         // Hard-fail when the UserService pins a node (Route via Node) but
         // `build_pre_resolved_node_route` could not resolve a dispatchable node
         // and no fallback binding exists. Falling through to direct routing
@@ -4353,7 +4358,14 @@ async fn execute_resolved_proxy_inner<'a>(
             .assistant_chat
             .as_deref()
             .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
-    let platform_metric = platform_metric_for_target(&target, is_ws_candidate || shared_connect);
+    // Only the server-authored, exact-connection check can select this lane;
+    // no caller header or body can opt ordinary traffic out of billing.
+    let credential_check = crate::services::credential_verification::checking();
+    let platform_metric = if credential_check {
+        crate::models::service_billing::BillingMetric::Requests
+    } else {
+        platform_metric_for_target(&target, is_ws_candidate || shared_connect)
+    };
     let node_intent = match &node_route {
         Some(route) if !route.fallback_node_ids.is_empty() => {
             crate::services::billing::NodeIntent::NodeWithFallback
@@ -4378,7 +4390,14 @@ async fn execute_resolved_proxy_inner<'a>(
         target.auth_method.clone(),
         credential_class,
         platform_metric,
-        target.service.billing.as_ref(),
+        // Verification records request metadata without catalog prices,
+        // components, operation prices or resale funding. Ordinary calls keep
+        // their original billing policy, including on this same connection.
+        target
+            .service
+            .billing
+            .as_ref()
+            .filter(|_| !credential_check),
         state.billing.resale_enabled(),
     );
     if nyxagent_admission
@@ -4950,6 +4969,14 @@ async fn execute_resolved_proxy_inner<'a>(
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(_) if durable_candidate => {}
+        approval_service::ApprovalOutcome::NeedsApproval(_)
+            if crate::services::credential_verification::checking() =>
+        {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Credential check skipped: approval required".to_string(),
+            ));
+        }
         // A draft's pre-review format check never raises an approval prompt.
         approval_service::ApprovalOutcome::NeedsApproval(_) if ornn_preflight => {
             request_audit.denied(403);

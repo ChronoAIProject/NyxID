@@ -33,6 +33,7 @@ export type StatusDomain =
   | "node"
   | "channel_bot"
   | "provider"
+  | "credential_verification"
   | "credential"
   | "user_service_credential";
 
@@ -141,6 +142,24 @@ export const STATUS_REGISTRY: StatusRegistry = {
       tooltip:
         "NyxID could not refresh this token automatically. Reconnect to restore access.",
       remediation: { label: "Reconnect provider", href: "/providers" },
+    },
+  },
+  credential_verification: {
+    not_verified: {
+      label: "Saved, not verified", variant: "secondary",
+      tooltip: "NyxID saved this credential. Provider authentication has not been verified.",
+    },
+    verified: {
+      label: "Verified", variant: "success",
+      tooltip: "The provider accepted this credential at the last check. Other operations may require more permissions.",
+    },
+    rejected: {
+      label: "Rejected by provider", variant: "destructive",
+      tooltip: "The provider rejected authentication. Check or replace the credential, then check again.",
+    },
+    forbidden: {
+      label: "Rejected by provider", variant: "destructive",
+      tooltip: "The provider refused this check. Review the credential's permissions; this does not necessarily mean the key is invalid.",
     },
   },
   credential: {

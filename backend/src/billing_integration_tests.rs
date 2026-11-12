@@ -723,6 +723,9 @@ async fn run_billing_route_coverage_smoke() {
     .await;
     exercised_routes.insert("/api/v1/providers/codex-connection/verify");
 
+    Box::pin(exercise_credential_verification_route(&state, &app)).await;
+    exercised_routes.insert("/api/v1/keys/{key_id}/verify");
+
     let mcp = insert_route_service(
         &db,
         &owner_id,
@@ -1635,6 +1638,154 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
         .await
         .expect("call mounted Lago webhook with invalid signature");
     assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn exercise_credential_verification_route(state: &crate::AppState, app: &Router) {
+    use crate::models::credential_verification::CredentialVerificationCheck;
+    use crate::models::credits::Credits;
+    use crate::models::service_endpoint::EndpointRisk;
+    use futures::TryStreamExt;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let db = &state.db;
+    let owner = insert_owner(db).await;
+    let token = route_access_token(state, &owner);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header(
+            "authorization",
+            "Bearer verification-billing-fixture",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":[]})))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "billing-verification-fixture".into();
+    catalog.base_url = server.uri();
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
+    catalog.requires_user_credential = true;
+    catalog.credential_verification = Some(CredentialVerificationCheck {
+        operation: "models_list".into(),
+        query: Default::default(),
+    });
+    catalog.billing = Some(ServiceBilling {
+        platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
+        platform_metric: Some(BillingMetric::Requests),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let mut operation =
+        crate::test_utils::test_service_endpoint(&catalog.id, "models_list", "GET", "/models");
+    operation.risk = Some(EndpointRisk::Read);
+    db.collection("service_endpoints")
+        .insert_one(operation)
+        .await
+        .unwrap();
+
+    // Saving and explicitly checking both cross the mounted routes and normal
+    // proxy transport. Neither is a purchased request even on a priced service.
+    let saved = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            "/api/v1/keys",
+            &token,
+            Body::from(
+                serde_json::json!({
+                    "service_slug": catalog.slug,
+                    "label": "Billing verification fixture",
+                    "credential": "verification-billing-fixture",
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(saved["credential_verification"]["state"], "verified");
+    let id = saved["id"].as_str().unwrap();
+    // Advance the durable attempt fence without sleeping ten seconds.
+    db.collection::<bson::Document>(USER_SERVICES).update_one(doc! {"_id":id},
+        doc! {"$set":{"credential_verification.started_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(11))}})
+        .await.unwrap();
+    let checked = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            &format!("/api/v1/keys/{id}/verify"),
+            &token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    let checked: serde_json::Value = serde_json::from_slice(&checked).unwrap();
+    assert_eq!(checked["state"], "verified");
+    let slug = saved["slug"].as_str().unwrap();
+    assert_route_settled_count(db, slug, BillingMetric::Requests, 2).await;
+    let rows: Vec<UsageMeterRow> = db
+        .collection(USAGE_METER)
+        .find(doc! {"billing_owner_id":&owner})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row.metric, BillingMetric::Requests);
+        assert_eq!(row.quantity, Some(1));
+        assert_eq!(row.reserved_credits, Credits::ZERO);
+        assert!(row.wallet_id.is_none());
+        assert!(
+            row.funding.is_none(),
+            "checks cannot consume wallets, grants or allowances"
+        );
+    }
+    assert_eq!(
+        db.collection::<bson::Document>(BILLING_WALLET)
+            .count_documents(doc! {"owner_id":&owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.collection::<bson::Document>("billing_ledger")
+            .count_documents(doc! {"owner_id":&owner})
+            .await
+            .unwrap(),
+        0
+    );
+
+    // The internal check context must not exempt an ordinary request through
+    // the very same connection. This control would fail if pricing were off.
+    call_mounted_route(
+        app,
+        route_request(
+            Method::GET,
+            &format!("/api/v1/proxy/{}/models?_nyxid_via={id}", catalog.id),
+            &token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    wait_for_charged_usage(
+        db,
+        doc! {"billing_owner_id":&owner,"wallet_id":{"$type":"string"}},
+        1,
+    )
+    .await;
+    server.verify().await;
 }
 
 async fn exercise_codex_verification_route(

@@ -77,6 +77,7 @@ fn operational(entity: &str, key: &str) -> bool {
             | "created_at"
             | "updated_at"
             | "state_version"
+            | "credential_verification"
             | "created_by"
             | "last_change"
             | "last_used_at"

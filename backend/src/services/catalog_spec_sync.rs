@@ -80,6 +80,7 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
             super::audit_service::audit_chain_hmac_key(),
         )
         .await?;
+        super::credential_verification::seed_declaration(db, &service).await?;
         tracing::debug!(
             slug,
             service_id = %service.id,

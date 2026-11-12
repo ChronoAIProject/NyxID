@@ -1,3 +1,4 @@
+import { credentialVerificationSchema } from "./credential-verification";
 import { z } from "zod";
 
 export const connectLinkStatusSchema = z.enum([
@@ -72,6 +73,7 @@ export const connectOAuthFormSchema = z.object({
 });
 
 export const completeConnectLinkResponseSchema = z.object({
+  credential_verification: credentialVerificationSchema.nullish(),
   id: z.string().uuid(),
   status: z.enum(["completed", "oauth_required", "device_code_required"]),
   service_slug: z.string().min(1),

@@ -479,3 +479,15 @@ it("hides credential switching and completes the stored assistant personal inten
   expect(screen.queryByText("Use platform key")).not.toBeInTheDocument();
   expect(screen.getByText(/fixed/i)).toBeVisible();
 });
+
+it("a saved personal API key is not presented as Connected", async () => {
+  mocks.available = false;
+  mocks.complete.mockResolvedValue({ status: "completed", credential_verification: { state: "rejected", reason_code: "provider_forbidden", can_check: true } });
+  render(<ConnectLinkContent token="hosted-token" embedded redirectOnTerminal={false} />);
+  await userEvent.type(screen.getByLabelText("Authorization"), "fixture-key");
+  await userEvent.click(screen.getByRole("button", { name: "Approve & connect" }));
+  expect(await screen.findByRole("heading", { name: "xAI saved" })).toBeInTheDocument();
+  expect(screen.getByText("Rejected by provider")).toBeInTheDocument();
+  expect(screen.getByText(/does not necessarily mean the key is invalid/)).toBeInTheDocument();
+  expect(screen.queryByText("xAI connected")).toBeNull();
+});
