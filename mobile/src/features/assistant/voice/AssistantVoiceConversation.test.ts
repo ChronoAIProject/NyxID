@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "../assistantHookTestHarness";
+import { voiceSettingsView } from "../../account/voiceSettingsModel";
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
 import type { VoiceStartRecovery } from "./voiceStartError";
 import type {
@@ -645,6 +646,37 @@ test("first-use OpenAI defaults to automatic and a platform default without repl
     "push_to_talk",
   );
   ptt.harness.unmount();
+});
+
+test("account Settings and actual call entry choose identical first-use preferences", () => {
+  const grok: VoiceOption = {
+    ...source,
+    voice: { ...source.voice, protocol: "xai_realtime" },
+  };
+  for (const selected of [source, grok]) {
+    const options: VoiceOption[] = [
+      {
+        ...selected,
+        default_model: false,
+        key_source: "own",
+        connection_id: sessionId,
+      },
+      selected,
+    ];
+    const settings = voiceSettingsView(options, null);
+    const call = setup({ options, saved: null });
+    assert.ok(settings);
+    assert.equal(call.starts().length, 1);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(call.starts()[0]?.[1])),
+      settings.preferences,
+    );
+    assert.equal(
+      settings.preferences.input_mode,
+      selected.voice.protocol === "xai_realtime" ? "push_to_talk" : "automatic",
+    );
+    call.harness.unmount();
+  }
 });
 
 test("a saved own source wins over an available platform source", () => {

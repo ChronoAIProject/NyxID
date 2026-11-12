@@ -37,6 +37,7 @@ import { VoiceMediaBridge } from "./VoiceMediaBridge";
 import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import {
   chooseVoiceOption,
+  resolveVoicePreferences,
   voiceElapsed,
   voiceOptionKey,
   voiceTariff,
@@ -227,11 +228,14 @@ function VoiceConversation({
       : undefined;
   const option = selectionReady ? cachedOption : undefined;
   const isGrok = option?.voice.protocol === "xai_realtime";
-  const nextMode = isGrok
-    ? "push_to_talk"
-    : (modeChoice ?? saved?.input_mode ?? "automatic");
-  const nextVoice =
-    voiceChoice ?? saved?.voice ?? option?.voice.voices[0]?.id ?? null;
+  const nextPreferences = option
+    ? resolveVoicePreferences(option, saved, {
+        input_mode: modeChoice,
+        voice: voiceChoice,
+      })
+    : undefined;
+  const nextMode = nextPreferences?.input_mode ?? "automatic";
+  const nextVoice = nextPreferences?.voice ?? null;
   const missingVoice =
     !!option &&
     !!nextVoice &&
@@ -683,16 +687,10 @@ function VoiceConversation({
       (voiceId && !option.voice.voices.some((row) => row.id === voiceId))
     )
       return;
-    return {
-      service_id: option.service_id,
-      connection_id: option.connection_id,
-      key_source: option.key_source,
-      model: option.model,
+    return resolveVoicePreferences(option, saved, {
       voice: voiceId,
-      input_mode: isGrok ? "push_to_talk" : mode,
-      language: saved?.language ?? null,
-      notify_on_completion: saved?.notify_on_completion ?? false,
-    };
+      input_mode: mode,
+    });
   }
   async function start() {
     const chosen = preferences(nextMode);
