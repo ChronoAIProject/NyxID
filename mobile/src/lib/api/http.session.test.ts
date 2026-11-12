@@ -5,8 +5,11 @@ import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import { createAssistantVoiceApi } from "./assistantVoiceTransport";
 
-function setup() {
+function setup(input?: { status: number; body: string; network?: boolean } | ((url: string, init?: RequestInit) => Promise<Response>)) {
+  const respond = typeof input === 'function' ? input : undefined;
+  const reply = typeof input === 'object' ? input : undefined;
   let generation = 1;
   let invalidations = 0;
   let sends = 0;
@@ -58,14 +61,18 @@ function setup() {
         name in mocks ? mocks[name] : localRequire(name),
       process: { env: {} },
       __DEV__: false,
-      fetch: async () => {
+      Headers,
+      fetch: async (url: string, init?: RequestInit) => {
         sends++;
+        if (respond) return respond(url, init);
+        if (reply?.network) throw new TypeError("Network request failed: private URL");
         return {
-          status: 401,
-          ok: false,
+          headers: new Headers({ "x-request-id": "request-2275", "X-NyxID-Trace-Id": "trace-2275" }),
+          status: reply?.status ?? 401,
+          ok: reply ? reply.status >= 200 && reply.status < 300 : false,
           text: async () => {
             afterRead();
-            return '{"error":"invalid_mfa_code","message":"Invalid code"}';
+            return reply?.body ?? '{"error":"invalid_mfa_code","message":"Invalid code"}';
           },
         };
       },
@@ -151,5 +158,119 @@ test("JSON authority guard cancels queued writes after the screen leaves and ret
   release();
   await assert.rejects(pending, { name: "AbortError" });
   assert.equal(env.sends(), 0, "the password body must never reach fetch");
+  assert.equal(env.invalidations(), 0);
+});
+
+for (const [status, body] of [
+  [404, null],
+  [405, "Method Not Allowed: synthetic upstream diagnostic"],
+  [404, "<html>synthetic proxy diagnostic</html>"],
+] as const) {
+  test(`raw HTTP ${status} keeps status and sanitizes ${body ? "non-JSON" : "empty"} failures`, async () => {
+    const env = setup(async () => new Response(body, { status }));
+    await assert.rejects(
+      env.request("/optional-route", {}),
+      (cause: unknown) => {
+        const error = cause as {
+          name: string;
+          statusCode: number;
+          errorKey: string;
+          errorCode: number;
+          message: string;
+        };
+        assert.equal(error.name, "ApiError");
+        assert.equal(error.statusCode, status);
+        assert.equal(error.errorKey, "invalid_error_response");
+        assert.equal(error.errorCode, 0);
+        assert.equal(error.message, "NyxID couldn't complete this request. Please try again.");
+        assert.doesNotMatch(error.message, /synthetic|html|upstream/);
+        return true;
+      },
+    );
+    assert.equal(env.sends(), 1);
+    assert.equal(env.invalidations(), 0);
+  });
+
+  test(`raw HTTP ${status} from an undeployed account route reaches bounded voice fallback`, async () => {
+    const thread = `nyxa-${"a".repeat(32)}`;
+    const paths: string[] = [];
+    const env = setup(async (url, init) => {
+      const path =
+        new URL(url).pathname.replace("/api/v1", "") + new URL(url).search;
+      paths.push(path);
+      assert.equal(init?.method, "GET");
+      if (path === "/assistant/nyxagent/voice/active")
+        return new Response(body, { status });
+      if (path.endsWith("/voice-sessions/active"))
+        return Response.json({ session: null });
+      assert.equal(path, "/assistant/nyxagent/conversations?limit=10");
+      return Response.json({ conversations: [], next_cursor: null });
+    });
+    const api = createAssistantVoiceApi(
+      (path, options) => env.request(path, { ...options }),
+      "https://nyx.example",
+    );
+    assert.deepEqual(await api.accountActive(thread), {
+      session: null,
+      conversation_id: null,
+    });
+    assert.deepEqual(paths, [
+      "/assistant/nyxagent/voice/active",
+      `/assistant/nyxagent/conversations/${thread}/voice-sessions/active`,
+      "/assistant/nyxagent/conversations?limit=10",
+    ]);
+    assert.equal(env.sends(), 3);
+    assert.equal(env.invalidations(), 0);
+  });
+}
+
+for (const status of [401, 403, 503]) {
+  test(`raw HTTP ${status} must not trigger account voice fallback`, async () => {
+    const paths: string[] = [];
+    const env = setup(async (url) => {
+      paths.push(new URL(url).pathname);
+      return new Response(null, { status });
+    });
+    const api = createAssistantVoiceApi(
+      (path, options) => env.request(path, { ...options }),
+      "https://nyx.example",
+    );
+    await assert.rejects(
+      api.accountActive(`nyxa-${"a".repeat(32)}`),
+      (error: unknown) =>
+        (error as { statusCode: number }).statusCode === status,
+    );
+    assert.deepEqual(paths, ["/api/v1/assistant/nyxagent/voice/active"]);
+    assert.equal(env.invalidations(), status === 401 ? 1 : 0);
+  });
+}
+for (const [status, body] of [[503, "<html>nginx</html>"], [502, "private upstream"], [504, ""], [503, '{"error":']] as const) {
+  test(`real JSON client sanitizes HTTP ${status} and preserves correlation`, async () => {
+    const env = setup({ status, body });
+    await assert.rejects(env.request("/assistant/nyxagent/agents", {}), (error: any) => {
+      assert.equal(error.message, "NyxID is temporarily unavailable. Try again in a moment.");
+      assert.equal(error.statusCode, status);
+      assert.equal(error.requestId, "request-2275");
+      assert.equal(error.traceId, "trace-2275");
+      return true;
+    });
+    assert.equal(env.sends(), 1);
+    assert.equal(env.invalidations(), 0);
+  });
+}
+test("real JSON client maps network failure without retrying a send", async () => {
+  const env = setup({ status: 0, body: "", network: true });
+  await assert.rejects(env.request("/assistant/nyxagent/turns", { method: "POST", body: {} }),
+    /Couldn't reach NyxID. Check your connection and try again./);
+  assert.equal(env.sends(), 1);
+});
+
+test("malformed successful JSON is safe and still honors a replacement session", async () => {
+  const reply = { status: 200, body: "<html>private proxy page</html>" };
+  await assert.rejects(setup(reply).request("/users/me", {}),
+    /NyxID couldn't complete this request. Please try again./);
+  const env = setup(reply);
+  env.switchDuringRead();
+  await assert.rejects(env.request("/users/me", {}), /auth_session_changed/);
   assert.equal(env.invalidations(), 0);
 });

@@ -76,7 +76,13 @@ pub(crate) async fn resume_turn(
         return Ok(None);
     }
     let mut notes = Vec::new();
+    let mut reviews = presentation::ReviewNotes::default();
+    let mut seen = std::collections::HashSet::new();
     for id in ids {
+        // Replayed wake IDs are the same receipt, never another operation.
+        if !seen.insert(id) {
+            continue;
+        }
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
@@ -93,7 +99,7 @@ pub(crate) async fn resume_turn(
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
-            notes.push("The execution permission was not approved. Nothing was sent.".into());
+            reviews.push(&request, p);
             continue;
         }
         if p.state == "completed" {
@@ -295,6 +301,7 @@ pub(crate) async fn resume_turn(
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
         notes.push(text);
     }
+    notes.extend(reviews.render());
     Ok(Some(notes.join("\n\n")))
 }
 /// Called only after first-party-human ownership checks. Public projections

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AppState, Linking } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import {
   ExpoSpeechRecognitionModule as Recognizer,
@@ -11,13 +11,9 @@ import { volumeLevel } from "./voice/dictationLevel";
 import { dictationLocale } from "./voice/dictationLocale";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
+import { claimVoiceAudioSession } from "./voice/audioSessionOwnership";
 
-type Phase =
-  | "idle"
-  | "permission"
-  | "connecting"
-  | "listening"
-  | "stopping";
+type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 
 const NO_SPEECH = "No speech was detected. Try again.";
 const DENIED =
@@ -59,11 +55,26 @@ function dictationError(code: ExpoSpeechRecognitionErrorCode) {
  * close it.
  */
 let releasing: Promise<void> | undefined;
-function release() {
+type AudioOwner = ReturnType<typeof claimVoiceAudioSession>;
+function deactivate(owner: AudioOwner) {
+  owner.release(() => {
+    if (Platform.OS === "ios") {
+      try {
+        Recognizer.setAudioSessionActiveIOS(false, {
+          notifyOthersOnDeactivation: true,
+        });
+      } catch {
+        // The native session may already have been released by the OS.
+      }
+    }
+  });
+}
+function release(owner: AudioOwner) {
   const done = new Promise<void>((resolve) => {
     const finish = () => {
       subscription.remove();
       clearTimeout(timer);
+      deactivate(owner);
       if (releasing === done) releasing = undefined;
       resolve();
     };
@@ -117,17 +128,23 @@ function levelSource() {
 /**
  * Composer dictation on Apple's speech recognizer (on-device when the iPhone
  * supports it). The words appear in the composer as they are recognized and
- * join the draft when recording finishes; nothing reaches NyxID until the
- * person sends the message themselves.
+ * join the draft when recording finishes. Crew voice instead opts into native
+ * utterance boundaries and sends successful final results through its sender.
  */
 export function useComposerDictation({
   scope,
   enabled,
   onInsert,
+  onSilence,
+  continuous = true,
 }: {
   scope: string;
   enabled: boolean;
   onInsert: (text: string) => void;
+  /** Automatic utterance users can pace retries using native session duration. */
+  onSilence?: (durationMs: number) => void;
+  /** Crew voice ends each utterance at native silence detection. */
+  continuous?: boolean;
 }) {
   const focused = useIsFocused();
   const { sheetOpen } = useWorkspaceAccessibility();
@@ -138,8 +155,15 @@ export function useComposerDictation({
   const [error, setError] = useState<string>();
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [levels] = useState(levelSource);
-  const current = useRef({ scope, epoch, enabled, focused, onInsert });
-  current.current = { scope, epoch, enabled, focused, onInsert };
+  const current = useRef({
+    scope,
+    epoch,
+    enabled,
+    focused,
+    onInsert,
+    onSilence,
+  });
+  current.current = { scope, epoch, enabled, focused, onInsert, onSilence };
   const operation = useRef<{ cancel(): void; stop(): void } | undefined>(
     undefined,
   );
@@ -177,11 +201,15 @@ export function useComposerDictation({
     let permission = true;
     /** Recognition was started and has not reported `end`: the mic may be on. */
     let native = false;
+    let audioOwner: AudioOwner | undefined;
+    // One utterance keeps the sender/routing that was visible at capture entry.
+    const insert = current.current.onInsert;
     let listening = false;
     let stopping = false;
     let finalText = "";
     let interimText = "";
     let failure: string | undefined;
+    let nativeStartedAt = 0;
     let subscriptions: { remove(): void }[] = [];
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
@@ -205,7 +233,7 @@ export function useComposerDictation({
       detach();
       if (native) {
         native = false;
-        release();
+        release(audioOwner!);
       }
     };
     /**
@@ -218,6 +246,19 @@ export function useComposerDictation({
       const text = spoken();
       setCaption({ final: "", interim: "" });
       setPhase("idle");
+      // Draft dictation can preserve an interrupted tail for review. Crew
+      // speech dispatches automatically, so only a successful native final
+      // result may cross its sender boundary.
+      if (!continuous && (failure || interimText.trim() || !finalText.trim())) {
+        const silence = !text && (!failure || failure === NO_SPEECH);
+        setError(
+          silence
+            ? undefined
+            : (failure ?? "Speech wasn't finalized. Please try again."),
+        );
+        if (silence) current.current.onSilence?.(Date.now() - nativeStartedAt);
+        return;
+      }
       if (!text) {
         setError((previous) => previous ?? failure ?? NO_SPEECH);
         return;
@@ -229,7 +270,7 @@ export function useComposerDictation({
         current.current.enabled &&
         current.current.focused
       )
-        current.current.onInsert(text);
+        (continuous ? current.current.onInsert : insert)(text);
     };
     const attempt = {
       cancel,
@@ -248,7 +289,7 @@ export function useComposerDictation({
         stopTimer = setTimeout(() => {
           if (!valid()) return;
           native = false;
-          release();
+          release(audioOwner!);
           settle();
         }, STOP_TIMEOUT_MS);
       },
@@ -315,19 +356,22 @@ export function useComposerDictation({
           if (!message || (message === NO_SPEECH && spoken())) return;
           if (event.error === "not-allowed") setPermissionDenied(true);
           failure = message;
-          setError(message);
+          if (continuous || message !== NO_SPEECH) setError(message);
         }),
         Recognizer.addListener("end", () => {
           if (!valid()) return;
           native = false;
+          deactivate(audioOwner!);
           settle();
         }),
       ];
       native = true;
+      audioOwner = claimVoiceAudioSession();
+      nativeStartedAt = Date.now();
       Recognizer.start({
         ...(lang ? { lang } : {}),
         interimResults: true,
-        continuous: true,
+        continuous,
         addsPunctuation: true,
         maxAlternatives: 1,
         iosTaskHint: "dictation",

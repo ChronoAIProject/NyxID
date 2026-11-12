@@ -442,3 +442,20 @@ The "Custom / self-hosted…" card on Step 1 currently shows a fallback notice p
 ### 10.7 Agent-binding step
 
 Earlier drafts proposed a post-creation "bind to specific NyxID API keys" step. Not built in v2.0 — default behavior (any NyxID key routes to any of the user's services) is good enough for most users, and per-agent isolation is handled by the existing `nyxid api-key bind` command. **Lands in:** a later PR if demand emerges.
+
+
+### Scope management transport parity (#2367)
+
+Local bootstrap and remote pairing serialize AI-key prefill through the same
+serializer, including `reconnect_key_id` and `scope_override`. The browser loads
+`GET /keys/{id}` for `granted_scopes` and `oauth_app_source`, then the canonical
+catalog slug for the scope menu and shared-app allowlist. Never derive app source
+from `credential_source` (that describes personal/organization ownership).
+
+Without `--set` the current grant seeds the picker; with `--set`, providers that
+support narrowing use the desired set and require a removal acknowledgement.
+Unsupported-removal providers retain their grants in both presentation and request.
+A blocked requested scope remains visible and prevents reauthorization; it is never
+silently filtered. The local wizard must reconnect the existing key, not create a
+new placeholder. Changes to the shared picker or confirm panel require rebuilding
+the embedded wizard bundle and passing its freshness test.

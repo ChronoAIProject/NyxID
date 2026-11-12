@@ -615,6 +615,7 @@ fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str
         capabilities: _,
         billing,
         inference,
+        credential_verification,
         platform_key,
         credential,
         clear_credential,
@@ -662,6 +663,9 @@ fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str
         ssh_config.as_ref().map(|_| "ssh_config"),
         billing.as_ref().map(|_| "billing"),
         inference.as_ref().map(|_| "inference"),
+        credential_verification
+            .as_ref()
+            .map(|_| "credential_verification"),
         platform_key.as_ref().map(|_| "platform_key"),
         credential.as_ref().map(|_| "credential"),
         clear_credential.then_some("clear_credential"),

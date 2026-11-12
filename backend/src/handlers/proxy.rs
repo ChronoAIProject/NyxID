@@ -794,6 +794,8 @@ pub async fn proxy_request(
             // inner function threads `resolved_slug` through so we can attach a
             // real slug (never a UUID from the route path) even when the error
             // happens after service resolution. See docs/TELEMETRY.md §5.1.
+            let diagnostic =
+                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
             let started_at = std::time::Instant::now();
             let method = request.method().clone();
             request
@@ -844,7 +846,10 @@ pub async fn proxy_request(
                 )
                 .await;
             }
-            result
+            super::invocation_diagnostics::HttpInvocation::finish(
+                diagnostic, &state, &auth_user, result,
+            )
+            .await
         })
         .await
 }
@@ -1162,6 +1167,8 @@ pub async fn proxy_request_by_slug(
             // intentionally do NOT seed with the path-param slug: telemetry §5.1
             // requires a resolved slug or empty, and the path param is unvalidated
             // user input until resolution succeeds.
+            let diagnostic =
+                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
             let started_at = request
                 .extensions()
                 .get::<ProxyExchangeStartedAt>()
@@ -1213,7 +1220,10 @@ pub async fn proxy_request_by_slug(
                 )
                 .await;
             }
-            result
+            super::invocation_diagnostics::HttpInvocation::finish(
+                diagnostic, &state, &auth_user, result,
+            )
+            .await
         })
         .await
 }
@@ -1756,6 +1766,10 @@ async fn proxy_request_through_pool(
     let mut visited_tier = None;
     let mut tier_tick = 0;
     for index in 0..plan.max_attempts.min(plan.candidates.len()) {
+        // A pool retry may time out during resolution before the next member
+        // records its exact UserService. Do not let the previous member be
+        // diagnosed as the final failed selection.
+        super::invocation_diagnostics::Target::clear_extensions(&extensions);
         if pool_cancellation.is_cancelled() {
             return Err(AppError::ClientDisconnected);
         }
@@ -3196,40 +3210,6 @@ async fn preflight_proxy_deny_before_resolution(
     Ok(())
 }
 
-/// NyxAgent calls its model through this proxy with the conversation's own
-/// assistant key, and a specialist's key holds only its grants. Such a key may
-/// always reach a catalog model inference service (`inference` metadata): that
-/// is its thinking, not a tool. Nothing else outside its grants is allowed, and
-/// MCP tools are unaffected. Checked only when the key would be refused.
-async fn assistant_model_call(
-    state: &AppState,
-    auth_user: &AuthUser,
-    catalog: Option<mongodb::bson::Document>,
-) -> AppResult<bool> {
-    if auth_user.api_key_purpose == ApiKeyPurpose::PublicNyxbot {
-        return Ok(false);
-    }
-    let (Some(key_id), Some(mut catalog)) = (auth_user.api_key_id.as_deref(), catalog) else {
-        return Ok(false);
-    };
-    catalog.insert("inference", doc! {"$ne": null});
-    catalog.insert("is_active", true);
-    let model_service = state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .count_documents(catalog)
-        .limit(1)
-        .await?
-        > 0;
-    Ok(model_service
-        && crate::services::assistant_agent_credential_service::is_conversation_key(
-            &state.db,
-            &auth_user.user_id.to_string(),
-            key_id,
-        )
-        .await?)
-}
-
 /// Inner proxy execution with optional pre-resolved target from UserService path.
 ///
 /// When `pre_resolved` is `Some`, the target and node routing are already known
@@ -3261,6 +3241,12 @@ async fn execute_proxy_inner(
     });
     let run = async {
         crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
+        if let Some(pre) = &pre_resolved {
+            super::invocation_diagnostics::Target::record_request(
+                &request,
+                pre.user_service_id.as_deref(),
+            );
+        }
         // Poll resolution and forwarding sequentially so their debug frames never
         // stack, including when a machine request is nested in pool dispatch.
         let (resolved, extra_outbound_headers) = resolve_proxy_execution(
@@ -3274,6 +3260,10 @@ async fn execute_proxy_inner(
             extra_outbound_headers,
         )
         .await?;
+        super::invocation_diagnostics::Target::record_request(
+            &request,
+            resolved.resolved_user_service_id.as_deref(),
+        );
         execute_resolved_proxy(
             state,
             auth_user,
@@ -3479,6 +3469,11 @@ async fn resolve_proxy_execution_inner(
         )
         .await?;
 
+        if crate::services::credential_verification::checking() && node_route.is_some() {
+            return Err(AppError::Conflict(
+                "Credential checks are unavailable for node routes".into(),
+            ));
+        }
         // Hard-fail when the UserService pins a node (Route via Node) but
         // `build_pre_resolved_node_route` could not resolve a dispatchable node
         // and no fallback binding exists. Falling through to direct routing
@@ -3521,12 +3516,12 @@ async fn resolve_proxy_execution_inner(
             && !auth_user.allow_all_services
             && !auth_user.allowed_service_ids.contains(us_id)
             && (machine_ingress.is_some()
-                || !assistant_model_call(
-                    state,
+                || !crate::services::assistant_agent_credential_service::allows_implicit_model_transport(
+                    &state.db,
                     auth_user,
                     pre.catalog_service_slug
                         .as_deref()
-                        .map(|slug| doc! {"slug": slug}),
+                        .map(crate::services::assistant_agent_credential_service::ModelCatalogRef::Slug),
                 )
                 .await?)
         {
@@ -3700,7 +3695,12 @@ async fn resolve_proxy_execution_inner(
                 .iter()
                 .any(|id| id == service_id)
             && (machine_ingress.is_some()
-                || !assistant_model_call(state, auth_user, Some(doc! {"_id": service_id})).await?)
+                || !crate::services::assistant_agent_credential_service::allows_implicit_model_transport(
+                    &state.db,
+                    auth_user,
+                    Some(crate::services::assistant_agent_credential_service::ModelCatalogRef::Id(service_id)),
+                )
+                .await?)
         {
             let err = AppError::ApiKeyScopeForbidden(
                 "Scoped API keys must use configured services".to_string(),
@@ -4001,6 +4001,10 @@ async fn execute_resolved_proxy_inner<'a>(
     >,
 ) -> AppResult<ProxyExecutionPhase<'a>> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+    let invocation_diagnostic_target = request
+        .extensions()
+        .get::<super::invocation_diagnostics::Target>()
+        .cloned();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4136,7 +4140,39 @@ async fn execute_resolved_proxy_inner<'a>(
                 "jwt" | "both"
             ))
     {
+        if request
+            .extensions()
+            .get::<super::agent_skills::OrnnOrgRead>()
+            .is_some()
+        {
+            return Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::OwnerConnectionUnavailable,
+            ));
+        }
         return Err(AppError::Forbidden("Ornn skills require your own signed identity; shared master credentials are not supported".into()));
+    }
+
+    if request
+        .extensions()
+        .get::<super::agent_skills::OrnnOrgRead>()
+        .is_some()
+    {
+        // Ornn uses Authorization ONLY for its NyxID org-membership callback.
+        // Never substitute a connection credential for that capability (or
+        // overwrite a configured bearer credential with another principal).
+        if catalog_service_slug.as_deref() != Some("ornn-api")
+            || target.service.inject_delegation_token
+            || !crate::services::agent_skill_org_access::compatible_auth(
+                &target.auth_method,
+                &target.auth_key_name,
+            )
+        {
+            return Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::OwnerConnectionUnavailable,
+            ));
+        }
+        assistant_projection.org_skill_lookup = true;
+        assistant_projection.apply(&mut target);
     }
 
     // Assistant agents publish skill content only through the reviewed draft
@@ -4354,7 +4390,14 @@ async fn execute_resolved_proxy_inner<'a>(
             .assistant_chat
             .as_deref()
             .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
-    let platform_metric = platform_metric_for_target(&target, is_ws_candidate || shared_connect);
+    // Only the server-authored, exact-connection check can select this lane;
+    // no caller header or body can opt ordinary traffic out of billing.
+    let credential_check = crate::services::credential_verification::checking();
+    let platform_metric = if credential_check {
+        crate::models::service_billing::BillingMetric::Requests
+    } else {
+        platform_metric_for_target(&target, is_ws_candidate || shared_connect)
+    };
     let node_intent = match &node_route {
         Some(route) if !route.fallback_node_ids.is_empty() => {
             crate::services::billing::NodeIntent::NodeWithFallback
@@ -4379,7 +4422,14 @@ async fn execute_resolved_proxy_inner<'a>(
         target.auth_method.clone(),
         credential_class,
         platform_metric,
-        target.service.billing.as_ref(),
+        // Verification records request metadata without catalog prices,
+        // components, operation prices or resale funding. Ordinary calls keep
+        // their original billing policy, including on this same connection.
+        target
+            .service
+            .billing
+            .as_ref()
+            .filter(|_| !credential_check),
         state.billing.resale_enabled(),
     );
     if nyxagent_admission
@@ -4815,6 +4865,9 @@ async fn execute_resolved_proxy_inner<'a>(
         .as_mut()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        if let Some(target) = &invocation_diagnostic_target {
+            target.record(None);
+        }
         request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
             (
@@ -4948,6 +5001,14 @@ async fn execute_resolved_proxy_inner<'a>(
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(_) if durable_candidate => {}
+        approval_service::ApprovalOutcome::NeedsApproval(_)
+            if crate::services::credential_verification::checking() =>
+        {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Credential check skipped: approval required".to_string(),
+            ));
+        }
         // A draft's pre-review format check never raises an approval prompt.
         approval_service::ApprovalOutcome::NeedsApproval(_) if ornn_preflight => {
             request_audit.denied(403);
@@ -5687,6 +5748,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
                     Ok(ws) => ws,
                     Err(rejection) => {
+                        if let Some(target) = &invocation_diagnostic_target {
+                            target.record(None);
+                        }
                         let response = rejection.into_response();
                         request_audit.denied(response.status().as_u16());
                         return observe_model_response(model_request, path, response).await;

@@ -604,7 +604,15 @@ the stored cap. Source acquisition expiry is independent of materialized-file
 retention. Pending/delivery metadata has a `purge_after` TTL with 30 days' grace;
 content-series metadata expires after 395 idle days. Conversation deletion and
 personal erasure include all three collections. Operator encryption walks register
-pending bytes and generated attachments with their contextual AAD.
+pending bytes and generated attachments with their contextual AAD. Both runtime
+writers follow `CONTEXTUAL_RECORD_WRITES`: while off, bytes use legacy envelope
+encryption and omit the version marker; while on, they use contextual encryption
+and mark `secret_context_versions.data_encrypted` as `3`. Readers choose strictly
+by that marker, preserving the same live provenance, size/hash and retention
+checks. The operator rewrap adapter converts legacy pending bytes only after
+writer cutover, updating ciphertext and marker together under its exact-source
+fence. Old generated-file readers refuse legacy pending rows; upgraded workers
+are required to materialize them during a mixed deployment.
 
 Generated GETs return the complete 200 response, ignore Range/If-Range, and hold
 the memory permit with the actual HTTP buffer. Headers are private/no-store,

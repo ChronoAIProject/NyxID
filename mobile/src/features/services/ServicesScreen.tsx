@@ -45,6 +45,7 @@ import {
 import {
   canManageProviderPermissions,
   describeConnection,
+  isSavedCredential,
   isOAuthConnection,
   reconnectScopeOverride,
 } from "./connectionPresentation";
@@ -382,7 +383,7 @@ export function ServicesScreen({
       connection && health
         ? !connection.is_active
           ? "Paused"
-          : health.tone === "success"
+          : health.tone === "success" && !isSavedCredential(connection)
             ? "Connected"
             : health.label
         : undefined;
@@ -400,6 +401,9 @@ export function ServicesScreen({
           ? editable
             ? "This connection is paused. Turn on Connection enabled above before using it in Chat."
             : "This connection is paused. Ask its administrator to enable it before using it in Chat."
+          : isSavedCredential(connection) && connection.status === "active" && !connection.credential_missing
+              && connection.credential_verification?.state !== "verified" && connection.credential_verification?.state !== "rejected"
+            ? "You can try this saved connection in Chat. Provider authentication has not been verified, and the agent still needs permission to use it."
           : health?.tone === "error" || health?.tone === "warning"
             ? "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection."
             : `Ask your agent to use ${providerName}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.`;
@@ -665,11 +669,18 @@ export function ServicesScreen({
                   value={connectionTime(connection.expires_at, "Not recorded")}
                 />
               ) : null}
+              {isSavedCredential(connection) && connection.credential_verification?.reason_code ? (
+                <SettingsRow label="Check result" value={connection.credential_verification.reason_code} />
+              ) : null}
               <SettingsRow
                 label="Refresh status"
                 tone="action"
                 disabled={busy || detail.isFetching}
-                onPress={() => void run(reload)}
+                onPress={() => void run(async () => {
+                  if (editable && isSavedCredential(connection) && connection.credential_verification?.can_check)
+                    await servicesApi.checkCredential(connection.id);
+                  await reload();
+                })}
               />
               {(entry?.documentation_url ?? connection.docs_url) ? (
                 <SettingsRow

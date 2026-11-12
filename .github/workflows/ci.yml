@@ -213,9 +213,11 @@ jobs:
               - '.config/nextest.toml'
             frontend:
               - 'frontend/**'
+              - 'shared/**'
               - '.node-version'
             mobile:
               - 'mobile/**'
+              - 'shared/**'
               - '.node-version'
             sdk:
               - 'sdk/**'
@@ -408,6 +410,8 @@ jobs:
         with:
           node-version-file: .node-version
       - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
+      - name: Ensure Ubuntu archive DNS
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
       - run: npx --no-install playwright-core install --with-deps chromium
       - run: npm run check
       - run: npm test
@@ -522,6 +526,8 @@ jobs:
       - name: Prepare backend image memory reserve
         timeout-minutes: 5
         run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Ensure Ubuntu archive DNS
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Locate published backend build cache
@@ -561,6 +567,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
+      - name: Ensure Ubuntu archive DNS
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
       - uses: docker/setup-buildx-action@v4
       - name: Locate published machine build cache
         id: machine-cache
@@ -736,6 +744,9 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run build
+      - name: Build frontend Docker inputs
+        working-directory: .
+        run: docker build --target builder --file frontend/Dockerfile .
 
   # ---------------------------------------------------------------------------
   # Mobile: committed native state, unit tests, and type-check

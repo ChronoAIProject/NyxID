@@ -1,3 +1,4 @@
+import { apiErrorBody } from "@/lib/api-error";
 import { markConnectionLost, markConnectionOk } from "@/lib/assistant/connection-state";
 import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
@@ -13,7 +14,7 @@ import {
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { assistantRequestErrorMessage, withAssistantTrace } from "./request-error";
+import { assistantRequestErrorMessage } from "./request-error";
 import { billingError } from "./billing-error";
 import { captureNyxbotError, httpErrorCode, responseCorrelation, type ErrorCorrelation } from "./error-telemetry";
 import { getAssistantIdentityRevision } from "./identity";
@@ -28,6 +29,8 @@ const responseWireLogExchangeIds = new WeakMap<Response, string>();
 type AssistantMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface AssistantHttpRequest {
+  /** Explicit CMA adapter opt-in; never inferred from a response body. */
+  readonly errorFormat?: "cma";
   readonly apiBaseUrl?: string;
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
@@ -45,7 +48,7 @@ export interface AssistantHttpRequest {
 export class AssistantHttpError extends ApiError {
   readonly correlation: ErrorCorrelation;
   constructor(response: Response, body: ApiErrorResponse) {
-    super(response.status, body);
+    super(response.status, body, response.headers);
     this.correlation = responseCorrelation(response);
   }
 }
@@ -172,35 +175,9 @@ export function assignAssistantResponseConversation(
     .assignConversation(exchangeId, conversationId);
 }
 
-function fallbackError(status: number): ApiErrorResponse {
-  return {
-    error: "unknown_error",
-    error_code: -1,
-    message: `Request failed with status ${String(status)}`,
-  };
-}
-
-async function parseError(
-  response: Response,
-): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
-  try {
-    const value = (await response.json()) as Record<string, unknown>;
-    const parsed: ApiErrorResponse = {
-      error: typeof value.error === "string" ? value.error : "unknown_error",
-      error_code: typeof value.error_code === "number" ? value.error_code : -1,
-      message:
-        typeof value.message === "string" && value.message
-          ? value.message
-          : `Request failed with status ${String(response.status)}`,
-      ...(typeof value.consent_url === "string"
-        ? { consent_url: value.consent_url }
-        : {}),
-      ...(value.details !== undefined ? { details: value.details } : {}),
-    };
-    return { parsed, raw: value };
-  } catch {
-    return { parsed: fallbackError(response.status), raw: null };
-  }
+async function parseError(response: Response, format?: "cma"): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
+  const raw: unknown = await response.json().catch(() => null);
+  return { parsed: apiErrorBody(raw, response.status, format), raw };
 }
 
 function redirectToConsent(error: ApiErrorResponse): void {
@@ -294,21 +271,18 @@ export async function assistantHttp(
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;
 
-  const { parsed: errorBody, raw } = await parseError(response);
+  const { parsed: errorBody, raw } = await parseError(response, options.errorFormat);
   options.authorityGuard?.();
   // Classify the raw envelope: the parsed shape defaults a missing symbol.
   reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
   const failure = new AssistantHttpError(response, {
     ...errorBody,
-    message: withAssistantTrace(
-      (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
-        ?? assistantRequestErrorMessage(
-          response.status,
-          errorBody.message,
-          errorBody.error,
-        ),
-      response.headers.get("X-NyxID-Trace-Id"),
-    ),
+    message: (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
+      ?? assistantRequestErrorMessage(
+        response.status,
+        errorBody.message,
+        errorBody.error,
+      ),
   });
   reportError(failure);
   if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
@@ -329,8 +303,9 @@ export async function assistantJson<T>(
   let result: T;
   try {
     result = (await response.json()) as T;
-  } catch (error) {
+  } catch {
     options.authorityGuard?.();
+    const error = new AssistantHttpError(response, apiErrorBody(null, response.status));
     if (!options.signal?.aborted && getAssistantIdentityRevision() === identityRevision) {
       try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
       if (options.reportErrors !== false) captureNyxbotError({

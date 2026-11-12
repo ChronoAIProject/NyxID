@@ -20,6 +20,7 @@ export function LoginMethods({
   onSignUp,
   returnTo,
   disabled = false,
+  enableEmailLogin = false,
   appTransport,
   onAppVerified,
   onAppOpenChange,
@@ -29,6 +30,8 @@ export function LoginMethods({
   onSignUp?: () => void;
   returnTo?: string;
   disabled?: boolean;
+  /** Display override for existing-account login; never enables registration. */
+  enableEmailLogin?: boolean;
   appTransport?: WebAuthDeviceTransport;
   onAppVerified?: () => void;
   onAppOpenChange?: (open: boolean) => void;
@@ -77,7 +80,7 @@ export function LoginMethods({
           onVerified={onAppVerified}
         />
       </div>
-      {!appOpen && config?.email_auth_enabled && (
+      {!appOpen && (config?.email_auth_enabled || enableEmailLogin) && (
         <>
           <div className="my-6 flex items-center gap-4">
             <div className="h-px flex-1 bg-border" />

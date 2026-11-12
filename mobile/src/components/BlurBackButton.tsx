@@ -14,7 +14,13 @@ export function BlurBackButton({ onPress }: Props) {
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   return (
-    <Pressable onPress={onPress} style={styles.wrapper} hitSlop={8}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Back"
+      onPress={onPress}
+      style={styles.wrapper}
+      hitSlop={8}
+    >
       <BlurView intensity={40} tint="dark" style={styles.blur}>
         <Text style={styles.arrow}>{"←"}</Text>
       </BlurView>

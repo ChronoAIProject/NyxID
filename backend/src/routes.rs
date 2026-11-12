@@ -287,7 +287,7 @@ macro_rules! assistant_direct_billing_routes {
     };
 }
 
-macro_rules! codex_connection_billing_routes {
+macro_rules! credential_check_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
@@ -295,6 +295,15 @@ macro_rules! codex_connection_billing_routes {
                 "/api/v1/providers/codex-connection/verify",
                 "handlers::codex_connection::verify",
                 post(handlers::codex_connection::verify),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/keys/{key_id}/verify",
+                "/api/v1/keys/{key_id}/verify",
+                "handlers::credential_verification::check",
+                post(handlers::credential_verification::check),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                     crate::services::billing::BillingIngress::Proxy
                 )
@@ -560,7 +569,7 @@ pub(crate) fn mounted_billing_route_inventory()
         collect_billing_route_specs,
         ()
     ));
-    routes.extend(codex_connection_billing_routes!(
+    routes.extend(credential_check_billing_routes!(
         collect_billing_route_specs,
         ()
     ));
@@ -2101,7 +2110,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Org metadata accepts general API keys. Handlers apply membership or
     // Direct-owner read access; service accounts remain rejected as before.
     let org_read_routes = Router::new()
-        .route("/", get(handlers::orgs::list_orgs))
+        .route("/", get(handlers::agent_skills::org_membership_lookup))
         .route("/{org_id}", get(handlers::orgs::get_org))
         .route(
             "/{org_id}/authorization",
@@ -2483,6 +2492,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route(
+            "/monitoring/invocation-diagnostics",
+            post(handlers::invocation_diagnostics::redeem).layer(DefaultBodyLimit::max(256)),
+        )
         .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
@@ -3409,6 +3422,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_voice::options),
         )
         .route(
+            "/assistant/nyxagent/voice/active",
+            get(handlers::assistant_voice::account_active_session),
+        )
+        .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
             post(handlers::assistant_voice::start)
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
@@ -3590,7 +3607,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/providers/codex-connection",
             get(handlers::codex_connection::status).post(handlers::codex_connection::import),
         )
-        .merge(codex_connection_billing_routes!(
+        .merge(credential_check_billing_routes!(
             register_billing_routes,
             Router::new()
         ))

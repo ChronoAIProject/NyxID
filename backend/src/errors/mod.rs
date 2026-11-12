@@ -2,6 +2,7 @@ pub mod access_denial;
 pub mod memory_write;
 pub mod refresh;
 pub mod skill_draft;
+pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -132,6 +133,10 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Additive fixed diagnostics for attached skill reads.
+    #[error("{0:?}")]
+    SkillRead(skill_read::SkillReadReason),
+
     /// Same forbidden / 1002 response with additive, fixed recovery metadata.
     #[error("Forbidden: {message}")]
     ForbiddenWithGuidance {
@@ -163,6 +168,15 @@ pub enum AppError {
     MonitoringUnavailable,
     #[error("Service monitoring is not configured")]
     MonitoringNotConfigured,
+    #[error("The failed invocation is still releasing capacity; retry this diagnostic once.")]
+    DiagnosticNotReady,
+    /// Response metadata, preserving the underlying error through handler layers.
+    #[error("{source}")]
+    InvocationDiagnostic {
+        #[source]
+        source: Box<AppError>,
+        handle: crate::services::invocation_diagnostic_service::IssuedHandle,
+    },
     #[error("Tool operation is not published")]
     ToolOperationNotPublished,
     /// Adds safe startup context while preserving the underlying numeric code/status.
@@ -867,6 +881,9 @@ impl AppError {
     /// Generic policy refusals, with or without additive recovery guidance.
     /// Specialized 403 errors retain their own control-flow semantics.
     pub fn is_forbidden(&self) -> bool {
+        if let Self::SkillRead(reason) = self {
+            return reason.legacy_error().is_forbidden();
+        }
         matches!(
             self,
             Self::Forbidden(_)
@@ -877,9 +894,11 @@ impl AppError {
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::SkillRead(reason) => reason.legacy_error().status_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
             Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
+            Self::InvocationDiagnostic { source, .. } => source.status_code(),
             Self::BadRequest(_)
             | Self::CredentialUnavailable(_)
             | Self::ValidationError(_)
@@ -895,7 +914,9 @@ impl AppError {
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
-            Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
+            Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
+                StatusCode::CONFLICT
+            }
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::ApprovalUnsupported => StatusCode::FORBIDDEN,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -1118,9 +1139,11 @@ impl AppError {
     pub(crate) fn error_code(&self) -> u32 {
         match self {
             Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
+            Self::SkillRead(reason) => reason.legacy_error().error_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
             Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
+            Self::InvocationDiagnostic { source, .. } => source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
@@ -1137,6 +1160,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => 12501,
             Self::MonitoringUnavailable => 13300,
             Self::MonitoringNotConfigured => 13301,
+            Self::DiagnosticNotReady => 13302,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
@@ -1403,9 +1427,11 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::SkillRead(reason) => reason.error_key(),
             Self::MemoryWrite(reason) => reason.error_key(),
             Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
+            Self::InvocationDiagnostic { source, .. } => source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
@@ -1422,6 +1448,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::MonitoringUnavailable => "monitoring_unavailable",
             Self::MonitoringNotConfigured => "monitoring_not_configured",
+            Self::DiagnosticNotReady => "diagnostic_not_ready",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
@@ -1656,7 +1683,8 @@ impl AppError {
 impl AppError {
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
-            Self::RateLimited => Some(1),
+            Self::InvocationDiagnostic { source, .. } => source.retry_after_seconds(),
+            Self::DiagnosticNotReady | Self::RateLimited => Some(1),
             Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
             _ => None,
         }
@@ -1664,6 +1692,14 @@ impl AppError {
 
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::InvocationDiagnostic { source, .. } = self {
+            return source.response_body();
+        }
+        if let Self::SkillRead(reason) = self {
+            let mut response = reason.legacy_error().response_body();
+            response.details = Some(serde_json::json!({"reason": reason}));
+            return response;
+        }
         if let Self::RefreshRefused { source, reason } = self {
             let mut response = source.response_body();
             response.details = Some(serde_json::json!({"reason": reason}));
@@ -1760,6 +1796,12 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let Self::InvocationDiagnostic { source, handle } = self {
+            let mut response = source.into_response();
+            handle.decorate(&mut response);
+            return response;
+        }
+        let diagnostic_not_ready = matches!(self, Self::DiagnosticNotReady);
         // Log server errors at error level; client errors at warn level.
         match &self {
             // Already logged once with bounded structured fields by the startup boundary.
@@ -1787,6 +1829,12 @@ impl IntoResponse for AppError {
                     .expect("bounded numeric retry delay"),
             );
         }
+        if diagnostic_not_ready {
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            );
+        }
         response
     }
 }
@@ -1802,6 +1850,49 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invocation_diagnostic_error_preserves_source_and_redacts_handle() {
+        let error = AppError::InvocationDiagnostic {
+            source: Box::new(AppError::Internal("private transport detail".into())),
+            handle: crate::services::invocation_diagnostic_service::IssuedHandle {
+                handle: "nyx_diag_do_not_log".into(),
+                expires_in: 60,
+            },
+        };
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.error_code(),
+            AppError::Internal(String::new()).error_code()
+        );
+        assert_eq!(error.error_key(), "internal_error");
+        assert_eq!(error.response_body().message, "An internal error occurred");
+        assert!(!format!("{error:?}").contains("nyx_diag_do_not_log"));
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<Box<AppError>>()
+            .expect("diagnostic source retains its declared boxed error type");
+        assert!(matches!(
+            source.as_ref(),
+            AppError::Internal(message) if message == "private transport detail"
+        ));
+    }
+
+    #[tokio::test]
+    async fn invocation_diagnostic_not_ready_uses_standard_error_contract() {
+        let response = AppError::DiagnosticNotReady.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "diagnostic_not_ready");
+        assert_eq!(body["error_code"], 13302);
+    }
+
     #[tokio::test]
     async fn mfa_step_up_error_preserves_typed_403_with_actionable_message() {
         let response = AppError::MfaStepUpRequired.into_response();
@@ -2300,6 +2391,7 @@ mod tests {
         let codes = vec![
             AppError::MonitoringUnavailable.error_code(),
             AppError::MonitoringNotConfigured.error_code(),
+            AppError::DiagnosticNotReady.error_code(),
             AppError::ManagedExecutionPending("".into()).error_code(),
             AppError::ErasurePreparing.error_code(),
             AppError::AssistantTurnActive.error_code(),

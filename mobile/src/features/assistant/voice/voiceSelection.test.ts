@@ -46,16 +46,57 @@ function preferences(value: VoiceOption): VoicePreferences {
   };
 }
 
-test("automatic voice selection matches web: available default, then first available, then none", () => {
+test("first-use voice selection matches web: platform default, any default, then first available", () => {
   const disabled = option({ model: "disabled", available: false });
   const first = option({ model: "first", default_model: false });
   const preferred = option({ model: "default" });
-  assert.equal(chooseVoiceOption([disabled, first, preferred]), preferred);
+  const ownDefault = option({ key_source: "own", connection_id: connectionId });
+  assert.equal(
+    chooseVoiceOption([disabled, first, ownDefault, preferred], null),
+    preferred,
+  );
+  assert.equal(chooseVoiceOption([disabled, first, ownDefault]), ownDefault);
   assert.equal(chooseVoiceOption([disabled, first]), first);
   assert.equal(chooseVoiceOption([disabled]), undefined);
   assert.equal(chooseVoiceOption([]), undefined);
   assert.notEqual(voiceOptionKey(first), voiceOptionKey(preferred));
   assert.equal(voiceOptionKey(first), voiceOptionKey(preferences(first)));
+});
+
+test("saved voice selection matches every source field instead of choosing an available default", () => {
+  const savedSource = option({
+    key_source: "own",
+    connection_id: connectionId,
+    default_model: false,
+  });
+  const mismatches: Partial<VoiceOption>[] = [
+    { service_id: "33333333-3333-4333-8333-333333333333" },
+    { connection_id: "44444444-4444-4444-8444-444444444444" },
+    { key_source: "platform" },
+    { model: "different-model" },
+  ];
+  const alternatives = mismatches.map((patch) => ({
+    ...savedSource,
+    ...patch,
+  }));
+  const saved = preferences(savedSource);
+  assert.equal(
+    chooseVoiceOption([option(), ...alternatives, savedSource], saved),
+    savedSource,
+  );
+  assert.equal(
+    chooseVoiceOption([option(), ...alternatives], saved),
+    undefined,
+  );
+});
+
+test("an unavailable saved voice source remains selected and never falls back", () => {
+  const unavailable = option({ model: "saved-model", available: false });
+  assert.equal(
+    chooseVoiceOption([option(), unavailable], preferences(unavailable)),
+    unavailable,
+  );
+  assert.equal(chooseVoiceOption([], preferences(unavailable)), undefined);
 });
 
 test("platform tariffs retain exact decimal rates and only list synced applicable components", () => {

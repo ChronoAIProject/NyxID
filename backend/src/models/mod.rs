@@ -41,6 +41,7 @@ pub mod connect_link;
 pub mod consent;
 #[allow(dead_code)]
 pub mod coordination;
+pub mod credential_verification;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
@@ -61,6 +62,7 @@ pub mod feature_flag_override;
 pub mod group;
 pub(crate) mod hmac_keyset;
 pub mod invite_code;
+pub mod invocation_diagnostic;
 pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;
@@ -266,3 +268,5 @@ pub mod platform_model;
 pub mod platform_model_tariff;
 
 pub mod execution_permission_channel;
+
+pub mod assistant_tool_result;

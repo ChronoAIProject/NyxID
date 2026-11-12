@@ -1,3 +1,4 @@
+import { CredentialCheck } from "./credential-check";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -304,7 +305,7 @@ function ConnectionPanel({
 
   const grantedScopes = key.granted_scopes ?? null;
   const modifiable = canModifyKey(key);
-  const statusMeta = credentialStatusMeta(key.status);
+  const statusMeta = credentialStatusMeta(key.status, key);
   const revokesGrant =
     key.revocation?.revokes_grant ??
     catalogEntry?.revocation?.revokes_grant ??
@@ -331,7 +332,7 @@ function ConnectionPanel({
                         : "text-warning"
                     }
                   >
-                    {statusMeta.tooltip}
+                    {translateUi(statusMeta.tooltip)}
                   </p>
                   {key.error_message ? (
                     <p className="break-words">{key.error_message}</p>
@@ -346,7 +347,7 @@ function ConnectionPanel({
             </>
           }
         >
-          <DetailRow label={translateUi("Status")}>{statusMeta.label}</DetailRow>
+          <DetailRow label={translateUi("Status")}>{translateUi(statusMeta.label)}</DetailRow>
           <DetailRow label={translateUi("Credential")}>
             {key.credential_missing
               ? translateUi("Missing - reconnect or delete")
@@ -407,6 +408,7 @@ function ConnectionPanel({
             </GroupedRow>
           ) : null}
         </GroupedList>
+        <CredentialCheck connection={key} canManage={modifiable} />
         {modifiable && canReplaceCredential(key) && !key.credential_missing ? (
           <ReplaceCredential apiKeyId={key.api_key_id as string} />
         ) : null}

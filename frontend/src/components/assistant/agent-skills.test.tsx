@@ -141,6 +141,46 @@ it("requires version preview and an explicit re-pin click", async () => {
     ),
   );
 });
+it("shows the skill's own outline card when the verified preview carries one", async () => {
+  mocks.search.mockReturnValue({
+    data: { page: 1, total_pages: 1, items: [{ id: "style", name: "style", description: "House style" }] },
+  });
+  const reference = { ...pin, skill_id: "style", name: "style", version: "2.0" };
+  mocks.preview.mockReturnValue({
+    data: {
+      reference,
+      description: "House style",
+      size_bytes: 900,
+      outline: {
+        overview: "One result.",
+        steps: [{ id: "step-1", title: "Prepare", text: "I get ready.", asks_you: true }],
+        needs: null,
+        produces: null,
+      },
+      author: { kind: "organization", name: "Example Org" },
+    },
+  });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^style/ }));
+  const card = await screen.findByRole("region", { name: "style skill" });
+  expect(card).toHaveTextContent("By Example Org");
+  expect(card).toHaveTextContent("Prepare. I get ready.");
+  expect(card).toHaveTextContent("Asks you");
+  // Attaching stays with the version view's own controls.
+  expect(screen.queryByRole("button", { name: "Start" })).not.toBeInTheDocument();
+});
+it("shows no outline card when the server sends no outline", async () => {
+  mocks.search.mockReturnValue({
+    data: { page: 1, total_pages: 1, items: [{ id: "style", name: "style", description: "House style" }] },
+  });
+  mocks.preview.mockReturnValue({
+    data: { reference: { ...pin, skill_id: "style", name: "style", version: "2.0" }, description: "House style", size_bytes: 900 },
+  });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^style/ }));
+  expect(await screen.findByText("900 bytes ·", { exact: false })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "style skill" })).not.toBeInTheDocument();
+});
 it("shows missing-access errors without erasing attached skills", () => {
   mocks.search.mockReturnValue({
     error: new Error("Skill unavailable through your Ornn access"),

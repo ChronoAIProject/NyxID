@@ -1,3 +1,4 @@
+import { composerInputMinHeight } from "./composerGeometry";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import type { AgentIdentity } from "../../components/agentAvatarModel";
 import { useComposerHeight } from "../display/ChatLayoutContext";
@@ -13,6 +14,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
   type StyleProp,
   type TextStyle,
@@ -65,6 +67,7 @@ export function AssistantMentionInput({
 }) {
   const { colors } = useTheme();
   const maxHeight = useComposerHeight();
+  const { fontScale } = useWindowDimensions();
   const overflow = useScrollEdges();
   const input = useRef<TextInput>(null);
   const mounted = useRef(true);
@@ -93,7 +96,7 @@ export function AssistantMentionInput({
   const revision = scope.current.revision;
   const [contentSize, setContentSize] = useState({ revision, height: 44 });
   const inputHeight = Math.max(
-    44,
+    composerInputMinHeight(fontScale),
     Math.min(
       maxHeight,
       contentSize.revision === revision ? contentSize.height : 44,
@@ -267,7 +270,10 @@ export function AssistantMentionInput({
           accessibilityLabel={accessibilityLabel}
           value={value}
           editable={editable}
-          placeholder={placeholder}
+          placeholder={Platform.OS === "ios" ? "" : placeholder}
+          accessibilityHint={
+            Platform.OS === "ios" && !value ? placeholder : undefined
+          }
           placeholderTextColor={colors.textMuted}
           selectionColor={colors.primary}
           multiline
@@ -336,14 +342,35 @@ export function AssistantMentionInput({
           }
           style={[
             styles.input,
-            { color: colors.textPrimary },
+            {
+              color: colors.textPrimary,
+              minHeight: composerInputMinHeight(fontScale),
+            },
             style,
             // iOS sizes a multiline input to its text; a measured height pins it at one line.
             Platform.OS === "ios"
-              ? { maxHeight }
+              ? {
+                  height: value ? undefined : composerInputMinHeight(fontScale),
+                  maxHeight,
+                }
               : { height: inputHeight, maxHeight },
           ]}
         />
+        {Platform.OS === "ios" && !value ? (
+          <Text
+            pointerEvents="none"
+            accessibilityElementsHidden
+            importantForAccessibility="no"
+            numberOfLines={1}
+            style={[
+              styles.emptyPlaceholder,
+              { color: colors.textMuted },
+              renderActions && { left: 12, right: 12 },
+            ]}
+          >
+            {placeholder}
+          </Text>
+        ) : null}
         <ScrollEdgeFades edges={overflow.edges} color={colors.composerBg} />
       </View>
       {renderActions ? renderActions(mentionAction) : mentionAction}
@@ -374,9 +401,19 @@ const styles = StyleSheet.create({
     maxHeight: 120,
     fontFamily: fonts.bodyRegular,
     fontSize: 14,
+    lineHeight: 20,
     paddingTop: 12,
     paddingBottom: 10,
     textAlignVertical: "top",
+  },
+  emptyPlaceholder: {
+    position: "absolute",
+    top: 12,
+    left: 0,
+    right: 0,
+    fontFamily: fonts.bodyRegular,
+    fontSize: 14,
+    lineHeight: 20,
   },
   mentionButton: {
     width: 44,

@@ -147,7 +147,7 @@ export function UpstreamScopePicker({
 }: UpstreamScopePickerProps) {
   useUiTranslation();
   const [customInput, setCustomInput] = useState("");
-  const selection = includeRequiredScopes(value, catalog);
+  const selection = includeRequiredScopes([...value, ...lockedScopes], catalog);
   const required = new Set(
     catalog.filter((entry) => entry.required).map((entry) => entry.scope),
   );
@@ -164,8 +164,14 @@ export function UpstreamScopePicker({
   // Edit-mode change summary (NyxID#917): when editing an existing connection,
   // diff the current selection against what's already granted. `labelFor` maps
   // a scope to its human pill label for readable copy.
-  const labelFor = (scope: string) =>
-    pills.find((p) => p.scope === scope)?.label ?? scope;
+  const labelFor = (scope: string) => {
+    const label = pills.find((p) => p.scope === scope)?.label;
+    // Curated display copy is translated; OAuth scope identifiers stay literal.
+    return label && label !== scope ? translateUi(label) : scope;
+  };
+  const blockedRequested = allowset
+    ? selection.filter((scope) => !allowset.has(scope))
+    : [];
   const grantedSet = grantedScopes ? new Set(grantedScopes) : null;
   const added = grantedSet ? selection.filter((s) => !grantedSet.has(s)) : [];
   const removed = grantedScopes
@@ -186,7 +192,7 @@ export function UpstreamScopePicker({
     onChange(pills.map((p) => p.scope).filter((s) => next.has(s)));
   }
 
-  const [customError, setCustomError] = useState<string | null>(null);
+  const [blockedCustomScopes, setBlockedCustomScopes] = useState<readonly string[] | null>(null);
 
   function addCustom() {
     const parsed = parseAdditionalScopes(customInput);
@@ -196,13 +202,11 @@ export function UpstreamScopePicker({
     if (allowset !== null) {
       const blocked = parsed.filter((s) => !allowset.has(s));
       if (blocked.length > 0) {
-        setCustomError(
-          `${blocked.join(", ")} — not available on NyxID's shared app. Use your own OAuth app to request ${blocked.length > 1 ? "these" : "it"}.`,
-        );
+        setBlockedCustomScopes(blocked);
         return;
       }
     }
-    setCustomError(null);
+    setBlockedCustomScopes(null);
     const next = [...selection];
     for (const s of parsed) {
       if (!next.includes(s)) next.push(s);
@@ -218,6 +222,7 @@ export function UpstreamScopePicker({
         <div role="group" aria-label={translateUi("Scopes")} className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
             const isRequired = required.has(p.scope);
+            const description = p.description ? translateUi(p.description) : p.scope;
             const gated = isGated(p.scope, p.locked);
             const isOn = (selected.has(p.scope) || p.locked) && !gated;
             return (
@@ -228,12 +233,12 @@ export function UpstreamScopePicker({
                 disabled={p.locked || isRequired || gated}
                 title={
                   gated
-                    ? translateUi("{{value1}} — available only with your own OAuth app", { value1: p.description ?? p.scope })
+                    ? translateUi("{{value1}} — available only with your own OAuth app", { value1: description })
                     : isRequired
-                      ? translateUi("{{value1}} — required for this service", { value1: p.description ?? p.scope })
+                      ? translateUi("{{value1}} — required for this service", { value1: description })
                       : p.locked
-                        ? translateUi("{{value1}} — already granted; can't be removed here", { value1: p.description ?? p.scope })
-                        : (p.description ?? p.scope)
+                        ? translateUi("{{value1}} — already granted; can't be removed here", { value1: description })
+                        : description
                 }
                 onClick={() => {
                   toggle(p.scope);
@@ -262,7 +267,7 @@ export function UpstreamScopePicker({
                     <span className="sr-only">{translateUi("(write or admin access) ")}</span>
                   </>
                 ) : null}
-                <span className="truncate">{p.label}</span>
+                <span className="truncate">{labelFor(p.scope)}</span>
                 {gated ? (
                   <span className="shrink-0 text-13 italic text-text-tertiary">{translateUi("own app")}</span>
                 ) : isRequired ? (
@@ -294,6 +299,17 @@ export function UpstreamScopePicker({
           {providerName ?? translateUi("provider")}{translateUi(" app. Connect with your own OAuth app to request them.")}</p>
       ) : null}
 
+      {blockedRequested.length > 0 ? (
+        <div role="alert" className="space-y-2 text-13 text-warning">
+          <p>{translateUi("Requested permissions unavailable on NyxID's shared app: {{scopes}}. Remove them or connect with your own OAuth app.", { scopes: blockedRequested.join(", ") })}</p>
+          {blockedRequested.filter((scope) => !locked.has(scope) && !required.has(scope)).map((scope) => (
+            <Button key={scope} type="button" variant="outline" onClick={() => toggle(scope)}>
+              {translateUi("Remove requested permission: {{scope}}", { scope })}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+
       <div className="flex items-center gap-1.5">
         <Input
           id={`${idPrefix}-custom`}
@@ -321,8 +337,8 @@ export function UpstreamScopePicker({
         >
           <Plus className="h-3.5 w-3.5" />{translateUi("Add")}</Button>
       </div>
-      {customError ? (
-        <p className="text-13 text-destructive">{translateUi(customError)}</p>
+      {blockedCustomScopes ? (
+        <p className="text-13 text-destructive">{translateUi("{{scopes}} — not available on NyxID's shared app. Use your own OAuth app to request these permissions.", { scopes: blockedCustomScopes.join(", ") })}</p>
       ) : null}
       {grantedSet && hasChanges ? (
         <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-14">
@@ -339,8 +355,7 @@ export function UpstreamScopePicker({
                 <span className="text-destructive">{translateUi("− Removing:")}</span>{" "}
                 {removed.map(labelFor).join(", ")}
               </p>
-              <p className="text-13 text-warning">{translateUi("Removing a permission re-authorizes this connection and will stop any app that relies on it. NyxID will use only the remaining permissions; the old access at")}{" "}
-                {providerName ?? translateUi("the provider")}{translateUi(" stays until you revoke it there.")}</p>
+              <p className="text-13 text-warning">{translateUi("Removing a permission re-authorizes this connection and may stop apps that rely on it. Review the removed permissions before continuing. Revoking older access depends on the provider.")}</p>
             </>
           ) : null}
         </div>
@@ -348,7 +363,7 @@ export function UpstreamScopePicker({
 
       <p className="text-13 text-muted-foreground">
         {locked.size > 0
-          ? translateUi("Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above.")
+          ? translateUi("Scopes marked “granted” are already authorized and locked. NyxID supports adding permissions here; removing older access requires managing the grant at the provider.")
           : grantedSet
             ? translateUi("Tick to add a permission, untick to remove one, then update. Changes re-authorize this connection at the provider.")
             : pills.length > 0

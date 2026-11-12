@@ -6,6 +6,7 @@ pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod agent_key_introspection;
 pub mod agent_operation_scope_service;
+pub(crate) mod agent_skill_org_access;
 pub mod agent_skill_preload;
 pub mod analytics_consent_service;
 pub mod analytics_dispatch_service;
@@ -114,6 +115,7 @@ pub mod content_type;
 pub mod coordination_service;
 pub mod credential_push_service;
 pub(crate) mod credential_record_service;
+pub mod credential_verification;
 pub mod delegation_service;
 pub mod destination_routing;
 pub mod developer_webhook_service;
@@ -255,6 +257,7 @@ pub mod service_pool_service;
 pub mod shared_agent_consent;
 pub mod shared_agent_service;
 pub(crate) mod shared_agent_transport;
+pub mod skill_outline;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
 pub mod sse_parser;
@@ -574,6 +577,7 @@ pub mod cma_session_origin;
 pub mod org_channel_service;
 
 pub mod generated_artifacts;
+pub(crate) mod invocation_diagnostic_service;
 
 pub mod platform_model_execution;
 pub mod platform_model_service;
@@ -583,3 +587,6 @@ pub(crate) mod execution_permission_channel;
 pub mod assistant_activity_decision;
 pub mod lark_wiki;
 pub mod platform_model_credentials;
+
+pub mod assistant_tool_result_service;
+pub(crate) mod catalog_endpoint_service;

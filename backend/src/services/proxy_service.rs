@@ -3168,7 +3168,7 @@ async fn finish_resolution(
     box_resolution_future(|| verify_auto_provision_eligibility(db, &user_service, effective_owner_id)).await?;
 
     // Load the endpoint
-    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+    let mut endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -3188,7 +3188,10 @@ async fn finish_resolution(
     // this bounded local decode and never provider credential effects.
     let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
     let catalog_proxy_authorization =
-        box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service)).await?;
+        box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service, Some(&endpoint))).await?;
+    if let Some((catalog_id, url, spec)) = &catalog_proxy_authorization.managed_target {
+        super::catalog_endpoint_service::apply_live_target(&user_service, &mut endpoint, catalog_id, url, spec);
+    }
     let catalog_billing = catalog_proxy_authorization.billing.clone();
     let catalog_service_slug = catalog_proxy_authorization.catalog_slug.clone();
     let catalog_ws_frame_injections =
@@ -3200,12 +3203,9 @@ async fn finish_resolution(
     };
     let user_service_default_headers: Vec<DefaultRequestHeader> = Vec::new();
 
-    if (super::platform_key_service::binding(&user_service) == "platform"
-        && (user_service.auth_method != "none"
-            || user_service.credential_binding.as_deref() == Some("platform")
-            || catalog_proxy_authorization.platform_key_configured))
-        || (catalog_proxy_authorization.no_auth_platform_service
-            && catalog_proxy_authorization.platform_key_configured)
+    if uses_catalog_platform_target(&user_service,
+        catalog_proxy_authorization.platform_key_configured,
+        catalog_proxy_authorization.no_auth_platform_service)
     {
         let catalog_service = box_resolution_future(|| load_catalog_service_for_user_service(db, &user_service)).await?;
         let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
@@ -3547,6 +3547,7 @@ async fn finish_resolution(
     })
 
     }).await?;
+    super::credential_verification::require_resolution(&resolution)?;
     if !resolve_header_values {
         return Ok(resolution);
     }
@@ -3594,6 +3595,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    managed_target: Option<(String, String, Option<String>)>,
     catalog_id: Option<String>,
     catalog_slug: Option<String>,
     billing: Option<crate::models::service_billing::ServiceBilling>,
@@ -3611,9 +3613,22 @@ struct CatalogProxyAuthorization {
     requires_user_credential: Option<bool>,
 }
 
+fn uses_catalog_platform_target(
+    connection: &UserService,
+    platform_key_configured: bool,
+    no_auth_platform_service: bool,
+) -> bool {
+    (super::platform_key_service::binding(connection) == "platform"
+        && (connection.auth_method != "none"
+            || connection.credential_binding.as_deref() == Some("platform")
+            || platform_key_configured))
+        || (no_auth_platform_service && platform_key_configured)
+}
+
 async fn load_catalog_proxy_authorization_for_user_service(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
+    endpoint: Option<&UserEndpoint>,
 ) -> AppResult<CatalogProxyAuthorization> {
     let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
         return Ok(CatalogProxyAuthorization::default());
@@ -3627,7 +3642,30 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
+    // Matching snapshots add no reads. Platform-key resolution already takes
+    // the live catalog target and performs its own provider checks below;
+    // never duplicate those checks for that branch, even on a mismatch.
+    let platform_target = uses_catalog_platform_target(
+        user_service,
+        service.platform_key.is_some(),
+        super::platform_key_service::no_auth_platform_service(&service),
+    );
+    let managed_target = if endpoint.is_some_and(|endpoint| {
+        endpoint.url != service.base_url || endpoint.openapi_spec_url != service.openapi_spec_url
+    }) && !platform_target
+        && super::catalog_endpoint_service::owned(user_service)
+        && super::catalog_endpoint_service::catalog_owns_url(db, &service).await?
+    {
+        Some((
+            service.id.clone(),
+            service.base_url.clone(),
+            service.openapi_spec_url.clone(),
+        ))
+    } else {
+        None
+    };
     Ok(CatalogProxyAuthorization {
+        managed_target,
         catalog_id: Some(service.id.clone()),
         catalog_slug: Some(service.slug.clone()),
         billing: service.billing.clone(),
@@ -4208,6 +4246,8 @@ fn build_minimal_downstream_service(
         git_http: None,
         concurrency_policy: None,
         inference_admin_modified: false,
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing,
         auth_notes: None,
         known_limitations: None,
@@ -4576,6 +4616,7 @@ async fn forward_request_with_egress_guard_inner(
         crate::turn_trace::Stage::ProxyHeaders,
     );
     let result: Result<reqwest::Response, ForwardRequestError> = crate::turn_trace::scope(operation.context(), async {
+    super::credential_verification::require_target(target,&method,path).await.map_err(ForwardRequestError::PreDispatchRejected)?;
     target.require_credential_materialized()?;
     let dispatch_guard =
         super::service_dispatch_registry::verify(admission, target, dispatch_caller)
@@ -5113,6 +5154,9 @@ async fn forward_request_with_egress_guard_inner(
         result?
     };
 
+    if super::credential_verification::checking() {
+        return super::credential_verification::observe(response).await.map_err(ForwardRequestError::Application);
+    }
     // Cache successful billing-API responses so a follow-up request
     // with the same body replays from memory. Non-2xx responses are
     // passed through unchanged by `insert_and_replay`.
@@ -5126,6 +5170,16 @@ async fn forward_request_with_egress_guard_inner(
     Ok(response)
 
     }).await;
+    if let Err(ForwardRequestError::Transport(error)) = &result {
+        super::credential_verification::record(
+            "not_verified",
+            if error.is_timeout() {
+                "check_timeout"
+            } else {
+                "check_unavailable"
+            },
+        );
+    }
     match &result {
         Ok(response) => operation.finish(
             if response.status().is_success() {
@@ -5929,6 +5983,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_endpoint_matching_proxy_snapshots_add_zero_commands() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let observed = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((event.command_name.clone(), collection.to_owned()));
+            }
+        });
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "catalog_endpoint_proxy_budget",
+            handler,
+        )
+        .await;
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.provider_config_id = Some("not-loaded-for-matching-snapshots".into());
+        catalog.openapi_spec_url = Some("https://example.com/openapi.json".into());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            "connection",
+            "owner",
+            "alias",
+            "endpoint",
+            Some(&catalog.id),
+            None,
+        );
+        connection.source = Some(AUTO_PROVISION_SOURCE.into());
+        let endpoint = test_user_endpoint(
+            "endpoint",
+            "owner",
+            "Catalog",
+            &catalog.base_url,
+            catalog.openapi_spec_url.as_deref(),
+            Some(&catalog.id),
+        );
+        // The legacy projection performs one catalog read. Compare every
+        // command, including potential writes, with the real matching path.
+        commands.lock().unwrap().clear();
+        load_catalog_proxy_authorization_for_user_service(&db, &connection, None)
+            .await
+            .unwrap();
+        let baseline = commands.lock().unwrap().clone();
+        assert_eq!(baseline, vec![("find".into(), DOWNSTREAM_SERVICES.into())]);
+        commands.lock().unwrap().clear();
+        load_catalog_proxy_authorization_for_user_service(&db, &connection, Some(&endpoint))
+            .await
+            .unwrap();
+        assert_eq!(
+            *commands.lock().unwrap(),
+            baseline,
+            "matching auto connection adds zero commands"
+        );
+        for spec_only in [false, true] {
+            let mut changed = endpoint.clone();
+            if spec_only {
+                changed.openapi_spec_url = None;
+            } else {
+                changed.url = "https://old.example".into();
+            }
+            commands.lock().unwrap().clear();
+            load_catalog_proxy_authorization_for_user_service(&db, &connection, Some(&changed))
+                .await
+                .unwrap();
+            assert_eq!(
+                *commands.lock().unwrap(),
+                vec![
+                    ("find".into(), DOWNSTREAM_SERVICES.into()),
+                    ("find".into(), PROVIDER_CONFIGS.into())
+                ]
+            );
+        }
+        // LLM/platform-key resolution already uses the live catalog and owns
+        // provider authorization. Neither matching nor stale snapshots add a
+        // second provider lookup at this projection seam.
+        connection.auth_method = "bearer".into();
+        for matching in [true, false] {
+            let mut endpoint = endpoint.clone();
+            if !matching {
+                endpoint.url = "https://old.example".into();
+            }
+            commands.lock().unwrap().clear();
+            let result = load_catalog_proxy_authorization_for_user_service(
+                &db,
+                &connection,
+                Some(&endpoint),
+            )
+            .await
+            .unwrap();
+            assert!(result.managed_target.is_none());
+            assert_eq!(*commands.lock().unwrap(), baseline);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn catalog_metering_keeps_protocol_identity_for_renamed_user_service() {
         let Some(db) = connect_test_database("proxy_catalog_protocol_identity").await else {
             eprintln!("skipping catalog protocol identity test: no local MongoDB available");
@@ -5953,7 +6109,7 @@ mod tests {
             None,
         );
         let catalog_service_slug =
-            load_catalog_proxy_authorization_for_user_service(&db, &user_service)
+            load_catalog_proxy_authorization_for_user_service(&db, &user_service, None)
                 .await
                 .unwrap()
                 .catalog_slug;
@@ -7330,6 +7486,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -8799,6 +8957,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -9000,6 +9160,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         }
     }
 
@@ -9205,6 +9366,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -9452,6 +9615,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -9712,6 +9877,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

@@ -63,6 +63,7 @@ pub mod connect_links;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;
+pub mod credential_verification;
 pub mod delegation;
 pub mod demo;
 pub mod developer_apps;
@@ -238,6 +239,7 @@ pub mod cma_sessions;
 pub mod org_specialist_channels;
 
 pub(crate) mod execution_permission_resume;
+pub(crate) mod invocation_diagnostics;
 
 mod platform_model_gateway;
 pub mod platform_models;

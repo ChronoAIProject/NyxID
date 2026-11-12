@@ -1,0 +1,11 @@
+A smoother NyxID workspace on iPhone and iPad.
+
+- Refined live voice controls, with a compact panel, thinner waveform, and improved call recovery.
+- Improved iPhone loudspeaker routing for GPT Live calls.
+- More stable dictation that fits naturally into the message composer.
+- A searchable voice picker for your next call.
+- Language settings for English, Simplified Chinese, and Traditional Chinese across supported settings screens.
+- Improved chat layout, attachment progress, and sign-in presentation.
+- Adaptive iPad layouts, rotation, and multitasking support.
+
+This update also includes reliability and compatibility improvements.

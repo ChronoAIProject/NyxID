@@ -11,6 +11,7 @@
       "description": "Anthropic API"
     }
   ],
+  "x-nyxid-credential-verification": { "operation": "models_list" },
   "paths": {
     "/messages": {
       "post": {

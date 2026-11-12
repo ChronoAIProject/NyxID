@@ -48,6 +48,10 @@ pub enum AuthMethod {
     Delegated,
 }
 
+/// Verified access token cannot be replayed from another sender (probe hop).
+#[derive(Clone, Copy)]
+pub struct SenderConstrainedToken;
+
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub(crate) execution_enrolled: bool,
@@ -986,7 +990,16 @@ async fn api_key_auth_user_inner(
             org_agent_access.as_ref(),
         )
         .await
-        .map_err(|_| AppError::Unauthorized("Invalid authentication credentials".to_string()))?
+        .map_err(|error| {
+            // An unavailable live turn lookup is not credential revocation.
+            // Preserve the retryable authority distinction for every caller,
+            // including Ornn's purpose-limited membership callback.
+            if error.status_code().is_server_error() {
+                AppError::OAuthAuthorityUnavailable
+            } else {
+                AppError::Unauthorized("Invalid authentication credentials".to_string())
+            }
+        })?
         .map(std::sync::Arc::new)
     } else {
         None
@@ -1286,6 +1299,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         claims.cnf.as_ref().and_then(|c| c.x5t_s256.as_deref())
                     {
                         validate_mtls_bound_access(parts, state, claims_x5t)?;
+                    }
+
+                    if claims.cnf.is_some() {
+                        parts.extensions.insert(SenderConstrainedToken);
                     }
 
                     // Check if this is a service account token
@@ -2804,6 +2821,14 @@ mod tests {
         assert!(!is_delegated_native_path(
             "/api/v1/approvals/requests/request-id"
         ));
+        for scope in [WIDE_PROXY_SCOPE, "proxy account:read"] {
+            assert!(!delegated_request_allowed(
+                &Method::POST,
+                "/api/v1/monitoring/invocation-diagnostics",
+                &HeaderMap::new(),
+                scope,
+            ));
+        }
     }
 
     #[test]
@@ -3198,6 +3223,7 @@ mod tests {
         }
         for path in [
             "/api/v1/assistant/nyxagent/voice/options",
+            "/api/v1/assistant/nyxagent/voice/active",
             "/api/v1/assistant/nyxagent/conversations/id/voice-requests/rid",
             "/api/v1/assistant/nyxagent/conversations/id/voice-sessions/sid/stream",
             "/api/v1/assistant/nyxagent/conversations/id/dictation",
@@ -4361,6 +4387,7 @@ mod tests {
             );
         }
         for path in [
+            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/users/me",
             "/api/v1/assistant/agents",
             "/api/v1/channel-relay/conversations",
@@ -4644,6 +4671,7 @@ mod tests {
     fn api_key_management_write_routes_require_write_scope() {
         let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
         let write_routes = [
+            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/api/v1/api-keys"),
             (Method::POST, "/api/v1/api-keys/key-1/rotate"),
             (Method::POST, "/api/v1/keys"),

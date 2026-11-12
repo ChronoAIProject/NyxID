@@ -12,7 +12,7 @@ import { decodeJwtSub } from "../auth/jwt";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "../accountDeletionPolicy";
 
 import { ApiError } from "./ApiError";
-import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
+import { buildApiError, networkApiError } from "./responseError";
 import { buildApiUrl } from "./baseUrl";
 import {
   clearStoredAuthSession,
@@ -143,33 +143,9 @@ async function readJsonSafely(response: Response): Promise<unknown> {
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    return text;
+    if (response.ok) throw buildApiError(null, response.status, response.headers);
+    return null;
   }
-}
-
-function buildApiError(payload: unknown, status: number): ApiError | Error {
-  if (payload && typeof payload === "object") {
-    const obj = payload as Record<string, unknown>;
-    const errorKey = typeof obj.error === "string" ? obj.error : `request_failed_${status}`;
-    const errorCode = typeof obj.error_code === "number" ? obj.error_code : 0;
-    const message =
-      typeof obj.message === "string" && obj.message.length > 0
-        ? obj.message
-        : errorKey;
-
-    const challenge = mfaChallengeFromResponse(payload, status);
-    if (challenge) return challenge;
-    const reason = obj.details && typeof obj.details === "object" &&
-      (obj.details as Record<string, unknown>).reason === "mfa_challenge_expired"
-      ? "mfa_challenge_expired" : undefined;
-    return new ApiError({ errorKey, errorCode, statusCode: status, message, reason, details: obj.details });
-  }
-
-  if (typeof payload === "string" && payload.length > 0) {
-    return new Error(payload);
-  }
-
-  return new Error(`request_failed_${status}`);
 }
 
 function computeAccessTokenExpiresAt(expiresInSec: number): number | undefined {
@@ -377,7 +353,7 @@ async function invalidateSession() {
 export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
   const { response } = await executeAuthenticatedRequest({
     url: buildApiUrl(path), options, clientHeaders: clientHeaders(),
-    transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init), init.signal ?? undefined), loadSession: loadStoredAuthSession,
+    transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init).catch((cause: unknown) => { throw networkApiError(cause); }), init.signal ?? undefined), loadSession: loadStoredAuthSession,
     refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
     toError: buildApiError, getAuthEpoch,
   });
@@ -438,7 +414,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
       headers,
       signal: options.signal,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    }), options.signal);
+    }).catch((cause: unknown) => { throw networkApiError(cause); }), options.signal);
 
   };
 
@@ -482,7 +458,7 @@ export async function requestBinaryJson<T>(
     },
     clientHeaders: clientHeaders(),
     transport: (url, init) =>
-      new Promise<{ ok: boolean; status: number; text: () => Promise<string> }>(
+      new Promise<{ ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string> }>(
         (resolve, reject) => {
           const xhr = new XMLHttpRequest();
           const abort = () => xhr.abort();
@@ -521,6 +497,7 @@ export async function requestBinaryJson<T>(
             resolve({
               ok: xhr.status >= 200 && xhr.status < 300,
               status: xhr.status,
+              headers: { get: (name) => xhr.getResponseHeader(name) },
               text: async () => xhr.responseText,
             });
           };
@@ -545,7 +522,9 @@ export async function requestBinaryJson<T>(
   });
   const text = await response.text();
   await assertOwner();
-  return JSON.parse(text) as T;
+  try { return JSON.parse(text) as T; } catch {
+    throw buildApiError(null, response.status, response.headers);
+  }
 }
 
 /** Bytes are consumed before the owner fence, so a late account response cannot be saved. */
@@ -557,7 +536,7 @@ export async function requestAuthenticatedBytes(
     url: buildApiUrl(path),
     options: { signal },
     clientHeaders: clientHeaders(),
-    transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init), init.signal ?? undefined),
+    transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init).catch((cause: unknown) => { throw networkApiError(cause); }), init.signal ?? undefined),
     loadSession: loadStoredAuthSession,
     refresh: refreshAccessTokenWithSingleFlight,
     invalidate: invalidateSession,

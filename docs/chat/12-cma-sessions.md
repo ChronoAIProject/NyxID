@@ -310,3 +310,67 @@ actions remain separate capabilities.
 - `frontend/e2e/login-redirect.spec.ts` checks app approval and password-MFA to
   app login against HTTP fixtures, preserving the absolute `return_to` and its
   assistant conversation query through profile restoration.
+
+## Catalog domain changes and auto-connected services
+
+NyxID-owned, auto-provisioned HTTP connections follow the current catalog target
+at proxy resolution. Reconciliation also updates the stored endpoint and inherited
+OpenAPI URL, keeping connection and endpoint IDs unchanged. This applies to all
+catalog services, including CMA and cmaeg; it does not rewrite explicit/custom,
+user-credential, gateway-provider or node destinations. Reconciliation runs during
+normal auto-provisioning (key listing, login and device approval), catalog URL/spec
+updates, and startup. Matching proxy snapshots add no database reads. Reconciliation
+batches connection, endpoint and catalog reads, and starts transactions only for
+mismatches; consistent pages perform no writes. Per-owner repair failures are
+logged without failing listing/login/approval. Admin updates return without waiting
+for repair: catalog updates and startup schedule bounded background passes with a
+five-minute limit. Live resolution already follows the catalog while repair runs.
+Repairs emit only identifier/changed-field audit metadata.
+
+NyxBot's cmaeg transport already resolves its target directly from the catalog;
+ordinary cmaeg proxy connections now follow catalog moves too. No user needs to
+delete or reconnect an auto-connected service.
+
+CMA still checks that the resolved connection targets the current catalog
+deployment at admission and immediately before sending. A mismatched explicit
+connection returns the existing `cma_configuration_required` conflict with the
+connection ID to inspect. Repair does not change credentials, key epochs, resource
+IDs, idempotency keys or retained creation fingerprints. A retained creation bound
+to the catalog **before** a domain move remains fenced against replay to the new
+deployment. Preserve that request and reconcile its outcome; do not create another
+request identity to bypass the fence. Endpoint-only repair under an unchanged
+catalog leaves valid retained creations recoverable.
+
+During a rolling upgrade, repaired rows work on old replicas too: old provisioning
+skips existing connections and does not revert their URLs. Until reconciliation
+visits a row, an old replica can still return the original conflict. The existing
+CMA safety check remains enforced throughout rollout.
+
+### Creation request encryption and writer cutover
+
+CMA sandbox/agent creation does not require `CONTEXTUAL_RECORD_WRITES=true`.
+Retained requests use the shared encrypted-field writer: legacy envelope encryption
+with the default setting off, contextual encryption with it on. The existing
+optional `request_context_version` on both creation and sandbox rows selects the
+reader: absent/null means legacy and `3` means contextual. Unknown or mismatched
+formats fail closed; readers never guess from ciphertext or retry another format.
+Existing contextual rows remain readable with writes off. No plaintext request is
+stored, and IDs, generations, idempotency keys and deployment fingerprints retain
+their existing meaning. Same-key pending retries preserve the saved ciphertext;
+only a proven-not-created retry replaces it and its marker together.
+
+During a mixed deployment, an old replica refuses a new legacy-format sandbox
+replay before any send: its marker check returns `cma_creation_recovery_unavailable`,
+and its contextual decoder cannot decrypt legacy ciphertext. This leaves the
+retained row and occupied slot intact for an upgraded replica. Receipt-only
+reconciliation remains valid; it clears recovery material only on the existing
+authoritative terminal evidence. Rolling back restores the creation/replay outage,
+not a plaintext fallback or automatic deletion. Account purge still deletes both
+owner-scoped record collections, while chat/watch cleanup does not discard an
+unresolved creation.
+
+This release does not enable writer cutover or disable legacy reads. CMA creation
+collections are not in the generic operator rewrap inventory; retain legacy reads
+until legacy pending requests have completed/been purged or a CMA migration adapter
+has been deployed and verified. An inventory pass alone does not establish that
+these CMA rows have been converted.
