@@ -583,7 +583,56 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     .await;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
-    assert!(saved.binding_id.is_none());
+    assert_eq!(saved.binding_id.as_deref(), Some("bnd_1"));
+    assert_eq!(saved.status, "active");
+    assert!(
+        key_service::validate_api_key(&state.db, &agent_key)
+            .await
+            .is_ok()
+    );
+    let route = state
+        .db
+        .collection::<ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&saved.route_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(route.is_active);
+    let observed = state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(observed.get_datetime("gateway_binding_unbound_at").is_ok());
+    let (first, second) = tokio::join!(
+        delete_binding(
+            State(state.clone()),
+            Path("bnd_1".into()),
+            bearer(&agent_key)
+        ),
+        delete_binding(
+            State(state.clone()),
+            Path("bnd_1".into()),
+            bearer(&agent_key)
+        ),
+    );
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
+    assert_eq!(second.status(), StatusCode::NO_CONTENT);
+    let repeated = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        repeated.execution_policy_revision,
+        saved.execution_policy_revision
+    );
+    assert_eq!(repeated.agent_api_key_id, saved.agent_api_key_id);
+    // CMA may reconcile a retained record with the same provider binding.
+    assert_eq!(
+        bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1")
+            .await
+            .status(),
+        StatusCode::OK
+    );
     assert!(!format!("{saved:?}").contains(&agent_key));
     server.abort();
 }
