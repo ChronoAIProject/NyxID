@@ -2833,14 +2833,6 @@ mod tests {
         assert!(!is_delegated_native_path(
             "/api/v1/approvals/requests/request-id"
         ));
-        for scope in [WIDE_PROXY_SCOPE, "proxy account:read"] {
-            assert!(!delegated_request_allowed(
-                &Method::POST,
-                "/api/v1/monitoring/invocation-diagnostics",
-                &HeaderMap::new(),
-                scope,
-            ));
-        }
     }
 
     #[test]

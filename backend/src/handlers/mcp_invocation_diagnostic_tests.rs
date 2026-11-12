@@ -80,7 +80,7 @@ async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_or
             &state, &auth, None, &request, false, permit,
         ))
         .await;
-        let should_issue = enabled && !agent_key && status >= 500;
+        let should_issue = enabled && status >= 500;
         if should_issue {
             assert_eq!(response.headers()["cache-control"], "no-store");
         }
