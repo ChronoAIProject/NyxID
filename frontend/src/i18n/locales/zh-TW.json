@@ -12077,5 +12077,6 @@
   "By {{name}}": "作者：{{name}}",
   "Drafted by {{name}}": "由 {{name}} 起草",
   "System skill": "系統技能",
-  "System skill for {{service}}": "{{service}} 的系統技能"
+  "System skill for {{service}}": "{{service}} 的系統技能",
+  "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark 附件寫入：{{reason}}。重試前請檢查已記錄的結果。"
 }

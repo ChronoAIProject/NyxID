@@ -6661,6 +6661,18 @@ async fn execute_tool_resolved_inner(
             &billing_ctx.billing_request_id,
             billing_ctx.credential_class,
         );
+        let lark_fields = endpoint.name == super::lark_attachment_tool::FIELDS_OPERATION
+            && matches!(catalog_service_slug, Some("api-lark" | "api-feishu" | "api-lark-bot" | "api-feishu-bot"))
+            && !is_generic_proxy_endpoint
+            && service.durable_endpoint_metadata.get(&endpoint.endpoint_id)
+                .is_some_and(|metadata| metadata.catalog_contract && metadata.operation_generation > 0);
+        if lark_fields {
+            super::lark_attachment_tool::diagnostics::bind(&service.service_id);
+            super::lark_attachment_tool::diagnostics::enable();
+        }
+        if managed_base.is_some() || attachment_binding.is_some() || lark_fields {
+            request_audit.attachment_write();
+        }
         request_audit.assistant(assistant_chat.as_ref());
         request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
@@ -6745,6 +6757,7 @@ async fn execute_tool_resolved_inner(
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
                 Err(error)=>{
+                    super::lark_attachment_tool::diagnostics::error(&error);
                     billing.settle(&metered,mcp_platform_usage_for_path(&[],request_len,&target.service,&path,409),None,None).await?;
                     return Err(error);
                 }
@@ -7056,6 +7069,10 @@ async fn execute_tool_resolved_inner(
         });
         let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_attachment(
             egress_guard,db,service,endpoint,attachment_binding.as_ref());
+        if attachment_binding.is_some() {
+            super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::Uncertain);
+        }
+        let catalog_route = super::lark_attachment_tool::routing::for_call(db, &target, service, endpoint, &path).await?;
         let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
@@ -7075,18 +7092,30 @@ async fn execute_tool_resolved_inner(
             resource_proof.as_ref(),
             Some(&dispatch_admission),
             Some(&dispatch_caller),
+            catalog_route.as_ref(),
         )
         .await
         {
             Ok(response) => response,
             Err(proxy_service::ForwardRequestError::PreDispatchRejected(error)) => {
+                if attachment_binding.is_some() {
+                    super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::NotSent);
+                    super::lark_attachment_tool::diagnostics::error(&error);
+                }
                 billing
                     .reject_before_send(&metered, "assistant_authority_changed", false)
                     .await?;
                 return Err(error);
             }
-            Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+            Err(proxy_service::ForwardRequestError::Application(error)) => {
+                if attachment_binding.is_some() && matches!(target.auth_method.as_str(), "bearer" | "token_exchange") && target.execution_permission.is_none() && !super::credential_verification::checking() {
+                    super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::NotSent);
+                    return Err(super::lark_attachment_tool::diagnostics::Reason::CredentialPreparation.error(error));
+                }
+                return Err(error);
+            },
             Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
+                if attachment_binding.is_some() { super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, None, None); }
                 return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
                     error.into_app_error(),
                 ));
@@ -7094,6 +7123,10 @@ async fn execute_tool_resolved_inner(
             Err(proxy_service::ForwardRequestError::Transport(error))
                 if direct_transport_failure_is_pre_dispatch(&error) =>
             {
+                if attachment_binding.is_some() {
+                    super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, None, None);
+                    super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::NotSent);
+                }
                 if error.is_connect()
                     && let (Some(chat), Some(admission)) =
                         (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -7113,6 +7146,7 @@ async fn execute_tool_resolved_inner(
                 ));
             }
             Err(proxy_service::ForwardRequestError::Transport(error)) => {
+                if attachment_binding.is_some() { super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, None, None); }
                 tracing::error!(
                     timeout = error.is_timeout(),
                     body = error.is_body(),
@@ -7188,6 +7222,7 @@ async fn execute_tool_resolved_inner(
         let (mut response, raw_usage) = match read {
             Ok(read) => read,
             Err(error) => {
+                if attachment_binding.is_some() { super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, Some(status), None); }
                 tracing::error!(
                     timeout = error.is_timeout(),
                     body = error.is_body(),
@@ -7214,6 +7249,12 @@ async fn execute_tool_resolved_inner(
             .await?;
 
         destination_audit.complete(status);
+        if lark_fields {
+            super::lark_attachment_tool::validate_field_response(status, &response.text)?;
+        }
+        if attachment_binding.is_some() && matches!(endpoint.attachment_input, Some(super::lark_attachment_tool::Projection::Stored(_))) {
+            super::lark_attachment_tool::validate_response(status, &response.text)?;
+        }
         request_audit.response(status).await;
         if (200..300).contains(&status)
             && let (Some(chat), Some(admission)) =

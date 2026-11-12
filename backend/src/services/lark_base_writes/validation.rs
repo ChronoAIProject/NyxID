@@ -59,26 +59,26 @@ pub(super) fn validate_fields(
 ) -> AppResult<()> {
     for field in attachments.keys() {
         if schema.get(field).and_then(|s| s["type"].as_i64()) != Some(17) {
-            return Err(AppError::BadRequest(
+            return Err(Failure::FieldNotAttachment.error(AppError::BadRequest(
                 "Unknown or non-attachment Base field".into(),
-            ));
+            )));
         }
     }
     for (field, value) in fields.as_object().ok_or_else(invalid)? {
-        let spec = schema
-            .get(field)
-            .ok_or_else(|| AppError::BadRequest("Unknown Base field".into()))?;
+        let spec = schema.get(field).ok_or_else(|| {
+            Failure::FieldMissing.error(AppError::BadRequest("Unknown Base field".into()))
+        })?;
         match spec["type"].as_i64() {
             Some(17) => {
-                return Err(AppError::BadRequest(
+                return Err(Failure::FieldValueInvalid.error(AppError::BadRequest(
                     "Attachment fields must use attachments".into(),
-                ));
+                )));
             }
             Some(2) => {
                 if !value.as_f64().is_some_and(f64::is_finite) {
-                    return Err(AppError::BadRequest(
+                    return Err(Failure::FieldValueInvalid.error(AppError::BadRequest(
                         "Base number field requires a finite number".into(),
-                    ));
+                    )));
                 }
             }
             Some(kind @ (3 | 4)) => {
@@ -94,9 +94,9 @@ pub(super) fn validate_fields(
                         .iter()
                         .any(|option| option["name"].as_str() == Some(name))
                     {
-                        return Err(AppError::BadRequest(
+                        return Err(Failure::FieldValueInvalid.error(AppError::BadRequest(
                             "Base select option does not exist; options will not be created".into(),
-                        ));
+                        )));
                     }
                 }
             }

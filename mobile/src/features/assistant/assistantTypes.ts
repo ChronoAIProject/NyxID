@@ -12,6 +12,7 @@ export const activitySchema = z.object({
   failure: z
     .object({
       kind: z.string(),
+      reason: z.string().nullish(),
       status: z.number().int().nullish(),
     })
     .nullish(),
