@@ -2133,12 +2133,22 @@ async fn setup_guidance_keeps_readiness_and_expiry_checks_closed() {
             .unwrap()["member_verified"],
         false
     );
-    // A live incompatible replica produces the existing distinct readiness error.
+    // An activated capability tolerates an undeclared supporting replica.
+    // Removing that replica's capability must retain the distinct refusal.
     let replicas = db.collection::<Document>(crate::models::security_replica::COLLECTION_NAME);
     let mut replica = replicas.find_one(doc! {}).await.unwrap().unwrap();
     replica.insert("_id", "unready-extra-replica");
     replica.insert("instance_name", "unready-extra-replica");
+    replica.insert("generation_id", "unready-extra-replica");
     replicas.insert_one(replica).await.unwrap();
+    require_target(db, &f.org.admin, &f.agent).await.unwrap();
+    replicas
+        .update_one(
+            doc! {"_id": "unready-extra-replica"},
+            doc! {"$pull": {"capabilities": FLAG}},
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         require_target(db, &f.org.admin, &f.agent).await,
         Err(AppError::SecurityReadinessUnavailable)

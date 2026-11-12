@@ -8136,8 +8136,24 @@ Returns a map keyed by security capability. Each report includes `ready`,
 `platform_policy_required`, `catalog_missing_policy`, and
 `catalog_explicit_empty_policy`. Catalog counts apply to the platform-policy
 capability. Missing, duplicate, stale, unsupported or differently configured
-serving processes block effective activation. Ordinary effective flag gates
-return `503 security_readiness_unavailable` (code `12900`) while unready.
+serving processes block activation (`ready` keeps its strict meaning).
+Additive `activated` / `active_since` show durable prior clean readiness;
+`serving_ready`, `serving_with_roster_warnings`, `roster_warnings` and
+`serving_blockers` explain continued serving separately. An activated capability
+may serve with roster warnings only while every live generation supports it and
+all hard checks pass. New activation remains strict. Refused gates return
+`503 security_readiness_unavailable` (code `12900`); ordinary flag reads retain
+their resolved boolean. The map includes `automation:coordinator-completion-v2`
+even when optional automation enrollment is disabled.
+
+| Additive field | JSON type | Nullable | Meaning |
+| --- | --- | --- | --- |
+| `activated` | boolean | No | Durable evidence of a prior clean assessment exists. |
+| `active_since` | RFC 3339 UTC string | Yes | First recorded activation time, or null when not recorded. |
+| `serving_ready` | boolean | No | Current traffic may serve, including recorded activation with only roster warnings. |
+| `serving_with_roster_warnings` | boolean | No | Serving is permitted despite one or more roster warnings. |
+| `roster_warnings` | array of strings | No | Sorted tolerable roster blocker strings, also present when hard checks refuse serving. |
+| `serving_blockers` | array of strings | No | Sorted hard serving blockers; includes `capability_not_activated` when strict readiness fails without evidence. |
 
 This endpoint requires admin/operator access and is separate from public
 `/health`. Roster/drain declarations are operational prerequisites; the

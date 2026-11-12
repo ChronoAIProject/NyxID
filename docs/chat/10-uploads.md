@@ -214,11 +214,13 @@ admission; no partially held reservation waits for a larger one.
 
 Upgrade **all NyxID replicas** and drain pre-release workers before enabling
 `assistant:channel-media`. The added Discord/Slack/WhatsApp/X path requires a
-ready `assistant:channel-media-v2` report at admission and every fetch/recheck;
+`assistant:channel-media-v2` serving readiness at admission and every fetch/recheck;
 legacy Lark/Feishu/Telegram owner paths do not acquire this new gate. With the
 existing flag already on, new adapters activate only after the complete roster
-advertises this capability and old workers are declared drained. A red report
-produces the unavailable-media note rather than a download. No new environment
+advertises this capability and old workers are declared drained. Once that clean
+activation is recorded, supported roster overlaps retain media service even when
+strict `ready` is false. Hard serving blockers produce the unavailable-media note
+rather than a download. No new environment
 variable or guest-media authority is introduced in this stage.
 Lark/Feishu gateway delivery also requires CMA at least
 `a570be21` and `CMAEG_MEDIA_ENABLED=true`. CMA's default provider header budget is

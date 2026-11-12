@@ -106,7 +106,7 @@ pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelM
 pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<AuthorizedMedia> {
     let source = source(db, request).await?;
     if expanded_relay(canonical_platform(&source.platform)) {
-        super::security_readiness_service::require(db, READINESS).await?;
+        super::security_readiness_service::require_serving(db, READINESS).await?;
     }
     let captured = &request.channel;
     let channel = db

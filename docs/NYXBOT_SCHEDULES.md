@@ -665,9 +665,9 @@ claim.
 ## Coordinator completion v2
 
 `AUTOMATION_CONTINUATION_V2_ENABLED=false` preserves legacy completion. With it
-on, first assistant admission enrolls only after the full declared/drained fleet
-advertises `automation:coordinator-completion-v2`. Missing readiness falls back to
-legacy admission. Started runs and confirmation waits admitted by legacy code
+on, first assistant admission uses `automation:coordinator-completion-v2` serving
+readiness. After a clean activation is recorded, supported roster overlaps retain
+v2 enrollment. Hard serving-readiness loss falls back to legacy admission. Started runs and confirmation waits admitted by legacy code
 finish using legacy behavior. No trigger protocol stamp or data migration exists.
 
 The coordinator is the thread selected by the delivery: NyxBot's home for a home

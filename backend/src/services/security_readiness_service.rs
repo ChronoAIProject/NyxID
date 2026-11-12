@@ -8,7 +8,10 @@ use mongodb::{
     bson::{self, doc},
 };
 use serde::Serialize;
-use std::{collections::BTreeSet, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
 #[derive(Clone, Debug)]
 pub struct Runtime {
@@ -26,7 +29,9 @@ pub fn initialize(runtime: Runtime) {
 fn runtime() -> AppResult<&'static Runtime> {
     RUNTIME.get().ok_or(AppError::SecurityReadinessUnavailable)
 }
-const ROLLOUTS: &str = "security_rollouts";
+use crate::models::security_capability_activation::{
+    COLLECTION_NAME as ROLLOUTS, RECORD_KIND, SecurityCapabilityActivation,
+};
 const PLATFORM_CUTOVER: &str = "platform-policy-v1";
 
 use super::node_owner_service::ReplicaIdentity;
@@ -86,6 +91,20 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
                     mongodb::options::IndexOptions::builder()
                         .name("security_replica_observations".to_owned())
                         .expire_after(std::time::Duration::from_secs(7 * 24 * 3600))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<SecurityCapabilityActivation>(ROLLOUTS)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"record_kind": 1, "capability": 1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .name("security_capability_activation_unique".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(doc! {"record_kind": RECORD_KIND})
                         .build(),
                 )
                 .build(),
@@ -192,18 +211,128 @@ async fn observe_with_capabilities(
         .replace_one(doc! {"_id": &row.id}, &row)
         .upsert(true)
         .await?;
+    // Activation evidence is written only by startup/heartbeat work, never by
+    // a request. Assess the live fleet after publishing this generation.
+    if let Err(error) = record_clean_activations(
+        db,
+        &Runtime {
+            identity: identity.clone(),
+            config: config.clone(),
+            platform_policy_required,
+        },
+        capabilities,
+    )
+    .await
+    {
+        // Evidence is retried on the next heartbeat. Publishing this process's
+        // observation must not depend on optional activation reads or writes.
+        tracing::warn!(%error, "Security capability activation recording incomplete; next heartbeat will retry");
+    }
     Ok(())
 }
 
 #[derive(Debug, Serialize)]
 pub struct Readiness {
+    /// Strict activation readiness; its existing API meaning is unchanged.
     pub ready: bool,
+    pub serving_ready: bool,
+    pub serving_with_roster_warnings: bool,
+    pub roster_warnings: Vec<String>,
+    pub serving_blockers: Vec<String>,
+    pub activated: bool,
+    pub active_since: Option<DateTime<Utc>>,
     pub blockers: Vec<String>,
     pub expected_replicas: Vec<String>,
     pub live_generations: usize,
     pub platform_policy_required: bool,
     pub catalog_missing_policy: u64,
     pub catalog_explicit_empty_policy: u64,
+}
+
+/// Classify at construction, never by parsing the public diagnostic strings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Blocker {
+    MissingOrDuplicateReplica(String),
+    UndeclaredReplica(String),
+    InconsistentServingRoster,
+    ServingRosterNotDeclared,
+    ExecutingProcessNotObserved,
+    OldReplicasNotDeclaredDrained,
+    FutureObservation(String),
+    UnsupportedReplica(String),
+    PlatformPolicyConfigurationMismatch,
+    ExecutingProcessPlatformPolicyDisabled,
+    PlatformPolicyNotEnabled,
+    CatalogMasterPolicyMissing,
+    CapabilityNotActivated,
+}
+impl Blocker {
+    fn roster_warning(&self) -> bool {
+        match self {
+            Self::MissingOrDuplicateReplica(_)
+            | Self::UndeclaredReplica(_)
+            | Self::InconsistentServingRoster
+            | Self::ServingRosterNotDeclared => true,
+            Self::ExecutingProcessNotObserved
+            | Self::OldReplicasNotDeclaredDrained
+            | Self::FutureObservation(_)
+            | Self::UnsupportedReplica(_)
+            | Self::PlatformPolicyConfigurationMismatch
+            | Self::ExecutingProcessPlatformPolicyDisabled
+            | Self::PlatformPolicyNotEnabled
+            | Self::CatalogMasterPolicyMissing
+            | Self::CapabilityNotActivated => false,
+        }
+    }
+    fn code(&self) -> String {
+        match self {
+            Self::MissingOrDuplicateReplica(name) => format!("missing_or_duplicate_replica:{name}"),
+            Self::UndeclaredReplica(name) => format!("undeclared_replica:{name}"),
+            Self::InconsistentServingRoster => "inconsistent_serving_roster".into(),
+            Self::ServingRosterNotDeclared => "serving_roster_not_declared".into(),
+            Self::ExecutingProcessNotObserved => "executing_process_not_observed".into(),
+            Self::OldReplicasNotDeclaredDrained => "old_replicas_not_declared_drained".into(),
+            Self::FutureObservation(name) => format!("future_observation:{name}"),
+            Self::UnsupportedReplica(name) => format!("unsupported_replica:{name}"),
+            Self::PlatformPolicyConfigurationMismatch => {
+                "platform_policy_configuration_mismatch".into()
+            }
+            Self::ExecutingProcessPlatformPolicyDisabled => {
+                "executing_process_platform_policy_disabled".into()
+            }
+            Self::PlatformPolicyNotEnabled => "platform_policy_not_enabled".into(),
+            Self::CatalogMasterPolicyMissing => "catalog_master_policy_missing".into(),
+            Self::CapabilityNotActivated => "capability_not_activated".into(),
+        }
+    }
+}
+
+impl Readiness {
+    fn block(&mut self, blocker: Blocker) {
+        let code = blocker.code();
+        if blocker.roster_warning() {
+            self.roster_warnings.push(code.clone());
+        } else {
+            self.serving_blockers.push(code.clone());
+        }
+        self.blockers.push(code);
+        self.ready = false;
+        self.serving_ready = false;
+    }
+
+    fn with_activation(mut self, active_since: Option<DateTime<Utc>>) -> Self {
+        self.activated = active_since.is_some();
+        self.active_since = active_since;
+        self.serving_ready = self.ready || (self.activated && self.serving_blockers.is_empty());
+        if !self.ready && !self.activated {
+            self.serving_blockers
+                .push(Blocker::CapabilityNotActivated.code());
+        }
+        self.serving_with_roster_warnings = self.serving_ready && !self.roster_warnings.is_empty();
+        self.serving_blockers.sort();
+        self.roster_warnings.sort();
+        self
+    }
 }
 
 fn assess(
@@ -223,25 +352,25 @@ fn assess(
         row.instance_name == local.identity.instance_name
             && row.generation_id == local.identity.generation_id
     }) {
-        blockers.insert("executing_process_not_observed".to_owned());
+        blockers.insert(Blocker::ExecutingProcessNotObserved);
     }
     if !local.config.drained {
-        blockers.insert("old_replicas_not_declared_drained".to_owned());
+        blockers.insert(Blocker::OldReplicasNotDeclaredDrained);
     }
     if expected.is_empty() {
-        blockers.insert("serving_roster_not_declared".to_owned());
+        blockers.insert(Blocker::ServingRosterNotDeclared);
     }
     for name in &expected {
         if live.iter().filter(|r| &r.instance_name == name).count() != 1 {
-            blockers.insert(format!("missing_or_duplicate_replica:{name}"));
+            blockers.insert(Blocker::MissingOrDuplicateReplica(name.clone()));
         }
     }
     for row in &live {
         if row.observed_at > now + Duration::seconds(5) {
-            blockers.insert(format!("future_observation:{}", row.instance_name));
+            blockers.insert(Blocker::FutureObservation(row.instance_name.clone()));
         }
         if !expected.contains(&row.instance_name) {
-            blockers.insert(format!("undeclared_replica:{}", row.instance_name));
+            blockers.insert(Blocker::UndeclaredReplica(row.instance_name.clone()));
         }
         if row
             .expected_replicas
@@ -250,13 +379,13 @@ fn assess(
             .collect::<BTreeSet<_>>()
             != expected
         {
-            blockers.insert("inconsistent_serving_roster".to_owned());
+            blockers.insert(Blocker::InconsistentServingRoster);
         }
         if !row.drained {
-            blockers.insert("old_replicas_not_declared_drained".to_owned());
+            blockers.insert(Blocker::OldReplicasNotDeclaredDrained);
         }
         if row.protocol != 1 || !row.capabilities.iter().any(|c| c == capability) {
-            blockers.insert(format!("unsupported_replica:{}", row.instance_name));
+            blockers.insert(Blocker::UnsupportedReplica(row.instance_name.clone()));
         }
     }
     let platform_policy_required = cutover_required
@@ -267,24 +396,38 @@ fn assess(
             .iter()
             .any(|r| r.platform_policy_required != platform_policy_required)
         {
-            blockers.insert("platform_policy_configuration_mismatch".to_owned());
+            blockers.insert(Blocker::PlatformPolicyConfigurationMismatch);
         }
         if !local.platform_policy_required {
-            blockers.insert("executing_process_platform_policy_disabled".to_owned());
+            blockers.insert(Blocker::ExecutingProcessPlatformPolicyDisabled);
         }
         if !platform_policy_required {
-            blockers.insert("platform_policy_not_enabled".to_owned());
+            blockers.insert(Blocker::PlatformPolicyNotEnabled);
         }
     }
-    Readiness {
-        ready: blockers.is_empty(),
-        blockers: blockers.into_iter().collect(),
+    let mut report = Readiness {
+        ready: true,
+        serving_ready: true,
+        serving_with_roster_warnings: false,
+        roster_warnings: vec![],
+        serving_blockers: vec![],
+        activated: false,
+        active_since: None,
+        blockers: vec![],
         expected_replicas: expected.into_iter().collect(),
         live_generations: live.len(),
         platform_policy_required,
         catalog_missing_policy: 0,
         catalog_explicit_empty_policy: 0,
+    };
+    for blocker in blockers {
+        report.block(blocker);
     }
+    // Preserve the existing lexicographic public blocker order.
+    report.blockers.sort();
+    report.roster_warnings.sort();
+    report.serving_blockers.sort();
+    report
 }
 
 async fn rows(db: &Database) -> AppResult<Vec<SecurityReplica>> {
@@ -311,14 +454,52 @@ async fn platform_cutover_required(db: &Database) -> AppResult<bool> {
         .is_some())
 }
 
+/// The existing cutover read also fetches activation evidence. No extra
+/// command or activation cache on the healthy request path.
+async fn rollout_state(
+    db: &Database,
+    capabilities: &[&str],
+) -> AppResult<(bool, BTreeMap<String, DateTime<Utc>>)> {
+    let records: Vec<bson::Document> = db
+        .collection(ROLLOUTS)
+        .find(doc! {"$or": [
+            {"_id": PLATFORM_CUTOVER},
+            {"record_kind": RECORD_KIND, "capability": {"$in": capabilities}},
+        ]})
+        // At most one row per capability, one cutover marker, and one sentinel
+        // to detect duplicate activations even without the unique index.
+        .limit((capabilities.len() + 2) as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let mut cutover = false;
+    let mut activations = BTreeMap::new();
+    for record in records {
+        if record.get_str("_id").ok() == Some(PLATFORM_CUTOVER) {
+            cutover = true;
+        } else {
+            let activation: SecurityCapabilityActivation =
+                bson::from_document(record).map_err(|_| AppError::SecurityReadinessUnavailable)?;
+            if activations
+                .insert(activation.capability, activation.active_since)
+                .is_some()
+            {
+                return Err(AppError::SecurityReadinessUnavailable);
+            }
+        }
+    }
+    Ok((cutover, activations))
+}
+
 async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResult<Readiness> {
-    let mut report = assess(
-        &rows(db).await?,
-        local,
-        capability,
-        platform_cutover_required(db).await?,
-        Utc::now(),
-    );
+    let rows = rows(db).await?;
+    let (cutover, activations) = rollout_state(db, &[capability]).await?;
+    let mut report = assess(&rows, local, capability, cutover, Utc::now());
+    inventory(db, capability, &mut report).await?;
+    Ok(report.with_activation(activations.get(capability).copied()))
+}
+
+async fn inventory(db: &Database, capability: &str, report: &mut Readiness) -> AppResult<()> {
     if capability == PLATFORM_POLICY {
         // Include every active catalog row which can supply a master credential.
         // A conservative superset is intentional; never fetch credential bytes.
@@ -332,18 +513,115 @@ async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResu
         empty.insert("proxy_operation_policy.rules", doc! {"$size": 0});
         report.catalog_explicit_empty_policy = collection.count_documents(empty).await?;
         if report.catalog_missing_policy != 0 {
-            report.blockers.push("catalog_master_policy_missing".into());
-            report.ready = false;
+            report.block(Blocker::CatalogMasterPolicyMissing);
         }
+    }
+    Ok(())
+}
+
+async fn record_clean_activations(
+    db: &Database,
+    local: &Runtime,
+    capabilities: &[&str],
+) -> AppResult<()> {
+    let rows = rows(db).await?;
+    let state = match rollout_state(db, capabilities).await {
+        Ok(state) => Some(state),
+        // Isolate malformed/duplicate evidence to its own capability. A shared
+        // database failure still aborts this best-effort pass immediately.
+        Err(AppError::SecurityReadinessUnavailable) => None,
+        Err(error) => return Err(error),
+    };
+    let mut failure = None;
+    for &capability in capabilities {
+        let isolated;
+        let (cutover, active) = if let Some(state) = &state {
+            state
+        } else {
+            match rollout_state(db, &[capability]).await {
+                Ok(state) => {
+                    isolated = state;
+                    &isolated
+                }
+                Err(error) => {
+                    tracing::warn!(capability, %error, "Security capability activation evidence unavailable");
+                    failure.get_or_insert(error);
+                    continue;
+                }
+            }
+        };
+        if active.contains_key(capability) {
+            continue;
+        }
+        let mut assessment = assess(&rows, local, capability, *cutover, Utc::now());
+        if !assessment.ready {
+            continue;
+        }
+        let result = async {
+            inventory(db, capability, &mut assessment).await?;
+            if assessment.ready {
+                insert_activation(db, capability).await?;
+            }
+            Ok::<_, AppError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(capability, %error, "Security capability activation recording failed");
+            failure.get_or_insert(error);
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+async fn insert_activation(db: &Database, capability: &str) -> AppResult<()> {
+    let record = SecurityCapabilityActivation {
+        id: uuid::Uuid::new_v4().to_string(),
+        record_kind: RECORD_KIND.into(),
+        capability: capability.into(),
+        active_since: Utc::now(),
+    };
+    // Equal unique-index predicates plus $setOnInsert make concurrent
+    // heartbeats converge on one immutable first activation timestamp.
+    db.collection::<SecurityCapabilityActivation>(ROLLOUTS)
+        .update_one(
+            doc! {"record_kind": RECORD_KIND, "capability": capability},
+            doc! {"$setOnInsert": bson::to_document(&record)
+            .map_err(|_| AppError::SecurityReadinessUnavailable)?},
+        )
+        .upsert(true)
+        .await?;
+    Ok(())
+}
+
+/// Serving decisions still read every live generation, including undeclared
+/// and duplicate names. Only a recorded activation can tolerate roster churn.
+pub async fn serving_report(db: &Database, capability: &str) -> AppResult<Readiness> {
+    let report = report(db, capability).await?;
+    if report.serving_with_roster_warnings {
+        diagnostics::warn(db, capability, &report);
     }
     Ok(report)
 }
 
-pub async fn require(db: &Database, capability: &str) -> AppResult<()> {
+/// Execution requires a known capability. Unlike activation of arbitrary
+/// feature flags, an unknown execution contract must never bypass readiness.
+pub async fn require_serving(db: &Database, capability: &str) -> AppResult<()> {
+    if !CAPABILITIES.contains(&capability) && capability != AUTOMATION_COMPLETION {
+        return Err(AppError::SecurityReadinessUnavailable);
+    }
+    if !serving_report(db, capability).await?.serving_ready {
+        return Err(AppError::SecurityReadinessUnavailable);
+    }
+    Ok(())
+}
+
+/// Platform rollout controls are strict for known capabilities. Unknown keys
+/// remain allowed because feature-flag writes also pass ordinary, ungated flags.
+pub async fn require_activation(db: &Database, capability: &str) -> AppResult<()> {
     if capability == super::platform_model_service::FLAG {
         // Keep this optional foundation out of every existing flag caller's
         // inline future layout.
-        return Box::pin(super::platform_model_service::require_execution_ready(db)).await;
+        return Box::pin(super::platform_model_service::require_activation_ready(db)).await;
     }
     if (CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION)
         && !report(db, capability).await?.ready
@@ -361,10 +639,12 @@ pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<
         || platform_cutover_required(db).await?
         || rows.iter().any(|r| r.platform_policy_required)
     {
-        require(db, PLATFORM_POLICY).await?;
+        require_serving(db, PLATFORM_POLICY).await?;
     }
     Ok(())
 }
+
+mod diagnostics;
 
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
@@ -382,11 +662,66 @@ pub(crate) async fn controlled_ready_test_replica(db: &Database) -> tokio::task:
 }
 
 #[cfg(test)]
+pub(crate) async fn overlapping_test_replica(db: &Database) -> SecurityReplica {
+    let replicas = db.collection::<SecurityReplica>(COLLECTION_NAME);
+    let mut row = replicas
+        .find_one(doc! {"_id":"test-process"})
+        .await
+        .unwrap()
+        .unwrap();
+    row.id = uuid::Uuid::new_v4().to_string();
+    row.generation_id = row.id.clone();
+    row.observed_at = Utc::now();
+    replicas.insert_one(&row).await.unwrap();
+    row
+}
+
+#[cfg(test)]
+pub(crate) async fn remove_test_replica_capability(
+    db: &Database,
+    replica: &SecurityReplica,
+    capability: &str,
+) {
+    db.collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&replica.id},
+            doc! {"$pull":{"capabilities":capability}},
+        )
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+struct TestHeartbeat {
+    stop: tokio_util::sync::CancellationToken,
+    finished: tokio::sync::watch::Receiver<()>,
+}
+
+#[cfg(test)]
+static TEST_HEARTBEATS: OnceLock<std::sync::Mutex<BTreeMap<String, TestHeartbeat>>> =
+    OnceLock::new();
+
+/// Finish any in-flight publication before a fixture expires its observation.
+#[cfg(test)]
+pub(crate) async fn stop_test_replica(db: &Database) {
+    let heartbeat = TEST_HEARTBEATS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(db.name());
+    if let Some(mut heartbeat) = heartbeat {
+        heartbeat.stop.cancel();
+        let _ = heartbeat.finished.changed().await;
+    }
+}
+
+#[cfg(test)]
 async fn ready_test_replica_inner(
     db: &Database,
     automation_enabled: bool,
     excluded: Option<&'static str>,
 ) -> tokio::task::JoinHandle<()> {
+    stop_test_replica(db).await;
     let local = Runtime {
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
@@ -399,7 +734,7 @@ async fn ready_test_replica_inner(
         },
         platform_policy_required: false,
     };
-    RUNTIME.get_or_init(|| local);
+    RUNTIME.get_or_init(|| local.clone());
     let db = db.clone();
     let mut capabilities: Vec<_> = CAPABILITIES
         .iter()
@@ -409,44 +744,92 @@ async fn ready_test_replica_inner(
     if automation_enabled {
         capabilities.push(AUTOMATION_COMPLETION);
     }
-    let heartbeat = || async {
-        observe_with_capabilities(
-            &db,
-            &ReplicaIdentity {
-                instance_name: "test-backend".into(),
-                generation_id: "test-process".into(),
-                internal_base_url: "http://127.0.0.1:3002".into(),
-            },
-            &RolloutConfig {
-                expected_replicas: vec!["test-backend".into()],
-                drained: true,
-            },
-            false,
-            &capabilities,
-        )
+    ensure_indexes(&db).await.expect("test readiness indexes");
+    let mut row = SecurityReplica {
+        id: local.identity.generation_id.clone(),
+        instance_name: local.identity.instance_name.clone(),
+        generation_id: local.identity.generation_id.clone(),
+        protocol: 1,
+        capabilities: capabilities
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect(),
+        expected_replicas: local.config.expected_replicas.clone(),
+        drained: true,
+        platform_policy_required: false,
+        observed_at: Utc::now(),
+    };
+    let replicas = db.collection::<SecurityReplica>(COLLECTION_NAME);
+    replicas
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .upsert(true)
         .await
         .expect("test replica observation");
-    };
-    heartbeat().await;
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            observe_with_capabilities(
-                &db,
-                &ReplicaIdentity {
-                    instance_name: "test-backend".into(),
-                    generation_id: "test-process".into(),
-                    internal_base_url: "http://127.0.0.1:3002".into(),
-                },
-                &RolloutConfig {
-                    expected_replicas: vec!["test-backend".into()],
-                    drained: true,
-                },
-                false,
-                &capabilities,
-            )
+    // Fixtures seed the same clean evidence in one command. Production heartbeat
+    // recording and its failure/recovery tests still use record_clean_activations.
+    let live = rows(&db).await.expect("test live replicas");
+    let (cutover, active) = rollout_state(&db, &capabilities)
+        .await
+        .expect("test rollout state");
+    let mut updates = Vec::new();
+    for capability in capabilities {
+        let mut assessment = assess(&live, &local, capability, cutover, Utc::now());
+        if active.contains_key(capability) || !assessment.ready {
+            continue;
+        }
+        inventory(&db, capability, &mut assessment)
             .await
-            .expect("test replica heartbeat");
+            .expect("test readiness inventory");
+        if !assessment.ready {
+            continue;
+        }
+        let record = SecurityCapabilityActivation {
+            id: uuid::Uuid::new_v4().to_string(),
+            record_kind: RECORD_KIND.into(),
+            capability: capability.into(),
+            active_since: Utc::now(),
+        };
+        updates.push(
+            mongodb::options::UpdateOneModel::builder()
+                .namespace(mongodb::Namespace::new(db.name(), ROLLOUTS))
+                .filter(doc! {"record_kind": RECORD_KIND, "capability": capability})
+                .update(doc! {"$setOnInsert": bson::to_document(&record).unwrap()})
+                .upsert(true)
+                .build(),
+        );
+    }
+    if !updates.is_empty() {
+        db.client()
+            .bulk_write(updates)
+            .await
+            .expect("test activation evidence");
+    }
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (finished, receiver) = tokio::sync::watch::channel(());
+    TEST_HEARTBEATS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(
+            db.name().to_owned(),
+            TestHeartbeat {
+                stop: stop.clone(),
+                finished: receiver,
+            },
+        );
+    tokio::spawn(async move {
+        let _finished = finished;
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {},
+            }
+            row.observed_at = Utc::now();
+            replicas
+                .replace_one(doc! {"_id": &row.id}, &row)
+                .upsert(true)
+                .await
+                .expect("test replica heartbeat");
         }
     })
 }
