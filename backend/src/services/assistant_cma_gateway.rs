@@ -1,4 +1,4 @@
-//! A bounded, owner-authenticated boundary to the single catalog CMA deployment.
+//! A bounded, owner-authenticated boundary to one concrete CMA connection.
 //! Remote payloads are projected here; catalog credentials and arbitrary upstream
 //! error text never enter the management API.
 
@@ -38,8 +38,10 @@ pub type CmaDesktopSocket =
 
 pub type CmaResult<T> = Result<T, CmaGatewayError>;
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum CmaGatewayError {
+    #[error(transparent)]
+    Resolution(#[from] AppError),
     #[error("CMA credential setup is required")]
     CredentialSetupRequired { login_url: String },
     #[error("CMA resource not found")]
@@ -56,8 +58,6 @@ pub enum CmaGatewayError {
     Unavailable,
     #[error("CMA returned an invalid response")]
     InvalidResponse,
-    #[error("CMA configuration is unavailable")]
-    ConfigurationRequired,
     #[error("Invalid CMA request")]
     InvalidRequest,
     #[error("CMA resource inventory is incomplete")]
@@ -69,6 +69,7 @@ pub enum CmaGatewayError {
 impl From<CmaGatewayError> for AppError {
     fn from(error: CmaGatewayError) -> Self {
         match error {
+            CmaGatewayError::Resolution(error) => error,
             CmaGatewayError::CredentialSetupRequired { login_url } => Self::Conflict(format!(
                 "sandbox_credential_setup_required: Sign in once at {login_url}; keep the original creation request for recovery"
             )),
@@ -77,9 +78,6 @@ impl From<CmaGatewayError> for AppError {
             CmaGatewayError::InvalidRequest => Self::ValidationError("Invalid CMA request".into()),
             CmaGatewayError::Conflict => {
                 Self::Conflict("CMA resource state changed; refresh before retrying".into())
-            }
-            CmaGatewayError::ConfigurationRequired => {
-                Self::Conflict("cma_configuration_required".into())
             }
             CmaGatewayError::InventoryIncomplete => {
                 Self::Conflict("cma_inventory_incomplete".into())
@@ -158,6 +156,10 @@ where
     )))
 }
 
+fn map_resolution_error(error: AppError) -> CmaGatewayError {
+    CmaGatewayError::Resolution(error)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CmaTranscriptMessage {
     pub id: Option<String>,
@@ -233,19 +235,37 @@ pub struct CmaFileWrite {
     pub sha256: String,
 }
 
+/// Routing identity only; the URL is deliberately absent from Debug/API DTOs.
+#[derive(Clone)]
+pub struct CmaConnection {
+    pub user_service_id: String,
+    pub cma_service_id: String,
+    pub execution_base_url: String,
+}
+
 #[async_trait]
 pub trait CmaGateway: Send + Sync {
     async fn service_id(&self, owner_id: &str) -> CmaResult<String>;
-    /// Recovery must address the same deployment that accepted the original
-    /// request, even when a catalog row keeps its ID while its target changes.
+    async fn connection(&self, owner_id: &str) -> CmaResult<CmaConnection>;
+    #[cfg(not(test))]
+    fn for_connection(&self, connection: &CmaConnection) -> Option<Box<dyn CmaGateway + '_>>;
+    #[cfg(test)]
+    fn for_connection(&self, _connection: &CmaConnection) -> Option<Box<dyn CmaGateway + '_>> {
+        None
+    }
+    /// Recovery must retain the original concrete connection and effective
+    /// destination under current authorization.
     async fn verify_creation_deployment(
         &self,
         owner_id: &str,
-        service_id: &str,
-        _fingerprint: &str,
+        user_service_id: &str,
+        execution_base_url: &str,
     ) -> CmaResult<()> {
-        if self.service_id(owner_id).await? != service_id {
-            return Err(CmaGatewayError::ConfigurationRequired);
+        let current = self.connection(owner_id).await?;
+        if current.user_service_id != user_service_id
+            || current.execution_base_url != execution_base_url
+        {
+            return Err(CmaGatewayError::Conflict);
         }
         Ok(())
     }
@@ -344,13 +364,16 @@ pub trait CmaGateway: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct CatalogCmaGateway {
+pub struct CatalogCmaGateway<'a> {
     db: mongodb::Database,
+    encryption_keys: GatewayKeys<'a>,
     jwt_keys: crate::crypto::jwt::JwtKeys,
     config: crate::config::AppConfig,
-    // One boundary instance cannot switch deployments during an operation.
+    // A boundary is pinned to one concrete UserService for the duration of an
+    // operation. The catalog id remains a classification value only.
     service_id: Arc<OnceLock<String>>,
-    execution_fingerprint: Arc<OnceLock<String>>,
+    user_service_id: Arc<OnceLock<String>>,
+    expected_base_url: Arc<OnceLock<String>>,
     native_authority: Option<(
         super::assistant_acknowledgement_service::ChatAuthority,
         crate::models::assistant_settings::AccessMode,
@@ -361,74 +384,94 @@ pub struct CatalogCmaGateway {
     )>,
 }
 
-pub(crate) fn catalog_execution_fingerprint(service: &DownstreamService) -> String {
-    // Bind every catalog input used by this boundary. Publication metadata and
-    // timestamps do not participate; changing destination or signed identity
-    // policy during one operation must stop before the next outbound request.
-    let projection = json!({
-        "service_id":service.id,"base_url":service.base_url,
-        "service_type":service.service_type,"service_category":service.service_category,
-        "auth_method":service.auth_method,"requires_user_credential":service.requires_user_credential,
-        "identity_propagation_mode":service.identity_propagation_mode,
-        "identity_include_user_id":service.identity_include_user_id,
-        "identity_include_email":service.identity_include_email,
-        "identity_include_name":service.identity_include_name,
-        "identity_jwt_audience":service.identity_jwt_audience,
-        "forward_access_token":service.forward_access_token,
-        "inject_delegation_token":service.inject_delegation_token,
-        "delegation_token_scope":service.delegation_token_scope,
-        "proxy_operation_policy":service.proxy_operation_policy,
-    });
-    let mut digest = Sha256::new();
-    digest.update(b"nyxid:cma-management-execution:v1\0");
-    digest.update(projection.to_string());
-    hex::encode(digest.finalize())
+#[derive(Clone)]
+enum GatewayKeys<'a> {
+    Borrowed(&'a crate::crypto::aes::EncryptionKeys),
+    Shared(Arc<crate::crypto::aes::EncryptionKeys>),
 }
-
-fn require_same_deployment_target(
-    catalog: &DownstreamService,
-    service_id: &str,
-    base_url: &str,
-) -> CmaResult<()> {
-    if catalog.id != service_id || catalog.base_url != base_url {
-        return Err(CmaGatewayError::ConfigurationRequired);
+impl std::ops::Deref for GatewayKeys<'_> {
+    type Target = crate::crypto::aes::EncryptionKeys;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(keys) => keys,
+            Self::Shared(keys) => keys,
+        }
     }
-    Ok(())
 }
 
-impl CatalogCmaGateway {
+impl CatalogCmaGateway<'static> {
     pub fn new(state: &AppState) -> Self {
         Self {
             db: state.db.clone(),
+            encryption_keys: GatewayKeys::Shared(state.encryption_keys.clone()),
             jwt_keys: state.jwt_keys.clone(),
             config: state.config.clone(),
             service_id: Arc::new(OnceLock::new()),
-            execution_fingerprint: Arc::new(OnceLock::new()),
+            user_service_id: Arc::new(OnceLock::new()),
+            expected_base_url: Arc::new(OnceLock::new()),
             native_authority: None,
             watch_authority: None,
         }
     }
 
-    pub fn for_service(state: &AppState, service_id: &str) -> Self {
-        Self::from_parts(&state.db, &state.jwt_keys, &state.config, service_id)
+    pub fn for_user_service(state: &AppState, user_service_id: &str) -> Self {
+        let mut gateway = Self::new(state);
+        gateway.user_service_id = Arc::new(OnceLock::from(user_service_id.to_owned()));
+        gateway
+    }
+}
+
+impl<'a> CatalogCmaGateway<'a> {
+    pub(crate) fn from_owner_parts(
+        db: &mongodb::Database,
+        keys: &'a crate::crypto::aes::EncryptionKeys,
+        jwt: &crate::crypto::jwt::JwtKeys,
+        config: &crate::config::AppConfig,
+    ) -> Self {
+        let mut gateway = Self::from_user_service_parts(db, keys, jwt, config, "", None, None);
+        gateway.user_service_id = Arc::new(OnceLock::new());
+        gateway
     }
 
-    pub fn from_parts(
+    pub(crate) fn from_user_service_parts(
         db: &mongodb::Database,
+        encryption_keys: &'a crate::crypto::aes::EncryptionKeys,
         jwt_keys: &crate::crypto::jwt::JwtKeys,
         config: &crate::config::AppConfig,
-        service_id: &str,
+        user_service_id: &str,
+        catalog_service_id: Option<&str>,
+        execution_base_url: Option<&str>,
     ) -> Self {
-        let pinned = OnceLock::new();
-        let _ = pinned.set(service_id.to_owned());
         Self {
             db: db.clone(),
+            encryption_keys: GatewayKeys::Borrowed(encryption_keys),
             jwt_keys: jwt_keys.clone(),
             config: config.clone(),
-            service_id: Arc::new(pinned),
-            execution_fingerprint: Arc::new(OnceLock::new()),
+            service_id: Arc::new(
+                catalog_service_id
+                    .map(str::to_owned)
+                    .map(OnceLock::from)
+                    .unwrap_or_default(),
+            ),
+            user_service_id: Arc::new(OnceLock::from(user_service_id.to_owned())),
+            expected_base_url: Arc::new(
+                execution_base_url
+                    .map(str::to_owned)
+                    .map(OnceLock::from)
+                    .unwrap_or_default(),
+            ),
             native_authority: None,
             watch_authority: None,
+        }
+    }
+
+    /// Rebind the transport and its caller authority to a saved resource.
+    pub(crate) fn for_binding(&self, connection: &str, service: &str, base: &str) -> Self {
+        Self {
+            user_service_id: Arc::new(OnceLock::from(connection.to_owned())),
+            service_id: Arc::new(OnceLock::from(service.to_owned())),
+            expected_base_url: Arc::new(OnceLock::from(base.to_owned())),
+            ..self.clone()
         }
     }
 
@@ -450,33 +493,48 @@ impl CatalogCmaGateway {
         self
     }
 
-    /// Compare catalog snapshots for native operations. Ordinary proxy
-    /// connections may have their own identity policy and must instead bind
-    /// their actual deployment through `deployment_fingerprint_for_target`.
-    pub async fn verify_catalog(
+    pub(super) fn with_authority_from(mut self, source: &CatalogCmaGateway<'_>) -> Self {
+        self.native_authority = source.native_authority.clone();
+        self.watch_authority = source.watch_authority.clone();
+        self
+    }
+
+    pub(super) fn has_dispatch_authority(&self) -> bool {
+        self.native_authority.is_some() || self.watch_authority.is_some()
+    }
+
+    /// Re-resolve the same concrete connection immediately before dispatch.
+    /// This preserves the generic proxy authority checks while preventing an
+    /// existing creation from silently moving to another UserService or URL.
+    pub(crate) async fn verify_target(
         &self,
         owner_id: &str,
-        expected: &DownstreamService,
+        user_service_id: &str,
+        base_url: &str,
     ) -> CmaResult<()> {
-        let (current, _, _) = self.resolve(owner_id).await?;
-        if catalog_execution_fingerprint(&current) != catalog_execution_fingerprint(expected) {
-            return Err(CmaGatewayError::ConfigurationRequired);
+        let resolution =
+            super::proxy_service::read_connection_authority(&self.db, owner_id, user_service_id)
+                .await
+                .map_err(map_resolution_error)?
+                .ok_or(CmaGatewayError::NotFound)?;
+        if self
+            .user_service_id
+            .get()
+            .is_none_or(|id| id != user_service_id)
+            || resolution.catalog_service_slug.as_deref() != Some(CMA_SLUG)
+            || self
+                .service_id
+                .get()
+                .is_some_and(|id| id != &resolution.target.service.id)
+            || resolution.node_id.is_some()
+            || validated_base(&resolution.target.base_url)? != validated_base(base_url)?
+        {
+            return Err(CmaGatewayError::Conflict);
         }
         Ok(())
     }
 
-    pub(crate) async fn deployment_fingerprint_for_target(
-        &self,
-        owner_id: &str,
-        service_id: &str,
-        base_url: &str,
-    ) -> CmaResult<String> {
-        let (catalog, _, _) = self.resolve(owner_id).await?;
-        require_same_deployment_target(&catalog, service_id, base_url)?;
-        Ok(catalog_execution_fingerprint(&catalog))
-    }
-
-    /// A fresh human recovery uses the saved request through the same catalog
+    /// A fresh human recovery uses the saved request through the same connection
     /// admission and final dispatch hooks as ordinary CMA execution.
     pub(super) async fn replay_creation(
         &self,
@@ -484,82 +542,57 @@ impl CatalogCmaGateway {
         creation: &crate::models::assistant_cma_creation::AssistantCmaCreation,
         body: &[u8],
     ) -> crate::errors::AppResult<()> {
-        use super::{proxy_service, service_dispatch_registry as registry};
+        use super::service_dispatch_registry as registry;
         let owner_id = &creation.user_id;
-        let (service, owner, base) = self.resolve(owner_id).await?;
+        let (target, owner, base) = self.resolve(owner_id).await?;
+        let service = &target.service;
         if service.id != creation.cma_service_id
-            || catalog_execution_fingerprint(&service) != creation.deployment_fingerprint
+            || self
+                .user_service_id
+                .get()
+                .is_some_and(|id| id != &creation.user_service_id)
+            || base != validated_base(&creation.execution_base_url)?
         {
-            return Err(CmaGatewayError::ConfigurationRequired.into());
+            return Err(CmaGatewayError::Conflict.into());
         }
         authorize_native_route(&service, &creation.method, &creation.path)?;
-        let target = proxy_service::resolve_proxy_target(
-            &self.db,
-            keys,
-            owner_id,
-            &service.id,
-            crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
-                self.config.platform_service_rate_limit_per_second,
-                self.config.platform_service_rate_limit_burst,
-            ),
-        )
-        .await?;
         let caller = registry::DispatchCaller {
             actor_user_id: owner_id,
             resource_owner_id: owner_id,
-            user_service_id: None,
+            user_service_id: Some(creation.user_service_id.as_str()),
         };
-        let admission = registry::admit(
-            &self.db,
-            keys,
-            &self.jwt_keys,
-            &self.config,
+        let headers = vec![
+            ("Idempotency-Key".into(), creation.idempotency_key.clone()),
+            (
+                super::assistant_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
+                super::assistant_cma_admission::recovery_submission(creation),
+            ),
+        ];
+        let preparing: futures::future::BoxFuture<'_, _> = Box::pin(
+            super::assistant_cma_admission::admit_with_gateway_authority(
+                &self.db,
+                keys,
+                &self.jwt_keys,
+                &self.config,
+                owner_id,
+                &creation.user_service_id,
+                true,
+                &target,
+                &creation.method,
+                &creation.path,
+                None,
+                body,
+                &headers,
+                false,
+                Some(self),
+            ),
+        );
+        let permit = preparing.await?;
+        let admission = registry::from_cma_permit(
+            &target,
             &caller,
-            true,
-            &target,
-            &creation.method,
-            &creation.path,
-            None,
-            body,
-            || {
-                Ok(vec![
-                    ("Idempotency-Key".into(), creation.idempotency_key.clone()),
-                    (
-                        super::assistant_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
-                        super::assistant_cma_admission::recovery_submission(creation),
-                    ),
-                ]
-                .into())
-            },
-            false,
-        )
-        .await?;
-        let identity = crate::models::default_request_header::SecretHeaders::from(
-            self.identity_headers(&service, &owner)
-                .await?
-                .iter()
-                .map(|(name, value)| {
-                    Ok((
-                        name.as_str().to_owned(),
-                        value
-                            .to_str()
-                            .map_err(|_| CmaGatewayError::InvalidRequest)?
-                            .to_owned(),
-                    ))
-                })
-                .collect::<CmaResult<Vec<_>>>()?,
-        );
-        let headers = proxy_service::build_effective_outbound_headers(
-            &target,
-            vec![
-                ("Idempotency-Key".into(), creation.idempotency_key.clone()),
-                ("Accept".into(), "application/json".into()),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            &identity,
-            &[],
-            &[],
-        );
+            permit.with_gateway_authority(self, &target, body),
+        )?;
         // Do not use the inventory URL builder: its pagination parameters are
         // not part of the original creation request.
         let url = format!(
@@ -573,36 +606,28 @@ impl CatalogCmaGateway {
                     .map_err(|_| CmaGatewayError::InvalidRequest)?,
                 url,
             )
-            .timeout(Duration::from_secs(20))
             .body(body.to_vec());
-        for (name, value) in headers.iter() {
-            let mut value = reqwest::header::HeaderValue::from_str(value)
-                .map_err(|_| CmaGatewayError::InvalidRequest)?;
-            value.set_sensitive(true);
-            request = request.header(name.as_str(), value);
-        }
+        request = request
+            .header("Idempotency-Key", &creation.idempotency_key)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json");
         let request = request
             .build()
             .map_err(|_| CmaGatewayError::InvalidRequest)?;
         super::assistant_cma_agent_service::require_enabled(&self.db, owner_id).await?;
         super::assistant_cma_admission::require_recovery_current(&self.db, creation).await?;
-        let guard = registry::verify(Some(&admission), &target, Some(&caller))?
-            .ok_or(CmaGatewayError::ConfigurationRequired)?;
-        guard.before_send(&request).await?;
-        let response = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
-            .execute(request)
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    CmaGatewayError::Timeout
-                } else {
-                    CmaGatewayError::Unavailable
-                }
-            })?;
-        let response = guard.observe_response(response).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let response = tokio::time::timeout_at(
+            deadline,
+            self.forward_admitted(owner_id, &target, &owner, request, &admission, &caller),
+        )
+        .await
+        .map_err(|_| CmaGatewayError::Timeout)??;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = bounded_body(response).await;
+            let body = tokio::time::timeout_at(deadline, bounded_body(response))
+                .await
+                .map_err(|_| CmaGatewayError::Timeout)?;
             return Err(map_status(status, body.as_ref().ok(), &base).into());
         }
         Ok(())
@@ -614,30 +639,35 @@ impl CatalogCmaGateway {
         owner: &User,
     ) -> CmaResult<reqwest::header::HeaderMap> {
         let principal = super::identity_service::Principal::from(owner);
-        let assertion = zeroize::Zeroizing::new(
-            super::identity_service::generate_identity_assertion(
-                &self.jwt_keys,
-                &self.config,
-                &principal,
-                service,
-                &self.db,
-            )
-            .await
-            .map_err(|_| CmaGatewayError::Unavailable)?,
-        );
         let mut headers = reqwest::header::HeaderMap::new();
-        let mut value = reqwest::header::HeaderValue::from_str(assertion.as_str())
-            .map_err(|_| CmaGatewayError::ConfigurationRequired)?;
-        value.set_sensitive(true);
-        headers.insert("x-nyxid-identity-token", value);
-        if service.identity_propagation_mode == "both" {
+        if matches!(service.identity_propagation_mode.as_str(), "jwt" | "both") {
+            let assertion = zeroize::Zeroizing::new(
+                super::identity_service::generate_identity_assertion(
+                    &self.jwt_keys,
+                    &self.config,
+                    &principal,
+                    service,
+                    &self.db,
+                )
+                .await
+                .map_err(map_resolution_error)?,
+            );
+            let mut value = reqwest::header::HeaderValue::from_str(assertion.as_str())
+                .map_err(|_| CmaGatewayError::InvalidRequest)?;
+            value.set_sensitive(true);
+            headers.insert("x-nyxid-identity-token", value);
+        }
+        if matches!(
+            service.identity_propagation_mode.as_str(),
+            "headers" | "both"
+        ) {
             for (name, value) in
                 super::identity_service::build_identity_headers(&principal, service)
             {
                 let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|_| CmaGatewayError::ConfigurationRequired)?;
+                    .map_err(|_| CmaGatewayError::InvalidRequest)?;
                 let mut value = reqwest::header::HeaderValue::from_str(&value)
-                    .map_err(|_| CmaGatewayError::ConfigurationRequired)?;
+                    .map_err(|_| CmaGatewayError::InvalidRequest)?;
                 value.set_sensitive(true);
                 headers.insert(name, value);
             }
@@ -653,7 +683,7 @@ impl CatalogCmaGateway {
         cursor: Option<&str>,
     ) -> CmaResult<reqwest::Response> {
         validate_remote_id(agent_id)?;
-        let (service, owner, base) = self.resolve(owner_id).await?;
+        let (target, owner, base) = self.resolve(owner_id).await?;
         let mut url = match response_id {
             Some(response) => {
                 endpoint_url(&base, &["api", "v2", "responses", response, "events"], None)?
@@ -680,21 +710,21 @@ impl CatalogCmaGateway {
                 cursor,
             );
         }
-        let response = tokio::time::timeout(
-            Duration::from_secs(20),
-            super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
-                .get(url)
-                .headers(self.identity_headers(&service, &owner).await?)
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .timeout(Duration::from_secs(MAX_STREAM_SECONDS))
-                .send(),
-        )
-        .await
-        .map_err(|_| CmaGatewayError::Timeout)?
-        .map_err(|_| CmaGatewayError::Unavailable)?;
+        let request = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+            .get(url)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .build()
+            .map_err(|_| CmaGatewayError::InvalidRequest)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let response =
+            tokio::time::timeout_at(deadline, self.forward(owner_id, &target, &owner, request))
+                .await
+                .map_err(|_| CmaGatewayError::Timeout)??;
         let status = response.status().as_u16();
         if status != 200 {
-            let body = bounded_body(response).await;
+            let body = tokio::time::timeout_at(deadline, bounded_body(response))
+                .await
+                .map_err(|_| CmaGatewayError::Timeout)?;
             return Err(map_status(status, body.as_ref().ok(), &base));
         }
         if !response
@@ -722,59 +752,41 @@ impl CatalogCmaGateway {
         Ok(response)
     }
 
-    pub async fn open_desktop(
+    pub(crate) async fn desktop_context(
         &self,
         owner_id: &str,
         agent_id: &str,
-    ) -> CmaResult<CmaDesktopSocket> {
-        use tokio_tungstenite::tungstenite::{
-            client::IntoClientRequest, protocol::WebSocketConfig,
-        };
-        let (service, owner, base) = self.resolve(owner_id).await?;
-        let mut url = endpoint_url(
-            &base,
-            &["api", "v1", "agents", agent_id, "desktop", "ws"],
-            None,
-        )?;
-        url.set_scheme(if base.scheme() == "https" {
-            "wss"
-        } else {
-            "ws"
-        })
-        .map_err(|_| CmaGatewayError::ConfigurationRequired)?;
-        let mut request = url
-            .as_str()
-            .into_client_request()
-            .map_err(|_| CmaGatewayError::InvalidRequest)?;
-        request
-            .headers_mut()
-            .extend(self.identity_headers(&service, &owner).await?);
-        // No browser cookies or caller-selected Origin reach CMA. Its own
-        // owner-authenticated open is the shared Sandbox single-viewer fence.
-        let mut limits = WebSocketConfig::default();
-        limits.max_message_size = Some(MAX_DESKTOP_FRAME_BYTES);
-        limits.max_frame_size = Some(MAX_DESKTOP_FRAME_BYTES);
-        let result = tokio::time::timeout(
-            Duration::from_secs(20),
-            tokio_tungstenite::connect_async_with_config(request, Some(limits), true),
-        )
-        .await
-        .map_err(|_| CmaGatewayError::Timeout)?;
-        match result {
-            Ok((socket, _)) => Ok(socket),
-            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-                let body = response
-                    .body()
-                    .as_ref()
-                    .filter(|body| body.len() <= MAX_RESPONSE_BYTES)
-                    .and_then(|body| serde_json::from_slice::<Value>(body).ok());
-                Err(map_status(response.status().as_u16(), body.as_ref(), &base))
-            }
-            Err(_) => Err(CmaGatewayError::Unavailable),
+    ) -> CmaResult<(
+        super::proxy_service::ProxyTarget,
+        reqwest::header::HeaderMap,
+        Url,
+    )> {
+        let (target, owner, base) = self.resolve(owner_id).await?;
+        let service = &target.service;
+        if !target.ws_frame_injections.is_empty() {
+            // This adapter relays binary RFB, not a JSON authentication exchange.
+            return Err(CmaGatewayError::InvalidRequest);
         }
+        validate_remote_id(agent_id)?;
+        let path = format!("/api/v1/agents/{agent_id}/desktop/ws");
+        self.authorize_request(owner_id, service, "GET", &path, None, &[])
+            .await?;
+        let identity = self.identity_headers(service, &owner).await?;
+        self.verify_target(
+            owner_id,
+            self.user_service_id
+                .get()
+                .ok_or(CmaGatewayError::NotFound)?,
+            base.as_str(),
+        )
+        .await?;
+        Ok((target, identity, base))
     }
 
-    async fn resolve(&self, owner_id: &str) -> CmaResult<(DownstreamService, User, Url)> {
+    async fn resolve(
+        &self,
+        owner_id: &str,
+    ) -> CmaResult<(super::proxy_service::ProxyTarget, User, Url)> {
         let owner = self
             .db
             .collection::<User>(USERS)
@@ -783,36 +795,395 @@ impl CatalogCmaGateway {
             .map_err(|_| CmaGatewayError::Unavailable)?
             .filter(|user| user.user_type.is_person())
             .ok_or(CmaGatewayError::Forbidden)?;
-        let service =
-            super::catalog_service::get_downstream_service_by_slug(&self.db, CMA_SLUG, owner_id)
+        let user_service_id = if let Some(id) = self.user_service_id.get() {
+            id.clone()
+        } else {
+            // Follow the same personal selection as the ordinary proxy once;
+            // never repeatedly choose a catalog deployment during recovery.
+            let direct = if self.service_id.get().is_none() {
+                super::user_service_service::find_by_slug(&self.db, owner_id, CMA_SLUG)
+                    .await
+                    .map_err(map_resolution_error)?
+            } else {
+                None
+            };
+            let selected = if let Some(connection) = direct {
+                connection
+            } else {
+                let catalog = if let Some(id) = self.service_id.get() {
+                    id.clone()
+                } else {
+                    super::catalog_service::get_downstream_service_by_slug(
+                        &self.db, CMA_SLUG, owner_id,
+                    )
+                    .await
+                    .map_err(map_resolution_error)?
+                    .id
+                };
+                super::user_service_service::find_by_catalog_service_id(
+                    &self.db, owner_id, &catalog,
+                )
                 .await
-                .map_err(|error| {
-                    if matches!(error, AppError::NotFound(_)) {
-                        CmaGatewayError::ConfigurationRequired
-                    } else {
-                        CmaGatewayError::Unavailable
-                    }
-                })?;
-        if service.service_type != "http"
-            || service.requires_user_credential
-            || service.auth_method != "none"
-            || !matches!(service.identity_propagation_mode.as_str(), "jwt" | "both")
+                .map_err(map_resolution_error)?
+                .ok_or(CmaGatewayError::NotFound)?
+            };
+            self.user_service_id.get_or_init(|| selected.id).clone()
+        };
+        let metadata =
+            super::proxy_service::read_connection_authority(&self.db, owner_id, &user_service_id)
+                .await
+                .map_err(map_resolution_error)?
+                .ok_or(CmaGatewayError::NotFound)?;
+        if metadata.catalog_service_slug.as_deref() != Some(CMA_SLUG) {
+            return Err(CmaGatewayError::Forbidden);
+        }
+        // Keep the shared resolver's large future out of every CMA protocol
+        // adapter's concrete future type.
+        let resolution: futures::future::BoxFuture<'_, _> = Box::pin(
+            super::proxy_service::resolve_proxy_target_by_user_service_id(
+                &self.db,
+                &self.encryption_keys,
+                owner_id,
+                &user_service_id,
+                None,
+                Some(&metadata.target.service.id),
+                super::proxy_service::ProxyExecutionContext::new(
+                    None,
+                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+                )
+                .with_assistant_access(
+                    self.native_authority
+                        .as_ref()
+                        .and_then(|(chat, _)| chat.org_agent_access.as_deref()),
+                ),
+            ),
+        );
+        let resolution = resolution
+            .await
+            .map_err(map_resolution_error)?
+            .ok_or(CmaGatewayError::NotFound)?;
+        if resolution.node_id.is_some() {
+            return Err(CmaGatewayError::InvalidRequest);
+        }
+        let mut target = resolution.target;
+        if let Some((chat, _)) = &self.native_authority {
+            let key = self
+                .db
+                .collection::<crate::models::api_key::ApiKey>("api_keys")
+                .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
+                .await
+                .map_err(|_| CmaGatewayError::Unavailable)?
+                .ok_or(CmaGatewayError::Forbidden)?;
+            if key
+                .assistant_agent_owner_id
+                .as_deref()
+                .is_none_or(|owner| owner == chat.user_id)
+                && let Some(credential) = super::proxy_service::resolve_agent_credential_override(
+                    &self.db,
+                    &self.encryption_keys,
+                    &chat.user_id,
+                    &chat.api_key_id,
+                    &user_service_id,
+                    &target,
+                    None,
+                )
+                .await
+                .map_err(map_resolution_error)?
+            {
+                target.credential = credential;
+            }
+        }
+        let service = &target.service;
+        if service.service_type != "http" {
+            return Err(CmaGatewayError::InvalidRequest);
+        }
+        let base = validated_base(&target.base_url)?;
+        if let Some(expected) = self.expected_base_url.get()
+            && validated_base(expected)? != base
         {
-            return Err(CmaGatewayError::ConfigurationRequired);
+            return Err(CmaGatewayError::Conflict);
         }
-        if self.service_id.get_or_init(|| service.id.clone()) != &service.id {
-            return Err(CmaGatewayError::ConfigurationRequired);
-        }
-        let fingerprint = catalog_execution_fingerprint(&service);
         if self
-            .execution_fingerprint
-            .get_or_init(|| fingerprint.clone())
-            != &fingerprint
+            .service_id
+            .get()
+            .is_some_and(|expected| expected != &service.id)
         {
-            return Err(CmaGatewayError::ConfigurationRequired);
+            return Err(CmaGatewayError::Conflict);
         }
-        let base = validated_base(&service.base_url)?;
-        Ok((service, owner, base))
+        let _ = self.service_id.set(service.id.clone());
+        let _ = self.expected_base_url.set(base.as_str().to_owned());
+        Ok((target, owner, base))
+    }
+
+    async fn authorize_request(
+        &self,
+        owner_id: &str,
+        service: &DownstreamService,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        body: &[u8],
+    ) -> CmaResult<()> {
+        if let Some((chat, mode)) = &self.native_authority {
+            if chat.user_id != owner_id {
+                return Err(CmaGatewayError::Forbidden);
+            }
+            authorize_native_route(service, method, path)?;
+            super::assistant_cma_tools::scope(
+                &self.db,
+                chat,
+                self.user_service_id
+                    .get()
+                    .ok_or(CmaGatewayError::NotFound)?,
+                &service.id,
+                method,
+                path,
+                query,
+                body,
+                *mode,
+            )
+            .await
+            .map_err(map_resolution_error)?;
+        }
+        if let Some((watch, nodes)) = &self.watch_authority {
+            if watch.user_id != owner_id
+                || self
+                    .user_service_id
+                    .get()
+                    .is_none_or(|id| id != &watch.service_id)
+            {
+                return Err(CmaGatewayError::Forbidden);
+            }
+            authorize_native_route(&service, method, path)?;
+            super::assistant_cma_tools::watch_scope(
+                &self.db,
+                nodes,
+                watch,
+                &service.id,
+                method,
+                path,
+                query,
+                body,
+            )
+            .await
+            .map_err(map_resolution_error)?;
+        }
+        Ok(())
+    }
+
+    async fn forward(
+        &self,
+        owner_id: &str,
+        target: &super::proxy_service::ProxyTarget,
+        owner: &User,
+        request: reqwest::Request,
+    ) -> CmaResult<reqwest::Response> {
+        use super::service_dispatch_registry as registry;
+        let connection = self
+            .user_service_id
+            .get()
+            .ok_or(CmaGatewayError::NotFound)?;
+        let caller = registry::DispatchCaller {
+            actor_user_id: owner_id,
+            resource_owner_id: owner_id,
+            user_service_id: Some(connection),
+        };
+        let base = validated_base(&target.base_url)?;
+        let path = request
+            .url()
+            .path()
+            .strip_prefix(base.path().trim_end_matches('/'))
+            .ok_or(CmaGatewayError::InvalidRequest)?;
+        self.authorize_request(
+            owner_id,
+            &target.service,
+            request.method().as_str(),
+            path,
+            request.url().query(),
+            request
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .unwrap_or_default(),
+        )
+        .await?;
+        let headers = request
+            .headers()
+            .iter()
+            .map(|(n, v)| {
+                Ok((
+                    n.to_string(),
+                    v.to_str()
+                        .map_err(|_| CmaGatewayError::InvalidRequest)?
+                        .to_owned(),
+                ))
+            })
+            .collect::<CmaResult<Vec<_>>>()?;
+        let body = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .unwrap_or_default();
+        let preparing: futures::future::BoxFuture<'_, _> = Box::pin(
+            super::assistant_cma_admission::admit_with_gateway_authority(
+                &self.db,
+                &self.encryption_keys,
+                &self.jwt_keys,
+                &self.config,
+                owner_id,
+                connection,
+                true,
+                target,
+                request.method().as_str(),
+                path,
+                request.url().query(),
+                body,
+                &headers,
+                false,
+                Some(self),
+            ),
+        );
+        let permit = preparing.await.map_err(map_resolution_error)?;
+        let admission = registry::from_cma_permit(
+            target,
+            &caller,
+            permit.with_gateway_authority(self, target, body),
+        )
+        .map_err(map_resolution_error)?;
+        self.forward_admitted(owner_id, target, owner, request, &admission, &caller)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn revalidate_dispatch(
+        &self,
+        owner_id: &str,
+        target: &super::proxy_service::ProxyTarget,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        body: &[u8],
+    ) -> CmaResult<()> {
+        if let Some((chat, _)) = &self.native_authority {
+            super::assistant_service_execution::verify_resolved(
+                &self.db,
+                &self.encryption_keys,
+                chat,
+                self.user_service_id
+                    .get()
+                    .ok_or(CmaGatewayError::NotFound)?,
+                target,
+                method,
+                path,
+            )
+            .await
+            .map_err(map_resolution_error)?;
+        }
+        // Credential materialization above can wait for KMS or OAuth refresh.
+        // Check the live native/watch scope last, using the saved business input.
+        self.authorize_request(owner_id, &target.service, method, path, query, body)
+            .await
+    }
+
+    async fn forward_admitted(
+        &self,
+        owner_id: &str,
+        target: &super::proxy_service::ProxyTarget,
+        owner: &User,
+        request: reqwest::Request,
+        admission: &super::service_dispatch_registry::DispatchAdmission<'_>,
+        caller: &super::service_dispatch_registry::DispatchCaller<'_>,
+    ) -> CmaResult<reqwest::Response> {
+        use super::{
+            cloud_response_cache::CloudResponseCache,
+            provider_token_exchange_service::TokenExchangeCache, proxy_service,
+        };
+        static TOKENS: std::sync::LazyLock<TokenExchangeCache> =
+            std::sync::LazyLock::new(TokenExchangeCache::new);
+        static CACHE: std::sync::LazyLock<CloudResponseCache> =
+            std::sync::LazyLock::new(|| CloudResponseCache::new(0));
+        let base = validated_base(&target.base_url)?;
+        let path = request
+            .url()
+            .path()
+            .strip_prefix(base.path().trim_end_matches('/'))
+            .ok_or(CmaGatewayError::InvalidRequest)?;
+        self.authorize_request(
+            owner_id,
+            &target.service,
+            request.method().as_str(),
+            path,
+            request.url().query(),
+            request
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .unwrap_or_default(),
+        )
+        .await?;
+        let identity = self.identity_headers(&target.service, owner).await?;
+        let identity = identity
+            .iter()
+            .map(|(n, v)| {
+                Ok((
+                    n.to_string(),
+                    v.to_str()
+                        .map_err(|_| CmaGatewayError::InvalidRequest)?
+                        .to_owned(),
+                ))
+            })
+            .collect::<CmaResult<Vec<_>>>()?;
+        if let Some((chat, _)) = &self.native_authority {
+            let verification: futures::future::BoxFuture<'_, _> =
+                Box::pin(super::assistant_service_execution::verify_resolved(
+                    &self.db,
+                    &self.encryption_keys,
+                    chat,
+                    self.user_service_id
+                        .get()
+                        .ok_or(CmaGatewayError::NotFound)?,
+                    target,
+                    request.method().as_str(),
+                    path,
+                ));
+            verification.await.map_err(map_resolution_error)?;
+        }
+        let permit = super::billing::route_inventory::enforce_billing_exempt_egress_classification(
+            Some(super::billing::route_inventory::BillingRoutePolicy::Exempt(
+                "CMA management and receipt observation",
+            )),
+        )
+        .map_err(map_resolution_error)?;
+        let forwarding: futures::future::BoxFuture<'_, _> =
+            Box::pin(proxy_service::forward_request_with_resource_proof(
+                &super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT,
+                target,
+                request.method().clone(),
+                path,
+                request.url().query(),
+                request.headers().clone(),
+                proxy_service::ProxyBody::Buffered(
+                    request
+                        .body()
+                        .and_then(reqwest::Body::as_bytes)
+                        .map(bytes::Bytes::copy_from_slice),
+                ),
+                identity,
+                vec![],
+                None,
+                &TOKENS,
+                &CACHE,
+                vec![],
+                permit,
+                None,
+                None,
+                Some(admission),
+                Some(caller),
+            ));
+        forwarding.await.map_err(|error| match error {
+            proxy_service::ForwardRequestError::Transport(error) if error.is_timeout() => {
+                CmaGatewayError::Timeout
+            }
+            proxy_service::ForwardRequestError::Transport(_) => CmaGatewayError::Unavailable,
+            error => map_resolution_error(error.into_app_error()),
+        })
     }
 
     async fn request(
@@ -882,32 +1253,11 @@ impl CatalogCmaGateway {
         idempotency_key: Option<&str>,
         body: Option<Vec<u8>>,
     ) -> CmaResult<(u16, Value)> {
-        let (service, owner, base) = self.resolve(owner_id).await?;
+        let (target, owner, base) = self.resolve(owner_id).await?;
         let url = endpoint_url(&base, segments, cursor)?;
-        let principal = super::identity_service::Principal::from(&owner);
-        let assertion = zeroize::Zeroizing::new(
-            super::identity_service::generate_identity_assertion(
-                &self.jwt_keys,
-                &self.config,
-                &principal,
-                &service,
-                &self.db,
-            )
-            .await
-            .map_err(|_| CmaGatewayError::Unavailable)?,
-        );
         let mut request = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
             .request(method, url)
-            .timeout(Duration::from_secs(20))
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header("X-NyxID-Identity-Token", assertion.as_str());
-        if service.identity_propagation_mode == "both" {
-            for (name, value) in
-                super::identity_service::build_identity_headers(&principal, &service)
-            {
-                request = request.header(name, value);
-            }
-        }
+            .header(reqwest::header::ACCEPT, "application/json");
         if let Some(key) = idempotency_key {
             validate_idempotency_key(key)?;
             request = request.header("Idempotency-Key", key);
@@ -920,65 +1270,15 @@ impl CatalogCmaGateway {
         let request = request
             .build()
             .map_err(|_| CmaGatewayError::InvalidRequest)?;
-        if let Some((chat, mode)) = &self.native_authority {
-            if chat.user_id != owner_id {
-                return Err(CmaGatewayError::Forbidden);
-            }
-            authorize_native_route(
-                &service,
-                request.method().as_str(),
-                &format!("/{}", segments.join("/")),
-            )?;
-            super::assistant_cma_tools::scope(
-                &self.db,
-                chat,
-                &service.id,
-                request.method().as_str(),
-                &format!("/{}", segments.join("/")),
-                request.url().query(),
-                request
-                    .body()
-                    .and_then(reqwest::Body::as_bytes)
-                    .unwrap_or_default(),
-                *mode,
-            )
-            .await
-            .map_err(|_| CmaGatewayError::Forbidden)?;
-        }
-        if let Some((watch, nodes)) = &self.watch_authority {
-            if watch.user_id != owner_id {
-                return Err(CmaGatewayError::Forbidden);
-            }
-            let path = format!("/{}", segments.join("/"));
-            authorize_native_route(&service, request.method().as_str(), &path)?;
-            super::assistant_cma_tools::watch_scope(
-                &self.db,
-                nodes,
-                watch,
-                &service.id,
-                request.method().as_str(),
-                &path,
-                request.url().query(),
-                request
-                    .body()
-                    .and_then(reqwest::Body::as_bytes)
-                    .unwrap_or_default(),
-            )
-            .await
-            .map_err(|_| CmaGatewayError::Forbidden)?;
-        }
-        let response = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
-            .execute(request)
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    CmaGatewayError::Timeout
-                } else {
-                    CmaGatewayError::Unavailable
-                }
-            })?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let response =
+            tokio::time::timeout_at(deadline, self.forward(owner_id, &target, &owner, request))
+                .await
+                .map_err(|_| CmaGatewayError::Timeout)??;
         let status = response.status().as_u16();
-        let body = bounded_body(response).await;
+        let body = tokio::time::timeout_at(deadline, bounded_body(response))
+            .await
+            .map_err(|_| CmaGatewayError::Timeout)?;
         if !(200..300).contains(&status) {
             return Err(map_status(status, body.as_ref().ok(), &base));
         }
@@ -1061,9 +1361,9 @@ pub fn validate_idempotency_key(value: &str) -> CmaResult<()> {
 
 fn validated_base(raw: &str) -> CmaResult<Url> {
     if raw.len() > 2048 {
-        return Err(CmaGatewayError::ConfigurationRequired);
+        return Err(CmaGatewayError::Unavailable);
     }
-    let url = Url::parse(raw).map_err(|_| CmaGatewayError::ConfigurationRequired)?;
+    let url = Url::parse(raw).map_err(|_| CmaGatewayError::Unavailable)?;
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
         || url.host_str().is_none()
@@ -1072,7 +1372,7 @@ fn validated_base(raw: &str) -> CmaResult<Url> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(CmaGatewayError::ConfigurationRequired);
+        return Err(CmaGatewayError::Unavailable);
     }
     Ok(url)
 }
@@ -1083,7 +1383,7 @@ fn endpoint_url(base: &Url, segments: &[&str], cursor: Option<&str>) -> CmaResul
     }
     let mut url = base.clone();
     url.path_segments_mut()
-        .map_err(|_| CmaGatewayError::ConfigurationRequired)?
+        .map_err(|_| CmaGatewayError::Unavailable)?
         .pop_if_empty()
         .extend(segments);
     if let Some(cursor) = cursor {
@@ -1128,6 +1428,725 @@ fn authorize_native_route(service: &DownstreamService, method: &str, path: &str)
 #[cfg(test)]
 mod native_policy_tests {
     use super::*;
+    use crate::crypto::key_provider::{KeyProvider, WrappedKey};
+
+    #[derive(Debug)]
+    struct PausedUnwrap {
+        inner: crate::crypto::local_key_provider::LocalKeyProvider,
+        armed: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl KeyProvider for PausedUnwrap {
+        async fn wrap_dek(&self, bytes: &[u8]) -> Result<WrappedKey, AppError> {
+            self.inner.wrap_dek(bytes).await
+        }
+
+        async fn unwrap_dek(
+            &self,
+            wrapped: &WrappedKey,
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                self.entered.notify_one();
+                tokio::time::timeout(Duration::from_secs(10), self.release.notified())
+                    .await
+                    .map_err(|_| AppError::Internal("test unwrap barrier expired".into()))?;
+            }
+            self.inner.unwrap_dek(wrapped).await
+        }
+
+        fn current_key_id(&self) -> u8 {
+            self.inner.current_key_id()
+        }
+        fn has_key_id(&self, id: u8) -> bool {
+            self.inner.has_key_id(id)
+        }
+        fn has_previous_key(&self) -> bool {
+            self.inner.has_previous_key()
+        }
+    }
+
+    async fn credential(
+        f: &super::super::assistant_authority_tests::Fixture,
+        value: &str,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(value.as_bytes())
+            .await
+            .unwrap();
+        f.state.db.collection::<bson::Document>("user_api_keys").insert_one(doc! {
+            "_id":&id,"user_id":&f.owner,"label":"CMA test","credential_type":"api_key","status":"active",
+            "credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        }).await.unwrap();
+        id
+    }
+
+    fn exchange_config() -> crate::models::downstream_service::TokenExchangeConfig {
+        crate::models::downstream_service::TokenExchangeConfig {
+            endpoint: "{base_url}/token".into(),
+            request_encoding: "json".into(),
+            request_template: json!({}),
+            token_response_path: "token".into(),
+            ttl_response_path: Some("expires_in".into()),
+            default_ttl_secs: 60,
+            injection: "bearer".into(),
+            error_code_path: None,
+            error_message_path: None,
+            credential_fields: vec![],
+        }
+    }
+
+    async fn native_fixture(
+        base: &str,
+        exchange: bool,
+    ) -> (super::super::assistant_authority_tests::Fixture, String) {
+        let f = super::super::assistant_authority_tests::orchestrator_fixture(
+            "cma_final_native_authority",
+        )
+        .await;
+        native_connection(f, base, exchange).await
+    }
+
+    async fn native_connection(
+        f: super::super::assistant_authority_tests::Fixture,
+        base: &str,
+        exchange: bool,
+    ) -> (super::super::assistant_authority_tests::Fixture, String) {
+        use crate::test_utils::{
+            test_auto_connected_catalog_service, test_user_endpoint, test_user_service,
+        };
+        let mut catalog = test_auto_connected_catalog_service();
+        catalog.slug = "cma".into();
+        catalog.base_url = base.into();
+        if exchange {
+            catalog.token_exchange_config = Some(exchange_config());
+        }
+        f.state
+            .db
+            .collection::<DownstreamService>("downstream_services")
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let endpoint = uuid::Uuid::new_v4().to_string();
+        let connection = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection("user_endpoints")
+            .insert_one(test_user_endpoint(
+                &endpoint,
+                &f.owner,
+                "CMA",
+                base,
+                None,
+                Some(&catalog.id),
+            ))
+            .await
+            .unwrap();
+        let key = credential(&f, if exchange { "{}" } else { "owner-A" }).await;
+        let mut service = test_user_service(
+            &connection,
+            &f.owner,
+            "cma",
+            &endpoint,
+            Some(&catalog.id),
+            Some(&key),
+        );
+        service.auth_method = if exchange { "token_exchange" } else { "header" }.into();
+        service.auth_key_name = "x-cma-secret".into();
+        f.state
+            .db
+            .collection("user_services")
+            .insert_one(service)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":&f.chat.api_key_id},
+                doc! {"$set":{"allow_all_services":true}},
+            )
+            .await
+            .unwrap();
+        super::super::feature_flag_service::set_platform_override(
+            &f.state.db,
+            super::super::feature_flag_service::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+            &super::super::feature_flag_service::FlagTarget::User(f.owner.clone()),
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        (f, connection)
+    }
+
+    async fn bind_credential(
+        f: &super::super::assistant_authority_tests::Fixture,
+        connection: &str,
+        key: &str,
+    ) {
+        f.state
+            .db
+            .collection::<bson::Document>("agent_service_bindings")
+            .insert_one(doc! {
+                "_id":uuid::Uuid::new_v4().to_string(),"api_key_id":&f.chat.api_key_id,
+                "user_service_id":connection,"user_api_key_id":key,"user_id":&f.owner,
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_gateway_sends_the_original_agent_key_credential_override() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+        let server = MockServer::start().await;
+        let (f, connection) = native_fixture(&server.uri(), false).await;
+        let key = credential(&f, "agent-B").await;
+        bind_credential(&f, &connection, &key).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent_1"))
+            .and(header("x-cma-secret", "agent-B"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id":"agent_1","status":"ready"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mode = super::super::assistant_acknowledgement_service::effective_access_mode(
+            &f.state.db,
+            &f.chat,
+        )
+        .await
+        .unwrap();
+        CatalogCmaGateway::for_user_service(&f.state, &connection)
+            .with_native_authority(&f.chat, mode)
+            .get_agent(&f.owner, "agent_1")
+            .await
+            .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_file_write_uses_override_for_admission_reads_and_final_post() {
+        use crate::services::{
+            assistant_cma_agent_service as agents, assistant_cma_sandbox_service as sandboxes,
+        };
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, header, method, path},
+        };
+        let server = MockServer::start().await;
+        let (f, connection) = native_fixture(&server.uri(), false).await;
+        let key = credential(&f, "agent-B").await;
+        bind_credential(&f, &connection, &key).await;
+        let mode = super::super::assistant_acknowledgement_service::effective_access_mode(
+            &f.state.db,
+            &f.chat,
+        )
+        .await
+        .unwrap();
+        let gateway = CatalogCmaGateway::for_user_service(&f.state, &connection)
+            .with_native_authority(&f.chat, mode);
+        for (route, value) in [
+            (
+                "/api/v1/sandboxes/sandbox_1",
+                json!({"id":"sandbox_1","owner":&f.owner,"status":"active","machine_included":false}),
+            ),
+            (
+                "/api/v1/agents/agent_1",
+                json!({"id":"agent_1","owner":&f.owner,"sandbox_id":"sandbox_1","status":"ready"}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(header("x-cma-secret", "agent-B"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .mount(&server)
+                .await;
+        }
+        let parent = sandboxes::begin_creation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &gateway,
+            &f.owner,
+            "override-file-parent-key",
+            br#"{"machine_included":false}"#,
+        )
+        .await
+        .unwrap();
+        sandboxes::associate_created(
+            &f.state.db,
+            &gateway,
+            &f.owner,
+            &parent.id,
+            parent.generation,
+            "sandbox_1",
+        )
+        .await
+        .unwrap();
+        agents::register_live(&f.state.db, &gateway, &f.owner, "agent_1", None)
+            .await
+            .unwrap();
+        server.reset().await;
+        // Count only this write's supplemental reads, not registration reads.
+        for (route, value) in [
+            (
+                "/api/v1/sandboxes/sandbox_1",
+                json!({"id":"sandbox_1","owner":&f.owner,"status":"active","machine_included":false}),
+            ),
+            (
+                "/api/v1/agents/agent_1",
+                json!({"id":"agent_1","owner":&f.owner,"sandbox_id":"sandbox_1","status":"ready"}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(header("x-cma-secret", "agent-B"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .mount(&server)
+                .await;
+        }
+        let sha = hex::encode(Sha256::digest(b"hello"));
+        Mock::given(method("POST")).and(path("/api/v1/agents/agent_1/files"))
+            .and(header("x-cma-secret", "agent-B"))
+            .and(body_json(json!({"path":"attachments/report.txt","content_base64":"aGVsbG8=","directory":false})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"path":"attachments/report.txt","size_bytes":5,"sha256":&sha})))
+            .expect(1).mount(&server).await;
+        let result = gateway
+            .write_agent_file(&f.owner, "agent_1", "attachments/report.txt", b"hello")
+            .await
+            .unwrap();
+        assert_eq!(result.sha256, sha);
+        let calls = server.received_requests().await.unwrap();
+        for route in ["/api/v1/agents/agent_1", "/api/v1/sandboxes/sandbox_1"] {
+            assert!(
+                calls
+                    .iter()
+                    .any(|call| call.method == "GET" && call.url.path() == route)
+            );
+        }
+        assert_eq!(calls.iter().filter(|call| call.method == "POST").count(), 1);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.headers["x-cma-secret"] == "agent-B")
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.headers["x-cma-secret"] == "owner-A")
+        );
+    }
+
+    #[tokio::test]
+    async fn final_native_decryption_rechecks_stop_and_cma_grant_before_dispatch() {
+        use crate::services::{
+            assistant_authority_tests::direct_fixture, assistant_service_execution as execution,
+        };
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        for drift in ["stop", "grant"] {
+            let token_entered = Arc::new(tokio::sync::Notify::new());
+            let token_release = Arc::new(tokio::sync::Notify::new());
+            let effects = Arc::new(AtomicUsize::new(0));
+            let app = Router::new()
+                .route(
+                    "/token",
+                    post({
+                        let entered = token_entered.clone();
+                        let release = token_release.clone();
+                        move || {
+                            let entered = entered.clone();
+                            let release = release.clone();
+                            async move {
+                                entered.notify_one();
+                                release.notified().await;
+                                Json(json!({"token":"final-unwrap-token","expires_in":60}))
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/api/v1/sandboxes",
+                    post({
+                        let effects = effects.clone();
+                        move || {
+                            effects.fetch_add(1, Ordering::SeqCst);
+                            async { Json(json!({"id":"unexpected"})) }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut f, connection) = native_connection(
+                direct_fixture("cma_final_unwrap_authority").await,
+                &base,
+                true,
+            )
+            .await;
+            f.state
+                .db
+                .collection::<bson::Document>("assistant_agents")
+                .update_one(
+                    doc! {"_id":&f.chat.agent_id},
+                    doc! {"$set":{"grants.service_ids":[&connection]}},
+                )
+                .await
+                .unwrap();
+            let provider = Arc::new(PausedUnwrap {
+                inner: crate::crypto::local_key_provider::LocalKeyProvider::from_config(
+                    &f.state.config,
+                ),
+                armed: AtomicBool::new(false),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            f.state.encryption_keys = Arc::new(crate::crypto::aes::EncryptionKeys::with_provider(
+                provider.clone(),
+            ));
+            let key = credential(&f, "{}").await;
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .update_one(doc! {"_id":&connection}, doc! {"$set":{"api_key_id":key}})
+                .await
+                .unwrap();
+            let mode = super::super::assistant_acknowledgement_service::effective_access_mode(
+                &f.state.db,
+                &f.chat,
+            )
+            .await
+            .unwrap();
+            let gateway = CatalogCmaGateway::for_user_service(&f.state, &connection)
+                .with_native_authority(&f.chat, mode);
+            let (target, owner, _) = gateway.resolve(&f.owner).await.unwrap();
+            let binding =
+                execution::connection_binding(&f.state.db, &connection, &f.chat.api_key_id)
+                    .await
+                    .unwrap();
+            let request = reqwest::Client::new()
+                .post(format!("{base}/api/v1/sandboxes"))
+                .header("Idempotency-Key", "final-unwrap-key")
+                .body(r#"{"machine_included":false}"#)
+                .build()
+                .unwrap();
+            let mut pending = Box::pin(gateway.forward(&f.owner, &target, &owner, request));
+            tokio::select! {
+                result = &mut pending => panic!("finished before token barrier: {result:?}"),
+                () = token_entered.notified() => {},
+                () = tokio::time::sleep(Duration::from_secs(10)) => panic!("token exchange never started"),
+            }
+            // All earlier credential reads have finished. Arm only the unwrap
+            // reached by the final guard after generic token exchange returns.
+            provider.armed.store(true, Ordering::SeqCst);
+            token_release.notify_one();
+            tokio::select! {
+                result = &mut pending => panic!("finished before final unwrap barrier: {result:?}"),
+                () = provider.entered.notified() => {},
+                () = tokio::time::sleep(Duration::from_secs(10)) => panic!("final unwrap never started"),
+            }
+            if drift == "stop" {
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_conversations")
+                    .update_one(
+                        doc! {"_id":&f.row.id},
+                        doc! {"$set":{"active_turn.stop_requested":true}},
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                // Isolate the live specialist grant from the unchanged API key
+                // and connection digest, so verify_resolved alone cannot reject.
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_agents")
+                    .update_one(
+                        doc! {"_id":&f.chat.agent_id},
+                        doc! {"$set":{"grants.service_ids":[]}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                execution::connection_binding(&f.state.db, &connection, &f.chat.api_key_id)
+                    .await
+                    .unwrap(),
+                binding
+            );
+            provider.release.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), pending)
+                    .await
+                    .unwrap()
+                    .is_err(),
+                "{drift}"
+            );
+            assert_eq!(effects.load(Ordering::SeqCst), 0, "{drift}");
+            let creation = f
+                .state
+                .db
+                .collection::<bson::Document>("assistant_cma_creations")
+                .find_one(doc! {"user_id":&f.owner,"idempotency_key":"final-unwrap-key"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                creation.get_str("submission_state").unwrap(),
+                "pending",
+                "{drift}"
+            );
+            assert!(matches!(
+                creation.get("first_dispatched_at"),
+                None | Some(bson::Bson::Null)
+            ));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_resource_cursor_roundtrips_to_the_exact_upstream_page() {
+        use crate::services::{assistant_cma_sandbox_service as sandboxes, assistant_cma_tools};
+        use wiremock::{
+            Mock, MockServer, Request, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let (f, connection) = native_fixture(&server.uri(), false).await;
+        let gateway = CatalogCmaGateway::for_user_service(&f.state, &connection);
+        let parent = sandboxes::begin_creation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &gateway,
+            &f.owner,
+            "cursor-parent-key",
+            br#"{"machine_included":false}"#,
+        )
+        .await
+        .unwrap();
+        let sandbox =
+            json!({"id":"sandbox_1","owner":&f.owner,"status":"active","machine_included":false});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/sandboxes/sandbox_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&sandbox))
+            .mount(&server)
+            .await;
+        sandboxes::associate_created(
+            &f.state.db,
+            &gateway,
+            &f.owner,
+            &parent.id,
+            parent.generation,
+            "sandbox_1",
+        )
+        .await
+        .unwrap();
+        for cursor in ["a".repeat(1000), "a".repeat(1024), "\"\\".repeat(512)] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/sandboxes/sandbox_1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&sandbox))
+                .mount(&server)
+                .await;
+            let upstream = cursor.clone();
+            Mock::given(method("GET"))
+                .and(path("/api/v1/agents"))
+                .respond_with(move |request: &Request| {
+                    let actual = request
+                        .url
+                        .query_pairs()
+                        .find(|(key, _)| key == "cursor")
+                        .map(|(_, value)| value.into_owned());
+                    let next = if let Some(actual) = actual {
+                        assert_eq!(actual, upstream);
+                        None
+                    } else {
+                        Some(upstream.as_str())
+                    };
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"agents":[],"next_cursor":next}))
+                })
+                .expect(2)
+                .mount(&server)
+                .await;
+            let first =
+                assistant_cma_tools::execute(&f.tools(), &f.chat, "list_cma_resources", &json!({}))
+                    .await
+                    .unwrap();
+            let encoded = first.value["next_cursor"].as_str().unwrap();
+            let second = assistant_cma_tools::execute(
+                &f.tools(),
+                &f.chat,
+                "list_cma_resources",
+                &json!({"cursor":encoded}),
+            )
+            .await
+            .unwrap();
+            assert!(second.value["next_cursor"].is_null());
+            assert_eq!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.url.path() == "/api/v1/agents")
+                    .count(),
+                2
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn native_revocation_during_token_exchange_never_dispatches_a_creation() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for drift in ["revoke", "stop", "replace_binding", "remove_binding"] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let effects = Arc::new(AtomicUsize::new(0));
+            let app = Router::new()
+                .route(
+                    "/token",
+                    post({
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        move || {
+                            let entered = entered.clone();
+                            let release = release.clone();
+                            async move {
+                                entered.notify_one();
+                                release.notified().await;
+                                Json(json!({"token":"test-token","expires_in":60}))
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/api/v1/sandboxes",
+                    post({
+                        let effects = effects.clone();
+                        move || {
+                            effects.fetch_add(1, Ordering::SeqCst);
+                            async { Json(json!({"id":"unexpected"})) }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (f, connection) = native_fixture(&base, true).await;
+            if drift.ends_with("binding") {
+                let key = credential(&f, r#"{"agent":"B"}"#).await;
+                bind_credential(&f, &connection, &key).await;
+            }
+            let mode = super::super::assistant_acknowledgement_service::effective_access_mode(
+                &f.state.db,
+                &f.chat,
+            )
+            .await
+            .unwrap();
+            let gateway = CatalogCmaGateway::for_user_service(&f.state, &connection)
+                .with_native_authority(&f.chat, mode);
+            let (target, owner, _) = gateway.resolve(&f.owner).await.unwrap();
+            let request = reqwest::Client::new()
+                .post(format!("{base}/api/v1/sandboxes"))
+                .header("Idempotency-Key", "native-delayed-key")
+                .body(r#"{"machine_included":false}"#)
+                .build()
+                .unwrap();
+            let mut pending = Box::pin(gateway.forward(&f.owner, &target, &owner, request));
+            tokio::select! {
+                result = &mut pending => panic!("finished before token barrier: {result:?}"),
+                () = entered.notified() => {},
+                () = tokio::time::sleep(Duration::from_secs(10)) => panic!("token exchange never started"),
+            }
+            match drift {
+                "revoke" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>("api_keys")
+                        .update_one(
+                            doc! {"_id":&f.chat.api_key_id},
+                            doc! {"$set":{"is_active":false}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "stop" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>("assistant_conversations")
+                        .update_one(
+                            doc! {"_id":&f.row.id},
+                            doc! {"$set":{"active_turn.stop_requested":true}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "replace_binding" => {
+                    let key = credential(&f, r#"{"agent":"C"}"#).await;
+                    f.state
+                        .db
+                        .collection::<bson::Document>("agent_service_bindings")
+                        .update_one(
+                            doc! {"api_key_id":&f.chat.api_key_id,"user_service_id":&connection},
+                            doc! {"$set":{"user_api_key_id":key}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>("agent_service_bindings")
+                        .delete_many(
+                            doc! {"api_key_id":&f.chat.api_key_id,"user_service_id":&connection},
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+            release.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), pending)
+                    .await
+                    .unwrap()
+                    .is_err(),
+                "{drift}"
+            );
+            assert_eq!(effects.load(Ordering::SeqCst), 0, "{drift}");
+            let creation = f
+                .state
+                .db
+                .collection::<bson::Document>("assistant_cma_creations")
+                .find_one(doc! {"user_id":&f.owner,"idempotency_key":"native-delayed-key"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                creation.get_str("submission_state").unwrap(),
+                "pending",
+                "{drift}"
+            );
+            assert!(matches!(
+                creation.get("first_dispatched_at"),
+                None | Some(bson::Bson::Null)
+            ));
+            server.abort();
+        }
+    }
 
     #[tokio::test]
     async fn cma_watch_enrichment_requires_leased_original_legacy_authority() {
@@ -1142,23 +2161,50 @@ mod native_policy_tests {
             test_auto_connected_catalog_service, test_service_endpoint, test_user_endpoint,
             test_user_service,
         };
-        use axum::{Json, Router, routing::get};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         let f = orchestrator_fixture("cma_watch_enrichment_authority").await;
         let reads = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let block_exchange = Arc::new(AtomicBool::new(false));
         let observed = reads.clone();
-        let app = Router::new().route(
-            "/api/v1/agents/agt_observed",
-            get(move || {
-                observed.fetch_add(1, Ordering::SeqCst);
-                async {
-                    Json(json!({
-                        "id":"agt_observed","status":"working","revision":1
-                    }))
-                }
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/token",
+                post({
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    let block = block_exchange.clone();
+                    move || {
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        let block = block.clone();
+                        async move {
+                            if block.load(Ordering::SeqCst) {
+                                entered.notify_one();
+                                release.notified().await;
+                            }
+                            Json(json!({"token":"watch-token","expires_in":60}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/agents/agt_observed",
+                get(move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        Json(json!({
+                            "id":"agt_observed","status":"working","revision":1
+                        }))
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1167,6 +2213,7 @@ mod native_policy_tests {
         catalog.slug = "cma".into();
         catalog.base_url = base.clone();
         catalog.identity_propagation_mode = "jwt".into();
+        catalog.token_exchange_config = Some(exchange_config());
         db.collection::<DownstreamService>("downstream_services")
             .insert_one(&catalog)
             .await
@@ -1194,6 +2241,8 @@ mod native_policy_tests {
         );
         connection.identity_propagation_mode = "jwt".into();
         connection.identity_jwt_audience = catalog.identity_jwt_audience.clone();
+        connection.auth_method = "token_exchange".into();
+        connection.api_key_id = Some(credential(&f, "{}").await);
         db.collection("user_services")
             .insert_one(connection)
             .await
@@ -1271,7 +2320,7 @@ mod native_policy_tests {
             .await
             .unwrap();
         let read = |watch: &AsyncServiceOperation| {
-            CatalogCmaGateway::for_service(&f.state, &catalog.id)
+            CatalogCmaGateway::for_user_service(&f.state, &watch.service_id)
                 .with_watch_authority(watch, f.state.node_ws_manager.clone())
         };
         assert!(
@@ -1394,6 +2443,31 @@ mod native_policy_tests {
             .await
             .unwrap();
         assert_eq!(reads.load(Ordering::SeqCst), 2);
+        // Authentication may await after the first watch scope check. The
+        // final guard must re-read this exact lease before provider dispatch.
+        block_exchange.store(true, Ordering::SeqCst);
+        let gateway = read(&legacy);
+        let mut pending = Box::pin(gateway.get_agent(&f.owner, "agt_observed"));
+        tokio::select! {
+            result = &mut pending => panic!("finished before token barrier: {result:?}"),
+            () = entered.notified() => {},
+            () = tokio::time::sleep(Duration::from_secs(10)) => panic!("token exchange never started"),
+        }
+        watches
+            .update_one(
+                doc! {"_id":&legacy.id},
+                doc! {"$set":{"lease_until":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        release.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), pending)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
         server.abort();
     }
 
@@ -1409,20 +2483,20 @@ mod native_policy_tests {
                 }],
             });
         assert!(authorize_native_route(&catalog, "GET", "/api/v1/agents").is_ok());
-        assert_eq!(
+        assert!(matches!(
             authorize_native_route(&catalog, "POST", "/api/v1/agents/agt_test/files"),
             Err(CmaGatewayError::Forbidden)
-        );
+        ));
         catalog
             .proxy_operation_policy
             .as_mut()
             .unwrap()
             .rules
             .clear();
-        assert_eq!(
+        assert!(matches!(
             authorize_native_route(&catalog, "GET", "/api/v1/agents"),
             Err(CmaGatewayError::Forbidden)
-        );
+        ));
     }
 
     #[test]
@@ -1441,10 +2515,10 @@ mod native_policy_tests {
             "/api/v1/sandbox-profiles/sbp_1/revisions/7",
             "/api/v1/usage/sandboxes/sbx_1",
         ] {
-            assert_eq!(
+            assert!(matches!(
                 authorize_native_route(&catalog, "GET", path),
                 Err(CmaGatewayError::Forbidden)
-            );
+            ));
         }
         catalog.proxy_operation_policy.as_mut().unwrap().rules.push(
             crate::models::downstream_service::ProxyOperationRule {
@@ -1454,14 +2528,14 @@ mod native_policy_tests {
             },
         );
         assert!(authorize_native_route(&catalog, "GET", "/api/v1/usage/sandboxes/sbx_1").is_ok());
-        assert_eq!(
+        assert!(matches!(
             authorize_native_route(&catalog, "GET", "/api/v1/usage/sandboxes"),
             Err(CmaGatewayError::Forbidden)
-        );
+        ));
     }
 }
 
-fn map_status(status: u16, body: Option<&Value>, base: &Url) -> CmaGatewayError {
+pub(crate) fn map_status(status: u16, body: Option<&Value>, base: &Url) -> CmaGatewayError {
     let code = body
         .and_then(|body| body.get("code").or_else(|| body.get("error")))
         .and_then(|value| {
@@ -2034,21 +3108,39 @@ fn parse_desktop(body: &Value, agent_id: &str) -> CmaResult<CmaDesktopDescriptor
 }
 
 #[async_trait]
-impl CmaGateway for CatalogCmaGateway {
+impl CmaGateway for CatalogCmaGateway<'_> {
+    async fn connection(&self, owner_id: &str) -> CmaResult<CmaConnection> {
+        let (target, _, base) = self.resolve(owner_id).await?;
+        let service = &target.service;
+        Ok(CmaConnection {
+            user_service_id: self
+                .user_service_id
+                .get()
+                .ok_or(CmaGatewayError::NotFound)?
+                .clone(),
+            cma_service_id: service.id.clone(),
+            execution_base_url: base.to_string(),
+        })
+    }
+    fn for_connection(&self, connection: &CmaConnection) -> Option<Box<dyn CmaGateway + '_>> {
+        Some(Box::new(self.for_binding(
+            &connection.user_service_id,
+            &connection.cma_service_id,
+            &connection.execution_base_url,
+        )))
+    }
+
     async fn service_id(&self, owner_id: &str) -> CmaResult<String> {
-        Ok(self.resolve(owner_id).await?.0.id)
+        Ok(self.resolve(owner_id).await?.0.service.id)
     }
     async fn verify_creation_deployment(
         &self,
         owner_id: &str,
-        service_id: &str,
-        fingerprint: &str,
+        user_service_id: &str,
+        execution_base_url: &str,
     ) -> CmaResult<()> {
-        let (service, _, _) = self.resolve(owner_id).await?;
-        if service.id != service_id || catalog_execution_fingerprint(&service) != fingerprint {
-            return Err(CmaGatewayError::ConfigurationRequired);
-        }
-        Ok(())
+        self.verify_target(owner_id, user_service_id, execution_base_url)
+            .await
     }
     async fn get_controls(
         &self,
@@ -2397,37 +3489,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connection_identity_flags_do_not_define_cma_deployment() {
-        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
-        catalog.identity_propagation_mode = "jwt".into();
-        catalog.identity_include_user_id = false;
-        catalog.identity_include_email = false;
-        catalog.identity_include_name = false;
-        let mut connection = catalog.clone();
-        connection.identity_include_user_id = true;
-        connection.identity_include_email = true;
-        connection.identity_include_name = true;
-        assert_ne!(
-            catalog_execution_fingerprint(&catalog),
-            catalog_execution_fingerprint(&connection)
-        );
-        assert!(
-            require_same_deployment_target(&catalog, &connection.id, &connection.base_url).is_ok()
-        );
-        assert!(
-            require_same_deployment_target(&catalog, "another-service", &connection.base_url)
-                .is_err()
-        );
-        assert!(
-            require_same_deployment_target(
-                &catalog,
-                &connection.id,
-                "https://another-deployment.example"
-            )
-            .is_err()
-        );
-    }
-    #[test]
     fn sandbox_authority_projection_keeps_exact_identity_without_profile_enrichment() {
         let body = json!({
             "id":"sandbox", "owner":"owner", "status":"active",
@@ -2479,7 +3540,7 @@ mod tests {
         }
     }
     #[test]
-    fn credential_setup_link_comes_only_from_the_catalog_base() {
+    fn credential_setup_link_comes_only_from_the_resolved_connection_base() {
         let base = validated_base("https://cma.example/base").unwrap();
         let error = map_status(
             409,
@@ -2488,11 +3549,9 @@ mod tests {
             ),
             &base,
         );
-        assert_eq!(
-            error,
-            CmaGatewayError::CredentialSetupRequired {
-                login_url: "https://cma.example/base/auth/login".into()
-            }
+        assert!(
+            matches!(&error, CmaGatewayError::CredentialSetupRequired {login_url}
+            if login_url == "https://cma.example/base/auth/login")
         );
         assert!(!AppError::from(error).to_string().contains("secret"));
     }
@@ -2859,11 +3918,11 @@ mod tests {
     #[tokio::test]
     async fn sandbox_allocation_failures_keep_inventory_usable_and_inactive_capacity_unknown() {
         for error in [
-            CmaGatewayError::Forbidden,
-            CmaGatewayError::UpstreamAuthorizationUnavailable,
-            CmaGatewayError::NotFound,
-            CmaGatewayError::Timeout,
-            CmaGatewayError::InvalidResponse,
+            (|| CmaGatewayError::Forbidden) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::UpstreamAuthorizationUnavailable) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::NotFound) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::Timeout) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::InvalidResponse) as fn() -> CmaGatewayError,
         ] {
             let mut items = ["active", "paused", "retired", "pausing"]
                 .into_iter()
@@ -2884,7 +3943,7 @@ mod tests {
                 |_| std::future::ready(Err(CmaGatewayError::NotFound)),
                 |_| {
                     reads += 1;
-                    std::future::ready(Err(error.clone()))
+                    std::future::ready(Err(error()))
                 },
             )
             .await;
@@ -2962,11 +4021,11 @@ mod tests {
     #[tokio::test]
     async fn optional_profile_failures_keep_inventory_usable_and_capacity_unknown() {
         for error in [
-            CmaGatewayError::Forbidden,
-            CmaGatewayError::UpstreamAuthorizationUnavailable,
-            CmaGatewayError::NotFound,
-            CmaGatewayError::Timeout,
-            CmaGatewayError::InvalidResponse,
+            (|| CmaGatewayError::Forbidden) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::UpstreamAuthorizationUnavailable) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::NotFound) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::Timeout) as fn() -> CmaGatewayError,
+            (|| CmaGatewayError::InvalidResponse) as fn() -> CmaGatewayError,
         ] {
             let mut items = (0..2)
                 .map(|index| {
@@ -2983,7 +4042,7 @@ mod tests {
                 Duration::from_secs(1),
                 |_| {
                     calls += 1;
-                    std::future::ready(Err(error.clone()))
+                    std::future::ready(Err(error()))
                 },
                 |_| std::future::ready(Err(CmaGatewayError::Unavailable)),
             )
@@ -3239,21 +4298,6 @@ mod tests {
         ] {
             assert!(parse_desktop(&json!({"websocket_url":url}), "agent_1").is_err());
         }
-    }
-
-    #[test]
-    fn execution_binding_detects_same_catalog_row_retargeting() {
-        let original = crate::test_utils::test_auto_connected_catalog_service();
-        let digest = catalog_execution_fingerprint(&original);
-        let mut changed = original.clone();
-        changed.base_url = "https://another-deployment.example".into();
-        assert_ne!(digest, catalog_execution_fingerprint(&changed));
-        changed = original.clone();
-        changed.identity_jwt_audience = Some("other-audience".into());
-        assert_ne!(digest, catalog_execution_fingerprint(&changed));
-        changed = original.clone();
-        changed.updated_at = Utc::now();
-        assert_eq!(digest, catalog_execution_fingerprint(&changed));
     }
 
     #[test]

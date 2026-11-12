@@ -248,16 +248,16 @@ pub fn indexes() -> Vec<IndexModel> {
             .options(IndexOptions::builder().unique(true).build())
             .build(),
         IndexModel::builder()
-            .keys(doc! {"user_id":1,"cma_service_id":1,"operation_id":1})
+            .keys(doc! {"user_id":1,"user_service_id":1,"execution_base_url":1,"cma_service_id":1,"operation_id":1})
             .options(
                 IndexOptions::builder()
                     .unique(true)
-                    .partial_filter_expression(doc! {"operation_id":{"$type":"string"}})
+                    .partial_filter_expression(doc! {"operation_id":{"$type":"string"},"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"}})
                     .build(),
             )
             .build(),
         IndexModel::builder()
-            .keys(doc! {"user_id":1,"cma_service_id":1,"recovery_checked_at":1,"created_at":1})
+            .keys(doc! {"user_id":1,"user_service_id":1,"cma_service_id":1,"recovery_checked_at":1,"created_at":1})
             .build(),
     ]
 }
@@ -280,19 +280,58 @@ pub(super) fn recovery_submission(creation: &AssistantCmaCreation) -> String {
 }
 
 // No Debug: the binding includes an idempotency key and no caller may log it.
-pub struct CmaDispatchPermit {
+pub struct CmaDispatchPermit<'a> {
     db: Database,
-    gateway: CatalogCmaGateway,
+    gateway: CatalogCmaGateway<'a>,
     owner: String,
     target: crate::models::downstream_service::DownstreamService,
+    user_service_id: String,
+    execution_base_url: String,
     operation: Operation,
     method: String,
     path: String,
+    dispatch_path: zeroize::Zeroizing<String>,
     query: Option<String>,
     body_hash: String,
+    // Only native/watch requests need the original business inputs and held
+    // target again after asynchronous generic authentication has completed.
+    authority_target: Option<&'a ProxyTarget>,
+    authority_body: Option<zeroize::Zeroizing<Vec<u8>>>,
     key: Option<String>,
     sandbox: Option<AssistantCmaSandbox>,
     creation: Option<AssistantCmaCreation>,
+}
+
+impl<'a> CmaDispatchPermit<'a> {
+    pub(super) fn with_gateway_authority(
+        mut self,
+        gateway: &CatalogCmaGateway<'_>,
+        target: &'a ProxyTarget,
+        body: &[u8],
+    ) -> Self {
+        self.gateway = self.gateway.with_authority_from(gateway);
+        if self.gateway.has_dispatch_authority() {
+            self.authority_target = Some(target);
+            self.authority_body = Some(zeroize::Zeroizing::new(body.to_vec()));
+        }
+        self
+    }
+
+    pub(super) fn matches_binding(
+        &self,
+        target: &ProxyTarget,
+        owner: &str,
+        connection: Option<&str>,
+    ) -> bool {
+        self.owner == owner
+            && connection == Some(self.user_service_id.as_str())
+            && self.target.id == target.service.id
+            && url::Url::parse(&target.base_url)
+                .ok()
+                .as_ref()
+                .map(url::Url::as_str)
+                == Some(self.execution_base_url.as_str())
+    }
 }
 fn wire_hash(body: &[u8]) -> String {
     hex::encode(Sha256::digest(body))
@@ -310,8 +349,9 @@ fn same_request(
     candidate: &AssistantCmaCreation,
 ) -> AppResult<()> {
     if previous.user_id != candidate.user_id
+        || previous.user_service_id != candidate.user_service_id
         || previous.cma_service_id != candidate.cma_service_id
-        || previous.deployment_fingerprint != candidate.deployment_fingerprint
+        || previous.execution_base_url != candidate.execution_base_url
         || previous.method != candidate.method
         || previous.path != candidate.path
         || previous.idempotency_key != candidate.idempotency_key
@@ -334,8 +374,9 @@ fn same_request(
     Ok(())
 }
 fn creation_filter(row: &AssistantCmaCreation) -> bson::Document {
-    let mut filter = doc! {"_id":&row.id,"user_id":&row.user_id,"cma_service_id":&row.cma_service_id,
-    "deployment_fingerprint":&row.deployment_fingerprint,"method":&row.method,"path":&row.path,
+    let mut filter = doc! {"_id":&row.id,"user_id":&row.user_id,"user_service_id":&row.user_service_id,
+    "cma_service_id":&row.cma_service_id,"execution_base_url":&row.execution_base_url,
+    "method":&row.method,"path":&row.path,
     "idempotency_key":&row.idempotency_key,"request_hash":&row.request_hash,
         "sandbox_ref_id":&row.sandbox_ref_id,"sandbox_generation":row.sandbox_generation};
     filter.insert(
@@ -363,6 +404,8 @@ fn revision_filter(row: &AssistantCmaCreation) -> bson::Document {
 fn require_parent(creation: &AssistantCmaCreation, parent: &AssistantCmaSandbox) -> AppResult<()> {
     if parent.id != creation.sandbox_ref_id
         || parent.user_id != creation.user_id
+        || parent.user_service_id != creation.user_service_id
+        || parent.execution_base_url != creation.execution_base_url
         || parent.cma_service_id != creation.cma_service_id
         || parent.generation != creation.sandbox_generation
     {
@@ -389,7 +432,7 @@ async fn fence_parent(
         .collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .find_one_and_update(
             doc! {"_id":&creation.sandbox_ref_id,"user_id":&creation.user_id,
-            "cma_service_id":&creation.cma_service_id,"generation":creation.sandbox_generation},
+            "user_service_id":&creation.user_service_id,"execution_base_url":&creation.execution_base_url,"cma_service_id":&creation.cma_service_id,"generation":creation.sandbox_generation},
             doc! {"$inc":{"agent_reference_version":1_i64}},
         )
         .return_document(ReturnDocument::After)
@@ -413,7 +456,7 @@ async fn store_creation(
             let parent = fence_parent(db, candidate, tx).await?;
             require_available_parent(&parent)?;
             let collection = db.collection::<AssistantCmaCreation>(COLLECTION_NAME);
-            if let Some(previous) = collection.find_one(doc! {"user_id":&candidate.user_id,"idempotency_key":&candidate.idempotency_key}).session(&mut *tx).await? {
+            if let Some(previous) = collection.find_one(doc! {"user_id":&candidate.user_id,"idempotency_key":&candidate.idempotency_key,"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"}}).session(&mut *tx).await? {
                 same_request(&previous, candidate)?;
                 if previous.submission_state == "confirmed_not_created" {
                     let mut next = previous.clone();
@@ -438,7 +481,7 @@ async fn store_creation(
     match result {
         Err(error) if duplicate(&error) => {
             let previous = db.collection::<AssistantCmaCreation>(COLLECTION_NAME)
-                .find_one(doc! {"user_id":&candidate.user_id,"idempotency_key":&candidate.idempotency_key}).await?.ok_or_else(drift)?;
+                .find_one(doc! {"user_id":&candidate.user_id,"idempotency_key":&candidate.idempotency_key,"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"}}).await?.ok_or_else(drift)?;
             same_request(&previous, candidate)?;
             if previous.sandbox_generation != candidate.sandbox_generation {
                 return Err(drift());
@@ -679,12 +722,13 @@ async fn change_creation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn admit(
+pub async fn admit<'a>(
     db: &Database,
-    keys: &EncryptionKeys,
+    keys: &'a EncryptionKeys,
     jwt: &JwtKeys,
     config: &AppConfig,
     owner: &str,
+    user_service_id: &str,
     personal: bool,
     target: &ProxyTarget,
     method: &str,
@@ -693,19 +737,81 @@ pub async fn admit(
     body: &[u8],
     headers: &[(String, String)],
     unsupported_transport: bool,
-) -> AppResult<CmaDispatchPermit> {
-    if !personal
-        || unsupported_transport
-        || target.auth_method != "none"
-        || !target.credential.is_empty()
-    {
+) -> AppResult<CmaDispatchPermit<'a>> {
+    admit_with_gateway_authority(
+        db,
+        keys,
+        jwt,
+        config,
+        owner,
+        user_service_id,
+        personal,
+        target,
+        method,
+        path,
+        query,
+        body,
+        headers,
+        unsupported_transport,
+        None,
+    )
+    .await
+}
+
+/// Native/watch authority must already cover the supplemental reads performed
+/// during admission, as well as the final provider dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn admit_with_gateway_authority<'a>(
+    db: &Database,
+    keys: &'a EncryptionKeys,
+    jwt: &JwtKeys,
+    config: &AppConfig,
+    owner: &str,
+    user_service_id: &str,
+    personal: bool,
+    target: &ProxyTarget,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+    headers: &[(String, String)],
+    unsupported_transport: bool,
+    authority: Option<&CatalogCmaGateway<'_>>,
+) -> AppResult<CmaDispatchPermit<'a>> {
+    if !personal || unsupported_transport {
         return Err(unsupported());
     }
     let operation = classify(method, path, body)?;
-    let gateway = CatalogCmaGateway::from_parts(db, jwt, config, &target.service.id);
-    let deployment_fingerprint = gateway
-        .deployment_fingerprint_for_target(owner, &target.service.id, &target.base_url)
-        .await?;
+    // Reuse the generic path-auth construction and retain an exact final path.
+    // The original path remains separately bound before any rewriting.
+    let mut path_credentials = Vec::new();
+    super::proxy_service::extend_with_path_credential(&mut path_credentials, target);
+    let dispatch_path = zeroize::Zeroizing::new(super::proxy_service::build_forward_path(
+        path,
+        &path_credentials,
+    )?);
+    let execution_base_url = url::Url::parse(&target.base_url)
+        .map_err(|_| invalid())?
+        .to_string();
+    let gateway = CatalogCmaGateway::from_user_service_parts(
+        db,
+        keys,
+        jwt,
+        config,
+        user_service_id,
+        Some(&target.service.id),
+        Some(&execution_base_url),
+    );
+    let gateway = if let Some(source) = authority {
+        gateway.with_authority_from(source)
+    } else {
+        gateway
+    };
+    if !matches!(operation, Operation::Read) {
+        gateway
+            .verify_target(owner, user_service_id, &execution_base_url)
+            .await?;
+    }
     if !matches!(operation, Operation::Read) && query.is_some_and(|q| !q.is_empty()) {
         return Err(invalid());
     }
@@ -728,12 +834,20 @@ pub async fn admit(
         db: db.clone(),
         gateway,
         owner: owner.into(),
-        target: target.service.clone(),
+        target: crate::models::downstream_service::DownstreamService {
+            base_url: target.base_url.clone(),
+            ..target.service.clone()
+        },
+        user_service_id: user_service_id.into(),
+        execution_base_url: execution_base_url.clone(),
         operation: operation.clone(),
         method: method.into(),
         path: path.into(),
+        dispatch_path,
         query: query.map(str::to_owned),
         body_hash: wire_hash(body),
+        authority_target: None,
+        authority_body: None,
         key,
         sandbox: None,
         creation: None,
@@ -755,17 +869,18 @@ pub async fn admit(
     );
     let pending_creation = if creates_sandbox || creates_agent {
         db.collection::<AssistantCmaCreation>(COLLECTION_NAME)
-            .find_one(doc! {"user_id":owner,"idempotency_key":&permit.key})
+            .find_one(doc! {"user_id":owner,"idempotency_key":&permit.key,"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"}})
             .await?
     } else {
         None
     };
     if let Some(previous) = &pending_creation {
-        if previous.cma_service_id != target.service.id
+        if previous.user_service_id != user_service_id
+            || previous.cma_service_id != target.service.id
             || previous.path != path
             || previous.method != method
             || previous.request_hash != sandboxes::prepare_creation_request(body)?.hash
-            || previous.deployment_fingerprint != deployment_fingerprint
+            || previous.execution_base_url != execution_base_url
         {
             return Err(drift());
         }
@@ -860,8 +975,9 @@ pub async fn admit(
         let candidate = AssistantCmaCreation {
             id,
             user_id: owner.into(),
+            user_service_id: user_service_id.into(),
             cma_service_id: target.service.id.clone(),
-            deployment_fingerprint,
+            execution_base_url: execution_base_url.clone(),
             method: method.into(),
             path: path.into(),
             idempotency_key: permit.key.clone().ok_or_else(invalid)?,
@@ -957,27 +1073,62 @@ fn creation_refusal_confirms_no_resource(path: &str, status: u16, value: &Value)
 }
 
 #[async_trait::async_trait]
-impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
+impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit<'_> {
+    fn validate_original_request(
+        &self,
+        request: super::service_dispatch_guard::OriginalRequest<'_>,
+    ) -> AppResult<()> {
+        let path = super::proxy_authorization::CanonicalPath::from_mcp_built(request.path)?;
+        if request.method != self.method
+            || path.as_policy_path() != self.path
+            || request.query != self.query.as_deref()
+            || wire_hash(request.body) != self.body_hash
+        {
+            return Err(drift());
+        }
+        let mut keys = request.headers.get_all("idempotency-key").iter();
+        let matches = match (self.key.as_deref(), keys.next()) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => actual.to_str().ok() == Some(expected),
+            _ => false,
+        };
+        if !matches || keys.next().is_some() {
+            return Err(drift());
+        }
+        Ok(())
+    }
+
     /// Called after all header/body rewriting, directly before network dispatch.
     async fn before_send(&self, request: &reqwest::Request) -> AppResult<()> {
+        if let Some(target) = self.authority_target {
+            self.gateway
+                .revalidate_dispatch(
+                    &self.owner,
+                    target,
+                    &self.method,
+                    &self.path,
+                    self.query.as_deref(),
+                    self.authority_body
+                        .as_deref()
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+                .await?;
+        }
         self.gateway
-            .deployment_fingerprint_for_target(&self.owner, &self.target.id, &self.target.base_url)
+            .verify_target(&self.owner, &self.user_service_id, &self.execution_base_url)
             .await?;
-        let body = request
-            .body()
-            .and_then(reqwest::Body::as_bytes)
-            .unwrap_or_default();
         let expected = format!(
             "{}/{}",
             self.target.base_url.trim_end_matches('/'),
-            self.path.trim_start_matches('/')
+            self.dispatch_path.trim_start_matches('/')
         );
-        let mut expected = url::Url::parse(&expected).map_err(|_| drift())?;
-        expected.set_query(self.query.as_deref());
-        if request.method().as_str() != self.method
-            || request.url() != &expected
-            || wire_hash(body) != self.body_hash
-        {
+        let expected = url::Url::parse(&expected).map_err(|_| drift())?;
+        let mut actual = request.url().clone();
+        // The original query/body were validated before the generic proxy
+        // applied authentication. Keep every other URL component exact.
+        actual.set_query(None);
+        if request.method().as_str() != self.method || actual != expected {
             return Err(drift());
         }
         if let Some(key) = &self.key {
@@ -1004,7 +1155,7 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                 Box::pin(async move {
                     super::erasure_admission::fence_in_session(db, owner, tx).await?;
                     let collection = db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME);
-                    let fresh = collection.find_one_and_update(doc! {"_id":&before.id,"user_id":owner,"generation":before.generation,"cma_service_id":&before.cma_service_id,"cma_sandbox_id":&before.cma_sandbox_id}, doc! {"$inc":{"agent_reference_version":1_i64}})
+                    let fresh = collection.find_one_and_update(doc! {"_id":&before.id,"user_id":owner,"generation":before.generation,"user_service_id":&before.user_service_id,"execution_base_url":&before.execution_base_url,"cma_service_id":&before.cma_service_id,"cma_sandbox_id":&before.cma_sandbox_id}, doc! {"$inc":{"agent_reference_version":1_i64}})
                         .return_document(ReturnDocument::After).session(&mut *tx).await?.ok_or_else(drift)?;
                     if matches!(operation, Operation::Agent { admission:true,.. } | Operation::Sandbox { admission:true,.. }) { require_available_parent(&fresh)?; }
                     if matches!(operation, Operation::Sandbox { retire:true,.. }) && fresh.admission_state != SandboxAdmissionState::Retired {
@@ -1112,7 +1263,7 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
 fn observation_unavailable(error: &AppError) -> bool {
     matches!(error, AppError::NotFound(_))
         || matches!(error, AppError::Conflict(message) if matches!(message.as_str(),
-        "cma_observation_unavailable" | "cma_configuration_required" | "cma_creation_authority_changed" | "cma_sandbox_generation_changed"))
+        "cma_observation_unavailable" | "cma_creation_authority_changed" | "cma_sandbox_generation_changed"))
 }
 async fn verify_creation(
     gateway: &dyn CmaGateway,
@@ -1121,8 +1272,8 @@ async fn verify_creation(
     gateway
         .verify_creation_deployment(
             &creation.user_id,
-            &creation.cma_service_id,
-            &creation.deployment_fingerprint,
+            &creation.user_service_id,
+            &creation.execution_base_url,
         )
         .await?;
     Ok(())
@@ -1247,10 +1398,11 @@ pub async fn record_creation_observation(
     value: &Value,
 ) -> AppResult<()> {
     let agent_id = lifecycle_agent(operation, value)?;
+    let connection = gateway.connection(owner).await?;
     let db = super::transaction_service::durable_database(db);
     let Some(creation) = db
         .collection::<AssistantCmaCreation>(COLLECTION_NAME)
-        .find_one(doc! {"user_id":owner,"cma_service_id":service,"operation_id":operation})
+        .find_one(doc! {"user_id":owner,"user_service_id":&connection.user_service_id,"execution_base_url":&connection.execution_base_url,"cma_service_id":service,"operation_id":operation})
         .await?
     else {
         return Ok(());
@@ -1272,7 +1424,7 @@ pub async fn record_creation_observation(
 pub async fn recover_creation(
     db: &Database,
     keys: &EncryptionKeys,
-    gateway: &CatalogCmaGateway,
+    gateway: &CatalogCmaGateway<'_>,
     owner: &str,
     id: &str,
     generation: i64,
@@ -1283,7 +1435,7 @@ pub async fn recover_creation(
     let creation = db
         .collection::<AssistantCmaCreation>(COLLECTION_NAME)
         .find_one(doc! {
-            "user_id":owner,"cma_service_id":&parent.cma_service_id,
+            "user_id":owner,"user_service_id":&parent.user_service_id,"execution_base_url":&parent.execution_base_url,"cma_service_id":&parent.cma_service_id,
             "sandbox_ref_id":id,"sandbox_generation":generation,"creates_sandbox":true,
             "idempotency_key":parent.idempotency_key.as_deref().ok_or_else(drift)?,
         })
@@ -1368,18 +1520,23 @@ pub(super) async fn require_recovery_current(
 /// Bounded observation only: no POST, no key replacement, and no request-body
 /// rewriting. The stored operation/resource identities survive chat deletion.
 pub async fn recover_owner(db: &Database, gateway: &dyn CmaGateway, owner: &str) -> AppResult<()> {
-    let service = gateway.service_id(owner).await?;
     let db = super::transaction_service::durable_database(db);
     let cutoff = bson::DateTime::from_chrono(
         Utc::now() - chrono::Duration::seconds(RECOVERY_COOLDOWN_SECONDS),
     );
     let pending: Vec<AssistantCmaCreation> = db.collection::<AssistantCmaCreation>(COLLECTION_NAME).find(doc! {
-        "user_id":owner,"cma_service_id":&service,"submission_state":{"$nin":["confirmed","confirmed_not_created"]},
+        "user_id":owner,"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"},"submission_state":{"$nin":["confirmed","confirmed_not_created"]},
         "$and":[{"$or":[{"operation_id":{"$type":"string"}},{"cma_agent_id":{"$type":"string"}},{"creates_sandbox":true,"cma_sandbox_id":{"$type":"string"}}]},
             {"$or":[{"recovery_checked_at":bson::Bson::Null},{"recovery_checked_at":{"$lte":cutoff}}]}],
     }).sort(doc! {"recovery_checked_at":1,"created_at":1,"_id":1}).limit(MAX_RECOVERY_OBSERVATIONS).await?.try_collect().await?;
     let deadline = tokio::time::Instant::now() + RECOVERY_BUDGET;
     for creation in pending {
+        let scoped = gateway.for_connection(&super::assistant_cma_gateway::CmaConnection {
+            user_service_id: creation.user_service_id.clone(),
+            cma_service_id: creation.cma_service_id.clone(),
+            execution_base_url: creation.execution_base_url.clone(),
+        });
+        let gateway = scoped.as_deref().unwrap_or(gateway);
         if tokio::time::Instant::now() >= deadline {
             break;
         }
@@ -1388,7 +1545,15 @@ pub async fn recover_owner(db: &Database, gateway: &dyn CmaGateway, owner: &str)
             let creation = change_creation(&db, &creation, CreationChange::Checked).await?;
             if let Some(operation) = &creation.operation_id {
                 let value = gateway.get_lifecycle(owner, operation).await?;
-                record_creation_observation(&db, gateway, owner, &service, operation, &value).await
+                record_creation_observation(
+                    &db,
+                    gateway,
+                    owner,
+                    &creation.cma_service_id,
+                    operation,
+                    &value,
+                )
+                .await
             } else if let Some(agent) = &creation.cma_agent_id {
                 finish_agent(&db, gateway, &creation, agent).await
             } else if let Some(sandbox) = &creation.cma_sandbox_id {
@@ -1575,8 +1740,9 @@ mod tests {
         AssistantCmaCreation {
             id: "creation".into(),
             user_id: "owner".into(),
+            user_service_id: "user-service".into(),
+            execution_base_url: "https://cma.example/".into(),
             cma_service_id: "service".into(),
-            deployment_fingerprint: "fingerprint".into(),
             method: "POST".into(),
             path: "/api/v1/agents".into(),
             idempotency_key: "original-key".into(),
@@ -1600,7 +1766,7 @@ mod tests {
         }
     }
     fn parent() -> AssistantCmaSandbox {
-        bson::from_document(doc! {"_id":"slot","user_id":"owner","cma_service_id":"service",
+        bson::from_document(doc! {"_id":"slot","user_id":"owner","user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"service",
             "label":"Sandbox","occupies_account_slot":true,"creation_ref":"original-creation",
             "generation":1_i64,"source":"nyxbot","idempotency_key":"original-key",
             "request_hash":"original-hash","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap()
@@ -1685,16 +1851,17 @@ mod tests {
         let mut no_resource = row.clone();
         no_resource.submission_state = "confirmed_not_created".into();
         assert!(same_request(&no_resource, &candidate).is_ok());
-        for change in 0..7 {
+        for change in 0..8 {
             let mut candidate = row.clone();
             match change {
                 0 => candidate.user_id = "other".into(),
                 1 => candidate.cma_service_id = "alias-to-another-deployment".into(),
-                2 => candidate.deployment_fingerprint = "changed-target".into(),
+                2 => candidate.execution_base_url = "https://changed.example/".into(),
                 3 => candidate.request_hash = "reformatted-body".into(),
                 4 => candidate.sandbox_ref_id = "other-slot".into(),
                 5 => candidate.path = "/api/v1/sandboxes".into(),
-                _ => candidate.expected_workspace_id = Some("other-workspace".into()),
+                6 => candidate.expected_workspace_id = Some("other-workspace".into()),
+                _ => candidate.user_service_id = "other-connection".into(),
             }
             assert!(same_request(&row, &candidate).is_err());
         }
@@ -1930,6 +2097,17 @@ mod tests {
         async fn service_id(&self, _: &str) -> CmaResult<String> {
             Ok("service".into())
         }
+        async fn connection(
+            &self,
+            owner: &str,
+        ) -> CmaResult<super::super::assistant_cma_gateway::CmaConnection> {
+            Ok(super::super::assistant_cma_gateway::CmaConnection {
+                user_service_id: "user-service".into(),
+                cma_service_id: self.service_id(owner).await?,
+                execution_base_url: "https://cma.example/".into(),
+            })
+        }
+
         async fn get_lifecycle(&self, owner: &str, id: &str) -> CmaResult<Value> {
             assert_eq!(owner, "owner");
             self.reads

@@ -9,8 +9,13 @@ pub struct AssistantCmaCreation {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    /// Exact UserService connection used for this creation. This is the
+    /// durable routing identity; `cma_service_id` remains the catalog class.
+    pub user_service_id: String,
     pub cma_service_id: String,
-    pub deployment_fingerprint: String,
+    /// The effective endpoint resolved at admission time. It is used only to
+    /// fence recovery against a changed connection target.
+    pub execution_base_url: String,
     pub method: String,
     pub path: String,
     pub idempotency_key: String,
@@ -59,8 +64,9 @@ mod tests {
         let row = AssistantCmaCreation {
             id: "id".into(),
             user_id: "owner".into(),
+            user_service_id: "user-service".into(),
             cma_service_id: "service".into(),
-            deployment_fingerprint: "fingerprint".into(),
+            execution_base_url: "https://cma.example".into(),
             method: "POST".into(),
             path: "/api/v1/agents".into(),
             idempotency_key: "private-key".into(),
@@ -82,6 +88,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
+        assert!(!format!("{row:?}").contains("https://cma.example"));
         let document = mongodb::bson::to_document(&row).unwrap();
         assert!(document.get("request_ciphertext").is_some());
         for key in [

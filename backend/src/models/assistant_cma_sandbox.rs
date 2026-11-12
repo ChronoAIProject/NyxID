@@ -87,7 +87,11 @@ pub struct AssistantCmaSandbox {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    /// Exact UserService connection that owns this remote resource.
+    pub user_service_id: String,
     pub cma_service_id: String,
+    /// Effective endpoint resolved when the resource was created.
+    pub execution_base_url: String,
     pub label: String,
     #[serde(default)]
     pub cma_sandbox_id: Option<String>,
@@ -148,6 +152,7 @@ impl std::fmt::Debug for AssistantCmaSandbox {
         f.debug_struct("AssistantCmaSandbox")
             .field("id", &self.id)
             .field("user_id", &self.user_id)
+            .field("user_service_id", &self.user_service_id)
             .field("cma_service_id", &self.cma_service_id)
             .field("cma_sandbox_id", &self.cma_sandbox_id)
             .field("occupies_account_slot", &self.occupies_account_slot)
@@ -172,7 +177,9 @@ mod tests {
         let row = AssistantCmaSandbox {
             id: "sandbox-row".into(),
             user_id: "user".into(),
+            user_service_id: "user-service".into(),
             cma_service_id: "service".into(),
+            execution_base_url: "https://cma.example".into(),
             label: "Sandbox".into(),
             cma_sandbox_id: Some("remote-sandbox".into()),
             occupies_account_slot: true,
@@ -202,6 +209,7 @@ mod tests {
             updated_at: now,
         };
 
+        assert!(!format!("{row:?}").contains("https://cma.example"));
         let document = bson::to_document(&row).expect("serialize sandbox");
         for field in [
             "created_at",
@@ -240,7 +248,9 @@ mod tests {
         let row = AssistantCmaSandbox {
             id: "sandbox-row".into(),
             user_id: "user".into(),
+            user_service_id: "user-service".into(),
             cma_service_id: "service".into(),
+            execution_base_url: "https://cma.example".into(),
             label: "Sandbox".into(),
             cma_sandbox_id: None,
             occupies_account_slot: true,

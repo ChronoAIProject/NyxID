@@ -15,16 +15,16 @@ pub(crate) struct DispatchCaller<'a> {
     pub(crate) user_service_id: Option<&'a str>,
 }
 
-pub(crate) struct DispatchAdmission {
-    state: AdmissionState,
+pub(crate) struct DispatchAdmission<'k> {
+    state: AdmissionState<'k>,
 }
 
-enum AdmissionState {
+enum AdmissionState<'k> {
     Unprotected,
     Protected {
         policy: Policy,
         binding: Box<Binding>,
-        guard: Box<dyn ServiceDispatchGuard>,
+        guard: Box<dyn ServiceDispatchGuard + 'k>,
     },
 }
 
@@ -73,9 +73,9 @@ fn refused() -> AppError {
 
 /// The entry points retain their own verified eligibility/transport semantics.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn admit(
+pub(crate) async fn admit<'k>(
     db: &Database,
-    keys: &EncryptionKeys,
+    keys: &'k EncryptionKeys,
     jwt: &JwtKeys,
     config: &AppConfig,
     caller: &DispatchCaller<'_>,
@@ -87,7 +87,7 @@ pub(crate) async fn admit(
     body: &[u8],
     prepare_headers: impl FnOnce() -> AppResult<SecretHeaders> + Send,
     unsupported_transport: bool,
-) -> AppResult<DispatchAdmission> {
+) -> AppResult<DispatchAdmission<'k>> {
     let Some(policy) = policy_for(target) else {
         return Ok(DispatchAdmission {
             state: AdmissionState::Unprotected,
@@ -95,32 +95,51 @@ pub(crate) async fn admit(
     };
     let canonical = super::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
     let headers = prepare_headers()?;
-    let binding = Binding::current(target, caller)?;
-    let guard: Box<dyn ServiceDispatchGuard> = match policy {
-        Policy::Cma => Box::new(
-            super::assistant_cma_admission::admit(
-                db,
-                keys,
-                jwt,
-                config,
-                caller.resource_owner_id,
-                personal,
-                target,
-                method,
-                &canonical.as_policy_path(),
-                query,
-                body,
-                &headers,
-                unsupported_transport,
-            )
-            .await?,
-        ),
-    };
+    match policy {
+        Policy::Cma => {
+            // Approval hints identify a catalog, not a concrete connection.
+            let connection = caller.user_service_id.ok_or_else(refused)?;
+            let path = canonical.as_policy_path();
+            let permit: futures::future::BoxFuture<'_, _> =
+                Box::pin(super::assistant_cma_admission::admit(
+                    db,
+                    keys,
+                    jwt,
+                    config,
+                    caller.resource_owner_id,
+                    connection,
+                    personal,
+                    target,
+                    method,
+                    &path,
+                    query,
+                    body,
+                    &headers,
+                    unsupported_transport,
+                ));
+            from_cma_permit(target, caller, permit.await?)
+        }
+    }
+}
+
+/// CMA gateways retain their native/watch authority on the final permit.
+/// This constructor still binds that permit to the independently supplied
+/// caller and resolved target before exposing it to the shared forwarder.
+pub(crate) fn from_cma_permit<'k>(
+    target: &ProxyTarget,
+    caller: &DispatchCaller<'_>,
+    permit: super::assistant_cma_admission::CmaDispatchPermit<'k>,
+) -> AppResult<DispatchAdmission<'k>> {
+    if policy_for(target) != Some(Policy::Cma)
+        || !permit.matches_binding(target, caller.resource_owner_id, caller.user_service_id)
+    {
+        return Err(refused());
+    }
     Ok(DispatchAdmission {
         state: AdmissionState::Protected {
-            policy,
-            binding: Box::new(binding),
-            guard,
+            policy: Policy::Cma,
+            binding: Box::new(Binding::current(target, caller)?),
+            guard: Box::new(permit),
         },
     })
 }
@@ -160,7 +179,7 @@ pub(crate) fn test_admission(
     target: &ProxyTarget,
     caller: &DispatchCaller<'_>,
     guard: Box<dyn ServiceDispatchGuard>,
-) -> DispatchAdmission {
+) -> DispatchAdmission<'static> {
     DispatchAdmission {
         state: AdmissionState::Protected {
             policy: Policy::Cma,
@@ -253,7 +272,7 @@ mod tests {
         target: &ProxyTarget,
         before: bool,
         response: bool,
-    ) -> (DispatchAdmission, Arc<Mutex<Vec<&'static str>>>) {
+    ) -> (DispatchAdmission<'static>, Arc<Mutex<Vec<&'static str>>>) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let admission = test_admission(
             target,
@@ -269,7 +288,7 @@ mod tests {
 
     async fn send(
         target: &ProxyTarget,
-        admission: Option<&DispatchAdmission>,
+        admission: Option<&DispatchAdmission<'_>>,
         caller: Option<&DispatchCaller<'_>>,
         body: ProxyBody,
     ) -> Result<reqwest::Response, ForwardRequestError> {
@@ -300,6 +319,134 @@ mod tests {
 
     fn body() -> ProxyBody {
         ProxyBody::Buffered(Some(Bytes::from_static(b"original body")))
+    }
+
+    struct AuthenticationGuard {
+        method: &'static str,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        reject_original: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceDispatchGuard for AuthenticationGuard {
+        fn validate_original_request(
+            &self,
+            request: super::super::service_dispatch_guard::OriginalRequest<'_>,
+        ) -> AppResult<()> {
+            self.calls.lock().unwrap().push("original");
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/operation");
+            assert_eq!(request.query, Some("selected=1"));
+            assert_eq!(request.body, br#"{ "action": "original" }"#);
+            assert_eq!(request.headers["idempotency-key"], "original-key");
+            if self.reject_original {
+                return Err(AppError::Forbidden("original request refused".into()));
+            }
+            Ok(())
+        }
+
+        async fn before_send(&self, request: &reqwest::Request) -> AppResult<()> {
+            self.calls.lock().unwrap().push("before");
+            assert_eq!(request.headers()["idempotency-key"], "original-key");
+            if self.method == "query" {
+                assert_eq!(
+                    request.url().query(),
+                    Some("selected=1&api_key=test-secret")
+                );
+                assert_eq!(
+                    request.body().and_then(reqwest::Body::as_bytes),
+                    Some(br#"{ "action": "original" }"#.as_slice())
+                );
+            } else {
+                assert_eq!(request.url().query(), Some("selected=1"));
+                let body: serde_json::Value = serde_json::from_slice(
+                    request.body().and_then(reqwest::Body::as_bytes).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(body["action"], "original");
+                assert_eq!(body["api_key"], "test-secret");
+            }
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: reqwest::Response,
+        ) -> AppResult<reqwest::Response> {
+            self.calls.lock().unwrap().push("response");
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn service_dispatch_validates_original_inputs_before_body_and_query_authentication() {
+        for method in ["body", "query"] {
+            let server = MockServer::start().await;
+            Mock::given(path("/operation"))
+                .respond_with(ResponseTemplate::new(201))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut target = target(server.uri());
+            target.auth_method = method.into();
+            target.auth_key_name = "api_key".into();
+            target.credential = "test-secret".to_owned().into();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let admission = test_admission(
+                &target,
+                &caller(),
+                Box::new(AuthenticationGuard {
+                    method,
+                    calls: calls.clone(),
+                    reject_original: false,
+                }),
+            );
+            send(
+                &target,
+                Some(&admission),
+                Some(&caller()),
+                ProxyBody::Buffered(Some(Bytes::from_static(br#"{ "action": "original" }"#))),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                *calls.lock().unwrap(),
+                vec!["original", "before", "response"]
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn service_dispatch_original_refusal_precedes_authentication_construction_failure() {
+        let server = MockServer::start().await;
+        let mut target = target(server.uri());
+        target.auth_method = "body".into();
+        target.auth_key_name.clear();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let admission = test_admission(
+            &target,
+            &caller(),
+            Box::new(AuthenticationGuard {
+                method: "body",
+                calls: calls.clone(),
+                reject_original: true,
+            }),
+        );
+        assert!(matches!(
+            send(
+                &target,
+                Some(&admission),
+                Some(&caller()),
+                ProxyBody::Buffered(Some(Bytes::from_static(br#"{ "action": "original" }"#)))
+            )
+            .await,
+            Err(ForwardRequestError::PreDispatchRejected(
+                AppError::Forbidden(_)
+            ))
+        ));
+        assert_eq!(*calls.lock().unwrap(), vec!["original"]);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
