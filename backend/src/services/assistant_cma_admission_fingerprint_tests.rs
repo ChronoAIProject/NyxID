@@ -385,6 +385,49 @@ impl Fixture {
         resolution.await.unwrap().unwrap().target
     }
 
+    async fn set_default_idempotency_key(&self, catalog: bool, key: &str, overridable: bool) {
+        let (collection, id, owner) = if catalog {
+            (
+                crate::models::downstream_service::COLLECTION_NAME,
+                &self.catalog.id,
+                crate::services::ownership_transfer_service::catalog_owner(&self.catalog),
+            )
+        } else {
+            (
+                crate::models::user_service::COLLECTION_NAME,
+                &self.user_service_id,
+                self.owner.as_str(),
+            )
+        };
+        let stored = crate::services::default_header_service::encode(
+            Some(&self.keys),
+            collection,
+            id,
+            owner,
+            vec![
+                crate::models::default_request_header::DefaultRequestHeader {
+                    name: "Idempotency-Key".into(),
+                    value: key.to_owned().into(),
+                    overridable,
+                    sensitive: false,
+                },
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let result = self
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(
+                doc! {"_id": id},
+                doc! {"$set": {"default_request_headers": bson::to_bson(&stored).unwrap()}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.matched_count, 1);
+    }
+
     fn dispatch_caller(&self) -> registry::DispatchCaller<'_> {
         registry::DispatchCaller {
             actor_user_id: &self.owner,
@@ -1057,6 +1100,157 @@ async fn gateway_json_and_sse_use_connection_b_authentication() {
             .is_empty()
     );
     f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn gateway_reads_and_sse_bind_catalog_and_connection_default_idempotency_keys() {
+    use crate::services::assistant_cma_gateway::CmaGateway;
+    for catalog in [true, false] {
+        for overridable in [false, true] {
+            let f = Fixture::new().await;
+            f.observations().await;
+            let key = "management-default-key";
+            f.set_default_idempotency_key(catalog, key, overridable)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agents": [{"id": "agent_1", "status": "ready"}],
+                })))
+                .expect(1)
+                .mount(&f.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v2/agents/agent_1/events"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(": keepalive\n\n", "text/event-stream"),
+                )
+                .expect(1)
+                .mount(&f.server)
+                .await;
+
+            let gateway = f.gateway();
+            assert_eq!(
+                gateway.get_agent(&f.owner, "agent_1").await.unwrap().id,
+                "agent_1"
+            );
+            let inventory = gateway.list_agents(&f.owner, None).await.unwrap();
+            assert_eq!(inventory.items.len(), 1);
+            assert_eq!(inventory.items[0].id, "agent_1");
+            let stream = gateway
+                .open_event_stream(&f.owner, "agent_1", None, None)
+                .await
+                .unwrap();
+            assert_eq!(stream.text().await.unwrap(), ": keepalive\n\n");
+
+            let requests = f.server.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                3,
+                "catalog={catalog}, overridable={overridable}"
+            );
+            for request in requests {
+                assert_eq!(request.method, "GET");
+                assert_eq!(request.headers["idempotency-key"], key);
+                assert_eq!(request.headers.get_all("idempotency-key").iter().count(), 1);
+            }
+            assert!(
+                f.catalog_server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            f.db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn gateway_recovery_preserves_the_saved_key_under_catalog_and_connection_defaults() {
+    for catalog in [true, false] {
+        for overridable in [false, true] {
+            let f = Fixture::new().await;
+            f.observations().await;
+            let body = br#"{ "name": "retained recovery", "machine_included": false }"#;
+            let key = "original-recovery-key";
+            let permit = f
+                .admit(&f.target, "/api/v1/sandboxes", key, body)
+                .await
+                .unwrap();
+            let row = permit.creation.as_ref().unwrap();
+            // Retain an uncertain original dispatch, without sending to the provider.
+            permit
+                .before_send(&f.request("/api/v1/sandboxes", key, body))
+                .await
+                .unwrap();
+            let dispatched = f.saved(&row.id).await;
+            f.set_default_idempotency_key(catalog, "replacement-default-key", overridable)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/sandboxes"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "sandbox_1",
+                })))
+                .expect(if overridable { 1 } else { 0 })
+                .mount(&f.server)
+                .await;
+
+            let result = recover_creation(
+                &f.db,
+                &f.keys,
+                &f.gateway(),
+                &f.owner,
+                &row.sandbox_ref_id,
+                row.sandbox_generation,
+            )
+            .await;
+            let after = f.saved(&row.id).await;
+            assert_eq!(after.idempotency_key, key);
+            assert_eq!(after.request_hash, row.request_hash);
+            let requests = f.server.received_requests().await.unwrap();
+            if overridable {
+                assert!(!result.unwrap().pending);
+                assert_eq!(after.submission_state, "confirmed");
+                let posts = requests
+                    .iter()
+                    .filter(|request| request.method == "POST")
+                    .collect::<Vec<_>>();
+                assert_eq!(posts.len(), 1);
+                assert_eq!(posts[0].headers["idempotency-key"], key);
+                assert_eq!(
+                    posts[0].headers.get_all("idempotency-key").iter().count(),
+                    1
+                );
+                assert_eq!(posts[0].body, body);
+                assert!(after.request_ciphertext.is_none());
+                assert!(requests.iter().any(|request| request.method == "GET"
+                    && request.url.path() == "/api/v1/sandboxes/sandbox_1"));
+                for request in requests.iter().filter(|request| request.method == "GET") {
+                    assert_eq!(
+                        request.headers["idempotency-key"],
+                        "replacement-default-key"
+                    );
+                }
+            } else {
+                assert!(matches!(result, Err(AppError::Conflict(_))));
+                assert_eq!(after.submission_state, dispatched.submission_state);
+                assert_eq!(after.first_dispatched_at, dispatched.first_dispatched_at);
+                assert_eq!(after.request_ciphertext, dispatched.request_ciphertext);
+                assert!(after.request_ciphertext.is_some());
+                assert!(requests.is_empty());
+            }
+            f.assert_single_intent().await;
+            assert!(
+                f.catalog_server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            f.db.drop().await.unwrap();
+        }
+    }
 }
 
 #[tokio::test]

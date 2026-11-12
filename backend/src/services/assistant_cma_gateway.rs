@@ -1018,6 +1018,21 @@ impl<'a> CatalogCmaGateway<'a> {
                 ))
             })
             .collect::<CmaResult<Vec<_>>>()?;
+        let headers = if matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS") {
+            // Reads bind the defaults the shared forwarder will actually send.
+            // Changes retain their original key so a default cannot replace
+            // the durable creation or recovery identity.
+            let initial = super::proxy_service::collect_forward_headers_with_defaults(
+                request.headers(),
+                &[
+                    target.catalog_default_headers.as_slice(),
+                    target.user_service_default_headers.as_slice(),
+                ],
+            );
+            super::proxy_service::build_effective_outbound_headers(target, initial, &[], &[], &[])
+        } else {
+            headers.into()
+        };
         let body = request
             .body()
             .and_then(reqwest::Body::as_bytes)
