@@ -365,10 +365,8 @@ export function useNativeVoice(
     const generation = ++ticket.current;
     const controller = new AbortController();
     pending.current = controller;
-    const valid = () =>
-      sameScope() &&
-      ticket.current === generation &&
-      !controller.signal.aborted;
+    const ownsOperation = () => sameScope() && ticket.current === generation;
+    const valid = () => ownsOperation() && !controller.signal.aborted;
     setStarting(true);
     setConnectedAt(undefined);
     setDisconnectedAt(undefined);
@@ -383,7 +381,9 @@ export function useNativeVoice(
       // selection; POST admission still resolves live credentials and authority.
       const options = selectedOption
         ? { options: [selectedOption] }
-        : await environment.api.options(thread, controller.signal);
+        : await withVoiceRequestDeadline(controller, () =>
+            environment.api.options(thread, controller.signal),
+          );
       if (!valid()) return;
       const selected = options.options.find(
         (option) =>
@@ -404,9 +404,13 @@ export function useNativeVoice(
           (key) => preferences[key] !== savedPreferences[key],
         )
       )
-        await environment.api.savePreferences(preferences, controller.signal);
+        await withVoiceRequestDeadline(controller, () =>
+          environment.api.savePreferences(preferences, controller.signal),
+        );
       if (!valid()) return;
-      let permission = await Camera.getMicrophonePermissionsAsync();
+      let permission = await withVoiceRequestDeadline(controller, () =>
+        Camera.getMicrophonePermissionsAsync(),
+      );
       if (!valid()) return;
       if (!permission.granted) {
         const attempt: PermissionAttempt = {
@@ -558,17 +562,23 @@ export function useNativeVoice(
       await next.start(preferences, protocol);
       if (valid() && next.isClosed) current.current = null;
     } catch (cause) {
-      if (valid())
+      if (ownsOperation())
         reportError(
           cause &&
             typeof cause === "object" &&
-            "message" in cause &&
-            typeof cause.message === "string"
-            ? cause.message
-            : "Voice could not start. Try again.",
+            "name" in cause &&
+            cause.name === "VoiceRequestTimeoutError"
+            ? translate.current("Voice could not start. Try again.")
+            : cause &&
+                typeof cause === "object" &&
+                "message" in cause &&
+                typeof cause.message === "string"
+              ? cause.message
+              : "Voice could not start. Try again.",
         );
     } finally {
-      if (valid()) {
+      // A deadline abort still owns its UI until a newer action takes over.
+      if (ownsOperation()) {
         busy.current = false;
         if (!current.current) setStarting(false);
       }

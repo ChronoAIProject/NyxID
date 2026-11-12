@@ -45,6 +45,9 @@ const runtimeCopy = [
   "Speech recognition needs a connection for your language. Check your connection and try again.",
   "Speech wasn't finalized. Please try again.",
   "The microphone couldn't record. Close other apps using it and try again.",
+  "Voice could not open. Try again.",
+  "Voice could not start. Try again.",
+  "Voice options could not load.",
   "This device doesn't have a speech recognition service available. You can keep typing.",
   "Your device's language",
 ] as const;

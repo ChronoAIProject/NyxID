@@ -2460,3 +2460,71 @@ test("a loaded chat voice choice avoids repeating options and unchanged preferen
   assert.equal(e.counts().permissionCalls, 1);
   assert.equal(e.clients.length, 1);
 });
+
+for (const stage of ["options", "save", "currentPermission"] as const) {
+  test(`${stage} preflight times out, permits retry and ignores a late completion`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup(context, "android");
+    const waiting = deferred<any>();
+    const originalOptions = e.responses.options;
+    const originalSave = e.responses.save;
+    const originalPermission = e.responses.currentPermission;
+    e.responses[stage] = () => waiting.promise;
+    const pending = e.harness.value().start(preferences, "openai_live");
+    await e.harness.settle();
+    context.mock.timers.tick(7_999);
+    await e.harness.settle();
+    assert.equal(e.harness.value().starting, true);
+    assert.equal(e.clients.length, 0);
+    context.mock.timers.tick(1);
+    await pending;
+    const failed = e.harness.flush();
+    assert.equal(failed.starting, false);
+    assert.equal(failed.connected, false);
+    assert.equal(failed.snapshot, null);
+    assert.equal(failed.error, "Voice could not start. Try again.");
+    assert.equal(e.signals[0]!.aborted, true);
+    assert.equal(e.clients.length, 0);
+
+    e.responses.options = originalOptions;
+    e.responses.save = originalSave;
+    e.responses.currentPermission = originalPermission;
+    await e.start();
+    const retry = e.clients[0]!;
+    assert.equal(
+      e.clients.length,
+      1,
+      "an explicit retry releases the busy lock",
+    );
+    waiting.resolve(
+      stage === "options"
+        ? { options: [e.available] }
+        : stage === "currentPermission"
+          ? { granted: true }
+          : {},
+    );
+    await e.harness.settle();
+    assert.equal(e.clients.length, 1, "the expired attempt cannot open a call");
+    assert.equal(e.harness.value().error, undefined);
+    retry.options.onReady?.();
+    assert.equal(e.harness.flush().connected, true);
+  });
+}
+
+for (const stage of ["options", "save", "currentPermission"] as const) {
+  test(`End cancels an unresponsive ${stage} preflight without waiting for its deadline`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup(context, "android");
+    e.responses[stage] = () => new Promise<never>(() => {});
+    const pending = e.harness.value().start(preferences, "openai_live");
+    await e.harness.settle();
+    await e.harness.value().end();
+    await pending;
+    assert.equal(e.harness.flush().starting, false);
+    assert.equal(e.harness.value().error, undefined);
+    assert.equal(e.clients.length, 0);
+    context.mock.timers.tick(8_000);
+    await e.harness.settle();
+    assert.equal(e.harness.value().error, undefined);
+  });
+}
