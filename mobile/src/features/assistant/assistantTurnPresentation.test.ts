@@ -314,3 +314,16 @@ test("2345 preserves original failure copy and generic handling of future errors
     ["future_kind", "This step did not complete. No additional error details are available."],
   ]) assert.equal(toolFailureCopy({ kind: kind! }), expected);
 });
+
+test("Lark attachment diagnostics are closed, visible, and scoped to attachment tools", () => {
+  const tool = "api-lark-bot-3__bitable_record_create_with_attachments";
+  for (const reason of ["field_read_transport", "field_missing", "eligibility:flag_off", "ledger:uncertain"]) {
+    const row = activitySchema.parse({id:"lark",label:tool,status:"error",started_at:new Date(0).toISOString(),failure:{kind:"tool_error",reason}});
+    assert.equal(row.failure?.reason, reason);
+    assert.match(toolFailureCopy(row.failure, row.label), new RegExp(`Lark attachment write: ${reason}`));
+  }
+  assert.equal(toolFailureCopy({kind:"retry_duplicate_action",reason:"ledger:succeeded"}, tool), "Already done in the previous attempt; skipped this time.");
+  for (const [name, reason] of [[tool, "field_missing:private field"], ["unrelated", "internal"]]) {
+    assert.equal(toolFailureCopy({ kind: "tool_error", reason }, name), "The tool reported an error.");
+  }
+});

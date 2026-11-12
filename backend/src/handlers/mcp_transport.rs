@@ -1,3 +1,5 @@
+#[path = "mcp_lark_diagnostics.rs"]
+mod lark_diagnostics;
 #[path = "mcp_tool_results.rs"]
 mod retained_results;
 use std::convert::Infallible;
@@ -2641,13 +2643,18 @@ async fn handle_tools_call(
         GENERATED_ARTIFACTS_ENABLED
             .scope(
                 cell,
-                handle_tools_call_inner(
+                lark_diagnostics::call(
                     state,
                     auth,
-                    session_id,
                     request,
-                    client_accepts_sse,
-                    billing_egress_permit,
+                    handle_tools_call_inner(
+                        state,
+                        auth,
+                        session_id,
+                        request,
+                        client_accepts_sse,
+                        billing_egress_permit,
+                    ),
                 ),
             )
             .await
@@ -2711,6 +2718,13 @@ async fn handle_tools_call_inner(
             )
             .await
     {
+        crate::services::lark_attachment_tool::diagnostics::failure(
+            crate::services::lark_attachment_tool::diagnostics::Reason::Eligibility(
+                crate::services::lark_attachment_tool::eligibility::Reason::NotLive,
+            ),
+            None,
+            None,
+        );
         return app_error_to_rpc(request.id.clone(), &error);
     }
     // A retried turn may not repeat a call its failed turn completed. Checked
@@ -2845,6 +2859,7 @@ async fn handle_tools_call_inner(
             tracing::warn!(conversation_id = %chat.conversation_id, "Could not record tool progress digest");
         }
     }
+    lark_diagnostics::decorate_current(&mut response);
     if let Some((chat, id)) = activity {
         let failure = tool_failure(&response);
         let _ = crate::services::assistant_nyxagent::activity_finished_for_turn(
@@ -3396,7 +3411,15 @@ fn dispatch_service_tool<'a>(
         {
             Ok(catalog) => catalog,
             Err(e) => {
-                tracing::error!("Failed to load tools for execution: {e}");
+                if crate::services::lark_attachment_tool::diagnostics::active() {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                    tracing::error!(
+                        error_code = e.error_code(),
+                        "Attachment tool catalog unavailable"
+                    );
+                } else {
+                    tracing::error!("Failed to load tools for execution: {e}");
+                }
                 return tool_result(request.id.clone(), "Failed to load tools", true);
             }
         };
@@ -3445,6 +3468,10 @@ fn dispatch_service_tool<'a>(
                 );
             }
         };
+
+        if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+            crate::services::lark_attachment_tool::diagnostics::bind(&service.service_id);
+        }
 
         if let Some((row, _)) = &resource
             && !crate::services::assistant_resource_service::matches_endpoint(
@@ -3502,6 +3529,9 @@ fn dispatch_service_tool<'a>(
                     .and_then(|_| arguments["acknowledgement_id"].as_str()),
             ),
             Err(e) => {
+                if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                }
                 return tool_result(
                     request.id.clone(),
                     &format!("Invalid tool arguments: {e}"),
@@ -3683,7 +3713,15 @@ fn dispatch_service_tool<'a>(
                 return concurrency_limited_response(request.id.clone());
             }
             Err(e) => {
-                tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                    tracing::warn!(
+                        error_code = e.error_code(),
+                        "Attachment tool execution failed"
+                    );
+                } else {
+                    tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                }
                 return tool_failure_with_diagnostic(
                     request.id.clone(),
                     &format!("Tool execution failed: {e}"),
@@ -3696,21 +3734,25 @@ fn dispatch_service_tool<'a>(
             response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
         }
         // Audit log -- attribute the API key when the caller is an agent.
-        audit_service::log_async(
-            state.db.clone(),
-            Some(auth.user_id.clone()),
-            "mcp_tool_call".to_string(),
-            Some(serde_json::json!({
-                "tool": tool_name,
-                "service_id": service.service_id,
-                "response_status": response.status,
-                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-            })),
-            auth.ip_address.clone(),
-            auth.user_agent.clone(),
-            auth.api_key_id.clone(),
-            auth.api_key_name.clone(),
-        );
+        if !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+            || !crate::services::lark_attachment_tool::diagnostics::active()
+        {
+            audit_service::log_async(
+                state.db.clone(),
+                Some(auth.user_id.clone()),
+                "mcp_tool_call".to_string(),
+                Some(serde_json::json!({
+                    "tool": tool_name,
+                    "service_id": service.service_id,
+                    "response_status": response.status,
+                    "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+                })),
+                auth.ip_address.clone(),
+                auth.user_agent.clone(),
+                auth.api_key_id.clone(),
+                auth.api_key_name.clone(),
+            );
+        }
 
         let concurrency = response.concurrency.take();
         let is_policy_refusal = response.is_policy_refusal();
@@ -5158,7 +5200,15 @@ async fn handle_meta_call_tool(
     {
         Ok(catalog) => catalog,
         Err(e) => {
-            tracing::error!("Failed to load tools for call_tool: {e}");
+            if crate::services::lark_attachment_tool::diagnostics::active() {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+                tracing::error!(
+                    error_code = e.error_code(),
+                    "Attachment tool catalog unavailable"
+                );
+            } else {
+                tracing::error!("Failed to load tools for call_tool: {e}");
+            }
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
@@ -5209,6 +5259,10 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+        crate::services::lark_attachment_tool::diagnostics::bind(&service.service_id);
+    }
+
     if result_query.is_some()
         && (endpoint.method != "GET"
             || endpoint.path != "/v1/blocks/{block_id}/children"
@@ -5244,6 +5298,9 @@ async fn handle_meta_call_tool(
                 .and_then(|_| inner_args["acknowledgement_id"].as_str()),
         ),
         Err(e) => {
+            if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+            }
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
@@ -5438,7 +5495,15 @@ async fn handle_meta_call_tool(
             return concurrency_limited_response(request_id);
         }
         Err(e) => {
-            tracing::warn!("Tool execution failed for {tool_name}: {e}");
+            if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+                tracing::warn!(
+                    error_code = e.error_code(),
+                    "Attachment tool execution failed"
+                );
+            } else {
+                tracing::warn!("Tool execution failed for {tool_name}: {e}");
+            }
             return tool_failure_with_diagnostic(
                 request_id,
                 &format!("Tool execution failed: {e}"),
@@ -5451,22 +5516,26 @@ async fn handle_meta_call_tool(
         response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
     }
     // Audit log -- attribute the API key when the caller is an agent.
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth.user_id.clone()),
-        "mcp_tool_call".to_string(),
-        Some(serde_json::json!({
-            "tool": tool_name,
-            "service_id": service.service_id,
-            "response_status": response.status,
-            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-            "via": "nyx__call_tool",
-        })),
-        auth.ip_address.clone(),
-        auth.user_agent.clone(),
-        auth.api_key_id.clone(),
-        auth.api_key_name.clone(),
-    );
+    if !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        || !crate::services::lark_attachment_tool::diagnostics::active()
+    {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(auth.user_id.clone()),
+            "mcp_tool_call".to_string(),
+            Some(serde_json::json!({
+                "tool": tool_name,
+                "service_id": service.service_id,
+                "response_status": response.status,
+                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+                "via": "nyx__call_tool",
+            })),
+            auth.ip_address.clone(),
+            auth.user_agent.clone(),
+            auth.api_key_id.clone(),
+            auth.api_key_name.clone(),
+        );
+    }
 
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();

@@ -12077,5 +12077,6 @@
   "By {{name}}": "By {{name}}",
   "Drafted by {{name}}": "Drafted by {{name}}",
   "System skill": "System skill",
-  "System skill for {{service}}": "System skill for {{service}}"
+  "System skill for {{service}}": "System skill for {{service}}",
+  "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark attachment write: {{reason}}. Check the saved outcome before retrying."
 }

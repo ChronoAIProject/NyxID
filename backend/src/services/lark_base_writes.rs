@@ -8,6 +8,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::lark_base_write::{LarkBaseWrite, UploadedFile, WritePrincipal, WriteState},
 };
+use attachment::diagnostics::{self as diagnostic, Reason as Failure};
 use chrono::Utc;
 use mongodb::{Database, bson::doc};
 use serde_json::{Value, json};
@@ -20,9 +21,9 @@ mod validation;
 pub(crate) use ledger::{effect_gate, sweep};
 const COLLECTION: &str = crate::models::lark_base_write::COLLECTION_NAME;
 fn invalid() -> AppError {
-    AppError::BadRequest(
+    Failure::InvalidArguments.error(AppError::BadRequest(
         "Invalid managed Base write; fields and nonempty attachments are required".into(),
-    )
+    ))
 }
 
 pub(crate) struct InputUpload {
@@ -37,7 +38,13 @@ pub(crate) struct Prepared {
     fields: Value,
     assignments: BTreeMap<String, Vec<String>>,
     uploads: Vec<InputUpload>,
+    child_paths: BTreeMap<String, ChildPath>,
     pub(crate) contract_digests: BTreeMap<String, String>,
+}
+
+pub(super) struct ChildPath {
+    logical: String,
+    route: Option<attachment::routing::BotRoute>,
 }
 
 pub(crate) async fn contracts(
@@ -193,15 +200,17 @@ pub(crate) async fn prepare(
     let mut ordered: Vec<_> = ids.iter().collect();
     ordered.sort();
     for id in ordered {
-        let row = uploads::for_egress(db, chat, id).await?;
+        let row = uploads::for_egress(db, chat, id)
+            .await
+            .map_err(|e| Failure::AttachmentUnreadable.error(e))?;
         let size = usize::try_from(row.size())
             .ok()
             .filter(|size| *size > 0 && *size <= super::attachment_extraction::MAX_BYTES)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| Failure::AttachmentSize.error(invalid()))?;
         total = total
             .checked_add(size)
             .filter(|total| *total <= 50 * 1024 * 1024)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| Failure::AttachmentSize.error(invalid()))?;
         let stored = match &row {
             uploads::EgressAttachment::User(row) => {
                 if let Some(source) = &row.source {
@@ -215,16 +224,18 @@ pub(crate) async fn prepare(
             hash
         } else {
             let _reservation = uploads::byte_budget::reserve(size).await?;
-            let bytes = uploads::egress_bytes(db, keys, chat, &row).await?;
+            let bytes = uploads::egress_bytes(db, keys, chat, &row)
+                .await
+                .map_err(|e| Failure::AttachmentUnreadable.error(e))?;
             hex::encode(Sha256::digest(&bytes))
         };
         if sha256.len() != 64
             || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
             || !contents.insert(sha256.clone())
         {
-            return Err(AppError::BadRequest(
+            return Err(Failure::AttachmentIntegrity.error(AppError::BadRequest(
                 "Repeated or invalid photo content in Base write".into(),
-            ));
+            )));
         }
         inputs.push(InputUpload {
             id: id.clone(),
@@ -251,12 +262,50 @@ pub(crate) async fn prepare(
                         .is_none_or(|source| source.declared != declared)
             })
         {
-            return Err(AppError::BadRequest(format!(
-                "{} of {} photos from that message could not be read; ask the owner to resend",
-                declared.saturating_sub(roots.iter().filter(|root| ids.contains(&root.id)).count()),
-                declared
-            )));
+            return Err(
+                Failure::AttachmentIncompleteSet.error(AppError::BadRequest(format!(
+                    "{} of {} photos from that message could not be read; ask the owner to resend",
+                    declared
+                        .saturating_sub(roots.iter().filter(|root| ids.contains(&root.id)).count()),
+                    declared
+                ))),
+            );
         }
+    }
+    // Dependencies were checked against the compiled catalog by require_eligible.
+    // Load their paths from that same catalog, never the connection slug or URL.
+    let McpToolSource::UserManaged {
+        catalog_service_id: Some(catalog_id),
+        ..
+    } = &service.source
+    else {
+        return Err(attachment::eligibility::Reason::ConnectionRequired.error());
+    };
+    let catalog = db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .find_one(doc! {"_id":catalog_id})
+        .await?
+        .ok_or_else(|| attachment::eligibility::Reason::CatalogUnavailable.error())?;
+    let rows: Vec<crate::models::service_endpoint::ServiceEndpoint> = db.collection("service_endpoints")
+        .find(doc! {"service_id":catalog_id,"name":{"$in":[attachment::FIELDS_OPERATION, attachment::UPLOAD_OPERATION, attachment::CREATE_OPERATION]}})
+        .await?.try_collect().await?;
+    let mut children = mcp::service_endpoints_to_mcp(&rows.iter().collect::<Vec<_>>());
+    attachment::stored_projections(Some(&catalog), &mut children);
+    let mut child_paths = BTreeMap::new();
+    for child in children {
+        if contract_digests.get(&child.name) != Some(&mcp::endpoint_contract_digest(&child)) {
+            return Err(attachment::eligibility::Reason::ContractChanged.error());
+        }
+        // Tokens have already passed the strict ASCII path-token validation.
+        let logical = child
+            .path
+            .replace("{app_token}", &app)
+            .replace("{table_id}", &table);
+        let route = attachment::routing::BotRoute::issue(&catalog, &child, &logical)?;
+        child_paths.insert(child.name, ChildPath { logical, route });
+    }
+    if child_paths.len() != 3 {
+        return Err(attachment::eligibility::Reason::MissingOperation.error());
     }
     Ok(Prepared {
         chat: chat.clone(),
@@ -265,6 +314,7 @@ pub(crate) async fn prepare(
         fields,
         assignments,
         uploads: inputs,
+        child_paths,
         contract_digests,
     })
 }
@@ -363,12 +413,18 @@ async fn execute_inner(
         deadline_at: now + chrono::Duration::seconds(180),
         expires_at: None,
     };
-    let mut row = match ledger::claim(db, &proposal, &photos).await? {
+    let mut row = match ledger::claim(db, &proposal, &photos)
+        .await
+        .inspect_err(|e| diagnostic::fallback(Failure::LedgerChanged, e))?
+    {
         ledger::Claim::Replay(record) => {
+            diagnostic::success(None);
             return Ok(json!({"record_id":record,"already_created":true}));
         }
         ledger::Claim::Active(row) if row.state == WriteState::Uploading => *row,
-        ledger::Claim::Active(_) => {
+        ledger::Claim::Active(row) => {
+            diagnostic::failure(Failure::Ledger(row.state), None, None);
+            diagnostic::outcome(diagnostic::Outcome::Uncertain);
             return Err(AppError::Conflict(
                 "Base write outcome unknown; check the Base; NyxID will not create it again".into(),
             ));
@@ -382,6 +438,13 @@ async fn execute_inner(
     match work {
         Ok(Ok(value)) => Ok(value),
         outcome => {
+            if outcome.is_err() {
+                diagnostic::failure(Failure::Timeout, None, None);
+            }
+            // Do not erase definite provider refusals or ambiguous sends.
+            if matches!(&outcome, Ok(Err(RunError::NotSent(_)))) {
+                diagnostic::outcome(diagnostic::Outcome::NotSent);
+            }
             let (state, code) = if matches!(&outcome, Ok(Err(RunError::NotSent(_)))) {
                 (WriteState::FailedDefinite, "not_sent")
             } else if row.state == WriteState::Uploading {
@@ -391,7 +454,9 @@ async fn execute_inner(
             };
             // Cleanup lives outside the timed work. Process death/Stop is handled
             // by the flag-independent sweeper using these same attempt fences.
-            ledger::terminal(db, &row, state, code, None).await?;
+            ledger::terminal(db, &row, state, code, None)
+                .await
+                .inspect_err(|e| diagnostic::fallback(Failure::LedgerChanged, e))?;
             match outcome {
                 Ok(Err(RunError::NotSent(error) | RunError::Other(error))) => Err(error),
                 _ => Err(AppError::Conflict(
@@ -409,10 +474,14 @@ async fn field_schema(
     transport: &Transport<'_>,
     row: &LarkBaseWrite,
 ) -> AppResult<BTreeMap<String, Value>> {
-    let path = format!(
-        "/bitable/v1/apps/{}/tables/{}/fields",
-        prepared.app, prepared.table
-    );
+    let path = prepared
+        .child_paths
+        .get(attachment::FIELDS_OPERATION)
+        .ok_or_else(|| {
+            Failure::FieldReadInvalidResponse.error(AppError::BadRequest(
+                "Base field schema returned an invalid response".into(),
+            ))
+        })?;
     let mut schema = BTreeMap::new();
     let mut next: Option<String> = None;
     let mut seen = HashSet::new();
@@ -431,7 +500,7 @@ async fn field_schema(
                 row,
                 WriteState::Uploading,
                 reqwest::Method::GET,
-                &path,
+                path,
                 Some(&query),
                 None,
                 "application/json",
@@ -440,11 +509,22 @@ async fn field_schema(
             .map_err(|error| error.0)?;
         effect_gate(db, row, WriteState::Uploading).await?;
         let Reply::Json(status, body) = response else {
-            return Err(AppError::BadRequest(
+            return Err(Failure::FieldReadTransport.error(AppError::BadRequest(
                 "Base field schema could not be read".into(),
-            ));
+            )));
         };
+        if (200..300).contains(&status) && body["code"].as_i64().is_none() {
+            diagnostic::failure(Failure::FieldReadInvalidResponse, Some(status), None);
+            return Err(AppError::BadRequest(
+                "Base field schema returned an invalid response".into(),
+            ));
+        }
         if !(200..300).contains(&status) || body["code"].as_i64() != Some(0) {
+            diagnostic::provider_failure(
+                Failure::FieldReadProviderError,
+                status,
+                body["code"].as_i64(),
+            );
             return Err(permission_error(
                 transport.target,
                 body["code"].as_i64(),
@@ -454,20 +534,38 @@ async fn field_schema(
         let items = body["data"]["items"]
             .as_array()
             .filter(|items| items.len() <= 100)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| {
+                Failure::FieldReadInvalidResponse.error(AppError::BadRequest(
+                    "Base field schema returned an invalid response".into(),
+                ))
+            })?;
         for item in items {
             let name = item["field_name"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| {
+                    Failure::FieldReadInvalidResponse.error(AppError::BadRequest(
+                        "Base field schema returned an invalid response".into(),
+                    ))
+                })?;
             if schema.insert(name.to_owned(), item.clone()).is_some() {
-                return Err(invalid());
+                return Err(Failure::FieldReadInvalidResponse.error(invalid()));
             }
         }
         if prepared
             .assignments
             .keys()
-            .chain(prepared.fields.as_object().ok_or_else(invalid)?.keys())
+            .chain(
+                prepared
+                    .fields
+                    .as_object()
+                    .ok_or_else(|| {
+                        Failure::FieldReadInvalidResponse.error(AppError::BadRequest(
+                            "Base field schema returned an invalid response".into(),
+                        ))
+                    })?
+                    .keys(),
+            )
             .all(|field| schema.contains_key(field))
         {
             validation::validate_fields(&prepared.fields, &prepared.assignments, &schema)?;
@@ -476,19 +574,23 @@ async fn field_schema(
         match body["data"]["has_more"].as_bool() {
             Some(false) => break,
             Some(true) => {
-                let token = body["data"]["page_token"].as_str().ok_or_else(invalid)?;
-                validation::token(token)?;
+                let token = body["data"]["page_token"].as_str().ok_or_else(|| {
+                    Failure::FieldReadInvalidResponse.error(AppError::BadRequest(
+                        "Base field schema returned an invalid response".into(),
+                    ))
+                })?;
+                validation::token(token).map_err(|e| Failure::FieldReadInvalidResponse.error(e))?;
                 if !seen.insert(token.to_owned()) {
-                    return Err(invalid());
+                    return Err(Failure::FieldReadInvalidResponse.error(invalid()));
                 }
                 next = Some(token.to_owned());
             }
-            None => return Err(invalid()),
+            None => return Err(Failure::FieldReadInvalidResponse.error(invalid())),
         }
     }
-    Err(AppError::BadRequest(
+    Err(Failure::FieldMissing.error(AppError::BadRequest(
         "Base field schema is incomplete or a referenced field does not exist".into(),
-    ))
+    )))
 }
 
 fn permission_error(
@@ -526,12 +628,16 @@ async fn run(
         {
             continue;
         }
-        let attachment = uploads::for_egress(db, &prepared.chat, &input.id).await?;
+        let attachment = uploads::for_egress(db, &prepared.chat, &input.id)
+            .await
+            .map_err(|e| Failure::AttachmentUnreadable.error(e))?;
         let reservation = uploads::byte_budget::reserve(input.size).await?;
         effect_gate(db, row, WriteState::Uploading).await?;
-        let bytes = uploads::egress_bytes(db, keys, &prepared.chat, &attachment).await?;
+        let bytes = uploads::egress_bytes(db, keys, &prepared.chat, &attachment)
+            .await
+            .map_err(|e| Failure::AttachmentUnreadable.error(e))?;
         if hex::encode(Sha256::digest(&bytes)) != input.sha256 {
-            return Err(invalid().into());
+            return Err(Failure::AttachmentIntegrity.error(invalid()).into());
         }
         let args = json!({"attachment_id":input.id,"parent_type":if attachment.content_type().starts_with("image/") {"bitable_image"}else{"bitable_file"},"parent_node":prepared.app});
         let fields = attachment::multipart::fields(&args, attachment.label(), input.size)?;
@@ -541,14 +647,19 @@ async fn run(
         let _serial = credential_lock(&row.principal.credential_id).await;
         let mut token = None;
         for attempt in 0..=3 {
-            uploads::for_egress(db, &prepared.chat, &input.id).await?;
+            uploads::for_egress(db, &prepared.chat, &input.id)
+                .await
+                .map_err(|e| Failure::AttachmentUnreadable.error(e))?;
             let reply = transport
                 .send(
                     guard,
                     row,
                     WriteState::Uploading,
                     reqwest::Method::POST,
-                    attachment::UPLOAD_PATH,
+                    prepared
+                        .child_paths
+                        .get(attachment::UPLOAD_OPERATION)
+                        .ok_or_else(invalid)?,
                     None,
                     Some(body.clone()),
                     &content_type,
@@ -565,19 +676,33 @@ async fn run(
                             .filter(|s| !s.is_empty())
                             .map(str::to_owned);
                         if token.is_none() {
-                            return Err(AppError::BadRequest(
-                                "Base upload returned no usable file_token".into(),
-                            )
-                            .into());
+                            return Err(Failure::UploadInvalidResponse
+                                .error(AppError::BadRequest(
+                                    "Base upload returned no usable file_token".into(),
+                                ))
+                                .into());
                         }
                         false
                     } else if matches!(code, Some(1061045 | 1061006)) {
+                        if attempt == 3 {
+                            diagnostic::provider_failure(
+                                Failure::UploadProviderError,
+                                status,
+                                code,
+                            );
+                        }
                         true
                     } else {
+                        diagnostic::provider_failure(Failure::UploadProviderError, status, code);
                         return Err(permission_error(transport.target, code, "upload").into());
                     }
                 }
-                Reply::Transport => true,
+                Reply::Transport => {
+                    if attempt == 3 {
+                        diagnostic::failure(Failure::UploadTransport, None, None);
+                    }
+                    true
+                }
             };
             if token.is_some() {
                 break;
@@ -600,7 +725,9 @@ async fn run(
             content_sha256: input.sha256.clone(),
             file_token: token.ok_or_else(invalid)?,
         };
-        ledger::save_file(db, row, &file).await?;
+        ledger::save_file(db, row, &file)
+            .await
+            .inspect_err(|e| diagnostic::fallback(Failure::LedgerChanged, e))?;
         row.files.push(file);
         drop(reservation);
     }
@@ -627,12 +754,15 @@ async fn run(
     let body = mcp::canonical_json(json!({"fields":fields}));
     let encoded = serde_json::to_vec(&body).map_err(|_| invalid())?;
     guard.revalidate_effect(row, WriteState::Uploading).await?;
-    ledger::barrier(db, row, photos, &hex::encode(Sha256::digest(&encoded))).await?;
+    ledger::barrier(db, row, photos, &hex::encode(Sha256::digest(&encoded)))
+        .await
+        .inspect_err(|e| diagnostic::fallback(Failure::LedgerChanged, e))?;
     row.state = WriteState::Dispatching;
-    let path = format!(
-        "/bitable/v1/apps/{}/tables/{}/records",
-        prepared.app, prepared.table
-    );
+    diagnostic::outcome(diagnostic::Outcome::Uncertain);
+    let path = prepared
+        .child_paths
+        .get(attachment::CREATE_OPERATION)
+        .ok_or_else(invalid)?;
     // [L1] client_token is a query parameter on Create record, not a field
     // in the record body. A fresh authorized attempt gets a fresh UUID.
     let query = url::form_urlencoded::Serializer::new(String::new())
@@ -644,19 +774,42 @@ async fn run(
             row,
             WriteState::Dispatching,
             reqwest::Method::POST,
-            &path,
+            path,
             Some(&query),
             Some(encoded.into()),
             "application/json",
         )
         .await
         .map_err(|error| RunError::NotSent(error.0))?;
+    let (status, provider_code) = match &reply {
+        Reply::Json(status, body) => (Some(*status), body["code"].as_i64()),
+        Reply::Transport => (None, None),
+    };
     let (state, code, record) = classify(reply);
+    if state == WriteState::Succeeded {
+        diagnostic::success(status);
+    } else {
+        diagnostic::failure(
+            if state == WriteState::FailedDefinite {
+                Failure::CreateProviderError
+            } else {
+                Failure::CreateUncertain
+            },
+            status,
+            provider_code,
+        );
+        diagnostic::outcome(if state == WriteState::FailedDefinite {
+            diagnostic::Outcome::ProviderRefused
+        } else {
+            diagnostic::Outcome::Uncertain
+        });
+    }
     if !ledger::terminal(db, row, state, &code, record.as_deref()).await? {
-        return Err(AppError::Conflict(
-            "Base write result was already settled; check the Base".into(),
-        )
-        .into());
+        return Err(Failure::LedgerChanged
+            .error(AppError::Conflict(
+                "Base write result was already settled; check the Base".into(),
+            ))
+            .into());
     }
     if state == WriteState::Succeeded {
         return Ok(json!({"record_id":record,"already_created":false}));

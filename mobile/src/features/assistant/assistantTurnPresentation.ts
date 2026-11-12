@@ -1,3 +1,4 @@
+import { larkAttachmentFailureReason } from "../../../../shared/larkAttachmentDiagnostics";
 import type { AssistantMessage } from "./assistantTypes";
 
 // Behavior and copy follow the web NyxAgent turn presentation.
@@ -266,8 +267,11 @@ export function contextResetCopy(reason: string | null | undefined): string {
 }
 
 export function toolFailureCopy(
-  failure: { kind: string; status?: number | null } | null | undefined,
+  failure: { kind: string; status?: number | null; reason?: string | null } | null | undefined,
+  tool?: string,
 ): string {
+  const reason = failure?.kind === "retry_duplicate_action" ? null : larkAttachmentFailureReason(tool, failure?.reason);
+  if (reason) return `Lark attachment write: ${reason}. Check the saved outcome before retrying.`;
   switch (failure?.kind) {
     case "retry_duplicate_action":
       return "Already done in the previous attempt; skipped this time.";
