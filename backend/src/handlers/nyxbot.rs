@@ -4818,14 +4818,22 @@ pub async fn delete_conversation(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match crate::services::nyxbot_chat_settings_service::remove_thread(
-        &state.db,
-        &row,
-        &conversation_id,
+    conversation_delete_response(
+        crate::services::nyxbot_chat_settings_service::remove_thread(
+            &state.db,
+            &row,
+            &conversation_id,
+        )
+        .await,
     )
-    .await
-    {
+}
+
+/// Keeps the provider contract: a binding that changed after the check above
+/// answers exactly like the check itself (bare 404), never a new 409.
+fn conversation_delete_response(result: AppResult<()>) -> Response {
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(AppError::Conflict(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => error.into_response(),
     }
 }

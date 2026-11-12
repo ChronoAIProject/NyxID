@@ -7497,3 +7497,24 @@ async fn onboarding_2318_human_patch_reports_the_final_linked_agent() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[test]
+fn provider_conversation_delete_keeps_its_status_vocabulary() {
+    // A binding that changed after the handler's own check answers like that
+    // check (bare 404), never with a new 409.
+    assert_eq!(
+        conversation_delete_response(Ok(())).status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Conflict("Channel binding changed".into())))
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Internal("unavailable".into()))).status(),
+        AppError::Internal("unavailable".into())
+            .into_response()
+            .status()
+    );
+}
