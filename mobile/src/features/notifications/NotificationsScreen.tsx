@@ -26,7 +26,7 @@ import {
 } from "../../app/WorkspaceHeader";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
-import { ServiceIcon } from "../../components/ServiceIcon";
+import { ChannelPlatformGlyph } from "../../components/ChannelPlatformGlyph";
 import { SegmentControl } from "../../components/SegmentControl";
 import { SkeletonRows } from "../../components/Skeleton";
 import {
@@ -56,7 +56,7 @@ import {
   notificationTitle,
   notificationSentence,
   notificationFilterCount,
-  notificationPlatformSlug,
+  notificationContextLabel,
   notificationTone,
   type NotificationTone,
 } from "./notificationPresentation";
@@ -172,6 +172,7 @@ export function NotificationRow({
   const palette = toneColors(colors, tone);
   const Icon = KIND_ICON[item.kind];
   const sentence = notificationSentence(item);
+  const contextLabel = notificationContextLabel(item);
   const agents = (item.participants ?? [])
     .filter((actor) => actor.type === "agent" && actor.id)
     .map((actor) => ({
@@ -238,10 +239,7 @@ export function NotificationRow({
           ]}
         >
           {item.kind === "chat_update" && item.platform ? (
-            <ServiceIcon
-              slug={notificationPlatformSlug(item.platform)}
-              size="2xs"
-            />
+            <ChannelPlatformGlyph platform={item.platform} size={12} color={palette.text} />
           ) : (
             <Icon testID={`notification-kind-icon-${item.kind}`} size={12} color={palette.text} />
           )}
@@ -283,15 +281,16 @@ export function NotificationRow({
           </Text>
         ) : null}
         <View style={styles.metaLine}>
-          {item.source.label ? (
+          {contextLabel ? (
             <View
+              testID="notification-context"
               style={[styles.sourceChip, { backgroundColor: colors.navActive }]}
             >
               <Text
                 numberOfLines={1}
                 style={[styles.time, { color: colors.textSecondary }]}
               >
-                {item.source.label}
+                {contextLabel}
               </Text>
             </View>
           ) : null}

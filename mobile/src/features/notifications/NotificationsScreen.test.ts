@@ -62,7 +62,7 @@ function setup(options: {
     },
     "../../components/DynamicTypeText": { DynamicTypeText: "Text" },
     "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar", AgentAvatarStack: "AgentAvatarStack" },
-    "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    "../../components/ChannelPlatformGlyph": { ChannelPlatformGlyph: "ChannelPlatformGlyph" },
     "../../components/SegmentControl": { SegmentControl: "SegmentControl" },
     "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/settings/SettingsList": {
@@ -338,7 +338,7 @@ test("each notification kind renders the source avatar, corner badge and client-
     if (kind === "automation_problem") assert.ok(all.some((n) => n.type === "AlertTriangle"));
     if (avatar === "agent") assert.ok(all.some((n) => n.type === "AgentAvatar" && n.props.size === "lg" && n.props.agent.id === "researcher"));
     if (avatar === "crew") assert.ok(all.some((n) => n.type === "AgentAvatarStack" && n.props.agents.length === 2));
-    if (kind === "chat_update") assert.ok(all.some((n) => n.type === "ServiceIcon" && n.props.slug === "api-lark"));
+    if (kind === "chat_update") assert.ok(all.some((n) => n.type === "ChannelPlatformGlyph" && n.props.platform === "lark"));
   });
   x.h.unmount();
 });

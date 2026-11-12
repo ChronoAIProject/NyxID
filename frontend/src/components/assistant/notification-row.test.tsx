@@ -76,7 +76,9 @@ it.each([
         container.querySelector("[data-notification-avatar] > span"),
       ).toHaveClass("h-8", "w-8");
     if (kind === "chat_update")
-      expect(container.querySelector('[data-slug="api-lark"]')).toBeTruthy();
+      expect(
+        container.querySelector('[data-channel-platform="lark"]'),
+      ).toBeTruthy();
   },
 );
 it("uses the sidebar's crew stack and falls back to the system identity", () => {
@@ -172,10 +174,134 @@ it.each(["channel_chat", "conversation"] as const)(
       container.querySelector('[data-notification-avatar="agent"]'),
     ).toBeTruthy();
     expect(
-      container.querySelector('[data-slug="api-telegram-bot"]'),
+      container.querySelector('[data-channel-platform="telegram"]'),
     ).toBeTruthy();
     expect(screen.getByRole("button")).toHaveTextContent(
       "Researcher replied in Launch room on Telegram",
     );
+  },
+);
+
+it.each([
+  "telegram",
+  "lark",
+  "feishu",
+  "discord",
+  "slack",
+  "whatsapp",
+  "x",
+  "twitter",
+  "unknown",
+])(
+  "renders a single bare %s platform glyph without a nested bot badge",
+  (platform) => {
+    const { container } = render(
+      <ul>
+        <NotificationRow
+          item={fixture("chat_update", { platform })}
+          onOpen={vi.fn()}
+        />
+      </ul>,
+    );
+    const badge = container.querySelector(
+      '[data-notification-badge="chat_update"]',
+    )!;
+    expect(badge.children).toHaveLength(1);
+    expect(badge.firstElementChild?.tagName.toLowerCase()).toBe("svg");
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+    expect(
+      badge.querySelector(`[data-channel-platform="${platform}"]`),
+    ).toBeTruthy();
+    expect(badge.querySelector(".lucide-bot, [data-slug]")).toBeNull();
+    if (platform === "unknown")
+      expect(badge.querySelector(".lucide-message-square")).toBeTruthy();
+  },
+);
+
+it.each([
+  [
+    "channel chat",
+    "chat_update",
+    {
+      title: "Launch · support bot · Guest group chat",
+      source: {
+        type: "channel_chat",
+        id: "c",
+        channel_id: "ch",
+        label: "Guest group chat",
+      },
+    },
+    "Launch · support bot",
+  ],
+  [
+    "linked chat",
+    "chat_update",
+    { source: { type: "conversation", id: "c", label: "Morgan · Telegram" } },
+    "Researcher",
+  ],
+  [
+    "matching bot label",
+    "chat_update",
+    {
+      title: "Launch plan · Launch plan",
+      source: {
+        type: "channel_chat",
+        id: "c",
+        channel_id: "ch",
+        label: "Launch plan",
+      },
+    },
+    null,
+  ],
+  ["thread", "agent_update", {}, null],
+  ["decision", "needs_decision", {}, null],
+  [
+    "crew",
+    "agent_update",
+    {
+      source: { type: "group", id: "g", group_id: "g", label: " Launch plan " },
+    },
+    null,
+  ],
+  [
+    "mention",
+    "group_mention",
+    {
+      source: {
+        type: "collaboration_group",
+        id: "g",
+        group_id: "g",
+        label: "Launch crew",
+      },
+    },
+    null,
+  ],
+  ["automation with a named runner", "automation_result", {}, "Researcher"],
+  [
+    "automation without a named runner",
+    "automation_result",
+    { actor: { type: "automation", name: "Morning digest" } },
+    null,
+  ],
+  [
+    "automation problem without a named runner",
+    "automation_problem",
+    { actor: { type: "automation", name: "Morning digest" } },
+    null,
+  ],
+] as const)(
+  "keeps only additional chip context for %s",
+  (_scenario, kind, extra, context) => {
+    const item = fixture(kind, extra);
+    const { container } = render(
+      <ul>
+        <NotificationRow item={item} onOpen={vi.fn()} />
+      </ul>,
+    );
+    const chip = container.querySelector("[data-notification-context]");
+    expect(chip?.textContent ?? null).toBe(context);
+    if (chip)
+      expect(chip.textContent).not.toBe(notificationSentence(item).target);
+    expect(container.querySelector("time")).toBeTruthy();
   },
 );

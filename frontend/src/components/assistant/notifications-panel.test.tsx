@@ -125,7 +125,8 @@ describe("NotificationsPanel", () => {
     expect(rows[0]).toHaveTextContent("Preview of n-1");
     expect(rows[1]).not.toHaveAttribute("data-unread");
     expect(rows[1]).toHaveTextContent("Needs you");
-    expect(rows[2]).toHaveTextContent("Morning digest");
+    expect(rows[2]).toHaveTextContent("Preview of n-3");
+    expect(rows[2]!.querySelector("[data-notification-context]")).toBeNull();
   });
 
   it("keeps the four filters on one scrollable line and mark-all on its own line", async () => {

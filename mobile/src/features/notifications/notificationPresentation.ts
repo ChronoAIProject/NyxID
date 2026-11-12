@@ -417,9 +417,23 @@ export function notificationPlatformLabel(platform: string): string {
   return names[platform] ?? platform;
 }
 
-/** Reuse the existing channel platform glyph registry. */
-export function notificationPlatformSlug(platform: string): string {
-  return platform === "telegram" ? "api-telegram-bot" : platform === "whatsapp" ? "api-whatsapp-business" : `api-${platform}`;
+/** Extra source context, never a second copy of the sentence target. */
+export function notificationContextLabel(item: AssistantNotification): string | null {
+  const target = notificationSentence(item).target;
+  const agent = item.actor?.type === "agent" ? item.actor : undefined;
+  const agentName = agent?.display_name?.trim() || agent?.name.trim() || "";
+  let context = item.source.label?.trim() || "";
+  if (item.kind === "chat_update") {
+    // Channel titles already contain the live bot label followed by the exact chat label.
+    const suffix = context ? ` · ${context}` : "";
+    context = item.source.channel_id && suffix && item.title.endsWith(suffix)
+      ? item.title.slice(0, -suffix.length).trim()
+      : agentName;
+  } else if (item.kind === "automation_result" || item.kind === "automation_problem") {
+    // An automation identity names the trigger, not the agent that ran it.
+    context = agentName;
+  }
+  return context && context !== target ? context : null;
 }
 
 export function notificationFilterCount(

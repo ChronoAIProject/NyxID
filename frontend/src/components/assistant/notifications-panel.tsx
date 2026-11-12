@@ -37,10 +37,10 @@ import {
   notificationRowLabel,
   notificationSentence,
   notificationFilterCount,
-  notificationPlatformSlug,
+  notificationContextLabel,
 } from "@/lib/assistant/notification-presentation";
 import { AgentAvatar, AgentAvatarStack } from "./nyxbot-agent-avatar";
-import { ServiceIcon } from "@/components/service-icon";
+import { ChannelPlatformGlyph } from "@/components/shared/channel-platform-glyph";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import {
@@ -69,6 +69,7 @@ export function NotificationRow({
   const kind = NOTIFICATION_KIND_PRESENTATION[item.kind];
   const Icon = kind.icon;
   const sentence = notificationSentence(item);
+  const contextLabel = notificationContextLabel(item);
   const agents = (item.participants ?? [])
     .filter((actor) => actor.type === "agent" && actor.id)
     .map((actor) => ({
@@ -129,9 +130,9 @@ export function NotificationRow({
             )}
           >
             {item.kind === "chat_update" && item.platform ? (
-              <ServiceIcon
-                slug={notificationPlatformSlug(item.platform)}
-                size="2xs"
+              <ChannelPlatformGlyph
+                platform={item.platform}
+                className="h-3 w-3"
               />
             ) : (
               <Icon className="h-3 w-3" />
@@ -186,10 +187,17 @@ export function NotificationRow({
             </span>
           ) : null}
           <span className="mt-0.5 flex min-w-0 items-center gap-1 type-secondary text-text-tertiary">
-            <span className="max-w-[70%] truncate rounded-md border border-hairline bg-overlay px-1.5 py-0.5 type-group-label">
-              {item.source.label || translateUi(kind.label)}
-            </span>
-            <span aria-hidden="true">·</span>
+            {contextLabel ? (
+              <>
+                <span
+                  data-notification-context
+                  className="max-w-[70%] truncate rounded-md border border-hairline bg-overlay px-1.5 py-0.5 type-group-label"
+                >
+                  {contextLabel}
+                </span>
+                <span aria-hidden="true">·</span>
+              </>
+            ) : null}
             <time dateTime={item.updated_at} className="shrink-0">
               {formatRelativeTime(item.updated_at)}
             </time>

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react-native";
 import { NotificationsScreen, NotificationRow } from "./NotificationsScreen";
+import { notificationSentence } from "./notificationPresentation";
 import { notificationSchema } from "./notificationContracts";
 import { lightColors } from "../../theme/mobileTheme";
 
@@ -198,4 +199,44 @@ it.each([
   expect(screen.getByTestId("notification-source-row").props.accessibilityLabel).toContain(sentence);
   expect(screen.getByText("3 new")).toBeTruthy();
   expect(screen.queryByTestId("notification-unread-dot")).toBeNull();
+});
+
+
+it.each(["telegram", "lark", "feishu", "discord", "slack", "whatsapp", "x", "twitter", "unknown"])(
+  "renders a single bare %s platform glyph without a nested bot badge",
+  async (platform) => {
+    const item = notificationSchema.parse({ id: "platform-row", kind: "chat_update", platform,
+      actor: { type: "agent", name: "Researcher", id: "researcher", kind: "specialist" },
+      source: { type: "channel_chat", id: MOCK_C, label: "Launch room" }, created_at: MOCK_AS_OF, updated_at: MOCK_AS_OF });
+    await render(<NotificationRow item={item} now={Date.parse(MOCK_AS_OF)} onPress={() => {}} />);
+    const badge = screen.getByTestId("notification-badge-chat_update");
+    // Composite catalog marks render a wrapper plus a second SVG for Bot.
+    const svgs = badge.queryAll(node => typeof node.type === "string" && node.type.startsWith("RNSVGSvg"));
+    expect(svgs).toHaveLength(1);
+    expect(badge.queryAll(node => node.props.testID === `channel-platform-${platform}` || node.props["data-testid"] === `channel-platform-${platform}`).length).toBeGreaterThan(0);
+    expect(badge.queryAll(node => String(node.props["data-slug"] ?? "").startsWith("api-"))).toHaveLength(0);
+  },
+);
+
+it.each([
+  ["channel chat", "chat_update", { title: "Launch · support bot · Guest group chat", source: { type: "channel_chat", id: MOCK_C, channel_id: "ch", label: "Guest group chat" } }, "Launch · support bot"],
+  ["linked chat", "chat_update", { source: { type: "conversation", id: MOCK_C, label: "Morgan · Telegram" } }, "Researcher"],
+  ["matching bot label", "chat_update", { title: "Launch plan · Launch plan", source: { type: "channel_chat", id: MOCK_C, channel_id: "ch", label: "Launch plan" } }, null],
+  ["thread", "agent_update", {}, null],
+  ["decision", "needs_decision", {}, null],
+  ["crew", "agent_update", { source: { type: "group", id: "g", group_id: "g", label: " Launch plan " } }, null],
+  ["mention", "group_mention", { source: { type: "collaboration_group", id: "g", group_id: "g", label: "Launch crew" } }, null],
+  ["automation with a named runner", "automation_result", {}, "Researcher"],
+  ["automation without a named runner", "automation_result", { actor: { type: "automation", name: "Morning digest" } }, null],
+  ["automation problem without a named runner", "automation_problem", { actor: { type: "automation", name: "Morning digest" } }, null],
+] as const)("keeps only additional chip context for %s", async (_scenario, kind, extra, context) => {
+  const item = notificationSchema.parse({ id: "context-row", kind,
+    actor: { type: "agent", name: "researcher", display_name: "Researcher", id: "researcher", kind: "specialist" },
+    source: { type: "conversation", id: MOCK_C, label: "Launch plan" }, created_at: MOCK_AS_OF, updated_at: MOCK_AS_OF, ...extra });
+  await render(<NotificationRow item={item} now={Date.parse(MOCK_AS_OF)} onPress={() => {}} />);
+  const chip = screen.queryByTestId("notification-context");
+  if (context) {
+    expect(chip).toHaveTextContent(context);
+    expect(context).not.toBe(notificationSentence(item).target);
+  } else expect(chip).toBeNull();
 });
