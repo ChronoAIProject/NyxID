@@ -20,7 +20,7 @@ pub(crate) async fn decide(
     id: &str,
     input: &Decision,
 ) -> AppResult<ApprovalRequest> {
-    crate::services::security_readiness_service::require(&state.db, READINESS).await?;
+    crate::services::security_readiness_service::require_serving(&state.db, READINESS).await?;
     let row = state
         .db
         .collection::<ApprovalRequest>(REQUESTS)

@@ -25,7 +25,7 @@ pub async fn enabled(db: &Database, owner: &str) -> AppResult<bool> {
         "assistant:channel-media-v2",
         flags::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
     ] {
-        match super::super::security_readiness_service::require(db, capability).await {
+        match super::super::security_readiness_service::require_serving(db, capability).await {
             Ok(()) => {}
             Err(AppError::SecurityReadinessUnavailable) => return Ok(false),
             Err(e) => return Err(e),
