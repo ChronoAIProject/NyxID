@@ -308,9 +308,12 @@ pub async fn begin_creation(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let field = ["request_ciphertext"];
     let context = RecordContext::new(COLLECTION_NAME, &id, owner_id, &field)?;
-    let ciphertext = encryption_keys
-        .encrypt_record(normalized.bytes.as_slice(), &context)
-        .await?;
+    let ciphertext = super::record_field_service::encrypt_context(
+        encryption_keys,
+        &context,
+        normalized.bytes.as_slice(),
+    )
+    .await?;
     let now = Utc::now();
     let row = AssistantCmaSandbox {
         id,
@@ -346,7 +349,7 @@ pub async fn begin_creation(
         operation_id: None,
         submission_state: "pending".into(),
         request_ciphertext: Some(ciphertext),
-        request_context_version: Some(3),
+        request_context_version: encryption_keys.contextual_record_writes().then_some(3),
         created_at: retry.as_ref().map_or(now, |row| row.created_at),
         updated_at: now,
     };
@@ -410,21 +413,27 @@ pub(super) async fn recover_creation_request(
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
-    if row.request_context_version != Some(3) {
-        return Err(AppError::Conflict(
-            "cma_creation_recovery_unavailable".into(),
-        ));
-    }
+    let version = match row.request_context_version {
+        None => None,
+        Some(3) => Some(3),
+        // The persisted marker is i32: never truncate unknown versions to u8.
+        Some(_) => {
+            return Err(AppError::Conflict(
+                "cma_creation_recovery_unavailable".into(),
+            ));
+        }
+    };
     let field = ["request_ciphertext"];
     let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &field)?;
-    let bytes = keys
-        .decrypt_record(
-            row.request_ciphertext
-                .as_deref()
-                .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?,
-            &context,
-        )
-        .await?;
+    let bytes = super::record_field_service::decrypt_context(
+        keys,
+        &context,
+        version,
+        row.request_ciphertext
+            .as_deref()
+            .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?,
+    )
+    .await?;
     if bytes.len() > MAX_RECOVERY_BYTES {
         return Err(invalid_request());
     }
