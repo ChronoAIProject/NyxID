@@ -12,6 +12,42 @@ import { LoginKeyDraft } from "./login-key-draft";
 afterEach(cleanup);
 
 describe("login key draft owner authority", () => {
+  it("shows the hinted name outside Customize and blocks blank or invalid names", async () => {
+    const user = userEvent.setup();
+    const inventory = loginInventory();
+    const onApprove = vi.fn();
+    render(
+      <LoginKeyDraft
+        initial={{
+          ...newApiKeyDefaults(),
+          name: "Hinted Key",
+          scopes: ["read", "proxy"],
+          allowed_service_ids: ["svc"],
+        }}
+        inventory={inventory}
+        requested={requestedRead}
+        initialRequested={requestedRead}
+        actor="user"
+        disabled={false}
+        onDraft={vi.fn()}
+        onApprove={onApprove}
+        onRequestedChange={vi.fn()}
+        onDeny={vi.fn()}
+      />,
+    );
+    const name = screen.getByRole("textbox", { name: "Name" });
+    expect(name).toBeVisible();
+    expect(name).toHaveValue("Hinted Key");
+    expect(name.closest("details")).toBeNull();
+    const submit = screen.getByRole("button", { name: "Create & continue" });
+    expect(submit).toBeEnabled();
+    await user.clear(name);
+    expect(submit).toBeDisabled();
+    await user.type(name, "x".repeat(65));
+    expect(submit).toBeDisabled();
+    expect(onApprove).not.toHaveBeenCalled();
+  });
+
   it.each([
     [undefined, true],
     ["org", true],

@@ -687,12 +687,17 @@ describe("three-step device approval", () => {
       ]);
     },
   );
-  it("creates a hinted key with the exact connection only on final approval", async () => {
+  it.each(["device", "agent-key"] as const)("creates a renamed hinted key with the exact connection only on final approval via %s", async (flow) => {
     mocks.query +=
       "&login_type=agent&key_source=new&key_name=Build+agent&platform=codex&expiry_days=30&permissions=read,proxy&service_permissions=github::repo:read";
-    await scope();
+    await scope(flow);
     await click("Create new Agent Key");
     expect(screen.getByLabelText("Name")).toHaveValue("Build agent");
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "My build agent" },
+    });
+    expect(screen.getByRole("heading", { name: "My build agent" })).toBeVisible();
     fireEvent.click(screen.getByText("Customize"));
     expect(
       screen.getByRole("button", { name: "January 31, 2026" }),
@@ -700,22 +705,20 @@ describe("three-step device approval", () => {
     expect(
       screen.getByText(new Date("2026-01-31T23:59:59.000Z").toLocaleString()),
     ).toBeVisible();
-    fireEvent.click(
-      screen.getByLabelText("GitHub access").querySelector("summary")!,
-    );
+    expect(screen.getByLabelText("GitHub access")).toHaveAttribute("open");
     expect(
       screen.getByRole("checkbox", {
-        name: "Grant connection GitHub personal",
+        name: "Grant connection GitHub personal (Personal)",
       }),
     ).toBeChecked();
     expect(approvals()).toEqual([]);
     await click("Create & continue");
     expect(approvals()[0]).toEqual([
-      "/auth/device/approve-agent-key",
+      `/auth/${flow}/${flow === "device" ? "approve-agent-key" : "approve"}`,
       expect.objectContaining({
         selection: expect.objectContaining({
           kind: "new",
-          name: "Build agent",
+          name: "My build agent",
           scopes: "read proxy",
           allowed_service_ids: ["svc"],
           platform: "codex",

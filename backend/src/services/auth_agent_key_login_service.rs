@@ -87,6 +87,7 @@ pub struct ResourceSummary {
     pub id: String,
     pub name: String,
     pub owner_id: String,
+    pub owner_name: Option<String>,
     #[serde(default)]
     pub auto_connected: bool,
 }
@@ -365,6 +366,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable service".into(), |r| r.slug.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
+                    owner_name: None,
                     auto_connected: row.is_some_and(consent::auto_connected),
                 }
             })
@@ -378,6 +380,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable node".into(), |r| r.name.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
+                    owner_name: None,
                     auto_connected: false,
                 }
             })
@@ -422,6 +425,7 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
                 orgs.push(ResourceSummary {
                     id: owner.id.clone(),
                     owner_id: owner.id,
+                    owner_name: None,
                     auto_connected: false,
                     name: owner.display_name.unwrap_or(owner.email),
                 });
@@ -449,6 +453,10 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             id: entry.service.id,
             name: entry.service.slug,
             owner_id: entry.service.user_id,
+            owner_name: match entry.source {
+                user_service_service::CredentialSource::Personal => None,
+                user_service_service::CredentialSource::Org { org_name, .. } => Some(org_name),
+            },
             auto_connected,
         });
     }
@@ -459,6 +467,7 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             id: entry.node.id,
             name: entry.node.name,
             owner_id: entry.node.user_id,
+            owner_name: None,
             auto_connected: false,
         })
         .collect();

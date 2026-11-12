@@ -31,8 +31,12 @@ for HTTP response shapes.
   The approving account is visible and can be signed out.
   Existing and new keys share one authorization card with the key, owner and
   login expiry above service rows. Each row shows its selected accounts and
-  extra-access count; expand it to inspect permissions or choose a connection
-  for a new key. Missing accounts are labelled “Choose account” in that row.
+  extra-access count. Service rows start expanded so permissions and connection
+  choices are immediately available, and each row can still be collapsed.
+  Connection choices and selected-account summaries show Personal or the owning
+  organization, including shared services available to ordinary organization
+  members. New Key names can be edited directly in the main review card.
+  Missing accounts are labelled “Choose account” in that row.
   “Customize” contains requested filters and secondary key settings. Selection
   and review use the same rows; there is no separate review appended below the
   editor. Current/future resource authority remains visible when details are

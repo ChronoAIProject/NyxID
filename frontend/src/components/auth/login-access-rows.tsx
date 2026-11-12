@@ -6,6 +6,7 @@ import type { RequestedPermissions } from "@/schemas/login-request";
 import {
   connectionCovers,
   connectionSlug,
+  connectionOrganization,
   effectiveLoginConnections,
   permissionOptions,
   requestedGroups,
@@ -87,6 +88,7 @@ export function LoginAccessRows({
         return (
           <details
             key={group}
+            open
             className="group/row"
             aria-label={t("{{name}} access", { name: name })}
           >
@@ -100,7 +102,13 @@ export function LoginAccessRows({
                   {group === "nyxid"
                     ? apiKey.scopes
                     : accounts.length
-                      ? accounts.map((c) => c.label).join(", ")
+                      ? accounts.map((c) => {
+                          const organization = connectionOrganization(c, inventory);
+                          const owner = organization
+                            ? t("Organization · {{org_name}}", { org_name: organization })
+                            : t("Personal");
+                          return `${c.label} (${owner})`;
+                        }).join(", ")
                       : missing
                         ? t("{{count}} requested permissions", { count: requestedEntries.length || 1 })
                         : t("{{value}} permissions", { value: matched.length + extras.length })}

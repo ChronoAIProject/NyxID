@@ -83,6 +83,25 @@ export function canonicalScope(slug: string, scope: string): string {
 export function connectionSlug(connection: LoginConnection) {
   return connection.catalog_service_slug ?? connection.slug;
 }
+// Organization choices only include Key administrators. Service ownership must
+// also cover ordinary members who can use a shared organization connection.
+export function connectionOrganization(
+  connection: LoginConnection,
+  inventory: LoginInventory,
+): string | undefined {
+  const service = inventory.options.services.find((s) => s.id === connection.id);
+  const ownerId = service?.owner_id ?? connection.owner_id;
+  if (!ownerId || ownerId === inventory.options.personal_owner_id) return;
+  const organization = inventory.options.orgs.find((o) => o.id === ownerId);
+  const ownerKey = inventory.options.keys.find((k) => k.owner_id === ownerId);
+  if (ownerKey?.owner_type === "personal") return;
+  return (
+    service?.owner_name?.trim() ||
+    organization?.name?.trim() ||
+    ownerKey?.owner_name?.trim() ||
+    ownerId
+  );
+}
 export function connectionReady(connection: LoginConnection, now = Date.now()) {
   return (
     connection.is_active &&

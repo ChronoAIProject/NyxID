@@ -62,6 +62,7 @@ export function LoginGrantReview({
   customize,
   actions,
   credentialExpiresAt,
+  nameField,
 }: {
   apiKey: AgentKeySummary;
   comparison: PermissionComparison;
@@ -70,6 +71,7 @@ export function LoginGrantReview({
   customize: ReactNode;
   actions: ReactNode;
   credentialExpiresAt?: string;
+  nameField?: ReactNode;
 }) {
   const { t } = useUiTranslation();
   const heading = useRef<HTMLHeadingElement>(null);
@@ -105,6 +107,7 @@ export function LoginGrantReview({
           </p>
         </div>
       </div>
+      {nameField}
       <div className="flex flex-wrap items-center justify-between gap-2 text-11">
         <p className="font-medium">{t("Allow this device to access")}</p>
         <span

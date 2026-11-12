@@ -1031,6 +1031,61 @@ fn new_child_default_is_finite_clamped_and_stored_none_is_unchanged() {
 }
 
 #[tokio::test]
+async fn login_options_show_shared_service_organization_to_members_without_key_admin_access() {
+    let (db, actor, _, _) = fixture("login_options_connection_owners").await;
+    let org = Uuid::new_v4().to_string();
+    let mut owner = test_user(&org, UserType::Org);
+    owner.display_name = Some("Engineering".into());
+    db.collection::<User>(USERS)
+        .insert_one(owner)
+        .await
+        .unwrap();
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_one(test_membership(&org, &actor, OrgRole::Member, None))
+        .await
+        .unwrap();
+    let service_id = Uuid::new_v4().to_string();
+    let service = crate::test_utils::test_user_service(
+        &service_id,
+        &org,
+        "shared-service",
+        "endpoint",
+        None,
+        None,
+    );
+    db.collection::<UserService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+
+    let options = options_for_actor(&db, &actor).await.unwrap();
+    assert!(options.orgs.is_empty());
+    let shared = options
+        .services
+        .iter()
+        .find(|s| s.id == service_id)
+        .unwrap();
+    assert_eq!(shared.owner_id, org);
+    assert_eq!(shared.owner_name.as_deref(), Some("Engineering"));
+    assert_eq!(
+        serde_json::to_value(shared).unwrap()["owner_name"],
+        "Engineering"
+    );
+
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id": &org, "member_user_id": &actor},
+            doc! {"$set": {"role": "viewer"}},
+        )
+        .await
+        .unwrap();
+    let viewer = options_for_actor(&db, &actor).await.unwrap();
+    assert!(viewer.services.iter().all(|s| s.id != service_id));
+    assert!(viewer.connections.iter().all(|c| c.id != service_id));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn auto_connected_login_options_provision_and_mark_platform_services() {
     let (db, actor, _, _) = fixture("auto_connected_login_options").await;
     let catalog = crate::test_utils::test_auto_connected_catalog_service();

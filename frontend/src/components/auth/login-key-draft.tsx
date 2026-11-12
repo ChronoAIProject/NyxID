@@ -94,6 +94,7 @@ export function LoginKeyDraft({
             apiKey={summary}
             comparison={comparison}
             kind="new"
+            nameField={<ApiKeyNameField form={form} />}
             customize={
               <>
                 <h4 className="text-12 font-semibold">{t("Requested access filters")}</h4>
@@ -112,7 +113,6 @@ export function LoginKeyDraft({
                     onToggle: toggleService,
                   }}
                 />
-                <ApiKeyNameField form={form} />
                 {inventory.options.orgs.length > 0 && (
                   <label className="block space-y-2">{t("Owner")}<Select
                       disabled={disabled}
