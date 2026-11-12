@@ -556,8 +556,12 @@ async fn flag_gates_tool_discovery_and_skill_read() {
     )
     .await
     .unwrap_err();
+    // The refusal is typed since #2385; clients still see the same class and text.
+    let body = plain.response_body();
     assert!(
-        matches!(&plain, AppError::Forbidden(m) if m.starts_with("Skill unavailable")),
+        body.error == "forbidden"
+            && body.error_code == 1002
+            && body.message.contains("Skill unavailable"),
         "{plain:?}"
     );
 
@@ -590,8 +594,11 @@ async fn flag_gates_tool_discovery_and_skill_read() {
         crate::handlers::agent_skills::dispatch(&f.state, &f.chat, "skill_read", &outline_read)
             .await
             .unwrap_err();
+    let body = missing.response_body();
     assert!(
-        matches!(&missing, AppError::Forbidden(m) if m.starts_with("Skill unavailable")),
+        body.error == "forbidden"
+            && body.error_code == 1002
+            && body.message.contains("Skill unavailable"),
         "{missing:?}"
     );
     // The unbound read is audited with metadata only, exactly like a file read.
