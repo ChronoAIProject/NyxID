@@ -5619,13 +5619,19 @@ async fn responses_with_producers_impl(
         text
     };
     let (source_media_declared, media) = if (media_text.is_some()
-        || crate::services::channel_media_authority::expanded_relay(&row.platform)
-        || (row.platform == "telegram"
+        || crate::services::channel_media_authority::expanded_relay(canonical_platform(
+            &row.platform,
+        ))
+        || (canonical_platform(&row.platform) == "telegram"
             && activity["actor"]["id"]
                 .as_str()
                 .is_some_and(|sender| !row.owner_sender_ids.iter().any(|owner| owner == sender))))
         && activity["source"]["type"] == "nyxid_relay"
-        && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
+        && activity["source"]["platform"]
+            .as_str()
+            .is_some_and(|platform| {
+                canonical_platform(platform) == canonical_platform(&row.platform)
+            })
         && activity["actor"]["kind"] == "human"
     {
         match Box::pin(media_admission(
