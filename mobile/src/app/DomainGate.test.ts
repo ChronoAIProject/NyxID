@@ -49,7 +49,7 @@ for (const unmountEarly of [false, true]) {
       "../lib/domains": domains,
       "../lib/domainBootstrap": {
         initializeDomains: () => bootstrap.initializeDomains({
-          fetch: async (url) => { calls.push(String(url)); return reply.promise; },
+          fetch: async (url) => { calls.push(String(url)); return reply.promise.then((r) => r.clone()); },
           getItem: async () => null,
           setItem: async () => {},
         }),

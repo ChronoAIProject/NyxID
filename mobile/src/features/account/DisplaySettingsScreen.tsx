@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Pressable, StyleSheet, Switch, View } from "react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
@@ -20,6 +21,7 @@ import { ChatPreview } from "../display/ChatPreview";
 export function DisplaySettingsScreen(
   _props: SheetScreenProps<"DisplaySettings">,
 ) {
+  const { t } = useAppLanguage();
   const { colors, mode, preference, setPreference } = useTheme();
   const automatic = preference === "system";
   const current = mode === "dark" ? "dark" : "light";
@@ -32,7 +34,7 @@ export function DisplaySettingsScreen(
   };
   return (
     <SettingsPage>
-      <SettingsGroup title="Appearance" inset={false}>
+      <SettingsGroup title={t("Appearance")} inset={false}>
         <View accessibilityRole="radiogroup" style={styles.tiles}>
           {(["light", "dark"] as const).map((value) => {
             const selected = current === value;
@@ -56,20 +58,27 @@ export function DisplaySettingsScreen(
                   <ChatPreview mode={value} compact />
                 </View>
                 <Text style={[styles.tileLabel, { color: colors.textPrimary }]}>
-                  {value === "light" ? "Light" : "Dark"}
+                  {value === "light" ? t("Light") : t("Dark")}
                 </Text>
                 <View
                   style={[
                     styles.radio,
                     {
-                      borderColor: selected ? colors.primary : colors.controlBorder,
-                      backgroundColor: selected ? colors.primary : "transparent",
+                      borderColor: selected
+                        ? colors.primary
+                        : colors.controlBorder,
+                      backgroundColor: selected
+                        ? colors.primary
+                        : "transparent",
                     },
                   ]}
                 >
                   {selected ? (
                     <View
-                      style={[styles.radioDot, { backgroundColor: colors.onPrimary }]}
+                      style={[
+                        styles.radioDot,
+                        { backgroundColor: colors.onPrimary },
+                      ]}
                     />
                   ) : null}
                 </View>
@@ -78,11 +87,11 @@ export function DisplaySettingsScreen(
           })}
         </View>
         <SettingsRow
-          label="Automatic"
-          detail={automatic ? "Follows your iPhone's appearance" : undefined}
+          label={t("Automatic")}
+          detail={automatic ? t("Follows your device's appearance") : undefined}
           accessory={
             <Switch
-              accessibilityLabel="Automatic appearance"
+              accessibilityLabel={t("Automatic appearance")}
               value={automatic}
               onValueChange={(on) => {
                 capture({

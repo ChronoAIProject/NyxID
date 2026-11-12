@@ -15,6 +15,7 @@ import { Check, ChevronDown, Search, X } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { fonts } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
 import { ActionButton, Label, Notice } from "./WorkspaceUI";
 
 export type WorkspaceSelectionOption = {
@@ -42,13 +43,16 @@ type SelectionProps = {
   confirmLabel?: string;
   allowEmpty?: boolean;
   children?: ReactNode;
+  surfaceColors?: ThemeColors;
+  presentationStyle?: "pageSheet" | "overFullScreen";
 };
 const signature = (value: readonly string[]) =>
   JSON.stringify([...new Set(value)].sort());
 
 /** The enclosing form owns persistence; Apply commits only its local field. */
 export function WorkspaceSelectionField(props: SelectionProps) {
-  const { colors } = useTheme();
+  const theme = useTheme();
+  const colors = props.surfaceColors ?? theme.colors;
   const [open, setOpen] = useState(false);
   const valueKey = signature(props.value);
   useEffect(() => {
@@ -124,8 +128,15 @@ export function WorkspaceSelectionSheet({
   confirmLabel = "Apply",
   allowEmpty = multiple,
   children,
-}: SelectionProps & { onClose: () => void }) {
-  const { colors } = useTheme();
+  surfaceColors,
+  presentationStyle = "pageSheet",
+  keepOpenWhenDisabled = false,
+}: SelectionProps & {
+  onClose: () => void;
+  keepOpenWhenDisabled?: boolean;
+}) {
+  const theme = useTheme();
+  const colors = surfaceColors ?? theme.colors;
   const sheet = useNativeSheetDismiss(onClose);
   const [draft, setDraft] = useState(() => [...new Set(value)]);
   const [query, setQuery] = useState("");
@@ -144,8 +155,8 @@ export function WorkspaceSelectionSheet({
     sheet.close();
   };
   useEffect(() => {
-    if (stale || (disabled && !readOnly)) onClose();
-  }, [stale, disabled, readOnly, onClose]);
+    if (stale || (disabled && !readOnly && !keepOpenWhenDisabled)) onClose();
+  }, [stale, disabled, readOnly, keepOpenWhenDisabled, onClose]);
   const known = new Map<string, WorkspaceSelectionOption>();
   for (const option of options)
     if (!known.has(option.value)) known.set(option.value, option);
@@ -199,7 +210,7 @@ export function WorkspaceSelectionSheet({
   return (
     <Modal
       {...sheet.modalProps}
-      presentationStyle="pageSheet"
+      presentationStyle={presentationStyle}
       onRequestClose={close}
     >
       <SafeAreaProvider>

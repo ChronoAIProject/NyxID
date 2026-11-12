@@ -178,7 +178,9 @@ function setup({
     "./socialCallback": socialCallback,
     "../../lib/telemetry": { capture: () => {} },
     "../../lib/env": { getFrontendUrl },
-    "../../theme/ThemeContext": { useTheme: () => ({ colors }) },
+    "./useAuthTheme": { useAuthTheme: () => ({ colors }) },
+    "./AuthTextInput": { AuthTextInput: "TextInput" },
+    "./AuthSubmitButton": { AuthSubmitButton: "AuthSubmitButton" },
     "../../theme/flowStyles": { createFlowStyles: () => ({}) },
     "../../components/brand/BrandNebula": {
       BrandNebula: "BrandNebula",
@@ -211,10 +213,7 @@ function setup({
   function submit() {
     const element = elements(harness.value()).find(
       (element) =>
-        element.type === "Pressable" &&
-        /^(Sign In|Sign in|Verify & sign in|Signing in\.\.\.)$/.test(
-          textContent(element),
-        ),
+        element.type === "AuthSubmitButton",
     );
     assert.ok(element, "Expected email sign-in action");
     return element;
@@ -319,7 +318,7 @@ for (const emailEnabled of [false, true]) {
       for (const label of ["Email", "Password"]) {
         assert.equal(tree.some((element) => element.props.accessibilityLabel === label), true);
       }
-      assert.equal(tree.some((element) => element.type === "Pressable" && textContent(element) === "Sign In"), true);
+      assert.equal(tree.some((element) => element.type === "AuthSubmitButton" && element.props.label === "Sign In"), true);
       assert.equal(tree.some((element) => element.type === "Text" && textContent(element) === "or continue with email"), providers.length > 0);
       assert.equal(tree.some((element) => element.props.accessibilityLabel === "Create account"), emailEnabled);
       if (providers.length > 0) {
@@ -607,4 +606,30 @@ test("registration and waitlist callbacks resolve the domain after import and at
   await screen.harness.settle();
   assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register", "https://old.example/register"]);
   assert.deepEqual(screen.waitlistUrls, ["https://nyxid.ai", "https://old.example"]);
+});
+
+
+test("sign-in delegates idle, ready, pending and MFA submits to the shared primary button", async (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  assert.equal(screen.submit().props.disabled, true);
+  assert.equal(screen.submit().props.loading, false);
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  assert.equal(screen.submit().props.disabled, false);
+  let rejectLogin!: (reason: unknown) => void;
+  screen.setLogin(() => new Promise((_resolve, reject) => { rejectLogin = reject; }));
+  screen.submit().props.onPress();
+  screen.harness.flush();
+  assert.equal(screen.submit().props.loading, true);
+  assert.equal(screen.submit().props.disabled, true);
+  assert.equal(screen.submit().props.label, "Signing in...");
+  rejectLogin(new MfaChallengeError("synthetic-challenge"));
+  await screen.harness.settle();
+  assert.equal(screen.submit().props.loading, false);
+  assert.equal(screen.submit().props.label, "Verify & sign in");
+  screen.change("Authenticator code", "12");
+  assert.equal(screen.submit().props.disabled, true);
+  screen.change("Authenticator code", "012345");
+  assert.equal(screen.submit().props.disabled, false);
 });

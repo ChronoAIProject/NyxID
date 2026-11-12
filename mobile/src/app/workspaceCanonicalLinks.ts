@@ -35,6 +35,8 @@ export function workspaceStateFromPath(
         ),
       );
     }
+    if (/^\/assistant\/approvals\/?$/.test(url.pathname))
+      return withWorkspaceFallback(parse("activity"));
     if (!/^\/assistant\/?$/.test(url.pathname))
       return withWorkspaceFallback(parse(path));
     search = url.searchParams;
@@ -72,6 +74,24 @@ export function workspaceStateFromPath(
           : route,
       ),
     };
+  }
+  if (!search.has("panel")) {
+    const group =
+      search.get("g") ??
+      (search.get("c")?.startsWith("nyxg-") ? search.get("c") : null);
+    if (group)
+      return withWorkspaceFallback(
+        parse(`groups/${encodeURIComponent(group)}`),
+      );
+    const conversation = search.get("c");
+    const agent = search.get("agent");
+    const card = search.get("card");
+    const query = new URLSearchParams();
+    if (conversation) query.set("conversationId", conversation);
+    if (agent) query.set("agentId", agent);
+    if (card) query.set("acknowledgementId", card);
+    if (!conversation && agent) query.set("openLatest", "true");
+    return withWorkspaceFallback(parse(`chat?${query}`));
   }
   if (search.getAll("panel").length !== 1 || search.get("panel") !== "billing")
     return withWorkspaceFallback(parse(path));

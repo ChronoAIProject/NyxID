@@ -58,6 +58,9 @@ export const servicesApi = {
       await requestJson("/keys", { method: "POST", body }),
     );
   },
+  async checkCredential(id: string) {
+    return requestJson(`${keyPath(id)}/verify`, { method: "POST", body: {} });
+  },
   async setActive(id: string, is_active: boolean) {
     return serviceConnectionSchema.parse(
       await requestJson(keyPath(id), { method: "PUT", body: { is_active } }),

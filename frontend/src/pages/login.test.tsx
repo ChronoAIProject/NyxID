@@ -57,7 +57,7 @@ describe("LoginPage", () => {
     window.history.pushState(
       {},
       "",
-      "/login?return_to=%2Fdashboard&error=access_denied&code=INVITE-5",
+      "/login?enable_email=true&return_to=%2Fdashboard&error=access_denied&code=INVITE-5",
     );
 
     render(<LoginPage />);
@@ -66,14 +66,21 @@ describe("LoginPage", () => {
     const flow = screen.getByTestId("auth-flow");
     expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({
       initialPanel: 0,
+      enableEmailLogin: true,
       returnTo: "/dashboard",
       socialError: "access_denied",
       initialInviteCode: "INVITE-5",
     });
   });
 
-  it("omits absent params (only initialPanel) when no query string is present", () => {
-    window.history.pushState({}, "", "/login");
+  it.each([
+    "",
+    "?enable_email=false",
+    "?enable_email=1",
+    "?enable_email=TRUE",
+    "?enable_email=",
+  ])("keeps email login configured by the server for /login%s", (search) => {
+    window.history.pushState({}, "", `/login${search}`);
 
     render(<LoginPage />);
 

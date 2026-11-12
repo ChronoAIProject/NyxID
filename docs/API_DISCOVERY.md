@@ -981,3 +981,60 @@ Official references (read 2026-11-10):
 - [Feishu node lookup](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node)
 - [Docx raw content](https://open.larksuite.com/document/server-docs/docs/docs/docx-v1/document/raw_content)
 - [Feishu scope setup and publishing](https://open.feishu.cn/document/faq/trouble-shooting/how-to-fix-the-99991672-error)
+
+### Saved credential verification
+
+For ordinary server-held API-key/bearer connections, `GET /keys` and
+`GET /keys/{id}` expose additive `credential_verification` metadata:
+`state` (`not_verified`, `verified`, `rejected`), `reason_code`, `observed_at`,
+`source`, and `can_check`. Missing metadata means **Saved, not verified**.
+Neither credential lifecycle `status: active`, service `is_active`, nor
+`last_used_at` proves provider acceptance. Enable/Disable and Delete keep their
+existing semantics. OAuth, no-auth, node-managed/routed and platform-key
+connections keep their existing status contracts.
+
+A first-party human owner or live organization admin can call
+`POST /keys/{id}/verify`. Creation and credential/destination updates on the
+unified key routes, plus hosted API-key completion, attempt the same check
+best effort after saving. Failure to check never undoes a save. Inventory reads
+and polling do not call the provider. A successful ordinary proxy/MCP/model
+request does **not** record verification in this release; `source: request` is
+reserved. The legacy MCP direct-credential save keeps its existing connection
+shape and reports `not_verified/legacy_connection_check_unavailable` instead
+of selecting an unrelated unified connection.
+
+An administrator may declare `credential_verification: { operation, query }`
+on catalog metadata through the service update API. It asserts that the named
+operation authenticates the supplied credential. NyxID requires one live,
+published, read-only GET without body, dynamic path, alternate target or async
+contract. Fixed arguments are bounded numeric pagination parameters only.
+Trusted hosted overlays seed `models_list` for `llm-anthropic`, `llm-openai`,
+`llm-deepseek`, `llm-mistral` and `llm-google-ai`. OpenRouter's public model list
+is not credential evidence and is not seeded. Remote specs cannot enable checks. An admin edit
+or explicit null clear suppresses startup defaults. No declaration means no
+probe; NyxID never guesses a health or identity URL from a service name.
+
+Checks reuse normal proxy authorization and injection with an exact saved
+connection, disable redirects, allow at most ten seconds and discard at most
+64 KiB of response data without retaining a body. Evidence binds key ID and
+credential epoch, connection/endpoint/catalog revisions and the published
+operation generation. Replacement, destination or operation changes invalidate
+old evidence, including writes by older replicas. Node routes, agent overrides,
+platform credentials and mismatched bindings cannot supply verification.
+Checks are limited to one attempt per connection per ten seconds.
+
+A completed 2xx check records `verified/provider_accepted`; 401 records
+`rejected/provider_unauthorized`; 403 records `rejected/provider_forbidden`
+(permission denial does not necessarily mean an invalid key). Outages,
+timeouts, oversized responses, redirects and local policy refusals remain
+`not_verified` with bounded reason codes. Audit contains connection ID, state
+and reason only. The web and mobile surfaces show the observed result, not a
+promise that every operation or future request will succeed. Existing mobile
+installs need a new app build for the corrected labels.
+
+Credential verification checks (on save and `POST /api/v1/keys/{key_id}/verify`)
+use the normal authorized proxy with the exact saved credential. They record
+request-count usage metadata when billing metering is enabled, but never apply
+catalog prices or consume wallet credits, grants or allowances. This exemption
+is server-authored and limited to the declared verification operation; ordinary
+requests through the same connection retain their configured billing policy.

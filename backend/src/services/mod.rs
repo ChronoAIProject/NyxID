@@ -115,6 +115,7 @@ pub mod content_type;
 pub mod coordination_service;
 pub mod credential_push_service;
 pub(crate) mod credential_record_service;
+pub mod credential_verification;
 pub mod delegation_service;
 pub mod destination_routing;
 pub mod developer_webhook_service;
@@ -587,3 +588,4 @@ pub mod lark_wiki;
 pub mod platform_model_credentials;
 
 pub mod assistant_tool_result_service;
+pub(crate) mod catalog_endpoint_service;

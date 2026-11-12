@@ -263,3 +263,12 @@ it("keeps group response display names independent of the viewer's inventory", (
   expect(withDisplayName(ref, [{ id: "agent", display_name: "Stale" }]).display_name).toBe("Office Agent");
   expect(withDisplayName({ ...ref, display_name: null }, [{ id: "agent", display_name: "Stale" }]).display_name).toBeNull();
 });
+
+it("renders a retained-operation batch as one notice after history reload", () => {
+  const text = "NyxID events (authored by NyxID):\n- Retained operation updates for 6 distinct permission requests. Results appear in the reply.";
+  const restored = JSON.parse(JSON.stringify({ role: "event", text })) as { text: string };
+  const notices = eventNotices(restored.text).map(describeEventNotice);
+  expect(notices).toHaveLength(1);
+  expect(notices[0]?.summary).toBe("Retained operation updates for 6 distinct permission requests");
+  expect(notices[0]?.detail).not.toContain("Do not reconstruct");
+});

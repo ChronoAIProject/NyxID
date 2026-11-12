@@ -5202,6 +5202,7 @@ pub(crate) async fn migrate_provider_tokens(
                 updated_at: now,
                 state_version: 1,
                 rotation_predecessor_id: None,
+                credential_verification: None,
             };
             let transaction_db = db.clone();
             let source_filter = records::exact_source_filter(USER_PROVIDER_TOKENS, raw_token)?;
@@ -5531,6 +5532,7 @@ pub(crate) async fn migrate_service_connections(
                 updated_at: now,
                 state_version: 1,
                 rotation_predecessor_id: None,
+                credential_verification: None,
             };
             let transaction_db = crate::services::transaction_service::durable_database(db);
             let db = transaction_db.clone();
@@ -5815,6 +5817,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             updated_at: now,
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         if let Err(e) =
             crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
@@ -6265,6 +6268,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

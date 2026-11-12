@@ -481,6 +481,11 @@ pub struct DownstreamService {
     /// Explicit admin edits, including clearing metadata, suppress startup defaults.
     #[serde(default)]
     pub inference_admin_modified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_verification:
+        Option<super::credential_verification::CredentialVerificationCheck>,
+    #[serde(default)]
+    pub credential_verification_admin_modified: bool,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -686,6 +691,8 @@ pub mod test_helpers {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -809,6 +816,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
@@ -906,6 +915,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

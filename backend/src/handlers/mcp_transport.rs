@@ -6309,6 +6309,15 @@ async fn handle_meta_connect(
                 "connected_at": result.get("connected_at").and_then(|v| v.as_str()).unwrap_or(""),
                 "note": "Service tools are now available. Your tool list has been updated.",
             });
+            if let Some(verification) = result
+                .get("credential_verification")
+                .filter(|v| !v.is_null())
+            {
+                response_json["credential_verification"] = verification.clone();
+                response_json["note"] = serde_json::json!(
+                    "Credential saved, not verified. Tools are listed, but provider authentication has not been checked."
+                );
+            }
             if let Some(existing) = &existing {
                 existing.attach(&mut response_json);
                 for field in ["service_id", "service_slug"] {

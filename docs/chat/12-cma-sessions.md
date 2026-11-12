@@ -310,3 +310,38 @@ actions remain separate capabilities.
 - `frontend/e2e/login-redirect.spec.ts` checks app approval and password-MFA to
   app login against HTTP fixtures, preserving the absolute `return_to` and its
   assistant conversation query through profile restoration.
+
+## Catalog domain changes and auto-connected services
+
+NyxID-owned, auto-provisioned HTTP connections follow the current catalog target
+at proxy resolution. Reconciliation also updates the stored endpoint and inherited
+OpenAPI URL, keeping connection and endpoint IDs unchanged. This applies to all
+catalog services, including CMA and cmaeg; it does not rewrite explicit/custom,
+user-credential, gateway-provider or node destinations. Reconciliation runs during
+normal auto-provisioning (key listing, login and device approval), catalog URL/spec
+updates, and startup. Matching proxy snapshots add no database reads. Reconciliation
+batches connection, endpoint and catalog reads, and starts transactions only for
+mismatches; consistent pages perform no writes. Per-owner repair failures are
+logged without failing listing/login/approval. Admin updates return without waiting
+for repair: catalog updates and startup schedule bounded background passes with a
+five-minute limit. Live resolution already follows the catalog while repair runs.
+Repairs emit only identifier/changed-field audit metadata.
+
+NyxBot's cmaeg transport already resolves its target directly from the catalog;
+ordinary cmaeg proxy connections now follow catalog moves too. No user needs to
+delete or reconnect an auto-connected service.
+
+CMA still checks that the resolved connection targets the current catalog
+deployment at admission and immediately before sending. A mismatched explicit
+connection returns the existing `cma_configuration_required` conflict with the
+connection ID to inspect. Repair does not change credentials, key epochs, resource
+IDs, idempotency keys or retained creation fingerprints. A retained creation bound
+to the catalog **before** a domain move remains fenced against replay to the new
+deployment. Preserve that request and reconcile its outcome; do not create another
+request identity to bypass the fence. Endpoint-only repair under an unchanged
+catalog leaves valid retained creations recoverable.
+
+During a rolling upgrade, repaired rows work on old replicas too: old provisioning
+skips existing connections and does not revert their URLs. Until reconciliation
+visits a row, an old replica can still return the original conflict. The existing
+CMA safety check remains enforced throughout rollout.

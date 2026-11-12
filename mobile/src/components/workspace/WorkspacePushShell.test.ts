@@ -7,6 +7,7 @@ import {
   settleSidebarOpen,
   sidebarPushWidth,
   SIDEBAR_EDGE_WIDTH,
+  workspaceSidebarLayout,
 } from "./workspacePushState";
 
 type Element = { type: unknown; props: Record<string, any> };
@@ -22,8 +23,8 @@ function elements(root: Element): Element[] {
       ),
   ];
 }
-function setup(reduced = false) {
-  let dimensions = { width: 402, height: 874 };
+function setup(reduced = false, width = 402, height = 874) {
+  let dimensions = { width, height };
   let props: Record<string, any>;
   const shared: { value: number }[] = [];
   let sharedCursor = 0;
@@ -154,6 +155,7 @@ function setup(reduced = false) {
       settleSidebarOpen,
       sidebarPushWidth,
       SIDEBAR_EDGE_WIDTH,
+      workspaceSidebarLayout,
     },
   });
   const component = harness.load(
@@ -638,7 +640,10 @@ test("desktop rotation and portrait return retarget the sidebar without losing i
   x.lastComplete();
   x.set({ obscured: true });
   x.rotate(874, 402);
-  assert.equal(x.find("workspace-sidebar-base").props.style[1].width, sidebarPushWidth(874));
+  assert.equal(
+    x.find("workspace-sidebar-base").props.style[1].width,
+    sidebarPushWidth(874),
+  );
   assert.equal(x.style().transform[0].translateX, sidebarPushWidth(874));
   x.lastComplete();
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "none");
@@ -646,13 +651,142 @@ test("desktop rotation and portrait return retarget the sidebar without losing i
   x.lastComplete();
   x.set({ obscured: false });
   assert.equal(x.style().transform[0].translateX, 310);
-  assert.equal(x.find("workspace-sidebar-base").props.accessibilityElementsHidden, false);
+  assert.equal(
+    x.find("workspace-sidebar-base").props.accessibilityElementsHidden,
+    false,
+  );
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
   assert.ok(x.all().includes(x.child));
   x.set({ visible: false });
   x.lastComplete();
   assert.equal(x.style().transform[0].translateX, 0);
   assert.equal(x.opacity(), 1);
-  assert.equal(x.find("workspace-slab-content").props.accessibilityElementsHidden, false);
+  assert.equal(
+    x.find("workspace-slab-content").props.accessibilityElementsHidden,
+    false,
+  );
   assert.equal(x.counts().dismissed, 1);
+  x.harness.unmount();
+});
+
+test("a wide window exposes a bounded sidebar beside the same fully accessible navigator", () => {
+  const x = setup(false, 1024, 768);
+  assert.equal(x.find("workspace-sidebar-base").props.style[1].width, 300);
+  assert.equal(x.find("workspace-content-slab").props.style[1].marginLeft, 300);
+  assert.equal(x.style().transform[0].translateX, 0);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  assert.equal(
+    x.find("workspace-sidebar-base").props.accessibilityElementsHidden,
+    false,
+  );
+  assert.equal(
+    x.find("workspace-slab-content").props.accessibilityElementsHidden,
+    false,
+  );
+  assert.equal(
+    x.find("workspace-slab-content").props.importantForAccessibility,
+    "auto",
+  );
+  assert.ok(x.all().includes(x.child));
+  assert.ok(x.all().includes(x.sidebar));
+  assert.equal(
+    x.all().some((node) => node.type === "GestureDetector"),
+    false,
+  );
+  assert.equal(x.hardwareBack(), undefined);
+  assert.equal(
+    x.focus.some((event) => event[0] === "active" && event[2]),
+    false,
+  );
+  x.harness.value().props.onAccessibilityEscape();
+  assert.deepEqual(x.changes, []);
+  assert.equal(x.timings.length, 0);
+  x.harness.unmount();
+});
+
+test("resize out of an opening drawer fences old completion and keeps the navigator and sidebar mounted", () => {
+  const x = setup();
+  x.set({ visible: true, presented: true });
+  const opening = x.timings.at(-1)!;
+  x.rotate(1194, 834);
+  opening.complete(true);
+  x.render();
+  assert.equal(x.offset(), 0);
+  assert.equal(x.find("workspace-content-slab").props.style[1].marginLeft, 300);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  assert.equal(
+    x.find("workspace-slab-content").props.accessibilityElementsHidden,
+    false,
+  );
+  assert.equal(x.hardwareBack(), undefined);
+  assert.equal(
+    x.focus.some((event) => event[0] === "focus"),
+    false,
+  );
+  assert.ok(x.all().includes(x.child));
+  assert.ok(x.all().includes(x.sidebar));
+
+  // App resets the compact request when crossing the breakpoint. The visible
+  // rail is independent of that modal request, then Split View returns closed.
+  x.set({ visible: false, presented: false });
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  x.rotate(744, 1133);
+  assert.equal(x.find("workspace-content-slab").props.style[1].marginLeft, 0);
+  assert.equal(x.find("workspace-sidebar-base").props.style[1].width, 360);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "none");
+  assert.equal(x.style().transform[0].translateX, 0);
+  assert.equal(
+    x.find("workspace-slab-content").props.accessibilityElementsHidden,
+    false,
+  );
+  assert.ok(x.all().includes(x.child));
+  assert.ok(x.all().includes(x.sidebar));
+  x.harness.unmount();
+});
+
+test("Settings suspends both wide columns and returns without changing layout or taking modal focus", () => {
+  const x = setup(false, 1366, 1024);
+  x.set({ obscured: true });
+  assert.equal(x.harness.value().props.pointerEvents, "none");
+  assert.equal(x.harness.value().props.accessibilityElementsHidden, true);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "none");
+  assert.equal(x.hardwareBack(), undefined);
+  x.rotate(1024, 1366);
+  x.set({ obscured: false });
+  assert.equal(x.harness.value().props.accessibilityElementsHidden, false);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  assert.equal(
+    x.find("workspace-slab-content").props.accessibilityElementsHidden,
+    false,
+  );
+  assert.equal(x.find("workspace-content-slab").props.style[1].marginLeft, 300);
+  assert.equal(
+    x.focus.some((event) => event[0] === "focus"),
+    false,
+  );
+  assert.ok(x.all().includes(x.child));
+  x.harness.unmount();
+});
+
+test("wide nested guarded Back uses only the content edge and never closes the sidebar", () => {
+  const x = setup(false, 1024, 768);
+  let backs = 0;
+  x.set({ onEdgeBack: () => backs++ });
+  const edge = x.find("workspace-sidebar-reveal-edge");
+  assert.equal(edge.props.accessible, false);
+  assert.equal(edge.props.style.width, 24);
+  x.handlers().onStart();
+  x.handlers().onUpdate({ translationX: 160 });
+  x.handlers().onEnd({ translationX: 160, velocityX: 0 });
+  assert.equal(backs, 1);
+  assert.equal(x.style().transform[0].translateX, 0);
+  assert.equal(x.counts().reveals, 0);
+  assert.deepEqual(x.changes, []);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  x.set({ gestureEnabled: false });
+  assert.equal(
+    x.all().some((node) => node.type === "GestureDetector"),
+    false,
+  );
+  x.harness.unmount();
 });
