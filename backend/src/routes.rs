@@ -3413,6 +3413,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_voice::options),
         )
         .route(
+            "/assistant/nyxagent/voice/active",
+            get(handlers::assistant_voice::account_active_session),
+        )
+        .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
             post(handlers::assistant_voice::start)
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),

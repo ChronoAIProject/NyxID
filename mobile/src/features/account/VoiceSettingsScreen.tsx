@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useMemo } from "react";
 import { Switch } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -32,16 +33,16 @@ const MODES = [
   },
 ] as const;
 
-const message = (error: unknown) =>
-  error instanceof Error ? error.message : "Voice settings could not be loaded.";
-
 /**
  * Settings › Voice: how live voice conversations sound and listen, and the
- * composer's dictation language. The voice source is chosen automatically, as
- * in a call; only what the person can really change is offered. Accounts
+ * composer's dictation language. Calls preserve the saved voice source; only
+ * what the person can really change is offered. Accounts
  * without live voice see only Dictation.
  */
-export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">) {
+export function VoiceSettingsScreen({
+  route,
+}: SheetScreenProps<"VoiceSettings">) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const voiceEnabled = route?.params?.voice ?? true;
   const language = useDictationLanguage(true);
@@ -72,12 +73,21 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
       environment!.api.savePreferences(preferences),
     onSuccess: (data) => queryClient.setQueryData(settingsKey, data),
   });
+  const selectionReady = options.isSuccess && settings.isSuccess;
   const view =
-    options.data && settings.data
+    selectionReady && options.data && settings.data
       ? voiceSettingsView(options.data.options, settings.data.voice)
       : null;
+  const controlsDisabled =
+    !selectionReady || !environment || !isConnected || save.isPending;
   const update = (change: Partial<VoicePreferences>) => {
-    if (!view || save.isPending) return;
+    if (!voiceEnabled || !view || controlsDisabled) return;
+    if (
+      change.voice !== undefined &&
+      !view.option.voice.voices.some((row) => row.id === change.voice)
+    )
+      return;
+    if (view.missingVoice && change.voice === undefined) return;
     save.mutate({ ...view.preferences, ...change });
   };
   const loading =
@@ -87,17 +97,30 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
   return (
     <SettingsPage>
       {voiceEnabled && !isConnected && (
-        <Notice message="You're offline. Reconnect to change voice settings." />
+        <Notice
+          message={t("You're offline. Reconnect to change voice settings.")}
+        />
       )}
       {!voiceEnabled ? null : loading ? (
-        <SkeletonRows rows={3} title accessibilityLabel="Loading voice settings" />
+        <SkeletonRows
+          rows={3}
+          title
+          accessibilityLabel={t("Loading voice settings")}
+        />
       ) : error || !environment ? (
         <>
-          <Notice tone="error" message={message(error)} />
+          <Notice
+            tone="error"
+            message={
+              error instanceof Error
+                ? error.message
+                : t("Voice settings could not be loaded.")
+            }
+          />
           <SettingsGroup inset={false}>
             <SettingsRow
               tone="action"
-              label="Retry"
+              label={t("Retry")}
               onPress={() => {
                 void options.refetch();
                 void settings.refetch();
@@ -107,39 +130,56 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
         </>
       ) : view ? (
         <SettingsGroup
-          title="Conversation"
-          footer={`Used for live voice conversations with NyxBot. ${voiceTariff(view.option)}`}
+          title={t("Conversation")}
+          footer={`${t("Used for live voice conversations with NyxBot.")} ${voiceTariff(view.option)}`}
         >
           <SettingsMenuRow
             icon={AudioLines}
-            label="Voice"
+            label={t("Voice")}
+            detail={
+              view.missingVoice
+                ? t(
+                    "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.",
+                    { voice: view.missingVoice },
+                  )
+                : undefined
+            }
             value={view.preferences.voice ?? ""}
-            options={voices.map((row) => ({ value: row.id, label: row.label }))}
-            disabled={save.isPending || voices.length < 2}
+            options={voices.map((row) => ({
+              value: row.id,
+              label: row.label,
+            }))}
+            disabled={controlsDisabled || !voices.length}
             onChange={(voice) => update({ voice })}
           />
           <SettingsMenuRow
             icon={Mic}
-            label="Listening"
+            label={t("Listening")}
             detail={
               view.holdOnly
-                ? "This voice service supports Hold to talk only."
+                ? t("This voice service supports Hold to talk only.")
                 : undefined
             }
             value={view.preferences.input_mode}
-            options={MODES}
-            disabled={save.isPending || view.holdOnly}
+            options={MODES.map((mode) => ({
+              ...mode,
+              label: t(mode.label),
+              detail: t(mode.detail),
+            }))}
+            disabled={controlsDisabled || !!view.missingVoice || view.holdOnly}
             onChange={(input_mode) => update({ input_mode })}
           />
           <SettingsRow
             icon={Bell}
-            label="Notify when tasks finish"
-            detail="When a task you asked for by voice completes after the call."
+            label={t("Notify when tasks finish")}
+            detail={t(
+              "When a task you asked for by voice completes after the call.",
+            )}
             accessory={
               <Switch
-                accessibilityLabel="Notify when tasks finish"
+                accessibilityLabel={t("Notify when tasks finish")}
                 value={view.preferences.notify_on_completion}
-                disabled={save.isPending}
+                disabled={controlsDisabled || !!view.missingVoice}
                 onValueChange={(notify_on_completion) =>
                   update({ notify_on_completion })
                 }
@@ -151,23 +191,38 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
       ) : (
         <SettingsGroup inset={false}>
           <SettingsRow
-            label="Voice isn't available right now"
-            detail="No voice service is ready for your account. Try again later."
+            label={t("Voice isn't available right now")}
+            detail={t(
+              "No voice service is ready for your account. Try again later.",
+            )}
           />
         </SettingsGroup>
       )}
       {save.error ? (
-        <Notice tone="error" message={message(save.error)} />
+        <Notice
+          tone="error"
+          message={
+            save.error instanceof Error
+              ? save.error.message
+              : t("Voice settings could not be loaded.")
+          }
+        />
       ) : null}
       <SettingsGroup
-        title="Dictation"
-        footer="The microphone in the message field uses your iPhone's speech recognition, on the device when available. The words appear in your message, where you can edit them before sending."
+        title={t("Dictation")}
+        footer={t(
+          "The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending.",
+        )}
       >
         <SettingsMenuRow
           icon={Languages}
-          label="Language"
+          label={t("Language")}
           value={language.value}
-          options={language.options}
+          options={language.options.map((option) =>
+            option.value === "automatic"
+              ? { ...option, label: t("Device language") }
+              : option,
+          )}
           onChange={language.choose}
         />
       </SettingsGroup>

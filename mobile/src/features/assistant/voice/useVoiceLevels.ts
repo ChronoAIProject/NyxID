@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSharedValue, withTiming } from "react-native-reanimated";
 import type { NativeVoiceMedia } from "./VoiceMediaBridge";
 import {
@@ -57,5 +57,15 @@ export function useVoiceLevels(media: NativeVoiceMedia | null) {
       output.value = 0;
     };
   }, [media]);
-  return { input, output, speaking };
+  const subscribeLevel = useCallback(
+    (listener: (level: number) => void) => {
+      if (!media) return () => {};
+      return media.subscribe((event) => {
+        if (event.type === "level")
+          listener(Math.max(event.input, event.output));
+      });
+    },
+    [media],
+  );
+  return { input, output, speaking, subscribeLevel };
 }

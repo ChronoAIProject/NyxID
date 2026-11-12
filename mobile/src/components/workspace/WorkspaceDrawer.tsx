@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { WORKSPACE_HEADER_ROW } from "./workspaceHeaderMetrics";
 import { useEffect, useState, type Ref } from "react";
 import { AppState, Pressable, StyleSheet, Text, View } from "react-native";
@@ -75,6 +76,7 @@ export function WorkspaceDrawer({
   onCreateAgent,
   onCreateGroup,
 }: Props) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const [barHeight, setBarHeight] = useState(52);
@@ -114,7 +116,7 @@ export function WorkspaceDrawer({
         <Pressable
           ref={initialFocusRef}
           accessibilityRole="button"
-          accessibilityLabel="NyxID home"
+          accessibilityLabel={t("NyxID home")}
           onPress={onHome}
           style={styles.brand}
         >
@@ -122,7 +124,7 @@ export function WorkspaceDrawer({
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Search"
+          accessibilityLabel={t("Search")}
           onPress={() => onBrowse("WorkspaceSearch")}
           style={workspaceCloseControlStyle(colors.navActive)}
         >
@@ -158,7 +160,7 @@ export function WorkspaceDrawer({
               accessibilityRole="header"
               style={[styles.section, { color: colors.textPrimary }]}
             >
-              Quick actions
+              {t("Quick actions")}
             </Text>
             {(
               [
@@ -173,7 +175,7 @@ export function WorkspaceDrawer({
               <Pressable
                 key={action}
                 accessibilityRole="button"
-                accessibilityLabel={label}
+                accessibilityLabel={t(label)}
                 onPress={() => onQuickAction(action)}
                 style={({ pressed }) => [
                   styles.row,
@@ -184,7 +186,7 @@ export function WorkspaceDrawer({
               >
                 <Icon size={20} color={colors.textSecondary} />
                 <Text style={[styles.rowText, { color: colors.textPrimary }]}>
-                  {label}
+                  {t(label)}
                 </Text>
               </Pressable>
             ))}
@@ -192,7 +194,7 @@ export function WorkspaceDrawer({
               accessibilityRole="header"
               style={[styles.section, { color: colors.textPrimary }]}
             >
-              Workspace
+              {t("Workspace")}
             </Text>
             {destinations.map((item) => {
               const route = item.route;
@@ -200,9 +202,9 @@ export function WorkspaceDrawer({
               const Icon = item.Icon;
               return (
                 <Pressable
-                  key={item.label}
+                  key={t(item.label)}
                   accessibilityRole="button"
-                  accessibilityLabel={`${item.label}${route === "Activity" && count ? `, ${count} pending` : ""}`}
+                  accessibilityLabel={`${t(item.label)}${route === "Activity" && count ? `, ${count} pending` : ""}`}
                   accessibilityState={{ selected }}
                   onPress={() => onNavigate(route)}
                   style={({ pressed }) => [
@@ -218,7 +220,7 @@ export function WorkspaceDrawer({
                     numberOfLines={1}
                     style={[styles.rowText, { color: colors.textPrimary }]}
                   >
-                    {item.label}
+                    {t(item.label)}
                   </Text>
                   {route === "Activity" && count ? (
                     <Text
@@ -238,13 +240,13 @@ export function WorkspaceDrawer({
             })}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Create new agent"
+              accessibilityLabel={t("Create new agent")}
               onPress={onCreateAgent}
               style={styles.row}
             >
               <UserPlus size={20} color={colors.textSecondary} />
               <Text style={[styles.rowText, { color: colors.textPrimary }]}>
-                Create new agent
+                {t("Create new agent")}
               </Text>
             </Pressable>
           </View>
@@ -293,8 +295,8 @@ export function WorkspaceDrawer({
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="New chat"
-          accessibilityHint="Open NyxBot home"
+          accessibilityLabel={t("New chat")}
+          accessibilityHint={t("Open NyxBot home")}
           onPress={onHome}
           style={({ pressed }) => [
             styles.chatPill,
@@ -303,12 +305,12 @@ export function WorkspaceDrawer({
         >
           <SquarePen size={20} color="#18181B" />
           <Text maxFontSizeMultiplier={1.3} style={styles.chatLabel}>
-            Chat
+            {t("Chat")}
           </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Settings"
+          accessibilityLabel={t("Settings")}
           onPress={() => onNavigate("AccountSettings")}
           style={[styles.gear, { backgroundColor: colors.navActive }]}
         >

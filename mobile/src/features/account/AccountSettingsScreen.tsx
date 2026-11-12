@@ -1,3 +1,5 @@
+import { LANGUAGES } from "../../i18n/language";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -16,6 +18,7 @@ import {
   Lock,
   Mail,
   Palette,
+  Languages,
   ScrollText,
   ShieldCheck,
   Wallet,
@@ -176,12 +179,14 @@ function formatSignInMethod(provider?: string | null): string {
  * sub-page that holds the actual controls; only Sign Out and Delete Account act here.
  */
 export function AccountSettingsScreen({ navigation, route }: Props) {
+  const { language, t } = useAppLanguage();
   const section = route?.params?.section;
   useEffect(() => {
     if (section) navigation.push(SECTION_PAGES[section]);
   }, [navigation, section]);
   const { colors } = useTheme();
-  const stacked = useSettingsStacked();
+  const [identityWidth, setIdentityWidth] = useState<number>();
+  const stacked = useSettingsStacked(identityWidth);
   const { fontScale } = useWindowDimensions();
   const styles = useMemo(
     () => createStyles(colors, stacked, fontScale),
@@ -304,7 +309,12 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         )}
 
         <SettingsGroup inset={false}>
-          <View style={styles.identity}>
+          <View
+            style={styles.identity}
+            onLayout={({ nativeEvent: { layout } }) => {
+              if (layout.width > 0) setIdentityWidth(layout.width);
+            }}
+          >
             <View style={styles.avatarCircle}>
               {profile?.avatar_url ? (
                 <Image
@@ -322,7 +332,9 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
               </Text>
               {profile ? (
                 <Text style={styles.identityMethod}>
-                  Signs in with {formatSignInMethod(profile.social_provider)}
+                  {t("Signs in with {{method}}", {
+                    method: formatSignInMethod(profile.social_provider),
+                  })}
                 </Text>
               ) : null}
             </View>
@@ -338,55 +350,61 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
                   isOffline && styles.statusBadgeTextOffline,
                 ]}
               >
-                {isOffline ? "Offline" : "Active"}
+                {isOffline ? t("Offline") : t("Active")}
               </Text>
             </View>
           </View>
         </SettingsGroup>
 
-        <SettingsGroup title="Account">
+        <SettingsGroup title={t("Account")}>
           <SettingsRow
             icon={ShieldCheck}
-            label="Account & security"
+            label={t("Account & security")}
             onPress={() => navigation.push("AccountSecurity")}
           />
           <SettingsRow
             icon={Wallet}
-            label="Usage & credits"
+            label={t("Usage & credits")}
             onPress={() => navigation.push("UsageCredits")}
           />
         </SettingsGroup>
 
-        <SettingsGroup title="Preferences">
+        <SettingsGroup title={t("Preferences")}>
           <SettingsRow
             icon={Bell}
-            label="Notifications"
+            label={t("Notifications")}
             onPress={() => navigation.push("NotificationSettings")}
           />
           <SettingsRow
             icon={Palette}
-            label="Display"
+            label={t("Display")}
             onPress={() => navigation.push("DisplaySettings")}
+          />
+          <SettingsRow
+            icon={Languages}
+            label={t("Language")}
+            value={LANGUAGES.find(({ code }) => code === language)?.label}
+            onPress={() => navigation.push("LanguageSettings")}
           />
           {/* Dictation is available to everyone; live voice only with its flag. */}
           <SettingsRow
             icon={AudioLines}
-            label={voiceEnabled ? "Voice" : "Dictation"}
+            label={voiceEnabled ? t("Voice") : t("Dictation")}
             onPress={() =>
               navigation.push("VoiceSettings", { voice: voiceEnabled })
             }
           />
           <SettingsRow
             icon={Lock}
-            label="Privacy"
+            label={t("Privacy")}
             onPress={() => navigation.push("PrivacySettings")}
           />
         </SettingsGroup>
 
-        <SettingsGroup title="Support">
+        <SettingsGroup title={t("Support")}>
           <SettingsRow
             icon={ScrollText}
-            label="Terms of Service"
+            label={t("Terms of Service")}
             onPress={() => {
               capture({
                 name: "ui.mobile_legal_page_opened",
@@ -397,7 +415,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
           <SettingsRow
             icon={FileText}
-            label="Privacy Policy"
+            label={t("Privacy Policy")}
             onPress={() => {
               capture({
                 name: "ui.mobile_legal_page_opened",
@@ -408,7 +426,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
           <SettingsRow
             icon={Mail}
-            label="Contact support"
+            label={t("Contact support")}
             value={SUPPORT_EMAIL}
             accessibilityRole="link"
             accessibilityHint={`Email ${SUPPORT_EMAIL}`}
@@ -425,19 +443,21 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         <SettingsGroup>
           <SettingsRow
             centered
-            label="Sign Out"
+            label={t("Sign Out")}
             disabled={deleting || isOffline}
             onPress={handleSignOut}
           />
         </SettingsGroup>
 
         <SettingsGroup
-          footer="Permanently deletes your account and its data. This cannot be undone."
+          footer={t(
+            "Permanently deletes your account and its data. This cannot be undone.",
+          )}
         >
           <SettingsRow
             centered
             destructive
-            label={deleting ? "Deleting..." : "Delete Account"}
+            label={deleting ? t("Deleting...") : t("Delete Account")}
             disabled={deleting || isOffline}
             onPress={handleDeleteAccount}
           />

@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useState } from "react";
 import { Switch } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -22,6 +23,7 @@ import { requestJson } from "../../lib/api/http";
 export function PrivacySettingsScreen(
   _props: SheetScreenProps<"PrivacySettings">,
 ) {
+  const { t } = useAppLanguage();
   const [toast, setToast] = useState<ToastState | null>(null);
   useEffect(() => {
     if (!toast) return;
@@ -74,16 +76,18 @@ export function PrivacySettingsScreen(
     <>
       <SettingsPage>
         <SettingsGroup
-          title="Usage analytics"
-          footer="Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules."
+          title={t("Usage analytics")}
+          footer={t(
+            "Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules.",
+          )}
         >
           <SettingsRow
             icon={ChartColumn}
-            label="Allow for my account"
-            detail={accountDetail}
+            label={t("Allow for my account")}
+            detail={accountDetail ? t(accountDetail) : undefined}
             accessory={
               <Switch
-                accessibilityLabel="Allow account usage analytics"
+                accessibilityLabel={t("Allow account usage analytics")}
                 value={analyticsPermission.data?.enabled === true}
                 disabled={
                   saveAnalytics.isPending ||
@@ -97,10 +101,10 @@ export function PrivacySettingsScreen(
           />
           <SettingsRow
             icon={Smartphone}
-            label="Allow on this device"
+            label={t("Allow on this device")}
             accessory={
               <Switch
-                accessibilityLabel="Allow usage analytics on this device"
+                accessibilityLabel={t("Allow usage analytics on this device")}
                 value={deviceConsent.enabled}
                 disabled={
                   !deviceConsent.enabled &&
@@ -116,7 +120,7 @@ export function PrivacySettingsScreen(
         {analyticsPermission.isError && (
           <PrimaryButton
             refreshLabelOnFontScaleChange
-            label="Retry"
+            label={t("Retry")}
             kind="ghost"
             onPress={() => {
               void analyticsPermission.refetch();
@@ -124,9 +128,13 @@ export function PrivacySettingsScreen(
           />
         )}
         {deviceConsent.persistenceError && (
-          <SettingsGroup footer="This device's choice could not be saved. Analytics is off in this session; retry to save it before closing the app.">
+          <SettingsGroup
+            footer={t(
+              "This device's choice could not be saved. Analytics is off in this session; retry to save it before closing the app.",
+            )}
+          >
             <SettingsRow
-              label="Retry saving device choice"
+              label={t("Retry saving device choice")}
               onPress={deviceConsent.retryPersistence}
               chevron={false}
             />

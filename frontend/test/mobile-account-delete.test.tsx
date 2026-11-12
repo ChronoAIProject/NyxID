@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import * as React from "react";
@@ -103,9 +103,10 @@ function harness() {
         if (name === "./authDeviceApi") return {};
         if (name.startsWith(".")) {
           const target = resolve(dirname(path), name);
-          try { return load(`${target}.ts`); }
-          catch (error) { if ((error as { code?: string }).code !== "ENOENT") throw error; }
-          return load(`${target}.tsx`);
+          if (name.endsWith(".json")) return JSON.parse(readFileSync(target, "utf8"));
+          const source = [`${target}.ts`, `${target}.tsx`].find(existsSync);
+          if (source) return load(source);
+          throw new Error(`Missing mobile test module: ${target}`);
         }
         throw new Error(`Unexpected mobile test dependency: ${name}`);
       },

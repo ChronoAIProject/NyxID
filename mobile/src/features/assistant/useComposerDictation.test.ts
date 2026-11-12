@@ -13,6 +13,14 @@ function recognizer(events: string[]) {
   let permission = deferred<Permission>();
   const module = {
     onDevice: true,
+    setAudioSessionActiveIOS: (
+      active: boolean,
+      options: { notifyOthersOnDeactivation: boolean },
+    ) => {
+      assert.equal(active, false);
+      assert.equal(options.notifyOthersOnDeactivation, true);
+      events.push("audio-release");
+    },
     options: undefined as Record<string, unknown> | undefined,
     requestPermissionsAsync: () => {
       events.push("permission");
@@ -51,7 +59,10 @@ function recognizer(events: string[]) {
   return module;
 }
 
-function setup({ chosen }: { chosen?: string } = {}) {
+function setup({
+  chosen,
+  continuous = true,
+}: { chosen?: string; continuous?: boolean } = {}) {
   let state = "active",
     focused = true,
     sheetOpen = false,
@@ -59,62 +70,84 @@ function setup({ chosen }: { chosen?: string } = {}) {
   const appListeners = new Set<(state: string) => void>();
   const events: string[] = [],
     inserted: string[] = [];
+  const silentDurations: number[] = [];
+  let time = 10_000;
   let resolveForeground: (() => void) | undefined;
   const native = recognizer(events);
   const locales: [string | undefined, readonly string[]][] = [];
   const props = {
     scope: "agent:chat:0",
+    continuous,
     enabled: true,
     onInsert: (text: string) => {
       inserted.push(text);
     },
+    onSilence: (durationMs: number) => silentDurations.push(durationMs),
   };
-  const h = hookHarness<ReturnType<typeof useComposerDictation>>({
-    "react-native": {
-      Linking: {
-        openSettings: async () => {
-          events.push("settings");
+  const h = hookHarness<ReturnType<typeof useComposerDictation>>(
+    {
+      "react-native": {
+        Platform: { OS: "ios" },
+        Linking: {
+          openSettings: async () => {
+            events.push("settings");
+          },
+        },
+        AppState: {
+          get currentState() {
+            return state;
+          },
+          addEventListener: (_: string, callback: (state: string) => void) => {
+            appListeners.add(callback);
+            return { remove: () => appListeners.delete(callback) };
+          },
         },
       },
-      AppState: {
-        get currentState() {
-          return state;
+      "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
+      "@react-navigation/native": { useIsFocused: () => focused },
+      "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+      "../../lib/accessibility/workspaceAccessibility": {
+        useWorkspaceAccessibility: () => ({ sheetOpen }),
+      },
+      "./voice/dictationLanguage": {
+        savedDictationLanguage: async () => chosen,
+      },
+      "./voice/dictationLocale": {
+        dictationLocale: (
+          phone: string | undefined,
+          list: readonly string[],
+        ) => {
+          locales.push([phone, list]);
+          return "en-GB";
         },
-        addEventListener: (_: string, callback: (state: string) => void) => {
-          appListeners.add(callback);
-          return { remove: () => appListeners.delete(callback) };
+      },
+      "./voice/voicePermission": {
+        waitForVoiceForeground: async (_app: unknown, signal: AbortSignal) => {
+          if (state === "active") return;
+          await new Promise<void>((resolve, reject) => {
+            resolveForeground = resolve;
+            signal.addEventListener(
+              "abort",
+              () => reject(new Error("cancelled")),
+              { once: true },
+            );
+          });
         },
       },
     },
-    "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
-    "@react-navigation/native": { useIsFocused: () => focused },
-    "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../../lib/accessibility/workspaceAccessibility": {
-      useWorkspaceAccessibility: () => ({ sheetOpen }),
-    },
-    "./voice/dictationLanguage": {
-      savedDictationLanguage: async () => chosen,
-    },
-    "./voice/dictationLocale": {
-      dictationLocale: (phone: string | undefined, list: readonly string[]) => {
-        locales.push([phone, list]);
-        return "en-GB";
+    {
+      Date: class extends Date {
+        static override now() {
+          return time;
+        }
       },
     },
-    "./voice/voicePermission": {
-      waitForVoiceForeground: async (_app: unknown, signal: AbortSignal) => {
-        if (state === "active") return;
-        await new Promise<void>((resolve, reject) => {
-          resolveForeground = resolve;
-          signal.addEventListener(
-            "abort",
-            () => reject(new Error("cancelled")),
-            { once: true },
-          );
-        });
-      },
-    },
-  });
+  );
+  const ownership = h.load(
+    fileURLToPath(new URL("./voice/audioSessionOwnership.ts", import.meta.url)),
+  ) as typeof import("./voice/audioSessionOwnership");
+  h.mock("./voice/audioSessionOwnership", ownership);
+  h.mock("./audioSessionOwnership", ownership);
   const module = h.load(
     fileURLToPath(new URL("./useComposerDictation.ts", import.meta.url)),
   );
@@ -132,7 +165,12 @@ function setup({ chosen }: { chosen?: string } = {}) {
     props,
     events,
     inserted,
+    silentDurations,
+    advance: (ms: number) => {
+      time += ms;
+    },
     native,
+    ownership,
     locales,
     emit,
     result,
@@ -317,7 +355,9 @@ test("permission denial links to Settings and never starts recognition", async (
     await x.h.settle();
     assert.match(
       x.h.value().error!,
-      restricted ? /restricted.*Screen Time/ : /microphone and speech recognition.*Settings/,
+      restricted
+        ? /restricted.*Screen Time/
+        : /microphone and speech recognition.*Settings/,
     );
     assert.equal(x.h.value().permissionDenied, true);
     assert.equal(x.h.value().active, false);
@@ -382,7 +422,11 @@ test("a new attempt waits for an aborted session's end before listening", async 
   await pending;
   await x.h.settle();
   assert.equal(x.events.at(-1), "start");
-  assert.equal(x.h.value().phase, "connecting", "the stale end did not settle it");
+  assert.equal(
+    x.h.value().phase,
+    "connecting",
+    "the stale end did not settle it",
+  );
   x.emit("start", null);
   assert.equal(x.h.value().phase, "listening");
   x.h.unmount();
@@ -435,7 +479,11 @@ test("recognizer errors explain themselves; text heard before a failure still jo
   late.emit("end", null);
   assert.equal(late.h.value().phase, "idle");
   assert.deepEqual(late.inserted, ["Heard"]);
-  assert.equal(late.h.value().error, undefined, "no-speech after words is not an error");
+  assert.equal(
+    late.h.value().error,
+    undefined,
+    "no-speech after words is not an error",
+  );
   late.h.unmount();
 });
 
@@ -449,4 +497,358 @@ test("a chosen dictation language the recognizer supports wins over the phone's"
   await unsupported.begin();
   assert.equal(unsupported.native.options?.lang, "en-GB");
   unsupported.h.unmount();
+});
+
+test("crew speech uses native utterance boundaries and delivers the final words once", async () => {
+  const x = setup({ continuous: false });
+  await x.begin();
+  assert.equal(x.native.options?.continuous, false);
+  x.native.emit("result", {
+    isFinal: true,
+    results: [{ transcript: "Review the launch" }],
+  });
+  x.native.emit("end");
+  x.h.flush();
+  x.native.emit("end");
+  assert.deepEqual(x.inserted, ["Review the launch"]);
+  x.h.unmount();
+});
+
+test("crew speech never dispatches an interrupted or still-interim utterance", async () => {
+  for (const failed of [false, true]) {
+    const x = setup({ continuous: false });
+    await x.begin();
+    x.native.emit("result", {
+      isFinal: failed,
+      results: [{ transcript: "unfinished words" }],
+    });
+    if (failed) x.native.emit("error", { error: "interrupted" });
+    x.native.emit("end");
+    x.h.flush();
+    assert.deepEqual(x.inserted, []);
+    assert.ok(x.h.value().error);
+    x.h.unmount();
+  }
+});
+
+test("silent crew utterances end without error or delivery and can re-arm; failures retain errors", async () => {
+  for (const event of [
+    "nomatch",
+    "no-speech",
+    "speech-timeout",
+    "empty",
+    "not-allowed",
+    "service-not-allowed",
+  ]) {
+    const x = setup({ continuous: false });
+    await x.begin();
+    if (event === "nomatch") x.native.emit(event, null);
+    else if (event !== "empty") x.native.emit("error", { error: event });
+    x.native.emit("end");
+    x.h.flush();
+    assert.deepEqual(x.inserted, []);
+    assert.equal(
+      !!x.h.value().error,
+      ["not-allowed", "service-not-allowed"].includes(event),
+      event,
+    );
+    assert.deepEqual(x.silentDurations, x.h.value().error ? [] : [0], event);
+    if (!x.h.value().error) {
+      await x.begin();
+      assert.equal(x.h.value().active, true);
+    }
+    x.h.unmount();
+  }
+});
+
+test("crew silence duration measures the native session and excludes time waiting for permission", async () => {
+  const x = setup({ continuous: false });
+  const pending = x.h.value().start();
+  x.advance(5000);
+  x.native.grant({ granted: true });
+  await pending;
+  await x.h.settle();
+  x.emit("start");
+  x.advance(75);
+  x.native.emit("nomatch");
+  x.emit("end");
+  assert.deepEqual(x.silentDurations, [75]);
+  x.h.unmount();
+});
+
+test("cancelled crew capture and ordinary draft dictation never report automatic silence", async () => {
+  for (const continuous of [true, false]) {
+    const x = setup({ continuous });
+    await x.begin();
+    if (!continuous) x.h.value().discard();
+    x.native.emit("nomatch");
+    x.emit("end");
+    assert.deepEqual(x.silentDurations, []);
+    x.h.unmount();
+  }
+});
+
+test("an utterance retains its capture-time insertion callback", async () => {
+  const f = setup({ continuous: false });
+  await f.begin();
+  const replacements: string[] = [];
+  f.props.onInsert = (text) => {
+    replacements.push(text);
+  };
+  f.h.render();
+  f.result("capture-time route", true);
+  f.emit("end");
+  assert.deepEqual(f.inserted, ["capture-time route"]);
+  assert.deepEqual(replacements, []);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("normal/error completion releases iOS audio with notify-others exactly once", async () => {
+  for (const error of [false, true]) {
+    const f = setup();
+    await f.begin();
+    if (error) f.emit("error", { error: "audio-capture" });
+    f.emit("end");
+    f.emit("end");
+    f.h.unmount();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  }
+});
+
+test("discard/background/unmount wait for native end before releasing the audio session", async () => {
+  for (const transition of ["discard", "background", "unmount"]) {
+    const f = setup();
+    await f.begin();
+    if (transition === "unmount") f.h.unmount();
+    else if (transition === "discard") f.h.value().discard();
+    else f.app("background");
+    assert.ok(f.events.includes("abort"));
+    assert.equal(f.events.includes("audio-release"), false);
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  }
+});
+
+test("a delayed recognizer end cannot deactivate a newer voice owner", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const newer = f.ownership.claimVoiceAudioSession();
+  f.native.emit("end");
+  assert.equal(f.events.includes("audio-release"), false);
+  newer.release();
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  newer.release();
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("a missing native end releases after the bounded abort timeout", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  context.mock.timers.tick(1499);
+  assert.equal(f.events.includes("audio-release"), false);
+  context.mock.timers.tick(1);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("ordinary editable dictation appends through the latest draft callback", async () => {
+  const f = setup();
+  await f.begin();
+  const replacements: string[] = [];
+  f.props.onInsert = (text) => {
+    replacements.push(text);
+  };
+  f.h.render();
+  f.result("append to the edited draft", true);
+  f.emit("end");
+  assert.deepEqual(f.inserted, []);
+  assert.deepEqual(replacements, ["append to the edited draft"]);
+  f.h.unmount();
+});
+
+/** The real bridge class and lease; only its native message port is replaced. */
+function privateAudio(f: ReturnType<typeof setup>) {
+  f.h.mock("react-native", { StyleSheet: { create: (v: unknown) => v } });
+  f.h.mock("react-native-webview", { WebView: "WebView" });
+  // These leases cover the WebView engine; native WebRTC is unavailable here.
+  f.h.mock("./createNativeOpenAIMedia", {
+    createNativeOpenAIMedia: () => undefined,
+  });
+  const { NativeVoiceMedia } = f.h.load(
+    fileURLToPath(new URL("./voice/VoiceMediaBridge.tsx", import.meta.url)),
+  ) as typeof import("./voice/VoiceMediaBridge");
+  return (ready: boolean, respond = true) => {
+    const media = new NativeVoiceMedia();
+    const commands: Record<string, unknown>[] = [];
+    media.connect((message) => {
+      commands.push(message);
+      if (message.type === "close") f.events.push("private-close");
+      if (respond && message.type === "prepare")
+        queueMicrotask(() =>
+          media.receive(
+            JSON.stringify({
+              type: "response",
+              generation: message.generation,
+              requestId: message.requestId,
+              result: "offer",
+            }),
+          ),
+        );
+    });
+    if (ready) media.receive(JSON.stringify({ type: "ready" }));
+    const controller = new AbortController();
+    const preparation = media
+      .prepare("openai_live", controller.signal)
+      .catch((error: Error) => error.message);
+    return { media, commands, controller, preparation };
+  };
+}
+
+for (const closeFirst of [false, true]) {
+  test(`cancelled private handoff before bridge readiness releases recognition exactly once: cancel ${closeFirst ? "before" : "after"} native end`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(false);
+    if (closeFirst) p.controller.abort();
+    f.native.emit("end");
+    p.controller.abort();
+    assert.equal(await p.preparation, "Voice audio was closed.");
+    assert.equal(
+      p.commands.length,
+      0,
+      "the bridge never acquired native media",
+    );
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+
+  test(`cancelled private media acquisition inherits pending release: cancel ${closeFirst ? "before" : "after"} native end`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(true, false);
+    assert.equal(p.commands[0]?.type, "prepare");
+    if (closeFirst) p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), closeFirst);
+    p.media.close();
+    assert.equal(await p.preparation, "Voice audio was closed.");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+
+  test(`prepared private media preserves the obligation until all owners finish: private closes ${closeFirst ? "first" : "last"}`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(true);
+    assert.equal(await p.preparation, "offer");
+    if (closeFirst) p.media.close();
+    f.native.emit("end");
+    assert.equal(
+      f.events.includes("audio-release"),
+      closeFirst,
+      "an active newer owner must not be deactivated",
+    );
+    p.media.close();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    assert.ok(
+      f.events.indexOf("private-close") < f.events.indexOf("audio-release"),
+    );
+    p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+}
+
+test("private bridge readiness timeout cannot take away a recognizer's deactivation", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(false);
+  f.native.emit("end");
+  context.mock.timers.tick(15000);
+  assert.equal(
+    await p.preparation,
+    "Voice audio is not ready. Please try again.",
+  );
+  assert.equal(p.commands.length, 0);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("private bridge failure and late recognizer end release the last owner exactly once", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(false);
+  p.media.unavailable();
+  assert.equal(await p.preparation, "Voice audio was closed.");
+  assert.equal(f.events.includes("audio-release"), false);
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("native media preparation failure runs the inherited deactivation", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(true, false);
+  f.native.emit("end");
+  assert.equal(f.events.includes("audio-release"), false);
+  const command = p.commands[0]!;
+  p.media.receive(
+    JSON.stringify({
+      type: "response",
+      generation: command.generation,
+      requestId: command.requestId,
+      error: "Media preparation failed.",
+    }),
+  );
+  assert.equal(await p.preparation, "Media preparation failed.");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("rapid repeated recognition/private handoffs retain one obligation until the final owner closes", async () => {
+  const f = setup();
+  const prepare = privateAudio(f);
+  await f.begin();
+  f.h.value().discard();
+  let p = prepare(true);
+  assert.equal(await p.preparation, "offer");
+  f.native.emit("end");
+  for (let i = 0; i < 5; i++) {
+    await f.begin();
+    p.media.close();
+    assert.equal(f.events.includes("audio-release"), false);
+    f.h.value().discard();
+    p = prepare(true);
+    assert.equal(await p.preparation, "offer");
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), false);
+  }
+  p.media.close();
+  p.media.close();
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
 });

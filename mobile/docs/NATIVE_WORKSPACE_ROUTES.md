@@ -5,6 +5,16 @@ navigation translates the slab right by 77% of the window width; no scrim or
 panel covers it. The near-black dark sidebar and gray light sidebar sit behind
 the elevated content surface. The slab keeps its rounded left corners and shadow.
 
+On windows at least 900pt wide, the sidebar remains visible at 300pt beside the
+main content; both columns are interactive and available to accessibility. No
+modal focus, closing sliver or sidebar Back interception applies in this mode.
+Below 900pt, including narrow iPad Split View or Stage Manager windows, the push
+sidebar is retained with a maximum width of 360pt. Layout uses the current
+window width and keeps the navigator and chat drafts mounted through resize.
+Crossing the breakpoint cancels obsolete push/fade/focus callbacks; compact mode
+starts with the sidebar closed. Critical writes block sidebar destinations and
+Settings/QR/terminal shortcuts; dirty route editors keep their native leave guard.
+
 Only Settings, its account pages and the QR/terminal quick actions use the
 pull-up surface. The full-screen desktop viewer retains its own presentation.
 Other task-local pickers, confirmations, attachment preview and voice call are
@@ -32,7 +42,7 @@ transient interactions, rather than workspace destinations.
 | Sheet / DeviceLogin, AgentKeyLogin                                                   | QR, terminal and Agent Key sign-in flows with existing write guards.                                                                       |
 | Sheet / TermsOfService, PrivacyPolicy                                                | Signed-in legal documents.                                                                                                                 |
 | Root / Workspace, WorkspaceSheet                                                     | Main signed-in shell and the account/quick-action sheet host above it.                                                                     |
-| Root / MachineDesktop                                                                | Full-screen native desktop; landscape while focused/active, upright portrait restored on exit/background. No desktop web fallback.          |
+| Root / MachineDesktop                                                                | Full-screen native desktop; iPhone landscape while focused/active with portrait restoration on exit/background; iPad follows its resizable window without locks. No desktop web fallback.          |
 | Root / Auth, DeviceLogin, AgentKeyLogin, TermsOfService, PrivacyPolicy               | Signed-out authentication and shared canonical entries; signed-in wrappers resolve into the account sheet.                                 |
 
 Chat Details, History and Working context are nested content pages. History
@@ -92,6 +102,13 @@ retains its equivalent Close/backdrop/drag/Back/Escape guards. Sign-out clears
 account state and unmounts editors. `navigationHierarchy.test.ts`,
 `workspaceChatNavigation.test.ts` and the surface/guard tests cover route,
 restoration, transition and dismissal behavior.
+
+At window widths of at least 768pt, Settings and quick-action sheets use a
+centered card up to 720×860pt with 24pt plus safe-area margins. Narrow windows
+retain the bottom sheet. The measured host shrinks above the keyboard, retaining
+the same sheet navigator and guarded edits; rotation does not replay entrance
+animation. Settings content is centered up to 720pt and row wrapping follows
+measured row width and Dynamic Type.
 
 Accessibility exposure follows the shell's settled visual endpoint. While
 navigation is open the slab is hidden except for Close navigation; focus moves

@@ -14,7 +14,9 @@ import {
   Animated,
   InteractionManager,
   BackHandler,
+  KeyboardAvoidingView,
   PanResponder,
+  Platform,
   Pressable,
   StyleSheet,
   useWindowDimensions,
@@ -50,6 +52,34 @@ export function WorkspaceSheetSurface({
   const sheet = mode === "light" ? lightSheetColors : darkSheetColors;
   const { height, width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const [viewport, setViewport] = useState<{
+    width: number;
+    height: number;
+    windowWidth: number;
+    windowHeight: number;
+  }>();
+  // The keyboard and Stage Manager can resize this host independently of the
+  // screen. Discard an old layout while a new window size is being committed.
+  const available =
+    viewport?.windowWidth === width && viewport.windowHeight === height
+      ? viewport
+      : { width, height };
+  const wide = available.width >= 768;
+  const gap = insets.top + (wide ? 24 : 10);
+  const bottomGap = wide ? insets.bottom + 24 : 0;
+  const panelWidth = wide
+    ? Math.min(
+        720,
+        Math.max(0, available.width - insets.left - insets.right - 48),
+      )
+    : available.width;
+  const panelHeight = Math.max(
+    0,
+    Math.min(wide ? 860 : Infinity, available.height - gap - bottomGap),
+  );
+  const panelTop = wide
+    ? gap + Math.max(0, available.height - gap - bottomGap - panelHeight) / 2
+    : gap;
   const reducedMotion = useReducedMotionPreference();
   const reduced = reducedMotion !== false || nativePresentation;
   const offset = useRef(
@@ -203,7 +233,6 @@ export function WorkspaceSheetSurface({
       }),
     [dismiss, offset, reduced, reset],
   );
-  const gap = insets.top + 10;
   return (
     <View
       style={styles.overlay}
@@ -225,69 +254,111 @@ export function WorkspaceSheetSurface({
         accessibilityRole="button"
         accessibilityLabel="Dismiss drawer"
         onPress={() => void dismiss()}
-        style={[styles.dismissArea, { height: gap }]}
+        style={StyleSheet.absoluteFill}
       />
-      <Animated.View
-        pointerEvents={interacting ? "auto" : "none"}
-        accessible={false}
-        accessibilityLabel="Workspace drawer"
-        style={[
-          styles.panel,
-          {
-            height: Math.max(0, height - gap),
-            backgroundColor: sheet.bg,
-            shadowColor: colors.shadowColor,
-            transform: [{ translateY: offset }],
-          },
-          mode === "light" && styles.lightLift,
-        ]}
+      <KeyboardAvoidingView
+        pointerEvents="box-none"
+        style={styles.fill}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <View
+          pointerEvents="box-none"
+          testID="workspace-sheet-viewport"
+          onLayout={({ nativeEvent: { layout } }) => {
+            setViewport((previous) =>
+              previous?.width === layout.width &&
+              previous.height === layout.height &&
+              previous.windowWidth === width &&
+              previous.windowHeight === height
+                ? previous
+                : { ...layout, windowWidth: width, windowHeight: height },
+            );
+          }}
           style={[
-            styles.surface,
-            { backgroundColor: sheet.bg, borderColor: colors.sheetEdge },
+            styles.host,
+            { paddingTop: gap, paddingBottom: bottomGap },
+            wide && styles.centeredHost,
           ]}
         >
-          <SafeAreaProvider
-            style={styles.fill}
-            initialMetrics={{
-              frame: { x: 0, y: gap, width, height: Math.max(0, height - gap) },
-              insets: {
-                top: 0,
-                left: insets.left,
-                right: insets.right,
-                bottom: insets.bottom,
+          <Animated.View
+            pointerEvents={interacting ? "auto" : "none"}
+            accessible={false}
+            accessibilityLabel="Workspace drawer"
+            style={[
+              styles.panel,
+              {
+                width: panelWidth,
+                height: panelHeight,
+                backgroundColor: sheet.bg,
+                shadowColor: colors.shadowColor,
+                transform: [{ translateY: offset }],
               },
-            }}
+              wide && styles.centeredPanel,
+              mode === "light" && styles.lightLift,
+            ]}
           >
-            <SheetThemeProvider>
-              <View
-                {...pan.panHandlers}
-                accessible={false}
-                style={styles.handleArea}
+            <View
+              style={[
+                styles.surface,
+                wide && styles.centeredSurface,
+                { backgroundColor: sheet.bg, borderColor: colors.sheetEdge },
+              ]}
+            >
+              <SafeAreaProvider
+                style={styles.fill}
+                initialMetrics={{
+                  frame: {
+                    x: (available.width - panelWidth) / 2,
+                    y: panelTop,
+                    width: panelWidth,
+                    height: panelHeight,
+                  },
+                  insets: {
+                    top: 0,
+                    left: wide ? 0 : insets.left,
+                    right: wide ? 0 : insets.right,
+                    bottom: wide ? 0 : insets.bottom,
+                  },
+                }}
               >
-                <View
-                  style={[
-                    styles.handle,
-                    { backgroundColor: sheet.textSecondary },
-                  ]}
-                />
-              </View>
-              <View style={styles.fill}>{children}</View>
-            </SheetThemeProvider>
-          </SafeAreaProvider>
+                <SheetThemeProvider>
+                  <View
+                    {...pan.panHandlers}
+                    accessible={false}
+                    style={styles.handleArea}
+                  >
+                    <View
+                      style={[
+                        styles.handle,
+                        { backgroundColor: sheet.textSecondary },
+                      ]}
+                    />
+                  </View>
+                  <View style={styles.fill}>{children}</View>
+                </SheetThemeProvider>
+              </SafeAreaProvider>
+            </View>
+          </Animated.View>
         </View>
-      </Animated.View>
+      </KeyboardAvoidingView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
+  fill: { flex: 1, minHeight: 0 },
   overlay: { flex: 1, justifyContent: "flex-end" },
-  dismissArea: { position: "absolute", top: 0, left: 0, right: 0 },
+  host: {
+    flex: 1,
+    minHeight: 0,
+    alignItems: "center",
+    justifyContent: "flex-end",
+  },
+  centeredHost: { justifyContent: "center" },
   // The outer panel carries the light-mode shadow, so only the inner surface clips.
   panel: { borderTopLeftRadius: 24, borderTopRightRadius: 24 },
+  centeredPanel: { borderRadius: 24 },
+  centeredSurface: { borderRadius: 24, borderBottomWidth: 1 },
   lightLift: {
     shadowOffset: { width: 0, height: -4 },
     shadowOpacity: 1,

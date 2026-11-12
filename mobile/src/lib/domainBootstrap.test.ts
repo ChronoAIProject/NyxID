@@ -88,7 +88,6 @@ test("asks both API hosts and applies the first valid answer", async () => {
 test("uses whichever host answers when the other is down or too old to know the flag", async () => {
   for (const [legacy, next] of [
     [{ fail: true }, { flag: true }],
-    [{ flag: true }, "hang"],
     [{}, { flag: true }],
     [{ status: 503 }, { flag: true }],
   ] as const) {
@@ -136,4 +135,49 @@ test("builds without a second domain set skip the network entirely", async () =>
   await bootstrap.initializeDomains({ fetch: fakeFetch({}, calls), ...store("true") });
   assert.deepEqual(calls, []);
   assert.equal(domains.activeDomains().apiBaseUrl, LEGACY_API);
+});
+
+test("a flag that selects an unreachable host falls back to the host that answered for this launch", async () => {
+  for (const [legacy, next, expected] of [
+    [{ flag: true }, "hang", LEGACY_API],
+    [{ flag: true }, { status: 503 }, LEGACY_API],
+    [{ flag: true }, { fail: true }, LEGACY_API],
+    [{ status: 503 }, { flag: false }, NEW_API],
+  ] as const) {
+    const { domains, bootstrap } = load();
+    const saved = store();
+    const started = Date.now();
+    await bootstrap.initializeDomains({
+      fetch: fakeFetch({ [LEGACY_API]: legacy, [NEW_API]: next }, []),
+      ...saved,
+      timeoutMs: 100,
+    });
+    assert.ok(Date.now() - started < 1000, "a hung chosen host is bounded by the timeout");
+    assert.equal(domains.activeDomains().apiBaseUrl, expected);
+    // The saved choice records the flag, never the per-launch fallback.
+    const flag = (legacy as { flag?: boolean }).flag ?? (next as { flag?: boolean }).flag;
+    assert.deepEqual(saved.writes, [String(flag)]);
+  }
+});
+
+test("the gate settles as soon as the chosen host answers, without waiting for a hung peer", async () => {
+  const { domains, bootstrap } = load();
+  const started = Date.now();
+  await bootstrap.initializeDomains({
+    fetch: fakeFetch({ [LEGACY_API]: "hang", [NEW_API]: { flag: true } }, []),
+    ...store(),
+    timeoutMs: 2000,
+  });
+  assert.ok(Date.now() - started < 500, "no wait for the unreachable legacy host");
+  assert.equal(domains.activeDomains().apiBaseUrl, NEW_API);
+});
+
+test("with neither host reachable, the saved choice still applies rather than a guess", async () => {
+  const { domains, bootstrap } = load();
+  await bootstrap.initializeDomains({
+    fetch: fakeFetch({ [LEGACY_API]: { status: 503 }, [NEW_API]: { fail: true } }, []),
+    ...store("true"),
+    timeoutMs: 100,
+  });
+  assert.equal(domains.activeDomains().apiBaseUrl, NEW_API);
 });

@@ -59,7 +59,7 @@ preserved. Standard NyxID error prefixes translate while unrecognized details,
 resource names, identifiers, and provider messages remain verbatim.
 
 Unrecognized server/provider error details, emails, channel notification bodies, terminal CLI
-output, and the native mobile app are outside this frontend change. Custom names,
+output are outside the frontend change. The native integration is described below. Custom names,
 descriptions, chat content, provider output, and authored documentation, blog,
 and legal document content remain in their authored language. Their web controls
 use the interface language.
@@ -206,3 +206,31 @@ requests locally and returns example credentials; it does not create live keys,
 nodes, or accounts. The preview route is available only when explicitly enabled
 on the development server and is absent from production builds.
 The sample preview starts at the default 1× text size.
+
+## Native iOS language preference
+
+Open **Settings → Language** to choose English, 简体中文, or 繁體中文. The native
+app saves `nyxid.language` in device-local AsyncStorage. It follows the same
+script-aware Chinese locale rules as web. On a fresh install it uses the first
+supported iPhone language, then English. The native and browser storage are
+independent; this is not an account preference.
+
+`mobile/src/i18n/LanguageProvider.tsx` loads the preference before mounting the
+navigator and updates subscribed controls without replacing the navigator or
+chat drafts. Writes are ordered so rapid changes persist the latest selection.
+A failed save leaves the current session usable and exposes a retry in Language.
+
+This native pass translates Settings navigation, account/security controls,
+Display, Privacy, Voice and dictation settings, workspace navigation labels,
+and dictation controls. Other native feature pages and unrecognized error
+messages currently retain English fallback. It does not claim complete native
+translation parity with the web. Messages, names, provider voice labels, URLs,
+credentials and protocol values are preserved. Legal content stays in its
+authored language. App language does not change dictation recognition or the
+model's response language.
+
+Native catalogs in `mobile/src/i18n/locales` reuse main's matching app phrases
+and include native-specific copy. They are small bundled catalogs and import
+no browser runtime. Mark app-owned copy explicitly with `useAppLanguage().t`;
+never translate arbitrary text in the generic Text component. Keep both
+catalogs and interpolation placeholders in sync.

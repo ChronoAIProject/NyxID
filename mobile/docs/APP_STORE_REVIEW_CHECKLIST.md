@@ -1,97 +1,51 @@
-# App Store 提审风险检查清单
+# App Store review checklist
 
-提审前自检用。每一项标注：✅ 已满足 / ⚠️ 需确认 / ❌ 需修复。
+Use this checklist with the metadata and review instructions in [the build 58 submission pack](../release/1.0.4-58/README.md). Source inspection and automated tests do not establish that an App Store Connect field or a production review account is ready.
 
----
+## Prepare review access
 
-## 1. 账号与数据（Guideline 5.1.1）
+- Supply a dedicated email/password account in App Store Connect's private **Sign-in Information** fields. Verify that it signs in on a fresh installation without a developer-controlled device or one-time code.
+- Enable the chat and voice features described in the listing. Verify that the account has working provider access and sufficient usage credit for review.
+- Supply a separate disposable account for deletion testing. Keep the primary review account available throughout review.
+- Do not commit passwords, tokens, recovery codes, or review-account credentials to the repository or public release notes.
+- Test sign-in, chat, voice, account settings, sign-out, and sign-in again on the selected TestFlight build. Apple, Google, and GitHub sign-in depend on their production OAuth configuration.
 
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 应用内提供账号删除 | ✅ | Account & Security → Danger Zone → Delete Account，二次确认，调用 `DELETE /users/me` |
-| 删除后数据清除说明 | ✅ | 隐私政策 §8、§9 与条款 §9 写明永久删除、不可恢复 |
-| 删除为真删除、重登为新账号 | ✅ | 后端硬删除 User 文档；同一社交身份再登录会**重新注册**为全新账号（新 UUID），旧数据不恢复，符合 5.1.1 |
-| 审核员测试账号 | ⚠️ | 若审核员删除你提供的测试账号，同一身份再登录会变成新账号。建议在「审核备注」中写：如需测试删除请先新建一个账号再删，或提供两个测试账号 |
+## Check account deletion
 
----
+Deletion starts at **Settings → Delete Account**. The confirmation sheet discloses managed Machine removal, paused workspace disks, cleanup timing, and retained records. The request sends the current account-deletion policy header to `DELETE /users/me` only after explicit confirmation.
 
-## 2. 隐私与合规
+The app signs out after deletion is accepted. Cleanup and provider erasure may continue afterward. Do not describe queue acceptance as verified immediate erasure, and do not promise that signing in with the same external identity always creates a new account immediately.
 
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 隐私政策 | ✅ | 应用内完整 Privacy Policy 页面，登录前可点「Privacy」进入 |
-| 服务条款 | ✅ | 应用内完整 Terms of Service，登录前可点「Terms」进入 |
-| 登录前可见条款/隐私 | ✅ | Auth 页底部 "By continuing, you agree to Terms and Privacy" 可点 |
-| 儿童隐私 | ✅ | 隐私政策 §11 声明不面向 16 岁以下 |
-| 导出合规 | ✅ | `ITSAppUsesNonExemptEncryption` = false（Info.plist） |
-| 隐私清单 PrivacyInfo.xcprivacy | ✅ | 已配置 API 原因码；NSPrivacyTracking=false；NSPrivacyCollectedDataTypes 当前为空 |
-| App Store Connect 隐私营养标签 | ⚠️ | 需与隐私政策一致：若在 Connect 中声明「收集的数据类型」，请与 App 内隐私政策（邮箱、设备标识、使用数据等）一致；不追踪已正确 |
+The account-deletion tests exercise the actual screen and HTTP helper, including the confirmation disclosures, cancellation, and policy header. A destructive end-to-end check requires the disposable account.
 
----
+## Match privacy disclosures to the current app
 
-## 3. Sign in with Apple（Guideline 4.8）
+| Area | Current behavior to account for |
+| --- | --- |
+| Microphone and speech recognition | Live voice and dictation request access when the person uses those features. Audio, transcripts, and voice-session metadata are covered by the privacy policy. |
+| Camera and photos | QR scanning, taking chat photos, and selecting attachments use their respective permissions. |
+| Account and AI data | Account identifiers, conversations, attachments, approvals, security records, and connected-provider data must be represented accurately in App Store Connect. |
+| Optional product analytics | Account permission defaults off. Account and device controls are separate. Analytics does not automatically capture screens, session replay, messages, or form contents. Essential operational records are separate. |
+| Privacy manifest | `NSPrivacyTracking=false` and API-reason entries do not by themselves prove that no server-side data is collected. An empty collected-data array is not a substitute for App Store privacy labels. |
+| Age | The published terms require users to be at least 18. Complete Apple's current age-rating questionnaire from the actual content and capabilities; do not infer an Apple rating from that terms clause. |
 
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 提供 Apple 登录 | ✅ | Auth 页有 "Continue with Apple"（与 Google/GitHub 并列） |
-| 实现方式 | ✅ | 通过后端 OAuth + `WebBrowser.openAuthSessionAsync`，无需原生 entitlement |
-| 条款/隐私中说明 | ✅ | Terms §4、Privacy §4 明确写清 Sign in with Apple 数据使用 |
+Use [the privacy policy source](../../frontend/public/legal/privacy.md) and [terms source](../../frontend/public/legal/terms.md) when checking declarations. Verify the public Privacy Policy and Support URLs from an unauthenticated browser before submission. Command-line requests to the candidate public domains returned HTTP 403 during preparation; public-browser accessibility remains to be checked.
 
----
+## Check the selected binary and screenshots
 
-## 4. 权限与能力
+- Select version **1.0.4**, build **58**, bundle **fun.chrono-ai.nyxid** in App Store Connect after processing completes.
+- The native deployment target is iOS **15.1**. Confirm the processed binary's supported devices and OS version.
+- Verify both embedded API domain sets remain reachable during review. See [domain migration](DOMAIN_MIGRATION.md).
+- Verify real-device microphone input, audible speaker output, call end/restart, and permission-denial recovery. Simulator route inspection cannot establish physical-device loudness.
+- Use actual app screenshots. Remove personal data, debug menus, and development error overlays. Build 58's source manifest identifies the binary's exact inputs; the PR includes a later merge from main.
+- Provide the required iPhone display-size screenshots. This is a universal app, so provide a genuine 13-inch iPad screenshot as well. Do not stretch an iPhone capture to impersonate an iPad.
+- Upload opaque PNG or JPEG files at dimensions accepted by [Apple's screenshot specification](https://developer.apple.com/help/app-store-connect/reference/screenshot-specifications).
+- Review the existing encryption declaration against the distributed app. The current native configuration declares `ITSAppUsesNonExemptEncryption=false`.
 
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 推送通知 | ✅ | UIBackgroundModes remote-notification；expo-notifications 请求权限，无额外 plist 文案要求 |
-| 相机/相册/麦克风/定位 | ✅ | 未使用，无需声明 |
-| ATT（跟踪） | ✅ | 未做跨应用跟踪，隐私政策 §10 已说明，NSPrivacyTracking=false |
-| 网络 | ✅ | NSAllowsArbitraryLoads=false，NSAllowsLocalNetworking=true（开发/本地调试用） |
+## Check review notes and content controls
 
----
+Completed assistant replies expose a Report control. Support is available under **Settings → Contact support**, using `contact@chrono-ai.fun`. Describe the actual enabled group or crew access model; do not imply unrestricted public chat.
 
-## 5. 技术配置
+Use [the build 58 review notes](../release/1.0.4-58/app-review-notes.txt). Keep credentials in App Store Connect's private fields. Complete all account and production-service checks before marking review access ready.
 
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 内置 `PROD_API_BASE_URL` 与可选的 `PROD_NEW_API_BASE_URL`（`https://api.nyxid.ai/api/v1`），启动时由 NyxID 管理后台功能开关 `mobile:new-domains` 选择。见 [域名迁移](DOMAIN_MIGRATION.md)，两个 API 域名在审核期间都须可访问 |
-| URL Scheme | ✅ | `nyxid`，用于 OAuth 回调 |
-| Associated Domains | ✅ | 根据所选 API / Universal Link 域名生成；新域名模式包含 `applinks:api.nyxid.ai`，保留已有 Universal Link 域名与路径（构建时 prebuild 更新 entitlements） |
-| 最低系统版本 | ✅ | LSMinimumSystemVersion 12.0 |
-
----
-
-## 6. 常见拒审点自检
-
-| 风险 | 建议 |
-|------|------|
-| 审核员删掉唯一测试账号 | 在审核备注中说明：请使用提供的账号浏览主要功能；若要测试删除，请先新建账号再删，或注明已提供第二个测试账号 |
-| 审核时 API 不可用 | 确保构建所选 API 域名在审核期间稳定、无 IP 限制或需 VPN；旧版本使用期间保留旧域名 |
-| 隐私营养标签与 App 不一致 | 在 App Store Connect → App 隐私 中如实填写收集的数据类型（邮箱、设备 ID、使用数据等），与隐私政策一致 |
-| AI 生成内容（1.2） | 每条已完成的 Agent 回复下方有「举报」旗标：选择原因后以 `Report: <原因>` 的差评写入现有回复反馈，管理员在 `/admin/assistant/feedback`（筛选差评）处理。群聊仅限邀请加入，不提供公开或匿名聊天 |
-| 联系方式（1.2） | 设置页底部「Contact support」打开发往 `contact@chrono-ai.fun` 的邮件，与法律页面公布的地址一致；App Store Connect 的 Support URL 同样须填写 |
-| 年龄分级 | 若未设 17+，建议与隐私政策「不面向 16 岁以下」一致，选 4+ 或 12+ 并确认无违规内容 |
-
----
-
-## 7. 建议的审核备注（App Review Information）
-
-可复制到 App Store Connect「备注」中，减少误删测试账号导致的拒审：
-
-```
-Test account: [你的测试邮箱/说明]
-Password: [若为邮箱密码登录则提供；当前为社交登录则写：Please use "Continue with Google/GitHub/Apple" to sign in.]
-
-Account deletion: Available under Account tab → Account & Security → Danger Zone → Delete Account. Deletion is permanent; if you sign in again with the same provider (Apple/Google/GitHub), a new account will be created and previous data will not be restored. To test deletion, please create a second account first, or use the provided account only for feature review.
-
-AI responses: NyxBot is a utility assistant for managing the user's own NyxID account and connected services. Every completed agent response has a flag button below it to report offensive, harmful or inaccurate content; reports reach the NyxID team for review. Group chats are invite-only (no public or anonymous chat). Support: Settings → Contact support (contact@chrono-ai.fun).
-```
-
----
-
-## 8. 结论
-
-- **已满足**：账号删除、条款/隐私、Sign in with Apple、推送、导出合规、隐私清单、生产 API 配置。
-- **提审前务必确认**：审核备注中说明测试账号与删除测试方式；App Store Connect 中隐私营养标签与隐私政策一致；构建所选 API 域名在审核期间可访问。
-
-完成上述 ⚠️ 项后，按当前实现无明显硬性拒审风险；具体通过仍以 Apple 当次审核为准。
+The listing text and local screenshots can be prepared without uploading metadata or submitting the app. Final approval depends on Apple's review.
