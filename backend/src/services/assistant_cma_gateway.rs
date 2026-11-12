@@ -555,7 +555,7 @@ impl<'a> CatalogCmaGateway<'a> {
         {
             return Err(CmaGatewayError::Conflict.into());
         }
-        authorize_native_route(&service, &creation.method, &creation.path)?;
+        authorize_native_route(service, &creation.method, &creation.path)?;
         let caller = registry::DispatchCaller {
             actor_user_id: owner_id,
             resource_owner_id: owner_id,
@@ -954,7 +954,7 @@ impl<'a> CatalogCmaGateway<'a> {
             {
                 return Err(CmaGatewayError::Forbidden);
             }
-            authorize_native_route(&service, method, path)?;
+            authorize_native_route(service, method, path)?;
             super::assistant_cma_tools::watch_scope(
                 &self.db,
                 nodes,
