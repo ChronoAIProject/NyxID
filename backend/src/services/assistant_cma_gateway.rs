@@ -1555,8 +1555,9 @@ mod native_policy_tests {
             "cma",
             &endpoint,
             Some(&catalog.id),
-            Some(&key),
+            None,
         );
+        service.api_key_id = Some(key);
         service.auth_method = if exchange { "token_exchange" } else { "header" }.into();
         service.auth_key_name = "x-cma-secret".into();
         f.state

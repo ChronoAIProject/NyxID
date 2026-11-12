@@ -1,14 +1,15 @@
 //! Service-independent checks before request rewriting and final HTTP dispatch.
 use crate::errors::AppResult;
 
-/// Borrowed caller inputs before authentication or delegated credential rewriting.
+/// Borrowed caller method/path/query/body before credential rewriting, together
+/// with the effective headers from the shared header builder.
 /// No Debug: bodies and headers can contain private request material.
 pub(crate) struct OriginalRequest<'a> {
     pub(crate) method: &'a str,
     pub(crate) path: &'a str,
     pub(crate) query: Option<&'a str>,
     pub(crate) body: &'a [u8],
-    pub(crate) headers: &'a reqwest::header::HeaderMap,
+    pub(crate) headers: &'a [(String, String)],
 }
 
 /// Protected requests must be buffered so the guard can bind their exact bytes.

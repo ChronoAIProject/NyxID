@@ -1087,10 +1087,14 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit<'
         {
             return Err(drift());
         }
-        let mut keys = request.headers.get_all("idempotency-key").iter();
+        let mut keys = request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("idempotency-key"))
+            .map(|(_, value)| value.as_str());
         let matches = match (self.key.as_deref(), keys.next()) {
             (None, None) => true,
-            (Some(expected), Some(actual)) => actual.to_str().ok() == Some(expected),
+            (Some(expected), Some(actual)) => actual == expected,
             _ => false,
         };
         if !matches || keys.next().is_some() {

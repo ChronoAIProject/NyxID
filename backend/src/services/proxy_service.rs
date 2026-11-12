@@ -4626,17 +4626,6 @@ async fn forward_request_with_egress_guard_inner(
             AppError::Forbidden("Protected services require a buffered HTTP request".into()),
         ));
     }
-    if let (Some(guard), ProxyBody::Buffered(bytes)) = (dispatch_guard, &body) {
-        guard
-            .validate_original_request(super::service_dispatch_guard::OriginalRequest {
-                method: method.as_str(),
-                path,
-                query,
-                body: bytes.as_deref().unwrap_or_default(),
-                headers: &headers,
-            })
-            .map_err(ForwardRequestError::PreDispatchRejected)?;
-    }
     if let Some(permit) = &target.execution_permission {
         let ProxyBody::Buffered(bytes) = &body else {
             return Err(ForwardRequestError::PreDispatchRejected(
@@ -4742,6 +4731,18 @@ async fn forward_request_with_egress_guard_inner(
         &prepared.delegated_headers,
         &extra_outbound_headers,
     );
+
+    if let (Some(guard), ProxyBody::Buffered(bytes)) = (dispatch_guard, &body) {
+        guard
+            .validate_original_request(super::service_dispatch_guard::OriginalRequest {
+                method: method.as_str(),
+                path,
+                query,
+                body: bytes.as_deref().unwrap_or_default(),
+                headers: &outbound_headers,
+            })
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
 
     crate::turn_trace::inject_secret_egress(&mut outbound_headers);
 

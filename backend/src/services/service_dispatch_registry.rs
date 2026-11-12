@@ -338,7 +338,14 @@ mod tests {
             assert_eq!(request.path, "/operation");
             assert_eq!(request.query, Some("selected=1"));
             assert_eq!(request.body, br#"{ "action": "original" }"#);
-            assert_eq!(request.headers["idempotency-key"], "original-key");
+            assert_eq!(
+                request
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("idempotency-key"))
+                    .map(|(_, value)| value.as_str()),
+                Some("original-key")
+            );
             if self.reject_original {
                 return Err(AppError::Forbidden("original request refused".into()));
             }
@@ -414,6 +421,83 @@ mod tests {
                 vec!["original", "before", "response"]
             );
             assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn service_dispatch_binds_effective_headers_with_original_body_and_query() {
+        for method in ["body", "query"] {
+            for source in ["default", "delegated", "server"] {
+                let server = MockServer::start().await;
+                Mock::given(path("/operation"))
+                    .respond_with(ResponseTemplate::new(201))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let mut target = target(server.uri());
+                target.auth_method = method.into();
+                target.auth_key_name = "api_key".into();
+                target.credential = "test-secret".to_owned().into();
+                let mut delegated = vec![];
+                let mut extra = vec![];
+                match source {
+                    "default" => target.user_service_default_headers.push(
+                        crate::models::default_request_header::ResolvedDefaultRequestHeader {
+                            name: "Idempotency-Key".into(),
+                            value: "original-key".to_owned().into(),
+                            overridable: false,
+                            sensitive: false,
+                        },
+                    ),
+                    "delegated" => {
+                        delegated.push(crate::services::delegation_service::DelegatedCredential {
+                            provider_slug: "endpoint-header".into(),
+                            injection_method: "header".into(),
+                            injection_key: "Idempotency-Key".into(),
+                            credential: "original-key".to_owned().into(),
+                        })
+                    }
+                    _ => extra.push(("Idempotency-Key".into(), "original-key".into())),
+                }
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let caller = caller();
+                let admission = test_admission(
+                    &target,
+                    &caller,
+                    Box::new(AuthenticationGuard {
+                        method,
+                        calls: calls.clone(),
+                        reject_original: false,
+                    }),
+                );
+                proxy_service::forward_request_with_resource_proof(
+                    &reqwest::Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    "/operation",
+                    Some("selected=1"),
+                    reqwest::header::HeaderMap::new(),
+                    ProxyBody::Buffered(Some(Bytes::from_static(br#"{ "action": "original" }"#))),
+                    vec![],
+                    delegated,
+                    None,
+                    &TokenExchangeCache::new(),
+                    &CloudResponseCache::new(0),
+                    extra,
+                    crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+                    None,
+                    None,
+                    Some(&admission),
+                    Some(&caller),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    *calls.lock().unwrap(),
+                    vec!["original", "before", "response"]
+                );
+                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            }
         }
     }
 

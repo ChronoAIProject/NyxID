@@ -952,6 +952,11 @@ async fn connection_retargeting_and_expired_recovery_remain_closed() {
                 );
             }
         }
+        let headers: Vec<_> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value.to_str().unwrap().to_owned()))
+            .collect();
         assert!(
             permit
                 .validate_original_request(
@@ -963,7 +968,7 @@ async fn connection_retargeting_and_expired_recovery_remain_closed() {
                             .body()
                             .and_then(reqwest::Body::as_bytes)
                             .unwrap_or_default(),
-                        headers: request.headers(),
+                        headers: &headers,
                     }
                 )
                 .is_err(),
@@ -1029,9 +1034,7 @@ async fn gateway_json_and_sse_use_connection_b_authentication() {
     Mock::given(method("GET"))
         .and(path("/api/v2/agents/agent_1/events"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("Content-Type", "text/event-stream")
-                .set_body_string(": keepalive\n\n"),
+            ResponseTemplate::new(200).set_body_raw(": keepalive\n\n", "text/event-stream"),
         )
         .mount(&f.server)
         .await;
@@ -1209,10 +1212,11 @@ async fn gateway_query_auth_preserves_the_admitted_request() {
 async fn common_body_auth_preserves_original_creation_and_injects_the_secret() {
     let f = Fixture::new().await;
     f.set_auth("body", "connection-b-secret").await;
+    f.observations().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/sandboxes"))
         .respond_with(
-            ResponseTemplate::new(202).set_body_json(serde_json::json!({"operation_id":"op_auth"})),
+            ResponseTemplate::new(201).set_body_json(serde_json::json!({"id":"sandbox_1"})),
         )
         .mount(&f.server)
         .await;
@@ -1283,12 +1287,23 @@ async fn common_body_auth_preserves_original_creation_and_injects_the_secret() {
     )
     .await
     .unwrap();
-    let requests = f.server.received_requests().await.unwrap();
+    let requests: Vec<_> = f
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.method == "POST")
+        .collect();
     assert_eq!(requests.len(), 1);
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["x-cma-secret"], "connection-b-secret");
     assert_eq!(body["machine_included"], false);
     assert_eq!(requests[0].headers["idempotency-key"], "body-auth-key");
+    assert_eq!(
+        f.creation_for_key("body-auth-key").await.submission_state,
+        "confirmed"
+    );
     assert!(
         f.catalog_server
             .received_requests()
@@ -1303,14 +1318,14 @@ async fn common_body_auth_preserves_original_creation_and_injects_the_secret() {
 async fn common_query_auth_creation_uses_connection_b_and_retains_original_body() {
     let f = Fixture::new().await;
     f.set_auth("query", "connection-b-secret").await;
+    f.observations().await;
     let target = f.resolved_target().await;
     let body = br#"{ "machine_included": false }"#;
     let key = "query-auth-creation";
     Mock::given(method("POST"))
         .and(path("/api/v1/sandboxes"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_json(serde_json::json!({"operation_id":"op_query"})),
+            ResponseTemplate::new(201).set_body_json(serde_json::json!({"id":"sandbox_1"})),
         )
         .expect(1)
         .mount(&f.server)
@@ -1324,7 +1339,14 @@ async fn common_query_auth_creation_uses_connection_b_and_retains_original_body(
     )
     .await
     .unwrap();
-    let sent = f.server.received_requests().await.unwrap();
+    let sent: Vec<_> = f
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.method == "POST")
+        .collect();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].body, body);
     assert_eq!(sent[0].headers["idempotency-key"], key);
@@ -1334,6 +1356,7 @@ async fn common_query_auth_creation_uses_connection_b_and_retains_original_body(
     );
     let after = f.creation_for_key(key).await;
     assert_eq!(after.request_hash, before.request_hash);
+    assert_eq!(after.submission_state, "confirmed");
     assert!(after.first_dispatched_at.is_some());
     assert!(
         f.catalog_server
@@ -1655,17 +1678,25 @@ async fn revoked_or_missing_original_connection_does_not_fall_back_to_catalog() 
     use crate::services::assistant_cma_gateway::CmaGateway;
     let f = Fixture::new().await;
     let gateway = f.gateway();
-    for (field, value) in [
-        ("is_active", bson::Bson::Boolean(false)),
-        ("deleted_at", bson::Bson::DateTime(bson::DateTime::now())),
-        ("user_id", bson::Bson::String("another-owner".into())),
+    for (field, changes) in [
+        ("is_active", doc! {"is_active":false}),
+        // Deletion retains a disabled tombstone, as user_endpoint_service does.
+        (
+            "deleted_at",
+            doc! {"deleted_at":bson::DateTime::now(),"is_active":false},
+        ),
+        ("user_id", doc! {"user_id":"another-owner"}),
     ] {
         f.db.collection::<bson::Document>("user_services")
-            .update_one(doc! {"_id":&f.user_service_id}, doc! {"$set":{field:value}})
+            .update_one(doc! {"_id":&f.user_service_id}, doc! {"$set":changes})
             .await
             .unwrap();
         assert!(
             gateway.get_agent(&f.owner, "agent_1").await.is_err(),
+            "{field}"
+        );
+        assert!(
+            f.server.received_requests().await.unwrap().is_empty(),
             "{field}"
         );
         f.db.collection::<bson::Document>("user_services")
@@ -1814,6 +1845,7 @@ async fn rest_and_mcp_execution_resolve_connection_b_with_different_catalog_iden
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/v1/proxy/s/cma-connection-b/api/v1/agents")
+        .extension(BillingRoutePolicy::Metered(BillingIngress::Proxy))
         .body(axum::body::Body::empty())
         .unwrap();
     let response = crate::handlers::proxy::proxy_request_by_slug_inner(

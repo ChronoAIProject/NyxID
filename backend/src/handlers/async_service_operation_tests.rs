@@ -367,9 +367,8 @@ async fn cma_fixture() -> AsyncFixture {
         )
         .await
         .unwrap();
-    // The connected alias must resolve to exactly the catalog's execution
-    // identity. A custom connection with unsigned or divergent settings is
-    // correctly refused by CMA admission before any upstream request.
+    // This fixture's mock provider verifies the connection's signed identity.
+    // The connection remains the execution authority for the catalog alias.
     db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
         .update_one(
             doc! {"_id":&a.service},
@@ -883,6 +882,18 @@ async fn cma_native_write_tools_create_bound_cards_without_remote_mutation() {
 
     let a = cma_existing_agent_fixture().await;
     let db = &a.f.state.db;
+    // The native tool selects the Agent's retained original connection.
+    crate::services::assistant_cma_agent_service::register_live(
+        db,
+        &crate::services::assistant_cma_gateway::CatalogCmaGateway::for_user_service(
+            &a.f.state, &a.service,
+        ),
+        &a.f.owner,
+        "agt_coffee",
+        None,
+    )
+    .await
+    .unwrap();
     flags::set_platform_override(
         db,
         flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
@@ -1504,19 +1515,23 @@ async fn lost_creation_fixture(path: &str) -> (AsyncFixture, wiremock::MockServe
         )
         .await
         .unwrap();
-        let target = proxy_service::resolve_proxy_target(
+        let target = proxy_service::resolve_proxy_target_by_user_service_id(
             db,
             &a.f.state.encryption_keys,
             &a.f.owner,
-            &service.id,
-            a.f.state.platform_user_rate_limit,
+            &a.service,
+            None,
+            Some(&service.id),
+            proxy_service::ProxyExecutionContext::new(None, a.f.state.platform_user_rate_limit),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .unwrap()
+        .target;
         let caller = registry::DispatchCaller {
             actor_user_id: &a.f.owner,
             resource_owner_id: &a.f.owner,
-            user_service_id: None,
+            user_service_id: Some(&a.service),
         };
         let admission = registry::admit(
             db,
@@ -2010,19 +2025,23 @@ async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence()
     let service = catalog_service::get_downstream_service_by_slug(db, "cma", &a.f.owner)
         .await
         .unwrap();
-    let target = proxy_service::resolve_proxy_target(
+    let target = proxy_service::resolve_proxy_target_by_user_service_id(
         db,
         &a.f.state.encryption_keys,
         &a.f.owner,
-        &service.id,
-        a.f.state.platform_user_rate_limit,
+        &a.service,
+        None,
+        Some(&service.id),
+        proxy_service::ProxyExecutionContext::new(None, a.f.state.platform_user_rate_limit),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .target;
     let caller = registry::DispatchCaller {
         actor_user_id: &a.f.owner,
         resource_owner_id: &a.f.owner,
-        user_service_id: None,
+        user_service_id: Some(&a.service),
     };
     let original = registry::admit(
         db,
