@@ -91,15 +91,19 @@ async fn assert_reason(u: &BaseFixture, code: &str, service_event: bool, outcome
     }
     for value in &tool {
         let text = value.to_string();
-        for secret in [
+        // Fixture markers only. The index, not the marker, goes in the message.
+        for (index, marker) in [
             "Receipt",
             "Card Number",
             "secret-do-not-audit",
             "provider-private-prose",
             "private-receipt.pdf",
             "tenant-test-token",
-        ] {
-            assert!(!text.contains(secret), "diagnostic leaked {secret}");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!text.contains(marker), "diagnostic leaked marker #{index}");
         }
     }
 }
