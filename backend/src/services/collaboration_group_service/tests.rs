@@ -143,6 +143,69 @@ async fn admit_test(
 }
 
 #[tokio::test]
+async fn activated_collaboration_create_and_membership_serve_overlap_and_reject_unsupported() {
+    use svc::security_readiness_service as readiness;
+    let (f, agent, _) = setup("collaboration_roster_overlap").await;
+    let sibling = readiness::overlapping_test_replica(&f.state.db).await;
+    let group = create(
+        &f.state.db,
+        &f.admin,
+        "Overlap",
+        std::slice::from_ref(&agent.id),
+    )
+    .await
+    .unwrap();
+    let revision = marker(&group).unwrap().membership_revision;
+    let mutation = membership::apply(
+        &f.state.db,
+        &f.admin,
+        &group.id,
+        revision,
+        Change::Invite {
+            intended_user_id: None,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let invite = mutation.invite.unwrap();
+    let joined = membership::accept_invite(&f.state.db, &f.member, &invite.token, true)
+        .await
+        .unwrap();
+    assert!(marker(&joined).unwrap().membership_revision > revision);
+    readiness::remove_test_replica_capability(&f.state.db, &sibling, READINESS).await;
+    assert!(matches!(
+        create(
+            &f.state.db,
+            &f.admin,
+            "Blocked",
+            std::slice::from_ref(&agent.id)
+        )
+        .await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(matches!(
+        membership::apply(
+            &f.state.db,
+            &f.admin,
+            &group.id,
+            marker(&joined).unwrap().membership_revision,
+            Change::Invite {
+                intended_user_id: None
+            },
+            true
+        )
+        .await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(matches!(
+        membership::accept_invite(&f.state.db, &f.outsider, &invite.token, true).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn collaboration_reader_first_classification_and_readiness_preserve_legacy() {
     let (f, agent, group) = setup("collaboration_readers").await;
     use svc::assistant_group_kind::{GroupKind, classify};

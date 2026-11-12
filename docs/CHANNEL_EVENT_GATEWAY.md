@@ -794,8 +794,10 @@ default-only routing, a successful direct reply, or `pending_discovery` alone
 never acknowledges the requested native policy.
 
 Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
-native enrollment. The existing roster/drained check refuses selection during a
-mixed rollout. A persisted `preparing` phase permits binding setup but refuses
+its first clean, drained activation. Native selection uses serving readiness:
+recorded activation tolerates supported roster overlaps, while an unsupported
+or undrained live generation still refuses selection. A persisted `preparing`
+phase permits binding setup but refuses
 provider execution with CMA's exact pre-admission `429` JSON refusal
 `{"error":{"type":"invalid_request_error","code":"conversation_not_ready"}}`
 until the transaction commits
@@ -1410,8 +1412,9 @@ Telegram has no explicit stop-typing API; its last indicator expires naturally.
 
 Reader rollout is fenced by the existing security-readiness mechanism's
 `nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
-relay events through the legacy path until every declared replica can serve
-these responses. This uses the existing roster and drain configuration, with
+relay events through the legacy path until the capability has clean activation
+and serving readiness. Recorded active capabilities tolerate roster warnings
+while every live generation supports them, including native transport selection. This uses the existing roster and drain configuration, with
 no new environment variables. The separately negotiated Lark/Feishu followed
 thread path retains its existing stream/late-send routing contract so its
 resolved `thread_reply` choice cannot change after the first durable frame.

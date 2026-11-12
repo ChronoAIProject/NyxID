@@ -1980,7 +1980,9 @@ Rollout requires every executing replica to advertise
 `nyxbot:org-guest-grants-v1` via the existing readiness roster/drain system.
 Before ready, old and new binaries enforce the old cap/list; adoption is refused.
 Ready removes caps for everyone while preserving legacy service restrictions.
-If readiness is lost, retained legacy restrictions apply again. To roll back,
+Recorded active Grants execution tolerates roster warnings while every live
+generation supports it, including new binding/adoption.
+If serving readiness is lost to a hard blocker, retained legacy restrictions apply again. To roll back,
 disable guests and drain/settle on upgraded binaries before downgrading. Prior
 cap-free spending may exceed the retained old cap; do not erase it to restore
 admission. Review old lists/digests/caps before re-enabling on an old binary.

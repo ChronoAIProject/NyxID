@@ -800,7 +800,8 @@ environment variable is needed. Deploy with ingress off. Activation uses the
 existing security rollout readiness roster and drain assertion: all serving
 replicas must advertise `channel:discord-gateway`, since old transport writers
 do not wait for socket shutdown before remote setup. Then enable a test owner.
-Loss of readiness stops local ingress at renewal.
+Acquisition and renewal use serving readiness: recorded active capabilities
+continue through supported roster overlaps; hard readiness loss stops local ingress.
 Interaction-only bots require no change while the ingress flag stays off.
 
 1. In Developer Portal > Bot > Privileged Gateway Intents, enable **Message
@@ -2761,7 +2762,7 @@ same live lease and release-fence checks.
 Unloaded health facts retain their legacy recommendation: intake advice requires
 `discord::load`. The loader applies the same owner flag precedence as ingress;
 when `channel:discord-gateway` is off, direct bots report `interactions_only`
-with no intake error. Flag-on with unavailable fleet readiness is a real block
+with no intake error. Flag-on with unavailable serving readiness is a real block (activated roster warnings alone do not block socket acquisition or renewal)
 (`readiness_unavailable`). Loading uses at most seven batched reads independent
 of bot count: channels, releases and leases; two flag-resolution reads; and two
 fleet-readiness reads. Native-only lists skip relay flag/readiness reads.

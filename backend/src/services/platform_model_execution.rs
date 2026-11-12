@@ -69,7 +69,8 @@ impl Plan {
     ) -> AppResult<Self> {
         registry::require_execution_ready(db).await?;
         if request.has_images() {
-            crate::services::security_readiness_service::require(db, images::READINESS).await?;
+            crate::services::security_readiness_service::require_serving(db, images::READINESS)
+                .await?;
         }
         let metadata = registry::resolve_route_metadata(db, person, public_id, scope).await?;
         let (model, routing) = metadata.into_execution_parts();
@@ -94,8 +95,11 @@ impl Plan {
         )
         .map_err(billing::model_tariffs::unavailable)?;
         if certification::family_contract(&tariff.tariff().contract) {
-            crate::services::security_readiness_service::require(db, certification::READINESS)
-                .await?;
+            crate::services::security_readiness_service::require_serving(
+                db,
+                certification::READINESS,
+            )
+            .await?;
         }
         let mut routes: Vec<_> = routing
             .routes
@@ -279,12 +283,16 @@ pub(crate) async fn dispatch(
     request: &Request,
 ) -> AppResult<Accepted> {
     if certification::family_contract(&plan.tariff.tariff().contract) {
-        crate::services::security_readiness_service::require(ctx.db, certification::READINESS)
-            .await?;
+        crate::services::security_readiness_service::require_serving(
+            ctx.db,
+            certification::READINESS,
+        )
+        .await?;
     }
     let deadline = Instant::now() + DEADLINE;
     if request.has_images() {
-        crate::services::security_readiness_service::require(ctx.db, images::READINESS).await?;
+        crate::services::security_readiness_service::require_serving(ctx.db, images::READINESS)
+            .await?;
     }
     let work = async {
         let mut attempts = 0;

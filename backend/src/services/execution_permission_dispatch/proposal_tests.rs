@@ -154,6 +154,37 @@ async fn count(f: &Fixture, collection: &str) -> u64 {
 }
 
 #[tokio::test]
+async fn activated_proposal_create_and_decide_serve_overlap_and_reject_unsupported() {
+    use crate::services::security_readiness_service as readiness;
+    let (f, _) = assistant("proposal_roster_overlap").await;
+    let sibling = readiness::overlapping_test_replica(&f.state.db).await;
+    let first = write_call(&f).await;
+    assert_ne!(first.0, StatusCode::SERVICE_UNAVAILABLE, "{}", first.1);
+    let request = proposal(&f).await;
+    let input = decision(&request, "persistent_private_conversations");
+    let approved = proposals::decide(&f.state, &f.owner, &request.id, &input)
+        .await
+        .unwrap();
+    assert_eq!(approved.status, "approved");
+    assert_eq!(count(&f, "approval_grants").await, 1);
+    readiness::remove_test_replica_capability(&f.state.db, &sibling, proposals::READINESS).await;
+    assert!(matches!(
+        proposals::decide(&f.state, &f.owner, &request.id, &input).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+    let (f, _) = assistant("proposal_unsupported_overlap").await;
+    let sibling = readiness::overlapping_test_replica(&f.state.db).await;
+    readiness::remove_test_replica_capability(&f.state.db, &sibling, proposals::READINESS).await;
+    let refused = write_call(&f).await;
+    assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE, "{}", refused.1);
+    assert_eq!(count(&f, "approval_requests").await, 0);
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exact() {
     for global in [false, true] {
         let (f, row) = assistant_for_cohort("execution_proposal_proxy", global).await;
