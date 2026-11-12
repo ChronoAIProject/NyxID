@@ -414,5 +414,10 @@
   "Confirm your verification before creating a revision": "請先確認已完成查證，再建立修訂版",
   "Enter a verification reference": "請輸入查證參考資料",
   "Verification source must be at most 1000 UTF-8 bytes with no control characters": "查證來源不得超過 1000 個 UTF-8 位元組，且不得包含控制字元",
-  "Platform models are read-only for this account.": "此帳號的平台模型為唯讀。"
+  "Platform models are read-only for this account.": "此帳號的平台模型為唯讀。",
+  "Could not load connection options. Try again.": "無法載入連結選項，請重試。",
+  "NyxID is temporarily unavailable. Try again in a moment.": "NyxID 暫時無法使用。請稍後再試。",
+  "Too many requests. Please wait a moment and try again.": "請求過於頻繁。請稍候再試。",
+  "Your session has expired. Please sign in again.": "您的工作階段已過期。請重新登入。",
+  "NyxID couldn't complete this request. Please try again.": "NyxID 無法完成此請求。請再試一次。"
 }

@@ -1881,15 +1881,24 @@ Private DM context, tool traces and another actor's approvals are never public.
 Queued questions enter that transcript atomically with source acceptance; queue
 instructions and unfinished/failed reply drafts remain private execution state.
 
-Guests are off by default. Only an admin can enable them, choose delegated HTTP
-services, and accept a positive daily exact-credit cap (1 credit suggested).
-Delegation intersects the specialist's grants, guest access levels and operation
-scopes; no services means model-only chat. The org wallet pays all guest model
-and tool usage, including platform keys. It must already be provisioned with a
-subscription. Each sender has a six-request/minute limit. Budget/rate failures
-produce a short refusal; verified members retain their own existing access and
-billing rules. Settings show today's spend/reservations and wallet readiness.
-Guest execution cannot use account tools, machines, saved logins or approvals.
+Guests are off by default; only an organization admin can enable them. After
+`nyxbot:org-guest-grants-v1` fleet readiness, a genuinely new binding follows the
+specialist's **Grants** immediately when enabled, including default `use` for a
+granted service without a saved guest override. The page states this before the
+switch is flipped. Active org-owned HTTP services must be granted to the specialist
+and pass the existing guest levels, guest operation selections and ordinary
+operation scopes. MCP uses `filter_guest_catalog` / `guest_service_refusal`;
+HTTP uses `check_non_mcp_context`. No second operation classifier is introduced.
+Empty guest operation selections still withhold a service. Machines, node
+credentials, account tools, saved logins and approvals remain unavailable to guests.
+
+Existing bindings keep their exact saved delegated-service/digest restriction,
+including empty-list model-only chat, until the explicit Grants handoff below.
+Their **daily cap is removed as soon as readiness is complete**, even before that
+handoff. No daily cap is required or enforced in ready mode. The org wallet pays
+all guest model and tool usage, with platform keys or BYOK, and must retain its
+subscription and funding/suspension checks. Each sender still has a six-request
+per-minute limit. Verified members retain existing access and billing rules.
 
 Binding metadata lives on `org_specialist`, sender verification in
 `org_channel_sender_links`; optional `org_execution` origins carry the exact
@@ -1912,39 +1921,64 @@ workers, then enable for an admin. Disable and retire before binary downgrade.
 
 ### Guest settings and binding recovery
 
-Every listed binding has a **Who can talk to this bot** section, separate from
-member verification. Failed and pending bindings retain read-only settings and
-a reconnect action. Organization admins enable guests immediately with the
-server default daily budget (one credit); subsequent budget and delegated-service
-edits use reviewed saves and a guest-policy revision fence. Dirty drafts survive
-spend/verification refreshes and conflicts. Personal bindings retain their private
-chat audience selector and link to the specialist's Grants settings.
+Every listed binding has a **Who can talk to this bot** section on web and mobile:
+Allow guests; a localized explanation of guest identity and org payment; named
+service access with a Grants link; and read-only Organization spend today (this
+bot's guest usage, including earlier connections, not all org spending). No budget
+input or separate service checklist remains. Failed/pending bindings stay readable.
+Before fleet readiness the page explains legacy enforcement and does not offer
+new enablement; disabling stays available under the existing management ACL.
 
-Rebuilding the same organization/bot/specialist carries forward the newest
-compatible saved guest policy. Current admin, bot, specialist and service
-authority is rechecked transactionally. Changed or revoked service grants,
-changed guest operation scopes, node credentials and moved services are dropped.
-An incompatible latest predecessor is a boundary; recovery never searches past
-it for an older policy. Invalid budgets or an unavailable/suspended org wallet
-leave restored exposure off. Member verification and conversation lanes are not
-copied. Rebuilds share the original sender-hash namespace only for refusal checks:
-previously verified or erased identities must verify afresh and cannot silently
-become organization-paid guests. The restored policy gets a fresh revision and retains the original
-`continuity_channel_id`, so today's spend and outstanding reservations continue to
-count against the cap, including after late settlement. Policy edits preserve
-that ledger identity. Upgrade all executing replicas before rebuilding bindings
-with preserved guest exposure; older binaries do not read this ledger identity.
+**One-time legacy handoff (option A).** Legacy bot pages show “Existing guest
+limits are kept. Review them in Grants.” The specialist's Grants page offers
+**Use these guest settings for all linked organization bots**. Save Grants edits
+first, then review all affected bot names (including disabled/recoverable bindings)
+and the resulting saved access by service name. Applying is human/admin-only;
+it is never inferred from an ordinary Grants save, an old-client PUT, a tool call,
+or a reconnect. `GET/POST /assistant/nyxagent/agents/{id}/org-guest-grants` binds
+that review to the actor, exact saved grants/scopes and binding set using a keyed
+fingerprint. The transaction fences the agent and live admin membership, rotates
+all guest revisions, retires guest/setup keys/work only, and audits metadata. A
+replay is idempotent; intervening changes require review again. Members are not
+retired. After adoption the notice disappears and ordinary Grants is the sole
+service guest policy. There is no per-service migration state.
 
-NyxBot uses the existing sensitive `update_channel_access` tool with an
-`org_guests` object (`expected_revision` from `list_channel_agents`, optional
-`enabled`, `daily_credits`, `service_ids`). Omitted values retain the saved
-policy; first enable uses the server default budget. The tool shares web
-validation/admin authorization and existing owner confirmations. It refuses
-mixed guest-policy and posting/audience mutations. Enabling guests also opens
-private guest admission; budget-only edits and recovery preserve the saved
-private-chat audience. Group audience settings remain independent. Settings,
-channel listings and chat tool results share the organization/personal billing
-explanation.
+Persisted `GuestPolicy.follows_agent_grants` defaults false; the optional
+`grants_adoption_id` identifies the reviewed transition. Legacy lists, digests,
+cap values and financial rows remain stored. Old readers ignore the additive
+fields and remain restrictive. New bindings start guest-off with the marker only
+when ready; a rebuild is never treated as new consent. The shared validator and
+key synchronization select legacy narrowing or Grants; final proxy/MCP/effect and
+delivery barriers retain live source/revision checks. A legacy digest drift still
+refuses rather than silently updating the frozen authority.
+
+Rebuilding the same org/bot/specialist preserves the adopted/legacy mode and
+original `continuity_channel_id`, with fresh guest identity and live authority
+checks. Legacy invalid/revoked/node/moved services are dropped. The newest
+incompatible predecessor remains a boundary. Missing/suspended wallets disable
+restored exposure; an invalid old cap does so only before readiness. Sender
+verification is not copied; claimed/erased identities cannot become paid guests.
+Exact holds settle once against their original UTC admission day even across
+cutover, revocation or midnight. Removing the cap never removes funding holds.
+
+GET continues returning legacy `delegated_service_ids`, `daily_credits` and
+`default_daily_credits`, adding `grants_ready`, `guest_policy_mode`,
+`legacy_fields_ignored`, `agent_id` and `effective_guest_services`. PUT accepts
+legacy `service_ids` and `daily_credits`; omission preserves them. In ready mode
+they are ignored, never release a frozen restriction and never restore the cap.
+The sensitive NyxBot `update_channel_access.org_guests` tool retains those optional
+arguments for compatibility, now deprecated; new calls need only `enabled` and
+`expected_revision`. It cannot perform the human-only handoff. Enabling also
+opens private guest admission; group audience settings remain independent.
+
+Rollout requires every executing replica to advertise
+`nyxbot:org-guest-grants-v1` via the existing readiness roster/drain system.
+Before ready, old and new binaries enforce the old cap/list; adoption is refused.
+Ready removes caps for everyone while preserving legacy service restrictions.
+If readiness is lost, retained legacy restrictions apply again. To roll back,
+disable guests and drain/settle on upgraded binaries before downgrading. Prior
+cap-free spending may exceed the retained old cap; do not erase it to restore
+admission. Review old lists/digests/caps before re-enabling on an old binary.
 
 ### Finding organization channel member verification (#2242)
 
@@ -1984,3 +2018,17 @@ The existing `update_channel_access` action summary discloses the live customer-
 These are structural facts, not a business-readiness verdict: even a ready model with populated fields may lack correct store information or a successful customer test. Existing guest admission remains authoritative: pending model setup holds eligible source-bound customer work briefly in its encrypted queue (up to the existing 60-second deadline), then resumes with the guest policy or returns the existing safe setup failure. It never grants owner tools or invents an answer while model admission is unavailable. Ready models still require appropriate instructions and testing by the owner.
 
 Old watches omit `source_turn_id`; old servers omit configuration facts, which the UI describes as unchecked. Web and mobile action cards retain their existing summary renderer and one-use decision contract. No schema enum or guest permission changes.
+
+### X direct-message verification diagnostics
+
+A successful owner-link receipt immediately projects the persisted verified
+sender onto the current chat (`owner_chat`, `owner_seen`, and the private title).
+The channel's verified sender IDs remain the execution authority; chat display
+fields grant no permissions. A consumed link-code CAS never reports a second
+successful link. Private X callbacks retain admission dispositions, including
+empty content, policy refusals and processing failures, and project bounded
+outcomes into bot Health. An organization-owned X bot may still reach its linking
+admin's personal specialist while that admin retains live org-admin authority.
+The org owns the bot/route/route key and pays channel usage; this is distinct from
+an enrolled organization-specialist execution lane. See
+[authenticated X outcomes](../CHANNEL_ACTIVITY.md#authenticated-inbound-outcomes-and-x-chat-limits).

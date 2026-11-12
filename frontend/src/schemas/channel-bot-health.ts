@@ -25,6 +25,8 @@ const errorSchema = z.object({
 });
 
 export const channelBotDiagnosticsSchema = z.object({
+  last_inbound_outcome: z.object({ code: z.string(), at: z.string() }).nullish(),
+  inbound_outcomes: z.record(z.string(), z.object({ count: z.number().int().nonnegative(), at: z.string() })).optional(),
   last_callback_challenge_at: z.string().nullish(),
   last_route_at: z.string().nullish(),
   last_route_result: z.string().nullish(),

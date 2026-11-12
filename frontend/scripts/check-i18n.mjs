@@ -93,6 +93,7 @@ const files = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) &&
     !/\.test\.|fixtures?|mock|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
 let checkedKeys = 0;
 const errorHelperFiles = new Set([
+  "src/lib/api-error.ts",
   "src/schemas/auth-device.ts", "src/schemas/agent-key-login.ts",
   "src/lib/assistant/errors.ts", "src/lib/assistant/request-error.ts",
   "src/lib/voice-start-error.ts",

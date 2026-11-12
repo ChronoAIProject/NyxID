@@ -703,7 +703,9 @@ pub async fn admit(
     }
     let operation = classify(method, path, body)?;
     let gateway = CatalogCmaGateway::from_parts(db, jwt, config, &target.service.id);
-    gateway.verify_catalog(owner, &target.service).await?;
+    let deployment_fingerprint = gateway
+        .deployment_fingerprint_for_target(owner, &target.service.id, &target.base_url)
+        .await?;
     if !matches!(operation, Operation::Read) && query.is_some_and(|q| !q.is_empty()) {
         return Err(invalid());
     }
@@ -763,8 +765,7 @@ pub async fn admit(
             || previous.path != path
             || previous.method != method
             || previous.request_hash != sandboxes::prepare_creation_request(body)?.hash
-            || previous.deployment_fingerprint
-                != super::assistant_cma_gateway::catalog_execution_fingerprint(&target.service)
+            || previous.deployment_fingerprint != deployment_fingerprint
         {
             return Err(drift());
         }
@@ -860,9 +861,7 @@ pub async fn admit(
             id,
             user_id: owner.into(),
             cma_service_id: target.service.id.clone(),
-            deployment_fingerprint: super::assistant_cma_gateway::catalog_execution_fingerprint(
-                &target.service,
-            ),
+            deployment_fingerprint,
             method: method.into(),
             path: path.into(),
             idempotency_key: permit.key.clone().ok_or_else(invalid)?,
@@ -962,7 +961,7 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
     /// Called after all header/body rewriting, directly before network dispatch.
     async fn before_send(&self, request: &reqwest::Request) -> AppResult<()> {
         self.gateway
-            .verify_catalog(&self.owner, &self.target)
+            .deployment_fingerprint_for_target(&self.owner, &self.target.id, &self.target.base_url)
             .await?;
         let body = request
             .body()
@@ -1411,6 +1410,11 @@ pub async fn recover_owner(db: &Database, gateway: &dyn CmaGateway, owner: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod fingerprint_regressions {
+        use super::*;
+        include!("assistant_cma_admission_fingerprint_tests.rs");
+    }
 
     #[test]
     fn lifecycle_pre_admission_refusals_confirm_no_resource() {

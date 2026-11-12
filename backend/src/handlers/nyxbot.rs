@@ -13,6 +13,7 @@
 //! they cannot become owners, approve cards or queue owner work.
 use crate::models::nyxbot_gateway_release::ReleaseReason;
 use crate::services::assistant_links::AssistantPage;
+use crate::services::channel_inbound_diagnostics::{self as x_diagnostics, Outcome as XOutcome};
 use crate::services::nyxbot_gateway_release_service as releases;
 use crate::services::org_channel_service::OrgAccess;
 use axum::{
@@ -55,6 +56,9 @@ use crate::{
 };
 
 use super::assistant_team::{Pool, Started, start_server_turn};
+
+#[path = "nyxbot_provider_refusal.rs"]
+mod provider_refusal;
 
 pub const GATEWAY_SLUG: &str = "cmaeg";
 pub const PROVIDER_SLUG: &str = "nyxbot";
@@ -3328,13 +3332,20 @@ async fn inbound_message(
         }
     } else {
         if let Some(linked) = link_owner(state, row, sender, text, private).await? {
+            // Linking changes the persisted sender set after record_chat used
+            // the pre-link snapshot. Project only the identity actually saved.
+            let current = load_channel(state, &row.user_id, &row.id).await?;
+            chats::note_owner_presence(state, &current, chat, sender.id).await?;
             return Ok(linked);
         }
         current_chat = chats::note_owner_presence(state, row, chat, sender.id).await?;
         match chats::admission(row, &current_chat, sender.id, addressed) {
             chats::Admission::Owner => false,
             chats::Admission::Guest => true,
-            chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
+            chats::Admission::Refuse => {
+                x_diagnostics::for_channel(&state.db, row, XOutcome::PolicyRefused).await;
+                return Ok(Inbound::Reply(PRIVATE_REFUSAL.into()));
+            }
             chats::Admission::Silent => {
                 return Ok(Inbound::Silent(
                     if addressed == Some(false) && chat.reply_mode.as_deref() != Some("all") {
@@ -3409,7 +3420,7 @@ async fn link_owner(
                 .into()
         })
     {
-        state
+        let linked = state
             .db
             .collection::<NyxbotChannel>(CHANNELS)
             .update_one(
@@ -3419,6 +3430,9 @@ async fn link_owner(
                 "$set": {"updated_at": bson::DateTime::now()}},
             )
             .await?;
+        if linked.matched_count != 1 {
+            return Ok(Some(Inbound::Silent("refused_link_consumed")));
+        }
         return Ok(Some(owner_linked(state, row, "link_code").await));
     }
     if !known
@@ -3889,6 +3903,7 @@ async fn start_chat_turn(
         note.push_str(&telegram_input.note);
     }
     let start = TurnStart {
+        title_language: None,
         automation_work: None,
         automation_parent: None,
         execution_enrollment: crate::services::execution_permission_channel::verified_owner(
@@ -4207,7 +4222,10 @@ fn bounded_reply(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn problem(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({"error": {"code": code}, "code": code}))).into_response()
+    provider_refusal::coded(
+        (status, Json(json!({"error": {"code": code}, "code": code}))).into_response(),
+        code,
+    )
 }
 
 /// Authenticate the gateway: the bearer is the channel's dedicated agent key.
@@ -4226,6 +4244,7 @@ async fn provider_channel(
         key_service::validate_api_key(&state.db, &raw)
             .await
             .map_err(|_| problem(StatusCode::UNAUTHORIZED, "not_authenticated"))?;
+    provider_refusal::owner(&owner);
     let row = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -4236,17 +4255,26 @@ async fn provider_channel(
         .await
         .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?
         .ok_or_else(|| problem(StatusCode::FORBIDDEN, "forbidden"))?;
-    if crate::services::platform_bot_authority::require_personal_routes(
+    provider_refusal::channel(&row.user_id, &row.id);
+    match crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
         &row.channel_bot_id,
     )
     .await
-    .is_err()
     {
-        return Err(problem(
-            StatusCode::FORBIDDEN,
-            "shared_entry_requires_native_receipt",
-        ));
+        Ok(()) => {}
+        Err(AppError::Forbidden(_)) => {
+            return Err(problem(
+                StatusCode::FORBIDDEN,
+                "shared_entry_requires_native_receipt",
+            ));
+        }
+        Err(_) => {
+            return Err(problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_unavailable",
+            ));
+        }
     }
     match org_access(state, &row).await {
         Ok(OrgAccess::Holds) => {}
@@ -4287,6 +4315,7 @@ async fn provider_event_binding_with_authority(
     let (owner, key, _) = key_service::validate_api_key(&state.db, &raw)
         .await
         .map_err(|_| problem(StatusCode::UNAUTHORIZED, "not_authenticated"))?;
+    provider_refusal::owner(&owner);
     let Some(row) = state
         .db
         .collection::<NyxbotEventBinding>(EVENT_BINDINGS)
@@ -4310,7 +4339,7 @@ async fn provider_event_binding_with_authority(
     if require_authority {
         crate::services::nyxbot_event_binding_service::authorize_provider(state, &row)
             .await
-            .map_err(|error| error.into_response())?;
+            .map_err(provider_refusal::error)?;
     }
     Ok(Some((row, raw)))
 }
@@ -4450,8 +4479,23 @@ pub async fn put_binding(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::BindingPut,
+        put_binding_inner(State(state.clone()), Path(binding_id), headers, Json(body)),
+    )
+    .await
+}
+
+async fn put_binding_inner(
+    State(state): State<AppState>,
+    Path(binding_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
             return match crate::services::platform_entry_gateway_service::put_binding(
                 &state,
                 authority,
@@ -4461,11 +4505,11 @@ pub async fn put_binding(
             .await
             {
                 Ok(result) => Json(result).into_response(),
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((row, raw))) => {
@@ -4618,7 +4662,11 @@ pub async fn delete_binding(
             "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
             "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
             "pending_agent_api_key_id": &row.pending_agent_api_key_id},
-            doc! {"$inc":{"execution_policy_revision":1_i64},"$unset": {"binding_id": ""}, "$set": {"gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
+            // Unbind is also used by rollback/consumer cleanup and precedes
+            // remote deletion. It is not authority to disconnect a live link
+            // or revoke keys. Preserve its binding so cold partitions/rebinds
+            // keep working if the gateway retains the record.
+            doc! {"$set": {"gateway_binding_unbound_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()}},
         )
         .await
     {
@@ -4639,8 +4687,27 @@ pub async fn put_conversation(
     Path((binding_id, conversation_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::ConversationPut,
+        put_conversation_inner(
+            State(state.clone()),
+            Path((binding_id, conversation_id)),
+            headers,
+        ),
+    )
+    .await
+}
+
+async fn put_conversation_inner(
+    State(state): State<AppState>,
+    Path((binding_id, conversation_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
+            provider_refusal::binding(authority.binding_matches(&binding_id));
             return match crate::services::platform_entry_gateway_service::conversation(
                 &state,
                 authority,
@@ -4650,14 +4717,17 @@ pub async fn put_conversation(
             .await
             {
                 Ok(()) => Json(json!({})).into_response(),
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((row, _))) => {
+            provider_refusal::binding(
+                row.provider_binding_id.as_deref() == Some(binding_id.as_str()),
+            );
             if row.provider_binding_id.as_deref() != Some(binding_id.as_str())
                 || row.partition_policy != "per_event"
                 || conversation_id.len() > 256
@@ -4676,8 +4746,20 @@ pub async fn put_conversation(
         Ok(found) => found,
         Err(response) => return response,
     };
+    provider_refusal::binding(row.binding_id.as_deref() == Some(binding_id.as_str()));
     if row.binding_id.as_deref() != Some(binding_id.as_str()) || !valid_partition(&conversation_id)
     {
+        if row.binding_id.as_deref() != Some(binding_id.as_str())
+            && valid_partition(&conversation_id)
+        {
+            // The gateway is waiting on this PUT. Remote proof must not make
+            // a re-entrant request on that path or delay its unchanged 404.
+            tokio::spawn(releases::repair_binding_on_refusal(
+                state,
+                row,
+                "conversation_put",
+            ));
+        }
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
     }
     let now = bson::DateTime::now();
@@ -4797,8 +4879,27 @@ pub async fn get_event_context(
     Path((binding_id, conversation_id, event_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::Events,
+        get_event_context_inner(
+            State(state.clone()),
+            Path((binding_id, conversation_id, event_id)),
+            headers,
+        ),
+    )
+    .await
+}
+
+async fn get_event_context_inner(
+    State(state): State<AppState>,
+    Path((binding_id, conversation_id, event_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    provider_refusal::event(&event_id);
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
             return match crate::services::platform_entry_gateway_service::event_context(
                 &state,
                 authority,
@@ -4810,11 +4911,11 @@ pub async fn get_event_context(
             {
                 // Native context is transient and never persisted as model history.
                 Ok(()) => problem(StatusCode::NOT_FOUND, "event_not_found"),
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((row, _))) => {
@@ -4829,6 +4930,7 @@ pub async fn get_event_context(
             let Ok(Some(event)) = event else {
                 return problem(StatusCode::NOT_FOUND, "event_not_found");
             };
+            provider_refusal::partition_known();
             let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
                 return problem(StatusCode::NOT_FOUND, "event_not_found");
             };
@@ -4873,6 +4975,7 @@ pub async fn get_event_context(
     let Ok(Some(event)) = event else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
     };
+    provider_refusal::partition_known();
     let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
     };
@@ -4973,9 +5076,14 @@ fn responses_with_producers(
 ) -> futures::future::BoxFuture<'static, Response> {
     // Native authentication precedes ordinary routing. Keep that composition's
     // state outside both HTTP caller futures, including ordinary group events.
-    Box::pin(responses_with_producers_impl(
-        state, producers, headers, body,
-    ))
+    Box::pin(async move {
+        provider_refusal::scope(
+            &state.db,
+            provider_refusal::Endpoint::Responses,
+            responses_with_producers_impl(state.clone(), producers, headers, body),
+        )
+        .await
+    })
 }
 
 async fn media_admission(
@@ -5074,6 +5182,7 @@ async fn custom_responses(
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
     let event_id = context["activity"]["event_id"].as_str().unwrap_or_default();
+    provider_refusal::event(event_id);
     let event_key = custom_event_key(&binding.id, event_id);
     let request_hash = sha256_hex(request.to_string());
     // The response identity follows the authenticated event, rather than the
@@ -5091,6 +5200,7 @@ async fn custom_responses(
         Ok(None) => return problem(StatusCode::FORBIDDEN, "destination_not_authorized"),
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     };
+    provider_refusal::channel(&destination.user_id, &destination.id);
     let Ok(agent) =
         crate::services::nyxbot_event_binding_service::authorize_provider(&state, &binding).await
     else {
@@ -5103,14 +5213,17 @@ async fn custom_responses(
     if !destination_targets_agent {
         return problem(StatusCode::FORBIDDEN, "destination_target_changed");
     }
-    if crate::services::platform_bot_authority::require_personal_routes(
+    match crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
         &destination.channel_bot_id,
     )
     .await
-    .is_err()
     {
-        return problem(StatusCode::FORBIDDEN, "destination_requires_native_receipt");
+        Ok(()) => {}
+        Err(AppError::Forbidden(_)) => {
+            return problem(StatusCode::FORBIDDEN, "destination_requires_native_receipt");
+        }
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     match org_access(&state, &destination).await {
         Ok(OrgAccess::Holds) => {}
@@ -5316,8 +5429,15 @@ async fn responses_with_producers_impl(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Some(value) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+    {
+        provider_refusal::event(value);
+    }
     match crate::services::platform_entry_gateway_service::authenticate(&state, &headers).await {
         Ok(Some(authority)) => {
+            provider_refusal::owner(authority.owner_id());
             let Some(idempotency) = headers
                 .get("idempotency-key")
                 .and_then(|value| value.to_str().ok())
@@ -5342,11 +5462,11 @@ async fn responses_with_producers_impl(
                     let response_id = format!("resp_{}", &sha256_hex(idempotency)[..32]);
                     sse(futures::stream::iter(native_completion_frames(&response_id)))
                 }
-                Err(error) => error.into_response(),
+                Err(error) => provider_refusal::error(error),
             };
         }
         Ok(None) => {}
-        Err(error) => return error.into_response(),
+        Err(error) => return provider_refusal::error(error),
     }
     match provider_event_binding(&state, &headers).await {
         Ok(Some((binding, _))) => return custom_responses(state, binding, headers, body).await,
@@ -5367,6 +5487,11 @@ async fn responses_with_producers_impl(
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     };
+    provider_refusal::event(
+        request["event_context"]["activity"]["event_id"]
+            .as_str()
+            .unwrap_or(idempotency),
+    );
     if row.gateway_source.is_some() {
         return native_responses::respond(state, row, headers.clone(), request, idempotency).await;
     }
@@ -5377,16 +5502,15 @@ async fn responses_with_producers_impl(
     if !valid_partition(&partition) || row.status != "active" {
         return problem(StatusCode::NOT_FOUND, "conversation_not_found");
     }
-    if state
+    match state
         .db
         .collection::<NyxbotThread>(THREADS)
         .find_one(doc! {"channel_id": &row.id, "partition": &partition})
         .await
-        .ok()
-        .flatten()
-        .is_none()
     {
-        return problem(StatusCode::NOT_FOUND, "conversation_not_found");
+        Ok(Some(_)) => provider_refusal::partition_known(),
+        Ok(None) => return problem(StatusCode::NOT_FOUND, "conversation_not_found"),
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     let text: String = request["input"]
         .as_array()
@@ -6511,6 +6635,7 @@ pub async fn relay_callback(
     .await
     .is_err()
     {
+        x_diagnostics::for_channel(&state.db, &row, XOutcome::AuthorityChanged).await;
         return problem(
             StatusCode::FORBIDDEN,
             "shared_entry_requires_native_receipt",
@@ -6520,12 +6645,17 @@ pub async fn relay_callback(
     match org_access(&state, &row).await {
         Ok(OrgAccess::Holds) => {}
         Ok(OrgAccess::Lost) => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::OrgAccessLost).await;
             if let Err(error) = release_org_channel(&state, &row).await {
-                tracing::warn!(%error, "NyxBot org channel release deferred");
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "NyxBot org channel release deferred"
+                );
             }
             return problem(StatusCode::FORBIDDEN, "org_access_lost");
         }
         Ok(OrgAccess::Unavailable) | Err(_) => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::OrgAccessUnavailable).await;
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
         }
     }
@@ -6662,6 +6792,7 @@ pub async fn relay_callback(
     {
         Ok(_) => {}
         Err(error) if is_duplicate(&error) => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::Duplicate).await;
             if crate::services::channel_media_events::record_duplicate(&state.db, &admitted)
                 .await
                 .is_err()
@@ -6715,7 +6846,9 @@ pub async fn relay_callback(
         .as_str()
         .map(str::to_owned);
     let message_id = claims.message_id.clone();
-    let admission_facts = if kind != "private" {
+    // Private chats are tracked only where inbound diagnostics exist.
+    let track_admission = kind != "private" || row.platform == "x";
+    let admission_facts = if track_admission {
         match crate::services::nyxbot_admission_service::begin(
             &state.db,
             &row,
@@ -6750,7 +6883,7 @@ pub async fn relay_callback(
                 let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
                 let own = own_user_id(&state, &bot).await;
                 if kind == "private" || !chats::foreign_bot(&bot, own.as_deref(), &sender_id) {
-                    if kind != "private" {
+                    if track_admission {
                         crate::services::nyxbot_admission_service::finish(
                             &state.db,
                             &row,
@@ -6847,7 +6980,7 @@ pub async fn relay_callback(
             if sender_id.is_empty()
                 || (text.trim().is_empty() && admitted.source_media_declared.unwrap_or(0) == 0)
             {
-                if kind != "private" {
+                if track_admission {
                     crate::services::nyxbot_admission_service::finish(
                         &state.db,
                         &row,
@@ -6930,7 +7063,7 @@ pub async fn relay_callback(
                 &admitted.id,
             ))
             .await;
-            if kind != "private" {
+            if track_admission {
                 admission_diagnostics::outcome(
                     &state,
                     &row,
@@ -6956,29 +7089,34 @@ pub async fn relay_callback(
                     None
                 }
             };
-            if let Some(reply) = reply
-                && let Err(error) = direct_reply(
+            if let Some(reply) = reply {
+                let result = direct_reply(
                     &state,
                     &row,
                     &message_id,
                     &reply,
                     reply_token.as_deref().map(String::as_str),
                 )
-                .await
-            {
-                // The bot moved to the gateway while answering: its route now
-                // answers as the new route key.
-                let current = load_channel(&state, &row.user_id, &row.id).await?;
-                if current.route_api_key_id == row.route_api_key_id || current.status != "active" {
-                    return Err(error);
+                .await;
+                if let Err(error) = result {
+                    x_diagnostics::for_channel(&state.db, &row, XOutcome::ReplyUnconfirmed).await;
+                    // The bot moved to the gateway while answering: its route now
+                    // answers as the new route key.
+                    let current = load_channel(&state, &row.user_id, &row.id).await?;
+                    if current.route_api_key_id == row.route_api_key_id
+                        || current.status != "active"
+                    {
+                        return Err(error);
+                    }
+                    direct_reply(&state, &current, &message_id, &reply, None).await?;
                 }
-                direct_reply(&state, &current, &message_id, &reply, None).await?;
+                x_diagnostics::for_channel(&state.db, &row, XOutcome::ReplySent).await;
             }
             Ok(())
         }
         .await;
         if let Err(error) = result {
-            if kind != "private" {
+            if track_admission {
                 let _ = crate::services::nyxbot_admission_service::finish(
                     &state.db,
                     &row,
@@ -6987,7 +7125,10 @@ pub async fn relay_callback(
                 )
                 .await;
             }
-            tracing::debug!(%error, "NyxBot direct channel message not answered");
+            tracing::debug!(
+                error_code = error.error_code(),
+                "NyxBot direct channel message not answered"
+            );
         } else if admitted.media.is_some() {
             // Intentional silence is a completed disposition, not a crash.
             let _ = state

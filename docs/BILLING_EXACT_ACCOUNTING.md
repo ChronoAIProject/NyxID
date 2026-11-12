@@ -506,23 +506,25 @@ read, including org-owned API keys whose principal is the org. Those keys never
 enter the guest lane. No auto-provisioning or transport-admin sponsorship is used
 for guests.
 
-The admin must set a positive exact Credits cap per binding per UTC day (the UI
-suggests 1 credit before enabling). `org_channel_guest_budgets` and
-`org_channel_guest_holds` reserve the existing billing estimate in the same
-transaction as exact allowance/grant/wallet admission. Concurrent admissions
-cannot spend the same remaining budget. The hold includes allowance/grant value
-and the wallet's tax-inclusive reservation; benefits are not taxed. Usage-ID settlement/release is idempotent;
-crashes retain the reservation until the normal funding reconciler settles it.
-The admission day remains fixed across midnight. Actual consumed usage must still
-settle if a provider exceeds the estimate; the cap governs new billed admission,
-not cancellation of an already consumed provider effect. Lowering policy never
-resets today's spend or outstanding reservations. Guests receive a short
-unavailable reply when admission fails; members do not consume this cap.
+After `nyxbot:org-guest-grants-v1` fleet readiness, no daily cap is required or
+enforced for either legacy or Grants-adopted bindings. Before readiness, old and
+new replicas retain the original positive-cap enforcement. The saved cap remains
+for compatibility; do not delete or reset it or the financial records.
+`org_channel_guest_budgets` and `org_channel_guest_holds` continue reserving the
+existing exact allowance/grant/wallet estimate in the funding transaction. Only
+the daily-cap predicate is omitted in ready mode. Wallet suspension, subscription,
+funding and the six-per-minute sender limit still apply. The hold includes benefit
+value and tax-inclusive wallet reservation; benefits remain untaxed. Usage-ID
+settlement/release stays idempotent and uses the original UTC admission day,
+including holds created before cutover and settled after revocation or midnight.
+Ordinary/member billing gains no extra reads or payer changes. Rollback disables
+and drains guests before downgrade; spending above the retained legacy cap can
+refuse further old-binary admissions and must never be erased to bypass it.
 
 Usage retains org `billing_owner_id` and additive `org_channel_guest` metadata
 (binding ID and a scoped sender hash, never message text or credentials). The
 org's billing usage and bot settings show spend; settings also show reserved
-credits, exposure and delegated services. Financial rows follow accounting
+credits and named guest access from Grants or the frozen legacy restriction. Financial rows follow accounting
 retention and are never discarded while unsettled. Every executing replica must
 support the typed lane before exposure is enabled; use the existing security
 readiness roster and drain controls, not a new environment variable.

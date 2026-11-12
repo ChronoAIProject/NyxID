@@ -310,7 +310,21 @@ pub struct DiscordGatewayStatusResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ChannelInboundOutcomeResponse {
+    pub code: String,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelInboundCounterResponse {
+    pub count: i64,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChannelBotDiagnosticsResponse {
+    pub last_inbound_outcome: Option<ChannelInboundOutcomeResponse>,
+    pub inbound_outcomes: std::collections::BTreeMap<String, ChannelInboundCounterResponse>,
     pub last_callback_challenge_at: Option<String>,
     pub last_route_at: Option<String>,
     pub last_route_result: Option<String>,
@@ -426,6 +440,25 @@ fn diagnostics_response(
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
+        last_inbound_outcome: d.last_inbound_outcome.as_ref().map(|o| {
+            ChannelInboundOutcomeResponse {
+                code: o.code.clone(),
+                at: o.at.to_rfc3339(),
+            }
+        }),
+        inbound_outcomes: d
+            .inbound_outcomes
+            .iter()
+            .map(|(code, c)| {
+                (
+                    code.clone(),
+                    ChannelInboundCounterResponse {
+                        count: c.count,
+                        at: c.at.to_rfc3339(),
+                    },
+                )
+            })
+            .collect(),
         last_callback_challenge_at: d.last_callback_challenge_at.map(|v| v.to_rfc3339()),
         last_route_at: d.last_route_at.map(|v| v.to_rfc3339()),
         last_route_result: d.last_route_result.clone(),

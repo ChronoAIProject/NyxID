@@ -1,4 +1,6 @@
+import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
 import { settledInterruptedTurn } from "./interrupted-turn";
+import { assistantTitleLanguage } from "@/lib/assistant/title-language";
 import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
 import { AssistantHttpError, assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
@@ -86,13 +88,17 @@ function toolCalls(
       ...(activity.machine ? { machine: activity.machine, conversationId } : {}),
       name: activity.label,
       status:
-        activity.status === "running" ? "running" : activity.status === "error" ? "error" : "done",
+        activity.status === "running" ? "running" : activity.status === "error" ? "error" : activity.status === "completed" ? "done" : "unknown",
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
       decision: activity.decision,
     })),
   };
+}
+
+function supportedFeedback(value: NyxAgentMessage["feedback"]): ChatMessage["feedback"] {
+  return value?.vote === "up" || value?.vote === "down" ? { ...value, vote: value.vote } : undefined;
 }
 
 function images(
@@ -371,8 +377,8 @@ export class NyxAgentTransport {
     const rows = new Map<string, NyxAgentConversation>();
     const scope = agentId ? `&agent_id=${encodeURIComponent(agentId)}` : "";
     do {
-      const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-      const page = nyxAgentIndexSchema.parse(
+      const query: string = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+      const page: ReturnType<typeof nyxAgentIndexSchema.parse> = parseHistoryResponse(nyxAgentIndexSchema,
         await assistantJson(`${ROOT}/conversations?limit=100${scope}${query}`),
       );
       this.current(generation);
@@ -435,7 +441,7 @@ export class NyxAgentTransport {
     } finally {
       this.requests.delete(controller);
     }
-    const page = nyxAgentHistorySchema.parse(response);
+    const page = parseHistoryResponse(nyxAgentHistorySchema, response);
     // New servers keep `approvals` pending-only for older clients.
     page.approvals = page.approval_history ?? page.approvals;
     this.current(generation);
@@ -655,12 +661,12 @@ export class NyxAgentTransport {
         recovery: message.recovery,
         artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,rejected: message.artifact_delivery.rejected,recoveryAvailable: message.artifact_delivery.recovery_available,messageSeq: message.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
         id: message.id,
-        feedback: message.feedback ?? undefined,
+        feedback: supportedFeedback(message.feedback),
         role: message.role,
         content: message.text,
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
-        status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
+        status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : message.status === "completed" ? "complete" : "unknown",
         error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms, message.turn_metadata?.failure_reason?.model_route?.reason) : undefined,
         channelDelivery: message.turn_metadata?.channel_delivery,
         turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
@@ -722,7 +728,7 @@ export class NyxAgentTransport {
           artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,rejected: settled.artifact_delivery.rejected,recoveryAvailable: settled.artifact_delivery.recovery_available,messageSeq: settled.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,
           id: message.id,
           role: settled?.role ?? message.role,
-          feedback: settled?.feedback ?? undefined,
+          feedback: supportedFeedback(settled?.feedback),
           errorCode: settled?.error_code ?? (streaming ? live.state.activeTurn?.error?.code : undefined),
           error: streaming && live.state.activeTurn?.error ? storedError(live.state.activeTurn.error.code, live.state.activeTurn.error.capacity_wait_ms) : undefined,
           channelDelivery: settled?.turn_metadata?.channel_delivery,
@@ -1002,7 +1008,7 @@ export class NyxAgentTransport {
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
-          headers: { Accept: "text/event-stream" },
+          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
           signal: controller.signal,
           creditsDenial: {
             key: `assistant:nyxagent:${key}:${userMessageId}`,

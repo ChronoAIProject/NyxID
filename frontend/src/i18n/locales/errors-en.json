@@ -414,5 +414,10 @@
   "Confirm your verification before creating a revision": "Confirm your verification before creating a revision",
   "Enter a verification reference": "Enter a verification reference",
   "Verification source must be at most 1000 UTF-8 bytes with no control characters": "Verification source must be at most 1000 UTF-8 bytes with no control characters",
-  "Platform models are read-only for this account.": "Platform models are read-only for this account."
+  "Platform models are read-only for this account.": "Platform models are read-only for this account.",
+  "Could not load connection options. Try again.": "Could not load connection options. Try again.",
+  "NyxID is temporarily unavailable. Try again in a moment.": "NyxID is temporarily unavailable. Try again in a moment.",
+  "Too many requests. Please wait a moment and try again.": "Too many requests. Please wait a moment and try again.",
+  "Your session has expired. Please sign in again.": "Your session has expired. Please sign in again.",
+  "NyxID couldn't complete this request. Please try again.": "NyxID couldn't complete this request. Please try again."
 }

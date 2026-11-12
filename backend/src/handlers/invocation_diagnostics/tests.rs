@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     services::{
         billing::{BillingIngress, route_inventory::BillingRoutePolicy},
-        invocation_diagnostic_service::tests::fixture,
+        invocation_diagnostic_service::tests::{fixture, legacy_handle},
     },
     test_utils::{set_test_approval_preference, test_auth_user},
 };
@@ -147,7 +147,7 @@ async fn retained_llm_execution_preserves_typed_errors_for_delivery_classificati
 
 #[tokio::test]
 async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_errors() {
-    for code in [401, 403, 404, 503, 504] {
+    for code in [500, 503, 504] {
         let (state, actor, id, server) = fixture().await;
         let mut request = request();
         let invocation = HttpInvocation::start(&state, &mut request);
@@ -156,6 +156,7 @@ async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_err
             .status(code)
             .header("content-type", "application/problem+json")
             .header("retry-after", "7")
+            .header("cache-control", "private, max-age=0")
             .header(HANDLE_HEADER, "downstream-spoof")
             .body(Body::from("byte-identical original body"))
             .unwrap();
@@ -176,7 +177,15 @@ async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_err
         assert_ne!(handle, "downstream-spoof");
         assert!(!handle.contains(&id));
         assert_eq!(response.headers()[EXPIRES_HEADER], "60");
-        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response
+                .headers()
+                .get_all("cache-control")
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["private, max-age=0", "no-store"],
+        );
         assert_eq!(
             to_bytes(response.into_body(), 4096).await.unwrap(),
             "byte-identical original body"
@@ -205,7 +214,15 @@ async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_err
         Err(AppError::NodeProxyTimeout),
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(
+        response.error_code(),
+        AppError::NodeProxyTimeout.error_code()
+    );
+    assert!(
+        matches!(response, AppError::InvocationDiagnostic { ref source, .. } if matches!(source.as_ref(), AppError::NodeProxyTimeout))
+    );
+    let response = response.into_response();
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert!(response.headers().contains_key(HANDLE_HEADER));
     let body: Value =
@@ -261,7 +278,7 @@ async fn invocation_diagnostic_failure_returns_without_probe_and_suppresses_dupl
     let invocation = HttpInvocation::start(&state, &mut initial_request).unwrap();
     Target::record_request(&initial_request, Some(&id));
     let original = Response::builder()
-        .status(403)
+        .status(503)
         .body(Body::from("original operation error"))
         .unwrap();
     let auth = auth(&actor);
@@ -270,7 +287,7 @@ async fn invocation_diagnostic_failure_returns_without_probe_and_suppresses_dupl
         .await
         .unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(response.headers().contains_key(HANDLE_HEADER));
     assert_eq!(
         to_bytes(response.into_body(), 4096).await.unwrap(),
@@ -281,7 +298,7 @@ async fn invocation_diagnostic_failure_returns_without_probe_and_suppresses_dupl
     let repeated_invocation = HttpInvocation::start(&state, &mut repeated_request).unwrap();
     Target::record_request(&repeated_request, Some(&id));
     let repeated_original = Response::builder()
-        .status(403)
+        .status(503)
         .body(Body::from("repeated original operation error"))
         .unwrap();
     let repeated = HttpInvocation::finish(
@@ -292,7 +309,7 @@ async fn invocation_diagnostic_failure_returns_without_probe_and_suppresses_dupl
     )
     .await
     .unwrap();
-    assert_eq!(repeated.status(), StatusCode::FORBIDDEN);
+    assert_eq!(repeated.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!repeated.headers().contains_key(HANDLE_HEADER));
     assert!(!repeated.headers().contains_key(EXPIRES_HEADER));
     assert_eq!(
@@ -341,6 +358,7 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
             axum::http::header::AUTHORIZATION,
             "Bearer narrower-caller".parse().unwrap(),
         )]),
+        None,
         Json(RedeemRequest {
             handle: issued.handle,
         }),
@@ -353,7 +371,7 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
 
 #[tokio::test]
 async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
-    for code in [401, 403, 404] {
+    for code in [500, 503, 504] {
         let (state, actor, id, server) = fixture().await;
         let downstream = MockServer::start().await;
         Mock::given(method("GET"))
@@ -469,7 +487,7 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
         Mock::given(method("GET"))
             .and(path("/models"))
             .respond_with(
-                ResponseTemplate::new(403).set_body_json(
+                ResponseTemplate::new(503).set_body_json(
                     json!({"error":{"message":"original operation permission error"}}),
                 ),
             )
@@ -554,10 +572,183 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
             .await
         }
         .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(response.headers().contains_key(HANDLE_HEADER));
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("original operation permission error"));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn invocation_diagnostic_flag_off_and_unsupported_callers_never_issue() {
+    let (mut state, actor, id, server) = fixture().await;
+    for (enabled, method) in [
+        (false, AuthMethod::AccessToken),
+        (true, AuthMethod::Session),
+        (true, AuthMethod::ServiceAccount),
+        (true, AuthMethod::Delegated),
+        (true, AuthMethod::Relay),
+    ] {
+        state.config.invocation_diagnostics_enabled = enabled;
+        let mut request = request();
+        let invocation = HttpInvocation::start(&state, &mut request);
+        if !enabled {
+            assert!(invocation.is_none());
+            assert!(request.extensions().get::<Target>().is_none());
+        }
+        Target::record_request(&request, Some(&id));
+        let mut caller = auth(&actor);
+        caller.auth_method = method.clone();
+        let response = HttpInvocation::finish(
+            invocation,
+            &state,
+            &caller,
+            Ok(Response::builder()
+                .status(503)
+                .body(Body::from("original"))
+                .unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.headers().contains_key(HANDLE_HEADER));
+        assert!(!response.headers().contains_key(EXPIRES_HEADER));
+        assert_eq!(
+            to_bytes(response.into_body(), 4096).await.unwrap(),
+            "original"
+        );
+        assert!(
+            diagnostics::issue(
+                &state.db,
+                &state.config,
+                diagnostics::IssueIdentity::new(&actor, &method, None, None, None),
+                &id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_diagnostic_downstream_client_errors_do_not_issue() {
+    let (state, actor, id, server) = fixture().await;
+    for status in [400, 401, 403, 404, 422, 429] {
+        let mut request = request();
+        let invocation = HttpInvocation::start(&state, &mut request);
+        Target::record_request(&request, Some(&id));
+        let response = HttpInvocation::finish(
+            invocation,
+            &state,
+            &auth(&actor),
+            Ok(Response::builder()
+                .status(status)
+                .body(Body::from("original"))
+                .unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        assert!(!response.headers().contains_key(HANDLE_HEADER));
+        assert_eq!(
+            to_bytes(response.into_body(), 4096).await.unwrap(),
+            "original"
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_diagnostic_sender_constrained_bearer_is_not_forwarded() {
+    let (state, actor, id, server) = fixture().await;
+    let mut request = request();
+    request
+        .extensions_mut()
+        .insert(crate::mw::auth::SenderConstrainedToken);
+    assert!(HttpInvocation::start(&state, &mut request).is_none());
+    let issued = diagnostics::issue(
+        &state.db,
+        &state.config,
+        diagnostics::IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
+        &id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let response = redeem(
+        State(state.clone()),
+        auth(&actor),
+        TelemetryContext::default(),
+        request.headers().clone(),
+        Some(axum::Extension(crate::mw::auth::SenderConstrainedToken)),
+        Json(RedeemRequest {
+            handle: issued.handle,
+        }),
+    )
+    .await
+    .unwrap();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["outcome"], "non_delegable");
+    assert_eq!(body["observation"], "unknown");
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_diagnostic_errors_retain_numeric_code_in_turn_trace() {
+    let (state, actor, id, _) = fixture().await;
+    let mut request = request();
+    let invocation = HttpInvocation::start(&state, &mut request);
+    Target::record_request(&request, Some(&id));
+    let context = crate::turn_trace::TurnContext::for_turn(&uuid::Uuid::new_v4().to_string());
+    let (result, records) = crate::turn_trace::capture(crate::turn_trace::response(
+        context,
+        crate::turn_trace::Stage::Proxy,
+        HttpInvocation::finish(
+            invocation,
+            &state,
+            &auth(&actor),
+            Err(AppError::NodeProxyTimeout),
+        ),
+    ))
+    .await;
+    assert!(result.is_err());
+    let records = serde_json::to_value(records).unwrap();
+    assert!(
+        records
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["error_code"] == 8002),
+        "{records}"
+    );
+    state.db.drop().await.unwrap();
 }

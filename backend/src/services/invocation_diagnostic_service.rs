@@ -38,6 +38,9 @@ use crate::{
     },
 };
 
+pub(crate) const HANDLE_HEADER: &str = "x-nyxid-diagnostic-handle";
+pub(crate) const EXPIRES_HEADER: &str = "x-nyxid-diagnostic-expires-in";
+
 /// Includes feature/ACL reads, cluster admission, both upstream requests and body reads.
 /// The probe path includes caller authorization and one live downstream check.
 /// Keep it bounded, but allow a normal remote provider round trip to finish.
@@ -124,12 +127,36 @@ pub struct Diagnostic {
 }
 
 #[derive(Clone, Serialize)]
-pub(crate) struct IssuedHandle {
+pub struct IssuedHandle {
     pub handle: String,
     pub expires_in: i64,
 }
 
+impl std::fmt::Debug for IssuedHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IssuedHandle")
+            .field("handle", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 impl IssuedHandle {
+    pub(crate) fn decorate(&self, response: &mut axum::response::Response) {
+        use axum::http::{HeaderValue, header::CACHE_CONTROL};
+        response.headers_mut().insert(
+            HANDLE_HEADER,
+            HeaderValue::from_str(&self.handle).expect("opaque ASCII handle"),
+        );
+        response.headers_mut().insert(
+            EXPIRES_HEADER,
+            HeaderValue::from_str(&self.expires_in.to_string()).expect("integer header"),
+        );
+        response
+            .headers_mut()
+            .append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+
     pub(crate) fn content(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "text",
@@ -160,6 +187,11 @@ fn auth_method_name(method: &AuthMethod) -> &'static str {
         AuthMethod::ServiceAccount => "service_account",
         AuthMethod::Delegated => "delegated",
     }
+}
+
+pub(crate) fn can_probe(method: &AuthMethod, client_id: Option<&str>) -> bool {
+    matches!(method, AuthMethod::AccessToken | AuthMethod::ApiKey)
+        && client_id != Some("chrono-probe")
 }
 
 pub(crate) struct IssueIdentity<'a> {
@@ -194,6 +226,13 @@ pub(crate) async fn issue(
     identity: IssueIdentity<'_>,
     exact_user_service_id: &str,
 ) -> AppResult<Option<IssuedHandle>> {
+    // Configuration is captured at startup. Off/non-delegable requests must
+    // return before even reserving a throttle slot or issuing a MongoDB command.
+    if !config.invocation_diagnostics_enabled
+        || !can_probe(identity.auth_method, identity.client_id)
+    {
+        return Ok(None);
+    }
     monitoring_service::configured_base_url(config)?;
     let Some(reservation) = reserve_issue(&identity, exact_user_service_id) else {
         return Ok(None);

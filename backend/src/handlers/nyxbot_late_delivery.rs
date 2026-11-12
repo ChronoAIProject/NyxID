@@ -379,6 +379,7 @@ async fn process_selected(state: &AppState, event_id: &str, gateway_only: bool) 
             let _ = refuse(state, event_id).await;
         }
         Err(_) => {
+            x_diagnostics::for_event(&state.db, event_id, XOutcome::DeliveryDeferred).await;
             // No upstream error display: it may contain URLs, capabilities or text.
             tracing::warn!(
                 event_id,
@@ -399,6 +400,7 @@ async fn refuse(state: &AppState, event_id: &str) -> AppResult<()> {
         )
         .await?
     {
+        x_diagnostics::for_event(&state.db, event_id, XOutcome::AuthorityChanged).await;
         audit(
             state,
             &event.user_id,
@@ -470,6 +472,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     }).await? else { return Ok(()); };
     if successful_silence(&message) {
         if delivery::silence(&state.db, event_id).await? {
+            x_diagnostics::for_channel(&state.db, &channel, XOutcome::AgentSilent).await;
             crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(crate::turn_trace::Outcome::Silent));
             audit(
                 state,
@@ -514,6 +517,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     // Preflight above can be slow: re-resolve authority immediately before the
     // irreversible barrier. Concurrent losers never reach a provider.
     let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
+        refuse(state, event_id).await?;
         return Ok(());
     };
     let claim = Uuid::new_v4().to_string();
@@ -544,6 +548,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     };
     crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(if status == "sent" { crate::turn_trace::Outcome::Confirmed } else { crate::turn_trace::Outcome::Unknown }));
     delivery::finish(&state.db, event_id, &claim, status).await?;
+    x_diagnostics::for_channel(&state.db, &channel, if status == "sent" { XOutcome::ReplySent } else { XOutcome::ReplyUnconfirmed }).await;
     events.update_one(doc! {"_id": event_id}, doc! {"$set": {"status": if message.status == "completed" { "completed" } else { "failed" }}}).await?;
     audit(
         state,

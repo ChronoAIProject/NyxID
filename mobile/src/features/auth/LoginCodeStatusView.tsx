@@ -5,7 +5,7 @@ import { Check, Copy } from "lucide-react-native";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { loginCodeApi, type IssuedLoginCode } from "../../lib/api/loginCodeApi";
 import { LoginCodeMonitor, type LoginCodeMonitorState } from "./loginCodeMonitor";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme as useTheme } from "./useAuthTheme";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import { fonts } from "../../theme/designTokens";
 

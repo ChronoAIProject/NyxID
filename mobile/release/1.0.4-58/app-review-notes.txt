@@ -1,0 +1,22 @@
+NyxID 1.0.4 (58) — App Review Notes
+
+About this update
+NyxID now includes NyxBot, an AI assistant for text conversations, live voice, and work with connected services. The app also provides account security, service access, agents, and approval controls. This release updates the listing to reflect that broader experience and refines iPhone voice playback, call recovery, dictation layout, and language settings. It supports native iPad layouts as well.
+
+Sign-in
+Use the dedicated email/password account supplied in App Store Connect's private Sign-in Information fields. Choose the email sign-in fields on the opening screen. Sign-in and AI features require an internet connection. Credentials are supplied separately from these notes.
+
+Suggested review steps
+1. Open a new private conversation with NyxBot. Send “Draft a three-step project checklist” and check the completed reply. The reply actions include Report for reporting inappropriate AI content.
+2. With the message composer empty, tap Open voice call. Allow microphone access. Ask a short question and listen to the response through the iPhone speaker. The voice panel supports Hands-free and Hold to talk, microphone pause, speaker mute, and ending the call. Please also check audio on a physical iPhone.
+3. End the call and start another. If the previous session is still closing, the panel explains that it is disconnecting before starting the new call. Returning from the background alone does not restart the microphone.
+4. Open Settings → Voice to choose a saved voice and dictation language. During a call, Chat options → Voice preferences also exposes voice selection. Playable voice samples are not included.
+5. Use dictation in a normal message draft. Confirm or cancel the recognized text; confirmed text remains editable before sending.
+6. Open Settings → Language. English, Simplified Chinese, and Traditional Chinese are available for supported native settings and controls. Existing messages keep their original language. The setting does not claim to translate the entire app.
+7. Open Settings → Account & Security to inspect account-security and session controls. Some service connection setup and advanced settings open the NyxID website.
+
+Account deletion
+Open Settings → Delete Account and review the explanation before confirming. After the deletion request is accepted, the app signs the account out; server and provider cleanup may continue under the retention policy. Complete other review steps first if using the same account, because deletion removes its access. A separate disposable account may be supplied in the private review information.
+
+Permissions and support
+Microphone and speech-recognition permissions support user-initiated voice and dictation. Camera and photo permissions support QR scanning and selected attachments. Connected services and group/crew features depend on account access. Support is available through Settings → Contact support at contact@chrono-ai.fun.

@@ -41,6 +41,7 @@ pub mod connect_link;
 pub mod consent;
 #[allow(dead_code)]
 pub mod coordination;
+pub mod credential_verification;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
@@ -267,3 +268,5 @@ pub mod platform_model;
 pub mod platform_model_tariff;
 
 pub mod execution_permission_channel;
+
+pub mod assistant_tool_result;

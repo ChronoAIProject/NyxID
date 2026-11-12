@@ -1861,6 +1861,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
         chrono_probe_url: None,
+        invocation_diagnostics_enabled: false,
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
@@ -2801,6 +2802,7 @@ pub(crate) fn test_user_service(
         updated_at: chrono::Utc::now(),
         state_version: 1,
         rotation_predecessor_id: None,
+        credential_verification: None,
     }
 }
 
@@ -2922,6 +2924,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         git_http: None,
         concurrency_policy: None,
         inference_admin_modified: false,
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing: None,
         auth_notes: None,
         known_limitations: None,

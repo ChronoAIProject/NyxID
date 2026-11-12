@@ -6617,6 +6617,8 @@ pub async fn seed_default_services(
             }),
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),
             required_permissions: seed_required_permissions(seed.service_slug).map(|permissions| {

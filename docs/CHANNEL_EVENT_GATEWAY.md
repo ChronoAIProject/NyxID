@@ -1138,7 +1138,55 @@ retains its PR1 owner-wide channel management scope; CMA still enforces owner
 identity, and cleanup additionally pins destination, record and acknowledged
 version. It is not a token restricted to one channel.
 
+### Automatic repair of stale local bindings
+
+An ordinary personal gateway link can retain a valid remote record but have a
+null, missing or mismatching local `binding_id` (legacy setup or partial provider
+unbind). A valid authenticated conversation PUT with a binding mismatch triggers
+a detached repair attempt; the original 404 returns without awaiting remote
+proof. A transactional claim permits at most one attempt per channel per
+15 minutes. Refused proofs additionally set optional
+`gateway_binding_repair_retry_at` at least six hours ahead; transient Deferred
+outcomes retain the 15-minute window. Both triggers check these same timestamps.
+The existing startup/30-second maintenance worker selects at most eight due stale
+links per pass, excluding healthy and cooling-down links before the limit.
+Malformed rows are decoded individually and deferred for six hours so later
+candidates are not starved. Scan failures log only a fixed warning code and never
+abort existing release reconciliation, direct-attempt repair or native drains.
+The failed customer message is never replayed; the next request can create its
+partition after repair.
+
+Repair derives `bnd_` plus the stored record UUID's 32 hex digits, then performs an
+owner-authenticated GET of that exact record through the catalog gateway. It must
+match record, channel, positive version, owner, provider, derived binding and exact
+relay source (issuer, route key and platform). A transaction rechecks/fences live
+owner, personal bot, provider/route keys and route, then CAS-restores only the
+binding. The channel policy revision and owner verification/settings/history stay
+unchanged. Native/org links, setup/move attempts, revoked authority, missing
+identity and failed remote proof stay refused; no key is replaced or reactivated.
+
+Audits `nyxbot_gateway_binding_repair_scheduled`,
+`nyxbot_gateway_binding_repaired`, `nyxbot_gateway_binding_repair_refused` and
+`nyxbot_gateway_binding_repair_deferred` contain only channel ID, trigger, repair
+mode and stable reason. Claim and success audits commit with their transitions.
+No owner disconnect/reconnect is required for the proven stale-metadata case.
+Provider binding DELETE preserves the active row, binding and provider/route
+keys and records only optional `gateway_binding_unbound_at` metadata. CMA also
+uses unbind for rollback and consumer cleanup; even channel deletion unbinds
+before its remote-record deletion commits. The notification alone is not terminal
+authority. Only the existing explicit local retirement protocol captures cleanup
+authority and revokes keys; its release worker still requires exact remote proof.
+No new effect follows the observational timestamp, and it is ignored by old
+replicas. Old unbind writers can still unset bindings until drained.
+
 ### Deployment and rollback
+
+Binding repair adds only optional Mongo metadata. Old replicas understand the
+restored binding and continue enforcing their current key/authority checks. Old
+unbind writers can still create stale rows until drained; the bounded sweep can
+repair those only while remote proof remains valid. Rolling back stops repair;
+retain cooldown/fence metadata and already-restored bindings. There is no new
+flag, environment variable or persisted enum value.
 
 Startup creates release and reconciliation indexes before workers start. Deploy
 normally across replicas; no global mutation freeze is needed.
@@ -1412,7 +1460,7 @@ cross-service extension, not an endpoint implemented by this change.
 Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
 Provider/creator keys stay on the linking admin and route keys stay org-owned;
 CMA source contracts are unchanged. NyxID resolves each verified sender to a
-live org member or an explicitly delegated, budgeted org-paid guest. Optional
+live org member or an explicitly enabled org-paid guest under specialist Grants (or frozen legacy service limits). Optional
 versioned origins carry that actor through replay/queues/async replies. Native
 and relay events use the same authority checks and dedup namespace. There is no
 CMA-provided membership/payer and no fallback to a personal agent. See

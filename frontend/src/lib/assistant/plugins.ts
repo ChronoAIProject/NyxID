@@ -3,6 +3,7 @@
 // service catalog (`GET /api/v1/catalog`): connected rows render as "Added",
 // catalog entries with no matching connection as "Available to add".
 
+import { credentialVerificationMeta, connectionVerificationLabel } from "@/lib/credential-verification";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { ConnectCardContentBlock } from "@/types/assistant";
 
@@ -41,6 +42,7 @@ export interface ConnectorCardItem {
    * connection when what they wanted was to re-enable the one they have.
    */
   readonly disabled?: boolean;
+  readonly verificationLabel?: string;
   /** Available items only: catalog slug for the hosted connect link. */
   readonly connectSlug?: string;
   /** Added org-only items: catalog slug for a personal "Connect your own" link. */
@@ -118,9 +120,9 @@ function addedServiceItem(
   const first = group[0] as KeyInfo;
   const catalogEntry = catalogBySlug.get(slug);
   const name = catalogEntry?.name ?? first.label;
-  const endpointDescription = !first.auto_connected && first.endpoint_url
+  const endpointDescription = credentialVerificationMeta(first)?.tooltip ?? (!first.auto_connected && first.endpoint_url
     ? `Connected through the NyxID proxy (${first.endpoint_url}).`
-    : "Connected through the NyxID proxy.";
+    : "Connected through the NyxID proxy.");
   return {
     id: `service:${slug}`,
     name,
@@ -141,6 +143,7 @@ function addedServiceItem(
         ? `${String(group.length)} connections`
         : first.credential_type.replaceAll("_", " "),
     added: true,
+    verificationLabel: connectionVerificationLabel(group),
     disabled: group.every((key) => key.is_active === false),
     manageKeyIds: group.map((key) => key.id),
     connectOwnSlug:
@@ -154,9 +157,9 @@ function addedServiceItem(
 }
 
 function addedCustomItem(key: KeyInfo): ConnectorCardItem {
-  const endpointDescription = !key.auto_connected && key.endpoint_url
+  const endpointDescription = credentialVerificationMeta(key)?.tooltip ?? (!key.auto_connected && key.endpoint_url
     ? `Connected through the NyxID proxy (${key.endpoint_url}).`
-    : "Connected through the NyxID proxy.";
+    : "Connected through the NyxID proxy.");
   return {
     id: `key:${key.id}`,
     name: key.label,
@@ -169,6 +172,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
       endpointDescription,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
+    verificationLabel: connectionVerificationLabel([key]),
     disabled: key.is_active === false,
     manageKeyIds: [key.id],
   };

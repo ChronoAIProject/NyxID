@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import AbortControllerPolyfill from "abort-controller";
 import {
   assistantVoiceSessionsPath,
   assistantVoiceStreamPath,
@@ -140,6 +141,188 @@ test("identity features default to disabled and use server-resolved capabilities
     capabilities: { enabled_features: ["assistant:voice"] },
   });
   await assert.rejects(f.api.features());
+});
+
+test("account active metadata binds the session to a valid conversation", async () => {
+  const f = fixture();
+  const signal = new AbortController().signal;
+  f.reply({ session, conversation_id: thread });
+  assert.deepEqual(await f.api.accountActive(thread, signal), {
+    session,
+    conversation_id: thread,
+  });
+  assert.deepEqual(f.calls, [
+    { path: "/assistant/nyxagent/voice/active", options: { signal } },
+  ]);
+  for (const result of [
+    { session, conversation_id: null },
+    { session: null, conversation_id: thread },
+    { session, conversation_id: "../other" },
+  ]) {
+    f.reply(result);
+    await assert.rejects(f.api.accountActive(thread));
+  }
+});
+
+test("old-server discovery finds another chat through bounded metadata reads", async () => {
+  const ids = Array.from(
+    { length: 15 },
+    (_, index) => `nyxa-${String(index + 1).padStart(32, "0")}`,
+  );
+  const calls: string[] = [];
+  let concurrent = 0;
+  let maximum = 0;
+  const signal = new AbortController().signal;
+  const api = createAssistantVoiceApi(async (path, options) => {
+    calls.push(path);
+    assert.equal(options?.signal, signal);
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: "more" };
+    concurrent++;
+    maximum = Math.max(maximum, concurrent);
+    await Promise.resolve();
+    concurrent--;
+    return { session: path.includes(ids[9]!) ? session : null };
+  }, origin);
+  assert.deepEqual(await api.accountActive(thread, signal), {
+    session,
+    conversation_id: ids[9],
+  });
+  assert.equal(maximum, 2);
+  assert.equal(calls.filter((path) => path.endsWith("/active")).length, 12);
+  assert.equal(
+    calls.some((path) => path.includes(ids[10]!)),
+    false,
+  );
+  assert.ok(calls.every((path) => !path.endsWith("/history")));
+});
+
+test("an old-server scan that finds no live call in recent chats clears recovery even with more chats", async () => {
+  // Accounts with more than ten chats always have a next page; treating that
+  // as permanently unknown blocked voice. Server admission still fences Start.
+  let posts = 0;
+  const api = createAssistantVoiceApi(async (path, options) => {
+    if (options?.method === "POST") posts++;
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 405 };
+    if (path.endsWith("?limit=10"))
+      return {
+        conversations: Array.from({ length: 10 }, (_, index) => ({
+          id: `nyxa-${String(index + 100).padStart(32, "0")}`,
+        })),
+        next_cursor: "more",
+      };
+    return { session: null };
+  }, origin);
+  assert.deepEqual(await api.accountActive(thread), {
+    session: null,
+    conversation_id: null,
+  });
+  assert.equal(posts, 0);
+});
+
+test("recent automation, channel or deleted threads do not make the old-server scan unverifiable", async () => {
+  // A frequently running automation thread answers 403 "Voice requires a
+  // private owner thread"; it previously failed every status check.
+  const ids = Array.from(
+    { length: 4 },
+    (_, index) => `nyxa-${String(index + 200).padStart(32, "0")}`,
+  );
+  const api = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: "more" };
+    if (path.includes(ids[0]!)) throw { statusCode: 403 };
+    if (path.includes(ids[1]!)) throw { statusCode: 404 };
+    if (path.includes(ids[3]!)) return { session };
+    return { session: null };
+  }, origin);
+  assert.deepEqual(await api.accountActive(thread), {
+    session,
+    conversation_id: ids[3],
+  });
+  const empty = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: null };
+    if (path.includes(ids[0]!)) throw { statusCode: 403 };
+    return { session: null };
+  }, origin);
+  assert.deepEqual(await empty.accountActive(thread), {
+    session: null,
+    conversation_id: null,
+  });
+  // Network failures and the caller's own thread still fail closed.
+  const offline = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: null };
+    if (path.includes(ids[0]!)) throw new TypeError("Network request failed");
+    return { session: null };
+  }, origin);
+  await assert.rejects(offline.accountActive(thread), /Network request failed/);
+  const forbiddenOwn = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    throw { statusCode: 403 };
+  }, origin);
+  await assert.rejects(forbiddenOwn.accountActive(thread));
+});
+
+test("account authorization failure or cancellation never triggers recent-chat scanning", async () => {
+  for (const failure of [
+    { statusCode: 401 },
+    { statusCode: 403 },
+    Object.assign(new Error("cancelled"), { name: "AbortError" }),
+  ]) {
+    const calls: string[] = [];
+    const api = createAssistantVoiceApi(async (path) => {
+      calls.push(path);
+      throw failure;
+    }, origin);
+    await assert.rejects(
+      api.accountActive(thread),
+      (error) => error === failure,
+    );
+    assert.deepEqual(calls, ["/assistant/nyxagent/voice/active"]);
+  }
+});
+
+test("cancelling legacy discovery stops the scan before another conversation batch", async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  const api = createAssistantVoiceApi(async (path) => {
+    calls.push(path);
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10")) {
+      controller.abort();
+      return {
+        conversations: [{ id: `nyxa-${"b".repeat(32)}` }],
+        next_cursor: null,
+      };
+    }
+    return { session: null };
+  }, origin);
+  await assert.rejects(api.accountActive(thread, controller.signal), {
+    name: "AbortError",
+  });
+  assert.equal(calls.length, 3);
+});
+
+test("account recovery supports React Native's AbortSignal polyfill without throwIfAborted", async () => {
+  const controller = new AbortControllerPolyfill();
+  const signal = controller.signal as unknown as AbortSignal;
+  assert.equal(typeof signal.throwIfAborted, "undefined");
+  const f = fixture();
+  f.reply({ session: null, conversation_id: null });
+  assert.deepEqual(await f.api.accountActive(thread, signal), {
+    session: null,
+    conversation_id: null,
+  });
+  controller.abort();
+  await assert.rejects(f.api.accountActive(thread, signal), {
+    name: "AbortError",
+  });
+  assert.equal(f.calls.length, 1);
 });
 
 test("settings reads and saves only the voice preference patch", async () => {
@@ -371,11 +554,20 @@ function integratedStart(response: unknown | (() => Promise<unknown>)) {
   const errors: string[] = [];
   const conflicts: unknown[] = [];
   const mediaEvents: string[] = [];
+  const controlStates: {
+    startAborted: boolean | undefined;
+    endAborted: boolean | undefined;
+  }[] = [];
   const api = createAssistantVoiceApi(async (path, options) => {
     calls.push({ path, options });
-    if (path.endsWith("/active")) return { session };
-    if (path.endsWith("/control"))
+    if (path.endsWith("/active")) return { session, conversation_id: thread };
+    if (path.endsWith("/control")) {
+      controlStates.push({
+        startAborted: calls[0]?.options?.signal?.aborted,
+        endAborted: options?.signal?.aborted,
+      });
       return { ...session, state: "closing", end_requested: true };
+    }
     return typeof response === "function" ? response() : response;
   }, origin);
   const media: VoiceMediaAdapter = {
@@ -408,7 +600,7 @@ function integratedStart(response: unknown | (() => Promise<unknown>)) {
     onError: (message) => errors.push(message),
     onConflict: (conflict) => conflicts.push(conflict),
   });
-  return { client, calls, errors, conflicts, mediaEvents };
+  return { client, calls, errors, conflicts, mediaEvents, controlStates };
 }
 
 test("real transport preserves an owned session so malformed media answers receive durable End", async () => {
@@ -421,7 +613,8 @@ test("real transport preserves an owned session so malformed media answers recei
       "Voice server returned an invalid session answer",
     ]);
     assert.deepEqual(f.mediaEvents, ["close"]);
-    assert.deepEqual(f.conflicts, []);
+    assert.equal((f.conflicts[0] as typeof session).id, sessionId);
+    assert.equal((f.conflicts[0] as typeof session).state, "closing");
     assert.deepEqual(
       f.calls.map((call) => call.path),
       [`${root}/voice-sessions`, `${root}/voice-sessions/${sessionId}/control`],
@@ -431,7 +624,23 @@ test("real transport preserves an owned session so malformed media answers recei
       expected_revision: session.control_revision,
       action: "end",
     });
-    assert.equal(f.calls[1]!.options?.signal, undefined);
+    const startSignal = f.calls[0]!.options?.signal;
+    const endSignal = f.calls[1]!.options?.signal;
+    assert.ok(startSignal);
+    assert.ok(
+      endSignal,
+      "durable End has an independent bounded cancellation signal",
+    );
+    assert.notEqual(endSignal, startSignal);
+    assert.deepEqual(f.controlStates, [
+      { startAborted: true, endAborted: false },
+    ]);
+    assert.equal(startSignal.aborted, true);
+    assert.equal(
+      endSignal.aborted,
+      true,
+      "End cleans up its own controller after settling",
+    );
   }
 });
 
@@ -453,10 +662,26 @@ test("closing during a real POST still ends a late owned session with a malforme
     f.calls.map((call) => call.path),
     [`${root}/voice-sessions`, `${root}/voice-sessions/${sessionId}/control`],
   );
-  assert.equal(f.calls[1]!.options?.signal, undefined);
+  const startSignal = f.calls[0]!.options?.signal;
+  const endSignal = f.calls[1]!.options?.signal;
+  assert.ok(startSignal);
+  assert.ok(
+    endSignal,
+    "a cancelled Start must not cancel its late durable End",
+  );
+  assert.notEqual(endSignal, startSignal);
+  assert.deepEqual(f.controlStates, [
+    { startAborted: true, endAborted: false },
+  ]);
+  assert.equal(startSignal.aborted, true);
+  assert.equal(
+    endSignal.aborted,
+    true,
+    "late End releases its own cancellation resources",
+  );
   assert.deepEqual(f.mediaEvents, ["close"]);
   assert.deepEqual(f.errors, []);
-  assert.deepEqual(f.conflicts, []);
+  assert.equal((f.conflicts[0] as typeof session).state, "closing");
 });
 
 test("real transport never turns an invalid start identity into authority to end another active session", async () => {
@@ -469,10 +694,9 @@ test("real transport never turns an invalid start identity into authority to end
   await f.client.end();
   assert.deepEqual(
     f.calls.map((call) => call.path),
-    [`${root}/voice-sessions`, `${root}/voice-sessions/active`],
+    [`${root}/voice-sessions`, "/assistant/nyxagent/voice/active"],
   );
   assert.equal(f.conflicts.length, 1);
   assert.equal((f.conflicts[0] as typeof session).id, sessionId);
   assert.deepEqual(f.mediaEvents, ["close"]);
 });
-

@@ -169,6 +169,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        title_language: None,
         automation_work: None,
         automation_parent: None,
         execution_enrollment: false,
@@ -1010,6 +1011,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: execution_parent
                 .and_then(crate::services::trigger_schedule::direct::parent),
@@ -1210,13 +1212,13 @@ fn action_summary(name: &str, args: &Value) -> String {
             }
             if let Some(budget) = guests.get("daily_credits").and_then(Value::as_str) {
                 details.push(format!(
-                    "daily organization guest budget {} credits",
+                    "legacy daily organization guest budget {} credits (ignored after Grants rollout)",
                     crate::services::assistant_nyxagent::identifier(budget)
                 ));
             }
             if let Some(services) = guests.get("service_ids").and_then(Value::as_array) {
                 details.push(format!(
-                    "{} delegated organization services",
+                    "{} legacy delegated organization services (ignored after Grants rollout)",
                     services.len()
                 ));
             }

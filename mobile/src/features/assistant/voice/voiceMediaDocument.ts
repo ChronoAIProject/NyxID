@@ -18,6 +18,9 @@ export const VOICE_MEDIA_ENGINE = String.raw`
   let meterContext, inputMeter, outputMeter, outputTap, meterTimer, meterSamples;
   let meterGeneration = 0;
   let lastLevel = '';
+  let diagnosticsTimer;
+  let inputListeners = [];
+  const diagnosticStates = new Map();
   const pendingPCM = new Set();
   const iceWaiters = new Set();
   const MAX_FRAME = 1920;
@@ -43,6 +46,126 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     return counts;
   }
   const assertAlive = (id) => { if (!alive(id)) throw new Error('cancelled'); };
+  const errorName = (error) => ['Error', 'TypeError', 'OperationError', 'InvalidStateError', 'NotSupportedError', 'NotAllowedError', 'AbortError', 'NotFoundError', 'UnknownError', 'SecurityError', 'TimeoutError'].includes(error?.name) ? error.name : 'Error';
+  function diagnostic(id, stage, name, counts) {
+    if (!alive(id)) return;
+    const value = JSON.stringify([name, counts]);
+    if (diagnosticStates.get(stage) === value) return;
+    diagnosticStates.set(stage, value);
+    emit({ type: 'diagnostic', stage, name, ...(counts ? { counts } : {}) });
+  }
+  function inputDiagnostic(id, name = 'ready') {
+    const tracks = media?.getAudioTracks().slice(0, 16) || [];
+    diagnostic(id, 'input_track', name, {
+      audio_tracks: tracks.length,
+      enabled_tracks: tracks.filter((track) => track.enabled).length,
+      live_tracks: tracks.filter((track) => track.readyState === 'live').length,
+      muted_tracks: tracks.filter((track) => track.muted).length,
+      input_requested: capturing ? 1 : 0,
+    });
+  }
+  function watchInput(id, stream) {
+    for (const track of stream.getAudioTracks()) {
+      const ended = () => {
+        if (!alive(id)) return;
+        inputDiagnostic(id, 'ended');
+        fail('Microphone access ended. Start a new call when it is available.');
+      };
+      const changed = () => { if (alive(id)) inputDiagnostic(id); };
+      track.addEventListener?.('ended', ended);
+      track.addEventListener?.('mute', changed);
+      track.addEventListener?.('unmute', changed);
+      inputListeners.push({ track, ended, changed });
+      if (track.readyState === 'ended') ended();
+    }
+    inputDiagnostic(id);
+  }
+  async function playOpenAI(id, target) {
+    diagnostic(id, 'openai_play', 'pending');
+    try {
+      await target.play();
+      if (!alive(id) || audio !== target) return;
+      diagnostic(id, 'openai_play', 'ready');
+    } catch (error) {
+      if (!alive(id) || audio !== target) return;
+      diagnostic(id, 'openai_play', errorName(error));
+      // Playback can recover through Resume; it is not a capture-permission failure.
+      emit({ type: 'playback-blocked' });
+    }
+  }
+  function startOpenAIDiagnostics(id, connection, events) {
+    let pending = false;
+    let sample = 0;
+    const state = (stage, value, allowed) => diagnostic(id, stage, allowed.includes(value) ? value : 'unavailable');
+    const states = () => {
+      if (!alive(id) || peer !== connection) return;
+      state('openai_peer', connection.connectionState, ['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed']);
+      state('openai_ice', connection.iceConnectionState, ['new', 'checking', 'connected', 'completed', 'disconnected', 'failed', 'closed']);
+      state('openai_datachannel', events.readyState, ['connecting', 'open', 'closing', 'closed']);
+      state('openai_context', meterContext?.state, ['running', 'suspended', 'interrupted', 'closed']);
+      inputDiagnostic(id);
+      if (audio) {
+        const counts = { paused: audio.paused ? 1 : 0, muted: audio.muted ? 1 : 0 };
+        if (Number.isFinite(audio.volume) && audio.volume >= 0 && audio.volume <= 1) counts.volume = audio.volume;
+        if (Number.isInteger(audio.readyState) && audio.readyState >= 0 && audio.readyState <= 4) counts.ready_state = audio.readyState;
+        if (Number.isFinite(audio.currentTime) && audio.currentTime >= 0 && audio.currentTime <= 1830) counts.current_time_ms = Math.floor(audio.currentTime * 1000);
+        diagnostic(id, 'openai_playback', 'ready', counts);
+      }
+    };
+    const sampleStats = async () => {
+      if (!alive(id) || peer !== connection || pending) return;
+      states();
+      if (typeof connection.getStats !== 'function') {
+        diagnostic(id, 'openai_stats', 'unavailable');
+        return;
+      }
+      pending = true;
+      try {
+        const reports = await connection.getStats();
+        if (!alive(id) || peer !== connection) return;
+        const buckets = {
+          'outbound-rtp': { stage: 'openai_rtp_outbound', counts: { audio_reports: 0 } },
+          'inbound-rtp': { stage: 'openai_rtp_inbound', counts: { audio_reports: 0 } },
+          'media-source': { stage: 'openai_audio_source', counts: { audio_reports: 0 } },
+        };
+        let inspected = 0;
+        for (const report of reports.values()) {
+          if (++inspected > 128) break;
+          if (report.kind !== 'audio' && report.mediaType !== 'audio') continue;
+          const bucket = Object.prototype.hasOwnProperty.call(buckets, report.type) ? buckets[report.type] : undefined;
+          if (!bucket || bucket.counts.audio_reports >= 16) continue;
+          bucket.counts.audio_reports++;
+          // Copy only numeric audio activity. Never copy ids, candidates, SDP or reports.
+          const fields = report.type === 'outbound-rtp'
+            ? [['bytesSent', 'bytes', Number.MAX_SAFE_INTEGER, true], ['packetsSent', 'packets', Number.MAX_SAFE_INTEGER, true]]
+            : report.type === 'inbound-rtp'
+              ? [['bytesReceived', 'bytes', Number.MAX_SAFE_INTEGER, true], ['packetsReceived', 'packets', Number.MAX_SAFE_INTEGER, true]] : [];
+          fields.push(['totalAudioEnergy', 'total_audio_energy', 1e9, false], ['totalSamplesDuration', 'total_samples_duration', 1e9, false]);
+          for (const [field, key, max, integer] of fields) {
+            const value = report[field];
+            if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max || (integer && !Number.isSafeInteger(value))) continue;
+            const total = (bucket.counts[key] || 0) + value;
+            if (total <= max) bucket.counts[key] = total;
+          }
+          if (typeof report.audioLevel === 'number' && Number.isFinite(report.audioLevel) && report.audioLevel >= 0 && report.audioLevel <= 1)
+            bucket.counts.audio_level = Math.max(bucket.counts.audio_level || 0, report.audioLevel);
+        }
+        const sampled = Math.min(++sample, 1000000);
+        for (const bucket of Object.values(buckets)) diagnostic(id, bucket.stage, 'ready', { ...bucket.counts, sample: sampled });
+        diagnostic(id, 'openai_stats', 'ready');
+      } catch (error) {
+        if (alive(id) && peer === connection) diagnostic(id, 'openai_stats', errorName(error));
+      } finally {
+        pending = false;
+      }
+    };
+    events.onopen = states;
+    events.onclose = states;
+    events.onerror = states;
+    connection.oniceconnectionstatechange = states;
+    void sampleStats();
+    diagnosticsTimer = setInterval(() => { void sampleStats(); }, 2000);
+  }
   function analyser(target) {
     const node = target.createAnalyser();
     node.fftSize = 512;
@@ -121,6 +244,15 @@ export const VOICE_MEDIA_ENGINE = String.raw`
   function cleanup() {
     closed = true;
     capturing = false;
+    if (diagnosticsTimer) clearInterval(diagnosticsTimer);
+    diagnosticsTimer = undefined;
+    diagnosticStates.clear();
+    for (const { track, ended, changed } of inputListeners) {
+      track.removeEventListener?.('ended', ended);
+      track.removeEventListener?.('mute', changed);
+      track.removeEventListener?.('unmute', changed);
+    }
+    inputListeners = [];
     stopMeter();
     for (const reject of iceWaiters) reject(new Error('cancelled'));
     iceWaiters.clear();
@@ -334,6 +466,11 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     if (!alive(id)) { localMedia.getTracks().forEach((track) => track.stop()); throw new Error('cancelled'); }
     media = localMedia;
     localMedia.getAudioTracks().forEach((track) => { track.enabled = false; });
+    const mockCapture = localMedia.getAudioTracks().some((track) => typeof track.label === 'string' && track.label.length === 19 && /^Mock audio device [1-4]$/.test(track.label));
+    diagnostic(id, 'input_source', 'ready', { mock_capture: mockCapture ? 1 : 0 });
+    if (mockCapture) throw new Error('mock_capture');
+    watchInput(id, localMedia);
+    assertAlive(id);
     if (protocol === 'xai_realtime') return grok(id, processor);
     if (protocol !== 'openai_live') throw new Error('unsupported');
     const localPeer = new RTCPeerConnection();
@@ -344,7 +481,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       if (!alive(id)) return;
       audio.srcObject = streams[0] || new MediaStream([track]);
       meterOpenAIOutput(id, audio.srcObject);
-      void audio.play().catch(() => {});
+      void playOpenAI(id, audio);
     };
     localPeer.onconnectionstatechange = () => {
       if (alive(id) && localPeer.connectionState === 'failed') fail('WebRTC negotiation failed.');
@@ -355,6 +492,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       try { if (JSON.parse(data)?.type === 'session.started') emit({ type: 'provider-ready' }); }
       catch { /* Provider data never enters logs, storage, or the app API. */ }
     };
+    startOpenAIDiagnostics(id, localPeer, events);
     await localPeer.setLocalDescription(await localPeer.createOffer());
     assertAlive(id);
     await waitForICE(localPeer, id);
@@ -370,6 +508,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       capturing = enabled;
       worklet?.port.postMessage({ type: 'capture', enabled, generation: ++captureGeneration });
     }
+    inputDiagnostic(generation);
   }
   async function command(message) {
     if (!message || !Number.isSafeInteger(message.generation)) return;
@@ -383,9 +522,19 @@ export const VOICE_MEDIA_ENGINE = String.raw`
           if (!peer || typeof message.sdp !== 'string' || message.sdp.length > 131072) throw new Error('sdp');
           await peer.setRemoteDescription({ type: 'answer', sdp: message.sdp }); break;
         case 'input': input(message.enabled === true); break;
-        case 'hold': if (audio) audio.volume = message.pressed ? 0.25 : 1; break;
+        case 'hold': break;
         case 'speaker': speakerMuted = message.muted === true; if (audio) audio.muted = speakerMuted; break;
-        case 'resume': if (context) await context.resume(); if (meterContext) await meterContext.resume().catch(() => {}); assertAlive(id); if (audio) await audio.play(); break;
+        case 'resume': {
+          const target = audio, localContext = context, localMeter = meterContext;
+          if (localContext) await localContext.resume();
+          assertAlive(id);
+          if (localMeter) await localMeter.resume().catch(() => {});
+          assertAlive(id);
+          if (target) await target.play();
+          assertAlive(id);
+          if (!worklet) diagnostic(id, 'openai_play', 'ready');
+          break;
+        }
         case 'enqueue': {
           if (!worklet || !Number.isSafeInteger(message.end_ms) || message.end_ms < 0 || message.end_ms > 1830000) throw new Error('frame');
           const bytes = decode(message.bytes);
@@ -402,10 +551,16 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       if (message.requestId && alive(id)) emit({ type: 'response', requestId: message.requestId, result });
     } catch (error) {
       if (!alive(id)) return;
+      if (message.type === 'resume' && !worklet) {
+        diagnostic(id, 'openai_play', errorName(error));
+        if (message.requestId) emit({ type: 'response', requestId: message.requestId, error: 'Tap Resume audio to hear the assistant.' });
+        return;
+      }
       emit({ type: 'diagnostic', stage, name: typeof error?.name === 'string' ? error.name : 'Error' });
       const reason = error?.name === 'NotAllowedError' ? 'Microphone access was denied. Enable it in Settings to use voice.'
         : error?.name === 'NotFoundError' ? 'No microphone is available.'
         : error?.message === 'unsupported' ? 'Voice audio is not supported by this app runtime.'
+        : error?.message === 'mock_capture' ? 'A test microphone is active. Select a real microphone and try again.'
         : error?.message === 'loopback' ? 'Voice playback could not be started. Try another voice source or continue with text.'
         : 'Voice audio could not be started. Please try again.';
       if (message.requestId) emit({ type: 'response', requestId: message.requestId, error: reason });

@@ -24,13 +24,17 @@ pub struct Binding {
 #[serde(default)]
 pub struct GuestPolicy {
     pub revision: String,
+    /// Explicit whole-policy adoption; absent keeps the binding's frozen list.
+    pub follows_agent_grants: bool,
+    /// Idempotent reviewed handoff identity. Legacy data is retained for rollback.
+    pub grants_adoption_id: Option<String>,
     /// Rebuilds share the original daily ledger and sender-hash namespace.
     /// Absent on legacy policies, which use their own channel ID.
     pub continuity_channel_id: Option<String>,
     pub service_authority: std::collections::BTreeMap<String, String>,
     pub enabled: bool,
     pub service_ids: Vec<String>,
-    /// Absent until an admin explicitly sets a positive UTC daily cap.
+    /// Legacy UTC daily cap, retained for old readers; inert after fleet cutover.
     #[serde(with = "super::credits::whole::optional")]
     pub daily_credits: Option<Credits>,
 }

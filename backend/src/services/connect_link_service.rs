@@ -78,6 +78,8 @@ pub struct CatalogConnectInfo {
     pub provider_type: Option<String>,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
+    pub(crate) has_oauth_endpoints: bool,
+    pub(crate) supports_oauth_scopes: bool,
     pub requires_gateway_url: bool,
     pub api_key_url: Option<String>,
     pub api_key_instructions: Option<String>,
@@ -1351,7 +1353,7 @@ async fn load_catalog_info_by_id(
     catalog_info(db, service).await
 }
 
-async fn catalog_info(
+pub(crate) async fn catalog_info(
     db: &mongodb::Database,
     service: DownstreamService,
 ) -> AppResult<CatalogConnectInfo> {
@@ -1389,6 +1391,25 @@ async fn catalog_info(
                 provider,
             )
         }),
+        has_oauth_endpoints: provider
+            .as_ref()
+            .is_some_and(|p| match p.provider_type.as_str() {
+                "oauth2" => {
+                    p.authorization_url
+                        .as_deref()
+                        .is_some_and(|v| !v.is_empty())
+                        && p.token_url.as_deref().is_some_and(|v| !v.is_empty())
+                }
+                "device_code" => {
+                    p.device_code_url.as_deref().is_some_and(|v| !v.is_empty())
+                        && p.device_token_url
+                            .as_deref()
+                            .or(p.token_url.as_deref())
+                            .is_some_and(|v| !v.is_empty())
+                }
+                _ => false,
+            }),
+        supports_oauth_scopes: provider.as_ref().is_some_and(|p| p.supports_oauth_scopes),
         requires_gateway_url: provider
             .as_ref()
             .is_some_and(|provider| provider.requires_gateway_url),
@@ -2049,7 +2070,7 @@ mod tests {
                 Mock::given(method("POST"))
                     .and(path("/device"))
                     .and(body_string_contains(
-                        "scope=read%3Auser+read%3Aorg+public_repo",
+                        "scope=read%3Auser+read%3Aorg+public_repo+read%3Aproject",
                     ))
                     .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "device_code": "test-device-code", "user_code": "TEST-CODE",
@@ -2068,7 +2089,7 @@ mod tests {
                     assistant_personal: false,
                     service_slug: service.slug.clone(),
                     use_platform_key: None,
-                    scopes: vec!["read:org, public_repo".to_string()],
+                    scopes: vec!["read:org, public_repo, read:project".to_string()],
                     label: None,
                     endpoint_url: None,
                     requested_by: None,
@@ -2097,7 +2118,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(preview.scopes, ["read:org", "public_repo"]);
+            assert_eq!(preview.scopes, ["read:org", "public_repo", "read:project"]);
             let Json(status) = handlers::get_connect_link(
                 State(state.clone()),
                 test_auth_user(&actor),
@@ -2150,7 +2171,10 @@ mod tests {
                         url::Url::parse(completed.authorization_url.as_deref().unwrap()).unwrap();
                     let params: std::collections::HashMap<_, _> =
                         url.query_pairs().into_owned().collect();
-                    assert_eq!(params["scope"], "read:user read:org public_repo");
+                    assert_eq!(
+                        params["scope"],
+                        "read:user read:org public_repo read:project"
+                    );
                     let oauth = db
                         .collection::<crate::models::oauth_state::OAuthState>(
                             crate::models::oauth_state::COLLECTION_NAME,

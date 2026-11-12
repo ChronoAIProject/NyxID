@@ -6,23 +6,17 @@ import { AssistantMarkdownBody } from "./AssistantMarkdownBody";
 export const AssistantReplyBody = memo(function AssistantReplyBody({
   text,
   activity,
-  variant,
   onLinkPress,
 }: {
   text: string;
   activity?: ReactNode;
-  variant?: "private" | "crew";
   onLinkPress?: (url: string) => boolean;
 }) {
   return (
     <View style={{ gap: 16 }}>
       {activity ? <View style={{ gap: 8 }}>{activity}</View> : null}
       {text ? (
-        <AssistantMarkdownBody
-          text={text}
-          variant={variant}
-          onLinkPress={onLinkPress}
-        />
+        <AssistantMarkdownBody text={text} onLinkPress={onLinkPress} />
       ) : null}
     </View>
   );

@@ -326,8 +326,9 @@ pub(crate) async fn authority_with_access(
         let mut grants = agent.grants.clone();
         grants.account_read = false;
         grants.platform_service_ids.clear();
-        let policy = channel.delegated_services();
-        grants.service_ids.retain(|id| policy.contains(id));
+        grants
+            .service_ids
+            .retain(|id| channel.guest_service_selected(id));
         return Ok(KeyAuthority::OrgChannelGuest(
             grants,
             agent.operation_scopes.clone(),

@@ -612,5 +612,14 @@
   ". Custom strings are rejected by the backend. ": "。后端不接受自定义字符串。",
   "Refresh the key details to confirm its expiry.": "请刷新密钥详情以确认到期时间。",
   "This key has no expiry.": "此密钥没有到期时间。",
-  "Expires {{date}}.": "到期时间：{{date}}。"
+  "Expires {{date}}.": "到期时间：{{date}}。",
+  "Projects (read)": "项目（只读）",
+  "Projects (read/write)": "项目（读写）",
+  "Read user and organization projects.": "读取用户和组织的项目。",
+  "Read and write user and organization projects.": "读取和修改用户及组织的项目。",
+  "I understand that removing these permissions may stop apps using this connection.": "我了解移除这些权限可能导致使用此连接的应用停止工作。",
+  "Requested permissions unavailable on NyxID's shared app: {{scopes}}. Remove them or connect with your own OAuth app.": "NyxID 的共享应用不提供所请求的权限：{{scopes}}。请移除这些权限，或使用自己的 OAuth 应用连接。",
+  "Remove requested permission: {{scope}}": "移除请求的权限：{{scope}}",
+  "Removing a permission re-authorizes this connection and may stop apps that rely on it. Review the removed permissions before continuing. Revoking older access depends on the provider.": "移除权限会重新授权此连接，并可能导致依赖该权限的应用停止工作。继续前请检查要移除的权限。能否撤销旧授权取决于服务提供方。",
+  "Scopes marked “granted” are already authorized and locked. NyxID supports adding permissions here; removing older access requires managing the grant at the provider.": "标记为“已授权”的权限已获授权并已锁定。NyxID 支持在此添加权限；移除旧权限需要在服务提供方管理授权。"
 }

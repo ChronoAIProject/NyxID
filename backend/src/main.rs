@@ -711,6 +711,10 @@ async fn server_main() {
         tracing::warn!("Unified collection migration encountered errors: {e}");
     }
 
+    // Live proxy resolution follows the catalog while bounded background
+    // repair refreshes stored snapshots after collection migration.
+    services::catalog_endpoint_service::spawn_reconcile(db.clone(), None);
+
     // Retire pre-upgrade owner asks in bounded pending-row batches. The sweep is
     // idempotent; failures retry on policy writes or the next startup.
     if services::assistant_acknowledgement_service::retire_full_access_confirmations(

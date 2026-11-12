@@ -102,6 +102,7 @@ interface AuthFlowProps {
   readonly returnTo?: string;
   readonly socialError?: string;
   readonly initialInviteCode?: string;
+  readonly enableEmailLogin?: boolean;
 }
 
 export function AuthFlow({
@@ -109,6 +110,7 @@ export function AuthFlow({
   returnTo,
   socialError,
   initialInviteCode,
+  enableEmailLogin = false,
 }: AuthFlowProps) {
   useUiTranslation();
   const normalizedInitialInviteCode =
@@ -183,6 +185,7 @@ export function AuthFlow({
         const nextParams = new URLSearchParams();
         if (returnTo) nextParams.set("return_to", returnTo);
         if (initialInviteCode) nextParams.set("code", initialInviteCode);
+        if (target === 0 && enableEmailLogin) nextParams.set("enable_email", "true");
         const qs = nextParams.toString();
         window.history.replaceState(
           null,
@@ -307,6 +310,7 @@ export function AuthFlow({
           )}
 
           <LoginMethods
+            enableEmailLogin={enableEmailLogin}
             returnTo={returnTo}
             disabled={loginMutation.isPending}
             onSignUp={() => slideToPanel(1)}

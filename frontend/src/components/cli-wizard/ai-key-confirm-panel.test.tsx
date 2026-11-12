@@ -1068,6 +1068,8 @@ describe("AiKeyConfirm — manage-scopes (NyxID#917 codex follow-up)", () => {
     // Toggle off both granted defaults.
     await user.click(await screen.findByRole("button", { name: /Read posts/i }));
     await user.click(await screen.findByRole("button", { name: /Read profile/i }));
+    expect(screen.getByRole("button", { name: /Re-authorize with these permissions/i })).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: /I understand that removing/ }));
     await user.click(
       screen.getByRole("button", { name: /Re-authorize with these permissions/i }),
     );
@@ -1192,6 +1194,16 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
       screen.getByRole("button", { name: /Upload media/i }),
     ).toHaveAttribute("aria-pressed", "true");
 
+    expect(reauth).toBeDisabled();
+    expect(screen.getByText(/may stop apps that rely on it/)).toBeInTheDocument();
+    await user.click(reauth);
+    expect(mockOAuthFlow).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("checkbox", { name: /I understand that removing/ }));
+    // Changing the selection invalidates the earlier acknowledgement.
+    await user.click(screen.getByRole("button", { name: /Upload media/i }));
+    expect(reauth).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /Upload media/i }));
+    await user.click(screen.getByRole("checkbox", { name: /I understand that removing/ }));
     await user.click(reauth);
     expect(mockOAuthFlow).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1399,5 +1411,73 @@ describe("CLI wizard OAuth app choice", () => {
 
     const props = await continueToSignIn();
     expect(props.ownOAuthApp).toBe(ownOAuthApp);
+  });
+});
+
+
+describe("Manage scopes preserves GitHub grants (#2367)", () => {
+  const granted = ["read:user", "user:email", "repo"];
+  const entry = {
+    slug: "api-github", name: "GitHub", provider_type: "oauth2",
+    provider_config_id: "github-provider", supports_oauth_scopes: true,
+    credential_mode: "both", has_platform_oauth_credentials: true,
+    default_scopes: ["read:user", "user:email"], scope_removal: "unsupported",
+    platform_scope_allowlist: [...granted, "read:project", "project"],
+    scope_catalog: [
+      { scope: "repo", label: "Repositories (full)", sensitive: true },
+      { scope: "read:project", label: "Projects (read)", sensitive: false },
+      { scope: "project", label: "Projects (read/write)", sensitive: true },
+    ],
+  };
+  function mockConnection(source: "platform" | "byo" = "platform") {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/existing-github") return {
+        id: "existing-github", slug: "api-github-2", label: "GitHub work",
+        catalog_service_slug: "api-github", granted_scopes: granted,
+        oauth_app_source: source, last_authorized_at: "2026-11-01T00:00:00Z",
+      };
+      if (path === "/catalog/api-github") return entry;
+      throw new Error(`unexpected GET ${path}`);
+    });
+  }
+  beforeEach(() => {
+    mockGet.mockReset(); mockPost.mockReset(); mockOAuthFlow.mockReset();
+    mockConnection();
+  });
+  it.each([{ scope_override: undefined }, { scope_override: ["read:project"] }])("locks the current grant and submits it with additions: %j", async ({ scope_override }) => {
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-github-2", reconnect_key_id: "existing-github", scope_override }} />, { wrapper: createWrapper() });
+    const repo = await screen.findByRole("button", { name: /Repositories/ });
+    expect(repo).toBeDisabled();
+    expect(repo).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /read:user/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/Removing:/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    if (!scope_override) await userEvent.click(screen.getByRole("button", { name: "Projects (read)" }));
+    await userEvent.click(screen.getByRole("button", { name: /Re-authorize with these permissions/ }));
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0];
+    expect(props).toEqual(expect.objectContaining({ reconnectKeyId: "existing-github", slug: "api-github-2" }));
+    expect(new Set(props.scopeOverride)).toEqual(new Set([...granted, "read:project"]));
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockGet).not.toHaveBeenCalledWith("/catalog/api-github-2");
+  });
+  it.each(["delete_repo", "future:scope"])("keeps a blocked --set scope visible: %s", async (scope) => {
+    render(<AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "existing-github", scope_override: ["read:project", scope] }} />, { wrapper: createWrapper() });
+    expect(await screen.findByRole("alert")).toHaveTextContent(scope);
+    const reauth = screen.getByRole("button", { name: /Re-authorize with these permissions/ });
+    expect(reauth).toBeDisabled();
+    expect(mockOAuthFlow).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: `Remove requested permission: ${scope}` }));
+    expect(reauth).toBeEnabled();
+    await userEvent.click(reauth);
+    expect(new Set(mockOAuthFlow.mock.calls.at(-1)?.[0].scopeOverride)).toEqual(new Set([...granted, "read:project"]));
+  });
+  it("keeps BYO custom scopes independent of the shared app allowlist", async () => {
+    mockConnection("byo");
+    render(<AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "existing-github", scope_override: ["delete_repo"] }} />, { wrapper: createWrapper() });
+    const reauth = await screen.findByRole("button", { name: /Re-authorize with these permissions/ });
+    expect(reauth).toBeEnabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await userEvent.click(reauth);
+    expect(new Set(mockOAuthFlow.mock.calls.at(-1)?.[0].scopeOverride)).toEqual(new Set([...granted, "delete_repo"]));
   });
 });

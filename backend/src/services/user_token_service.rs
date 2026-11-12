@@ -7009,6 +7009,7 @@ mod tests {
             Some(plat_sec),
         );
         provider.slug = "github".to_string();
+        provider.default_scopes = Some(vec!["read:user".into(), "user:email".into()]);
         provider.credential_mode = "both".to_string();
         provider.authorization_url = Some("https://github.com/login/oauth/authorize".to_string());
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -7020,41 +7021,70 @@ mod tests {
         let connection_id = key.connection_id.clone().unwrap();
 
         // A non-allowlisted scope is rejected before any redirect is built.
-        let err = super::initiate_oauth_connect(
-            &db,
-            &encryption_keys,
-            "http://localhost:3001",
-            &key.user_id,
-            &provider_id,
-            None,
-            None,
-            &[],
-            Some(&["read:user".to_string(), "delete_repo".to_string()]),
-            Some(&connection_id),
-            None,
-            None,
-        )
-        .await
-        .expect_err("delete_repo must be rejected on the shared app");
-        assert!(matches!(err, AppError::ValidationError(_)), "got {err:?}");
+        for rejected in ["delete_repo", "write:org", "some:future:scope"] {
+            let err = super::initiate_oauth_connect(
+                &db,
+                &encryption_keys,
+                "http://localhost:3001",
+                &key.user_id,
+                &provider_id,
+                None,
+                None,
+                &[],
+                Some(&["read:user".to_string(), rejected.to_string()]),
+                Some(&connection_id),
+                None,
+                None,
+            )
+            .await
+            .expect_err("unreviewed or excluded scopes must be rejected on the shared app");
+            assert!(matches!(err, AppError::ValidationError(_)), "got {err:?}");
+        }
 
-        // An allowlisted-only selection succeeds.
-        super::initiate_oauth_connect(
-            &db,
-            &encryption_keys,
-            "http://localhost:3001",
-            &key.user_id,
-            &provider_id,
-            None,
-            None,
-            &[],
-            Some(&["read:user".to_string(), "repo".to_string()]),
-            Some(&connection_id),
-            None,
-            None,
-        )
-        .await
-        .expect("allowlisted scopes should pass");
+        // Both connect-link additions and wizard exact overrides use this
+        // same shared-app gate. No provider requests are made by initiation.
+        for scope in ["read:project", "project"] {
+            for use_override in [false, true] {
+                let additions = vec![scope.to_string()];
+                let selection = vec![
+                    "read:user".to_string(),
+                    "repo".to_string(),
+                    scope.to_string(),
+                ];
+                let (additional, scope_override) = if use_override {
+                    (&[][..], Some(selection.as_slice()))
+                } else {
+                    (additions.as_slice(), None)
+                };
+                let started = super::initiate_oauth_connect(
+                    &db,
+                    &encryption_keys,
+                    "http://localhost:3001",
+                    &key.user_id,
+                    &provider_id,
+                    None,
+                    None,
+                    additional,
+                    scope_override,
+                    Some(&connection_id),
+                    None,
+                    None,
+                )
+                .await
+                .expect("Projects must be offered on the shared app");
+                let url = url::Url::parse(&started.authorization_url).unwrap();
+                let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert_eq!(params["client_id"], "gh-client-id");
+                assert!(
+                    params["scope"]
+                        .split_whitespace()
+                        .any(|value| value == scope)
+                );
+                if use_override {
+                    assert_eq!(params["scope"], selection.join(" "));
+                }
+            }
+        }
     }
 
     #[tokio::test]

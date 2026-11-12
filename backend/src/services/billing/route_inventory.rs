@@ -140,6 +140,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::credential_verification::check",
+        route: "/api/v1/keys/{key_id}/verify",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::codex_connection::verify",
         route: "/api/v1/providers/codex-connection/verify",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),

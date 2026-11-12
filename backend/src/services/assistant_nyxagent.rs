@@ -690,6 +690,8 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    /// Validated first-party UI language; not forwarded to NyxAgent.
+    pub title_language: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) automation_parent: Option<super::trigger_schedule::direct::Parent>,
     /// Copied from a verified person's already-loaded enrollment. Not a client field.
@@ -868,6 +870,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
@@ -918,6 +921,11 @@ pub fn events_text(events: &[AgentEvent]) -> String {
             "NyxID events (authored by NyxID; only a quoted owner message is a request from the user; continuation lines are indented):"
         },
     );
+    if let Some(notice) = super::execution_permission_dispatch::proposals::delivery_notice(events) {
+        text.push_str("\n- ");
+        text.push_str(&notice);
+        return text;
+    }
     for event in events {
         text.push_str("\n- ");
         text.push_str(&event_notice_text(event));
@@ -1195,6 +1203,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::async_service_operation::ensure_indexes(db).await?;
     super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
+    super::assistant_tool_result_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
     // Retire legacy per-person keys before lifting the unique owner index.
@@ -2231,6 +2240,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            title_language: None,
             automation_v2: false,
             artifact_head: None,
             collaboration: None,
@@ -2310,6 +2320,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         && start.channel.is_none()
     {
         row.title = super::assistant_title_service::provisional(&start.text);
+        row.title_language = start
+            .title_language
+            .as_deref()
+            .and_then(super::assistant_title_service::language);
     }
     if start.group_request_id.is_some() {
         row.group_request_id = start.group_request_id.clone();
@@ -6372,6 +6386,7 @@ pub(crate) async fn delete_in_session(
             super::assistant_service_execution::COLLECTION,
             crate::models::assistant_attachment::COLLECTION_NAME,
             crate::models::assistant_resource::COLLECTION_NAME,
+            crate::models::assistant_tool_result::COLLECTION_NAME,
             crate::models::nyxbot_gateway_response::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,

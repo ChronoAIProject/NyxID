@@ -180,6 +180,9 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "image=ghcr.io/${owner}/nyxid/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
 
+      - name: Ensure Ubuntu archive DNS
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 

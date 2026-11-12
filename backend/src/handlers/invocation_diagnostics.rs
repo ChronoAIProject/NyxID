@@ -6,17 +6,14 @@ use axum::{
     Json,
     body::Body,
     extract::State,
-    http::{
-        HeaderMap, HeaderValue, Request, StatusCode,
-        header::{CACHE_CONTROL, RETRY_AFTER},
-    },
+    http::{HeaderMap, HeaderValue, Request, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState,
-    errors::AppResult,
+    errors::{AppError, AppResult},
     mw::auth::{AuthMethod, AuthUser},
     services::{
         audit_service::{self, AuditActor},
@@ -26,8 +23,7 @@ use crate::{
     telemetry::{TelemetryContext, TelemetryEvent, emit_event},
 };
 
-pub(crate) const HANDLE_HEADER: &str = "x-nyxid-diagnostic-handle";
-pub(crate) const EXPIRES_HEADER: &str = "x-nyxid-diagnostic-expires-in";
+pub(crate) use diagnostics::{EXPIRES_HEADER, HANDLE_HEADER};
 pub(crate) const PROBE_HEADER: &str = "x-nyxid-invocation-diagnostic-probe";
 
 /// Internal retained LLM sends must preserve typed failures for their durable
@@ -73,8 +69,13 @@ impl HttpInvocation {
             .as_deref()
             == Some("1");
         // Nested gateway/pool wrappers share the outer invocation's budget.
-        if state.config.chrono_probe_url.is_none()
+        if !state.config.invocation_diagnostics_enabled
+            || state.config.chrono_probe_url.is_none()
             || diagnostic_probe
+            || request
+                .extensions()
+                .get::<crate::mw::auth::SenderConstrainedToken>()
+                .is_some()
             || request.extensions().get::<Target>().is_some()
             || request.extensions().get::<RetainedLlmExecution>().is_some()
         {
@@ -101,9 +102,7 @@ impl HttpInvocation {
             return result;
         };
         let eligible = match &result {
-            Ok(response) => {
-                response.status().is_client_error() || response.status().is_server_error()
-            }
+            Ok(response) => response.status().is_server_error(),
             Err(error) => diagnostics::eligible_error(error),
         };
         if !eligible {
@@ -117,7 +116,7 @@ impl HttpInvocation {
             .clone();
         let Some(id) = id else { return result };
         // chrono-probe callbacks must not create recursive diagnostics.
-        if auth.acting_client_id.as_deref() == Some("chrono-probe") {
+        if !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref()) {
             return result;
         }
         let actor_id = auth.user_id.to_string();
@@ -148,22 +147,18 @@ impl HttpInvocation {
                 return result;
             }
         };
-        let mut response = match result {
-            Ok(response) => response,
-            Err(error) => error.into_response(),
-        };
-        response.headers_mut().insert(
-            HANDLE_HEADER,
-            HeaderValue::from_str(&issued.handle).expect("opaque ASCII handle"),
-        );
-        response.headers_mut().insert(
-            EXPIRES_HEADER,
-            HeaderValue::from_str(&issued.expires_in.to_string()).expect("integer header"),
-        );
-        response
-            .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        Ok(response)
+        match result {
+            Ok(mut response) => {
+                issued.decorate(&mut response);
+                Ok(response)
+            }
+            // Keep Err through tracing and outer handler layers. Decoration
+            // happens only when Axum finally converts the error to a response.
+            Err(source) => Err(AppError::InvocationDiagnostic {
+                source: Box::new(source),
+                handle: issued,
+            }),
+        }
     }
 }
 
@@ -225,6 +220,7 @@ pub async fn redeem(
     auth: AuthUser,
     telemetry: TelemetryContext,
     headers: HeaderMap,
+    sender_constraint: Option<axum::Extension<crate::mw::auth::SenderConstrainedToken>>,
     Json(request): Json<RedeemRequest>,
 ) -> AppResult<Response> {
     if auth.ensure_llm_proxy_access().is_err() {
@@ -241,11 +237,16 @@ pub async fn redeem(
             "Invocation diagnostic not found".into(),
         ));
     }
-    let caller_credential = live_credential(
-        &auth.auth_method,
-        auth.acting_client_id.as_deref(),
-        &headers,
-    );
+    let caller_credential =
+        if sender_constraint.is_some() && matches!(auth.auth_method, AuthMethod::AccessToken) {
+            None
+        } else {
+            live_credential(
+                &auth.auth_method,
+                auth.acting_client_id.as_deref(),
+                &headers,
+            )
+        };
     match diagnostics::redeem(
         &state.db,
         &state.config,
@@ -276,23 +277,7 @@ pub async fn redeem(
                 .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
             Ok(response)
         }
-        RedeemResult::NotReady => {
-            let mut response = (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error":"diagnostic_not_ready",
-                    "message":"The failed invocation is still releasing capacity; retry this diagnostic once."
-                })),
-            )
-                .into_response();
-            response
-                .headers_mut()
-                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
-            response
-                .headers_mut()
-                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            Ok(response)
-        }
+        RedeemResult::NotReady => Err(AppError::DiagnosticNotReady),
     }
 }
 

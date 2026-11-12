@@ -313,9 +313,12 @@ fn x_activity_normalizes_recipient_bound_messages_and_media() {
             .unwrap()
             .is_empty()
     );
+    // Account attribution is independent of selection: unsupported signed
+    // events still identify the bot for diagnostics, but parsing above admits
+    // no message and grants no reply authority.
     assert_eq!(
         webhooks::target(&serde_json::to_vec(&payload).unwrap()).unwrap(),
-        None
+        Some("10".into())
     );
 }
 
@@ -771,4 +774,38 @@ async fn public_reply_uses_the_persisted_incoming_post_as_its_target() {
             .await
             .is_err()
     );
+}
+
+#[test]
+fn encrypted_activity_supports_both_documented_shapes_without_plaintext_or_identity_rewrite() {
+    // Official Activity sample (payload.id) and current X Chat live guide (event_uuid).
+    let id = "e4f4d3fc-8bbf-4928-92eb-e5058d6bb6f6";
+    for modern in [false, true] {
+        let mut event = json!({"data":{"event_type":"chat.received","filter":{"user_id":"10"},
+            "payload":{"sender_id":"2","conversation_id":if modern {"2-10"} else {"2:10"},
+                "encoded_event":"ciphertext","conversation_key_change_event":"key-material"}}});
+        if modern {
+            event["data"]["event_uuid"] = json!(id);
+        } else {
+            event["data"]["payload"]["id"] = json!(id);
+        }
+        let parsed = webhooks::parse(&serde_json::to_vec(&event).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].platform_message_id, id);
+        assert_eq!(parsed[0].conversation_type, "private");
+        assert_eq!(parsed[0].sender_platform_id, "2");
+        assert!(parsed[0].text.is_none());
+        assert!(parsed[0].attachments.is_empty());
+        assert!(!parsed[0].raw_data.to_string().contains("ciphertext"));
+        assert!(!parsed[0].raw_data.to_string().contains("key-material"));
+        // A mixed fleet must retain the old message identity when both are present.
+        event["data"]["payload"]["id"] = json!(id);
+        event["data"]["event_uuid"] = json!("0f52b591-4b7e-4f13-92cd-30e6b2a3f18a");
+        assert_eq!(
+            webhooks::parse(&serde_json::to_vec(&event).unwrap()).unwrap()[0].platform_message_id,
+            id
+        );
+        event["data"]["payload"]["conversation_id"] = json!(if modern { "3-10" } else { "3:10" });
+        assert!(webhooks::parse(&serde_json::to_vec(&event).unwrap()).is_err());
+    }
 }

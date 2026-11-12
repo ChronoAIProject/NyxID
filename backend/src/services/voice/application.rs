@@ -266,6 +266,28 @@ pub async fn active_session(
         session: session.map(Into::into),
     })
 }
+#[derive(Serialize)]
+pub struct AccountActiveSessionResponse {
+    pub(crate) session: Option<SessionResponse>,
+    pub(crate) conversation_id: Option<String>,
+}
+
+/// The account-wide live call that would refuse a new Start, with the
+/// conversation that owns it, so clients can verify or end it exactly instead
+/// of scanning recent conversations. First-party human callers only.
+pub async fn account_active_session(
+    state: &AppState,
+    auth: &AuthUser,
+) -> AppResult<AccountActiveSessionResponse> {
+    let user = auth.user_id.to_string();
+    voice::require_enabled(&state.db, &user).await?;
+    let call = crate::services::voice::session::active_for_user(&state.db, &user).await?;
+    Ok(AccountActiveSessionResponse {
+        conversation_id: call.as_ref().map(|row| row.conversation_id.clone()),
+        session: call.map(Into::into),
+    })
+}
+
 pub async fn session_status(
     state: &AppState,
     auth: &AuthUser,

@@ -114,14 +114,29 @@ on every startup. Therefore:
 - **v2:** "Phase 2 gating" must be real. Add a **server-side per-provider scope
   allowlist that applies only when the flow resolves platform credentials**: requested
   scopes (defaults + additions + `scope_override`) must be a subset of the allowlist or
-  initiation fails with a clear error. Launch allowlists: google = `openid email
-  profile`; github = `read:user user:email` (+ `repo` if product wants it at launch).
+  initiation fails with a clear error. The current positive allowlists live in
+  `scope_catalog::platform_scope_allowlist`. GitHub includes `read:project`
+  (read user/organization Projects) and `project` (read/write), alongside `repo`
+  and the other curated recoverable capabilities. Defaults remain minimal.
+  `write:org`, `delete_repo`, admin/hook/key/security scopes and unreviewed new
+  scopes remain BYO-only; a display catalog entry does not imply shared-app access.
   BYO flows keep today's free-form behavior (the user consents on their own app).
 - The scope catalog's `sensitive` flag is a display hint and MUST NOT be used as the
   verification gate — Google's sensitive/restricted classification is a separate,
   manually maintained list (it does not match our `sensitive` booleans; e.g. Drive
   read-only is verification-relevant to Google).
-- GitHub caveat: no scope removal (`ScopeRemoval::Unsupported`); re-auth mints supersets.
+- GitHub caveat: NyxID keeps scope management add-only (`ScopeRemoval::Unsupported`)
+  and retains known grants in the submitted scope set. GitHub documents automatic
+  union when the authorization request omits `scope`; explicitly scoped tokens can
+  have different scope combinations. Do not promise that a smaller explicit
+  request revokes old app access. See [GitHub OAuth authorization](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps).
+- A classic GitHub OAuth App needs no GitHub App permission toggle for Projects.
+  Existing connections must reauthorize with `read:project` or `project`. Organization
+  approval, SSO and the user's project access still apply. See [GitHub OAuth scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+- Local and hosted scope-management wizards preserve the existing connection id,
+  load its recorded grants, and retain unsupported-removal grants in the request.
+  Blocked requested shared-app scopes remain visible with a reason and block save;
+  supported removals require acknowledgement before reauthorization.
 
 ### D6. The chat connect card gets true one-click for these two providers
 
