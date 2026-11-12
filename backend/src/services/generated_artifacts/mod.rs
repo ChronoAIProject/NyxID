@@ -887,6 +887,7 @@ async fn materialize(
             return Err(invalid());
         }
         let mut attachment = AssistantAttachment {
+            chunks: 0,
             artifact: meta.artifact.clone(),
             id: meta.id.clone(),
             origin: meta.origin.clone(),

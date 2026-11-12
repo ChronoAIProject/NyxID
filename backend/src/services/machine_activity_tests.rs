@@ -395,6 +395,7 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
             turn_id: Uuid::new_v4().to_string(),
             content_type: "text/plain".into(),
             size: 4,
+            chunks: 0,
             data_encrypted: f.state.encryption_keys.encrypt(b"test").await.unwrap(),
             created_at: Utc::now(),
         })

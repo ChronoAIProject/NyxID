@@ -308,6 +308,7 @@ pub async fn store_preview(
         turn_id: chat.turn_id.clone().unwrap_or_default(),
         content_type: "text/plain".into(),
         size: text.len() as i64,
+        chunks: 0,
         data_encrypted: Vec::new(),
         created_at: Utc::now(),
     };

@@ -690,6 +690,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 turn_id: turn_id.clone(),
                 content_type: "image/png".into(),
                 size: 6,
+                chunks: 0,
                 data_encrypted: f.state.encryption_keys.encrypt(b"pixels").await.unwrap(),
                 created_at: Utc::now(),
             };

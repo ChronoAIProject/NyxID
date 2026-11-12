@@ -1,7 +1,7 @@
 # Assistant uploads
 
-Normative contract for human uploads to NyxAgent conversations, owner-posted
-group messages and verified owner Lark/Feishu media. This extends [08](08-nyxagent-engine.md) and
+Normative contract for human uploads, binary tool files, raw file uploads from
+NyxAgent conversations, owner-posted group messages and verified owner Lark/Feishu media. This extends [08](08-nyxagent-engine.md) and
 [09](09-nyxbot-orchestrator.md). Tool images are owner-readable and may also be fetched by the bound thread key
 during their producing live turn, including that same guest turn; see
 [Tool images](08-nyxagent-engine.md#tool-images). Their default retention is the
@@ -62,6 +62,146 @@ exists; collaboration guests have none. Retention belongs to the original
 uploader even when a guest turn runs on the agent owner's key. The delete-after-
 turn policy recognizes that requester's collaboration execution and still
 expires images at settlement.
+
+## Binary tool files
+
+Successful binary service responses in a live, non-guest owner turn become
+encrypted attachments without a feature flag. NyxID selects the byte reader
+before consuming the response, using an explicitly binary, non-text content
+type. A candidate becomes a file only if its body is not valid UTF-8 or its
+Content-Disposition identifies an `attachment` or supplies `filename`/`filename*`.
+Otherwise it keeps the exact existing text, including each transport's original
+charset and BOM handling. This preserves AWS JSON MIME types, JWT, JavaScript
+and JSON mislabeled as octet-stream. Missing content types, JSON, text and
+structured `+xml`/`+json` types retain the existing reader. PNG/JPEG/GIF/WebP content types always retain their existing
+reader, text and image behavior, including unverified or oversized responses.
+Other non-text images are opaque files with `application/octet-stream` metadata
+so legacy image readers ignore them. A raw upload operation declaring `image/*`
+refuses these opaque files because their stored type does not match the wildcard;
+an operation declaring `application/octet-stream` or `*/*` can accept them.
+Ordinary MCP callers retain their existing response representation. Non-file
+chat results, including every legacy-reader fallback, continue through the
+ordinary large-tool-result paging path; short retained-file handles do not need
+paging.
+
+Retention is limited to 20 MiB and retained files share the eight tool-attachment
+slots per turn with tool images and machine screenshots. Candidate capture
+reserves twice the 20 MiB maximum in the shared byte budget before buffering.
+If the budget is full or Content-Length exceeds 20 MiB, NyxID uses the unchanged
+legacy response reader. If an unknown-length body crosses 20 MiB, NyxID releases
+the reservation, finishes using the legacy reader and creates no attachment.
+These fallbacks preserve the original text even for non-UTF-8 responses; they
+cannot safely assume a binary MIME identifies a file before reading it.
+An exhausted turn count returns an explicit `not_retained` metadata note without
+a partial row. Node replies apply the same classification and retention rules,
+with a reservation acquired after binary response headers are known. Text and
+legacy image replies keep their existing limits without a reservation. Complete
+node replies are already buffered by the WebSocket transport before their
+headers can be inspected and retain its frame limit.
+
+For retained files, the model receives only `{attachment_id, name, type, size}` and instructions to
+use the handle with an upload operation or `nyx__attachment_read`. It never
+receives file bytes or base64. The safe, bounded name comes from UTF-8 RFC 5987
+`filename*`, then `filename`, then the operation identifier. Paths and control
+characters are removed. The name lives in `active_turn.attachments[].label`,
+alongside `chat_delivery: false`; the encrypted root retains `origin: tool`.
+Tool files up to **15 MiB** (15,728,640 bytes), inclusive, store their complete
+encrypted payload in the root, leaving one MiB of conservative headroom below
+MongoDB's 16 MiB document limit. Larger files, through the 20 MiB maximum, use
+4 MiB encrypted chunks and an encrypted empty root. The additive `chunks` field
+defaults to zero for existing roots. Chunk documents use the existing upload
+format and scope fields, without an origin or image metadata; root, chunks and
+turn slot commit atomically. Channel image delivery and
+image-input continuations ignore these file rows.
+
+`nyx__attachment_read` runs the existing bounded subprocess extractor on demand
+for PDF, DOCX and supported UTF-8 text. Unsupported or malformed documents may
+still be forwarded as their original bytes; the read result explicitly reports
+unavailable extracted text. Reads and egress require the same owner, conversation,
+active key and credential, producing live turn, non-stopped state and retention
+authority, rechecked after extraction or decryption. Tool files cannot be read
+or uploaded by a later turn or a guest. User uploads retain their existing
+conversation and message fences. Tool files use `tool_image_days` retention,
+including its conversation-lifetime default, and the existing conversation,
+group and owner purge paths remove roots and all their chunks.
+
+## Raw file uploads from attachments
+
+Eligible live, non-guest owner chat keys see both `attachment_id` and the original
+base64 `body` for published, active, stored catalog operations whose request mode
+is Binary. This generic capability is always available and performs no feature-flag
+read; `assistant:attachment-writes` continues to gate only the separate managed
+Lark attachment/Base-write paths.
+This includes system overlays and Catalog-Manager-created catalog rows. The
+override applies only when rendering MCP discovery and search; stored endpoint
+contracts, contract digests, `/mcp/config`, exact descriptors and non-chat
+discovery keep their existing base64 schema. Optional capability lookup errors
+fall back to these unchanged schemas and never fail discovery. Candidate endpoint
+validation uses one batched query per discovery request. Ineligible callers and
+requests without candidate operations perform no capability reads.
+
+Supply exactly one of the two inputs. Use base64 `body` for content the assistant
+wrote itself, such as a note to save as `notes.txt`; use `attachment_id` to move an
+existing uploaded or downloaded file without reconstructing its bytes. Discovery
+expresses this choice with `oneOf`, and dispatch refuses both inputs together for
+eligible generic chat operations. Body-only calls retain the original byte parser
+and perform no attachment-capability lookups. When a declared parameter/body field
+owns `attachment_id`, or the caller is ineligible, NyxID preserves the original
+argument parser and never interprets that field as a file handle.
+
+NyxID resolves the handle through the ordinary upload egress rules, reserves
+twice the exact file size and materializes the bytes once. The declared binary
+request content type wins; a declared wildcard uses the attachment type only
+when it matches that wildcard. The model supplies every declared path, query
+and header parameter, including Zoho's `fileName`; NyxID does not infer them.
+For example, download an email attachment, upload its returned `attachment_id`
+with the required filename and account parameters, then use the provider's
+returned attachment token in the compose operation.
+
+Every `attachment_id` upload is a confirmation policy floor: Auto and Ask every time
+require an owner card; Full access executes with the existing automatic receipt.
+The card shows the safe filename, size, destination service/operation and declared
+parameters. Its binding covers attachment identity, method, path, query, headers,
+content type, endpoint contract and the SHA-256 of the exact outbound bytes.
+The final HTTP egress guard rechecks live authority, contract and
+metadata identity before a provider effect. Identity includes root/chunk IDs,
+ownership, conversation/turn, origin, size, MIME and chunk relationships; it
+excludes ciphertext and encryption versions so legitimate key rotation remains
+compatible. Authenticated decryption and the card-bound plaintext SHA-256 protect
+the single immutable materialized buffer. Capability validation runs once during
+preparation, then independently at egress. An eligible handle call
+whose live contract is invalid returns a clear file-upload refusal. Pre-dispatch
+failover shares the same buffer; a post-dispatch failure remains an unknown provider outcome
+and never triggers automatic resend. Audit records contain metadata only.
+
+This handle capability refuses guests, ordinary API keys, delegated/relay/service
+account callers, specialists outside their grants, mounted
+instance specifications, generic proxy calls, Raw/Multipart modes and async,
+durable or exact execution. Node-routed uploads are refused because the final
+HTTP attachment egress guard cannot fence node transport. Lark's separate
+managed multipart behavior and trusted projection remain unchanged.
+
+Generic raw attachment uploads require no feature flag. During a rolling deploy,
+an `attachment_id` call reaching an old replica fails with its existing
+base64-body-required error and succeeds once that replica is upgraded. Body-only
+uploads continue to work on both versions. Existing tool files keep the compatible
+`tool` origin and remain excluded from legacy image paths. The separate
+Lark/channel flag gates and rollback procedure below still apply to those features.
+Binary tool-file retention is ungated, so a rolling deployment can produce new
+rows before every replica is upgraded. Old replicas serve complete root files
+through 15 MiB normally and ignore the defaulted chunk metadata. For files above
+15 MiB, an old replica's owner download route decrypts the empty root and may
+return an empty file with HTTP 200 until that replica is upgraded. Old encrypted
+record/key-retirement verification rejects the new tool-file chunk relationships
+because its child lookup accepts only user-upload roots; its root size check
+also rejects an encrypted-empty root declaring the complete file size. Both
+limitations affect only files above the 15 MiB inline threshold: inline tool
+files create no children and pass the old root size check. New replicas assemble
+and validate the complete payload. This residual window also applies after a
+binary rollback; disabling Lark's write flag does not change already retained files,
+ungated tool-file capture or generic raw uploads. Existing root-filtered
+retention/list/image queries exclude child documents; existing scoped purge,
+root-and-child deletion and orphan sweeps remove them without leaving chunks.
 
 ## Inbound channel media
 
@@ -312,7 +452,7 @@ names or content. An audit failure aborts the change.
 | `image_days` | 30 days | Integer 1–365 days, from first message binding |
 | `images_delete_after_turn` | false | Also expire sent user images once their first referencing turn settles |
 | `document_days` | 30 days | Integer 1–365 days, from first message binding; original bytes and extracted text expire together |
-| `tool_image_days` | null | null keeps tool images with the conversation; otherwise integer 1–365 days from creation |
+| `tool_image_days` | null | null keeps tool images and files with the conversation; otherwise integer 1–365 days from creation |
 
 Replicas refresh the policy snapshot every five seconds without restarting.
 Attachment downloads, agent image fetches, document paging, machine transfers and
@@ -327,7 +467,7 @@ failed and stopped turns all settle. Settlement records the first-use marker and
 when enabled, deletes those user images in the same transaction. Enabling the
 option later also expires images whose first turn already settled; abandoned
 turns are considered settled once their live lease ends. Documents and tool
-images do not follow this option.
+images and tool files do not follow this option.
 
 Cleanup runs every minute under a renewable cluster lease. Each pass examines at
 most 100 roots and 100 chunk records, saving cursors for the next pass. Deletion

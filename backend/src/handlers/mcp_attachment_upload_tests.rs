@@ -1,4 +1,6 @@
 //! Real chat dispatch tests for the stored-catalog attachment capability.
+#[path = "mcp_raw_attachment_tests.rs"]
+mod raw_file_tests;
 use super::*;
 use crate::models::{
     downstream_service::{self, DownstreamService},
@@ -225,7 +227,7 @@ async fn rpc(f: &Fixture, auth: &McpAuthContext, method: &str, params: Option<Va
         .await
     };
     serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+        &axum::body::to_bytes(response.into_body(), 24 * 1024 * 1024)
             .await
             .unwrap(),
     )
@@ -268,6 +270,7 @@ async fn loaded(u: &UploadFixture, auth: &McpAuthContext) -> mcp_service::McpToo
 
 #[tokio::test]
 async fn lark_attachment_dispatch_direct_and_meta_send_canonical_parts_and_return_file_token() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_dispatch").await;
     let auth = authenticate(&u.f).await;
     let service = loaded(&u, &auth).await;
@@ -296,6 +299,9 @@ async fn lark_attachment_dispatch_direct_and_meta_send_canonical_parts_and_retur
     let expected_identity = prepared
         .attachment_confirmation_arguments(endpoint, &args(&u.attachment_id))
         .unwrap();
+    assert!(expected_identity.get("attachment").is_none());
+    assert!(expected_identity.get("parameters").is_none());
+    assert!(expected_identity.get("headers").is_none());
     drop(prepared);
     for meta in [false, true] {
         let response = call(&u, &auth, meta, args(&u.attachment_id)).await;
@@ -337,6 +343,7 @@ async fn lark_attachment_dispatch_direct_and_meta_send_canonical_parts_and_retur
 
 #[tokio::test]
 async fn lark_attachment_provenance_spoofs_and_edited_stored_inputs_refuse_before_provider() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_provenance").await;
     let auth = authenticate(&u.f).await;
     let original = bson::to_document(&u.endpoint).unwrap();
@@ -519,6 +526,7 @@ async fn lark_attachment_discovery_failure_returns_fixed_public_error() {
 
 #[tokio::test]
 async fn lark_attachment_discovery_chat_flag_matrix_config_and_exact_keep_plain_create() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_discovery").await;
     let mut auth = authenticate(&u.f).await;
     for media in [false, true] {
@@ -623,6 +631,7 @@ async fn lark_attachment_discovery_chat_flag_matrix_config_and_exact_keep_plain_
 
 #[tokio::test]
 async fn lark_attachment_origin_access_refuses_cross_owner_conversation_guest_stopped_revoked() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_access").await;
     let auth = authenticate(&u.f).await;
     let original =
@@ -707,6 +716,7 @@ async fn lark_attachment_origin_access_refuses_cross_owner_conversation_guest_st
 
 #[tokio::test]
 async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fallback() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let mut u = setup("attachment_tool_image").await;
     let mut keys = crate::test_utils::test_encryption_keys();
     keys.set_contextual_record_writes(true);
@@ -723,6 +733,7 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
         turn_id: u.f.chat.turn_id.clone().unwrap(),
         content_type: "image/jpeg".into(),
         size: 4,
+        chunks: 0,
         data_encrypted: Vec::new(),
         created_at: chrono::Utc::now(),
     };
@@ -750,7 +761,18 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
         uploads::for_egress(&u.f.state.db, auth.chat.as_ref().unwrap(), &image.id)
             .await
             .unwrap(),
-        uploads::EgressAttachment::Tool(_)
+        uploads::EgressAttachment::Tool(..)
+    ));
+    // Adding tool-document reads must keep the former tool-image refusal.
+    assert!(matches!(
+        uploads::read(
+            &u.f.state.db,
+            &u.f.state.encryption_keys,
+            auth.chat.as_ref().unwrap(),
+            &json!({"attachment_id":&image.id}),
+        )
+        .await,
+        Err(crate::errors::AppError::NotFound(_))
     ));
     let mut original = bson::to_document(&image).unwrap();
     for (field, value) in [("turn_id", "prior-turn"), ("origin", "user_upload")] {
@@ -805,6 +827,7 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
 #[tokio::test]
 async fn lark_attachment_cards_bind_bytes_filename_parent_type_and_destination_on_both_dispatch_paths()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_cards").await;
     crate::services::assistant_settings_service::update(
         &u.f.state.db,
@@ -874,6 +897,7 @@ async fn lark_attachment_cards_bind_bytes_filename_parent_type_and_destination_o
 
 #[tokio::test]
 async fn lark_attachment_body_scopes_and_unsupported_preparation_fail_closed_before_effects() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_scopes").await;
     let mut auth = authenticate(&u.f).await;
     let service = loaded(&u, &auth).await;
@@ -944,6 +968,7 @@ async fn lark_attachment_body_scopes_and_unsupported_preparation_fail_closed_bef
 
 #[tokio::test]
 async fn lark_attachment_dispatch_refuses_malformed_fields_and_size_before_provider() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_malformed").await;
     let auth = authenticate(&u.f).await;
     for (key, value) in [
@@ -968,6 +993,7 @@ async fn lark_attachment_dispatch_refuses_malformed_fields_and_size_before_provi
 
 #[tokio::test]
 async fn lark_attachment_budget_precedes_decryption_and_is_held_by_prepared_call_until_drop() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::services::assistant_upload_service::byte_budget::{CAPACITY, reserve};
     use std::time::Duration;
     let u = setup("attachment_egress_budget").await;
@@ -1082,6 +1108,7 @@ async fn lark_attachment_budget_precedes_decryption_and_is_held_by_prepared_call
 
 #[tokio::test]
 async fn lark_attachment_upload_requires_http_and_business_success_with_nonempty_file_token() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_response").await;
     let auth = authenticate(&u.f).await;
     for (status, body) in [
@@ -1114,6 +1141,7 @@ async fn lark_attachment_upload_requires_http_and_business_success_with_nonempty
 
 #[tokio::test]
 async fn lark_attachment_platform_cards_bind_materialized_bytes_and_boundary_content_type() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("attachment_platform_card").await;
     crate::services::assistant_settings_service::update(
         &u.f.state.db,
@@ -1223,6 +1251,7 @@ async fn lark_attachment_platform_cards_bind_materialized_bytes_and_boundary_con
 
 #[tokio::test]
 async fn lark_attachment_actual_send_revalidates_after_delayed_credential_preparation() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use std::time::Duration;
     for drift in ["attachment", "key", "contract", "stop"] {
         let u = setup("attachment_final_send").await;
@@ -1376,6 +1405,31 @@ async fn lark_attachment_public_discovery_excludes_upload_and_keeps_ordinary_end
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].endpoints.len(), 1);
     assert_eq!(services[0].endpoints[0].path, "/ordinary");
+    assert_no_requests(&u).await;
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lark_attachment_non_image_tool_file_remains_refused() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    let u = setup("lark_tool_file_refused").await;
+    let auth = authenticate(&u.f).await;
+    let _reservation = uploads::byte_budget::reserve(4).await.unwrap();
+    let result = crate::services::assistant_tool_files::retain(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        auth.chat.as_ref().unwrap(),
+        "report.pdf",
+        "application/pdf",
+        b"%PDF",
+    )
+    .await
+    .unwrap();
+    let metadata: Value = serde_json::from_str(result.lines().next().unwrap()).unwrap();
+    let id = metadata["attachment_id"].as_str().unwrap();
+    for meta in [false, true] {
+        assert_error(&call(&u, &auth, meta, args(id)).await);
+    }
     assert_no_requests(&u).await;
     u.f.state.db.drop().await.unwrap();
 }

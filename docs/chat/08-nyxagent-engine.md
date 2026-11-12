@@ -1118,6 +1118,20 @@ and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
 ## Managed attachment writes
 
+Published stored catalog Binary operations also accept server-resolved
+`attachment_id` for every eligible live, non-guest owner chat key, without a
+feature-flag read. Discovery advertises both the original base64 `body` and
+`attachment_id`, requiring exactly one: use body for content the assistant wrote
+itself and attachment_id for an existing uploaded or downloaded file. Both inputs
+together are refused. During a rolling deploy, a handle call reaching an old
+replica gets its existing base64-body-required error until that replica is upgraded;
+body-only calls continue to work. Confirmed binary files captured within the byte
+and memory limits become encrypted tool files and return metadata handles.
+Textual candidates and unavailable capture preserve the legacy response reader.
+See [Assistant uploads](10-uploads.md#binary-tool-files) for limits, extraction,
+confirmation, egress fences and rollout. This generic capability changes only
+rendered chat schemas; the Lark multipart contract below remains separate.
+
 `bitable_media_upload` is available for trusted Lark/Feishu catalog operations
 in a live, non-guest owner chat with the default-off, per-person
 `assistant:attachment-writes` flag enabled. It resolves an authorized

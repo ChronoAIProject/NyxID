@@ -256,6 +256,29 @@ pub struct Binding {
     chat: ChatAuthority,
     attachment_id: String,
     _reservation: byte_budget::ByteReservation,
+    raw: Option<(String, Value)>,
+}
+impl Binding {
+    pub(crate) fn raw(
+        chat: ChatAuthority,
+        attachment_id: String,
+        reservation: byte_budget::ByteReservation,
+        snapshot: String,
+        display: Value,
+    ) -> Self {
+        Self {
+            chat,
+            attachment_id,
+            _reservation: reservation,
+            raw: Some((snapshot, display)),
+        }
+    }
+    pub(crate) fn is_raw(&self) -> bool {
+        self.raw.is_some()
+    }
+    pub(crate) fn display(&self) -> Option<&Value> {
+        self.raw.as_ref().map(|(_, display)| display)
+    }
 }
 pub struct Materialized {
     pub body: bytes::Bytes,
@@ -352,6 +375,7 @@ pub async fn materialize(
             chat: chat.clone(),
             attachment_id: id.into(),
             _reservation: reservation,
+            raw: None,
         },
     })
 }
@@ -366,8 +390,18 @@ pub async fn validate_binding(
     endpoint: &McpToolEndpoint,
     binding: &Binding,
 ) -> AppResult<()> {
-    eligibility::require_eligible(db, Some(&binding.chat), service, endpoint).await?;
-    uploads::for_egress(db, &binding.chat, &binding.attachment_id).await?;
+    if let Some((snapshot, _)) = &binding.raw {
+        super::raw_attachment_tool::validate_contract(db, service, endpoint).await?;
+        if *snapshot
+            != super::raw_attachment_tool::metadata_identity(db, &binding.attachment_id).await?
+        {
+            return Err(refused());
+        }
+        uploads::for_file_egress(db, &binding.chat, &binding.attachment_id).await?;
+    } else {
+        eligibility::require_eligible(db, Some(&binding.chat), service, endpoint).await?;
+        uploads::for_egress(db, &binding.chat, &binding.attachment_id).await?;
+    }
     Ok(())
 }
 

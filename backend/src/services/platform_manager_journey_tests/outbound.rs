@@ -349,6 +349,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
         origin: "tool".into(),
         content_type: mime.into(),
         size: bytes.len() as i64,
+        chunks: 0,
         data_encrypted: Vec::new(),
         created_at: Utc::now(),
     };

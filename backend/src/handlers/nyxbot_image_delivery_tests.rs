@@ -130,6 +130,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             turn_id: f.event.turn_id.clone().unwrap(),
             content_type: "image/png".into(),
             size: bytes.len() as i64,
+            chunks: 0,
             data_encrypted: f
                 .state
                 .encryption_keys
@@ -276,6 +277,39 @@ async fn send_plan(
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = [None, Some(true), Some(false)]
+        .into_iter()
+        .map(|delivery| TurnAttachment {
+            image_input_reason: None,
+            artifact: Default::default(),
+            id: Uuid::new_v4().to_string(),
+            origin: "tool".into(),
+            label: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 100,
+            pages: None,
+            chat_delivery: delivery,
+            image_input: None,
+            image_inspection: None,
+        })
+        .collect();
+    send_plan(&f, attachments, None).await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]

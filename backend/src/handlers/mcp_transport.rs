@@ -812,6 +812,14 @@ impl McpAuthContext {
         context
     }
 
+    fn attachment_chat(
+        &self,
+    ) -> Option<&crate::services::assistant_acknowledgement_service::ChatAuthority> {
+        self.chat
+            .as_ref()
+            .filter(|_| self.is_api_key && self.auth_method == AuthMethod::ApiKey)
+    }
+
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
             execution_permission: None,
@@ -2395,13 +2403,35 @@ async fn handle_tools_list(
         }
     }
 
+    let attachment_schemas = match crate::services::raw_attachment_tool::discovery_schemas(
+        &state.db,
+        auth.attachment_chat(),
+        &services,
+    )
+    .await
+    {
+        Ok(mut schemas) => {
+            schemas.retain(|name, _| {
+                mcp_service::resolve_tool_call(name, &services)
+                    .is_some_and(|(service, _)| chat_access(auth, service) == "granted")
+            });
+            schemas
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Failed to load file upload schemas"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
             let mut tool = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
+                "inputSchema": webhook_tool_schema(auth, attachment_schemas.get(&t.name).unwrap_or(&t.input_schema)),
             });
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
                 tool["title"] = annotations["title"].clone();
@@ -3489,7 +3519,13 @@ fn dispatch_service_tool<'a>(
         let mut prepared = match mcp_service::prepare_chat_proxy_tool_call(
             &state.db,
             &state.encryption_keys,
-            auth.chat.as_ref(),
+            if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
+                && !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+            {
+                auth.attachment_chat()
+            } else {
+                auth.chat.as_ref()
+            },
             service,
             endpoint,
             &execution_arguments,
@@ -3863,6 +3899,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
     mcp_service::McpExecContext {
         strict_response_utf8: false,
         execution_permission: auth.execution_permission.as_ref(),
+        attachment_owner_key: auth.attachment_chat().is_some(),
         assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
@@ -4490,13 +4527,17 @@ async fn webhook_service_gate(
     let summary = format!(
         "{} {} on {}",
         prepared.method(),
-        crate::services::assistant_nyxagent::identifier(&endpoint.name),
+        prepared
+            .attachment_summary(endpoint, args)
+            .unwrap_or_else(|| crate::services::assistant_nyxagent::identifier(&endpoint.name)),
         crate::services::assistant_nyxagent::identifier(&service.service_slug),
     );
     let materialized_args = prepared.attachment_confirmation_arguments(endpoint, args);
     let args = materialized_args.as_ref().unwrap_or(args);
     let result = async {
-        let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
+        let gate =
+            acks::confirmation_needed(&state.db, chat, facts, prepared.attachment_policy_floor())
+                .await?;
         if let Some(need) = gate.ask()
             && let Some(refusal) =
                 acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await?
@@ -5231,7 +5272,13 @@ async fn handle_meta_call_tool(
     let prepared = match mcp_service::prepare_chat_proxy_tool_call(
         &state.db,
         &state.encryption_keys,
-        auth.chat.as_ref(),
+        if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
+            && !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        {
+            auth.attachment_chat()
+        } else {
+            auth.chat.as_ref()
+        },
         service,
         endpoint,
         &execution_arguments,
@@ -5689,13 +5736,35 @@ async fn handle_meta_search(
             Default::default()
         }
     };
+    let attachment_schemas = match crate::services::raw_attachment_tool::discovery_schemas(
+        &state.db,
+        auth.attachment_chat(),
+        &services,
+    )
+    .await
+    {
+        Ok(mut schemas) => {
+            schemas.retain(|name, _| {
+                mcp_service::resolve_tool_call(name, &services)
+                    .is_some_and(|(service, _)| chat_access(auth, service) == "granted")
+            });
+            schemas
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Failed to load file upload schemas"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     let results: Vec<_> = ranked_candidates
         .into_iter()
         .map(|tool| {
             let mut value = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
+                "inputSchema": webhook_tool_schema(auth, attachment_schemas.get(&tool.name).unwrap_or(&tool.input_schema)),
             });
             if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
                 value["service_id"] = serde_json::json!(service.service_id);

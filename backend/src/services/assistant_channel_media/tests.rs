@@ -799,6 +799,7 @@ async fn channel_media_six_day_conversion_survives_seven_day_source_deletion_and
 
 #[tokio::test]
 async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_and_encrypts() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use axum::{
         body::Body,
         extract::{Path, State},
@@ -874,6 +875,7 @@ async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_a
 
 #[tokio::test]
 async fn channel_media_browser_waits_for_shared_budget_before_body_read_and_cancels() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use axum::{
         body::{Body, Bytes},
         extract::{Path, State},

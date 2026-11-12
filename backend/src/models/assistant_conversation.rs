@@ -304,7 +304,7 @@ pub struct ToolFailure {
     pub status: Option<u16>,
 }
 
-/// Metadata for an image a tool returned during a turn; the bytes live in
+/// Metadata for a file a tool returned during a turn; the bytes live in
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
@@ -329,7 +329,7 @@ pub struct TurnAttachment {
     pub id: String,
     pub content_type: String,
     pub size: i64,
-    /// The tool identifier that produced it, never arguments.
+    /// A tool identifier for images or a sanitized display filename for tool files.
     pub label: String,
 }
 

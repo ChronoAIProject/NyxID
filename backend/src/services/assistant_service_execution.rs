@@ -879,7 +879,8 @@ async fn check_inner(
         let gate = if resource_replay && acknowledgement.is_some() {
             acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed_with_org(db, chat, facts,
-            org && !model_consent && !instruction_covered && !org_guest_setup,
+            (org && !model_consent && !instruction_covered && !org_guest_setup)
+                || operation.get("attachment_upload").is_some(),
             if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
         let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if gate.ask().is_some() {

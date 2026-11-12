@@ -5033,6 +5033,7 @@ pub async fn attach_routed_image(
             turn_id,
             content_type: meta.content_type.clone(),
             size: meta.size,
+            chunks: 0,
             data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
@@ -5118,6 +5119,7 @@ pub(crate) async fn attach_resource_image(
                 .ok_or(AppError::AssistantTurnRequired)?,
             content_type: meta.content_type.clone(),
             size: meta.size,
+            chunks: 0,
             data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
@@ -5421,7 +5423,7 @@ pub async fn read_attachment_for_caller(
         .await?;
         return Err(not_found());
     };
-    let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+    let mut protected = super::assistant_tool_files::payload(db, keys, &row).await?;
     let bytes = std::mem::take(&mut *protected);
     Box::pin(super::assistant_upload_retention::require_available(
         db, filter,

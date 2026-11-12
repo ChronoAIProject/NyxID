@@ -444,6 +444,7 @@ async fn cleanup(u: BaseFixture) {
 #[tokio::test]
 async fn lark_base_write_direct_and_meta_upload_all_then_create_with_query_token_and_file_token_cells()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for meta in [false, true] {
         let u = setup("base_happy").await;
         let auth = authenticate(&u.f).await;
@@ -501,6 +502,7 @@ async fn lark_base_write_direct_and_meta_upload_all_then_create_with_query_token
 #[tokio::test]
 async fn lark_base_write_new_upload_same_bytes_replays_after_original_deletion_and_changed_fields_or_assignment_refuse_without_provider()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_replay_new_id").await;
     let auth = authenticate(&u.f).await;
     assert_eq!(
@@ -528,6 +530,7 @@ async fn lark_base_write_new_upload_same_bytes_replays_after_original_deletion_a
 
 #[tokio::test]
 async fn lark_base_write_success_replay_after_credential_rotation_makes_no_provider_calls() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_replay_rotation").await;
     let auth = authenticate(&u.f).await;
     assert_eq!(
@@ -570,6 +573,7 @@ async fn lark_base_write_success_replay_after_credential_rotation_makes_no_provi
 #[tokio::test]
 async fn lark_base_write_page_two_resolves_photo_and_invalid_loop_or_malformed_page_tokens_fail_closed()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use wiremock::matchers::query_param;
     for variant in ["second", "loop", "malformed", "exhausted"] {
         let u = setup("base_pages").await;
@@ -623,6 +627,7 @@ async fn lark_base_write_page_two_resolves_photo_and_invalid_loop_or_malformed_p
 #[tokio::test]
 async fn lark_base_write_second_upload_http_200_error_releases_attempt_and_never_creates_partial_record()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_upload_failure").await;
     let auth = authenticate(&u.f).await;
     let second = bind_upload(&u.f, b"receipt-b bytes").await;
@@ -667,6 +672,7 @@ async fn lark_base_write_second_upload_http_200_error_releases_attempt_and_never
 #[tokio::test]
 async fn lark_base_write_upload_busy_codes_have_three_bounded_retries_and_a_successful_retry_creates_once()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for succeeds in [false, true] {
         let u = setup("base_upload_retry").await;
         let auth = authenticate(&u.f).await;
@@ -701,6 +707,7 @@ async fn lark_base_write_upload_busy_codes_have_three_bounded_retries_and_a_succ
 #[tokio::test]
 async fn lark_base_write_field_read_permission_error_identifies_outbound_service_and_connection_without_provider_prose()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_field_permission").await;
     let auth = authenticate(&u.f).await;
     Mock::given(method("GET"))
@@ -724,6 +731,7 @@ async fn lark_base_write_field_read_permission_error_identifies_outbound_service
 #[tokio::test]
 async fn lark_base_write_source_completeness_legacy_hash_duplicate_content_and_size_limits_refuse_locally()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for variant in [
         "source_missing",
         "source_omitted",
@@ -811,6 +819,7 @@ async fn wait_upload(u: &BaseFixture) {
 #[tokio::test]
 async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes_between_uploads_block_every_further_send()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for change in [
         "stop",
         "key",
@@ -1001,6 +1010,7 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
 #[tokio::test]
 async fn lark_base_write_four_flag_combinations_both_dispatch_paths_and_discovery_keep_plain_create_unchanged()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for media in [false, true] {
         for writes_on in [false, true] {
             for meta in [false, true] {
@@ -1057,6 +1067,7 @@ async fn lark_base_write_four_flag_combinations_both_dispatch_paths_and_discover
 #[tokio::test]
 async fn lark_base_write_config_exact_descriptors_nonchat_and_async_exclude_attachment_operations_locally()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_surfaces").await;
     let auth = authenticate(&u.f).await;
     let service = loaded(&u, &auth).await;
@@ -1132,6 +1143,7 @@ async fn lark_base_write_config_exact_descriptors_nonchat_and_async_exclude_atta
 #[tokio::test]
 async fn lark_base_write_uncertain_replay_never_calls_provider_and_definite_correction_uses_new_client_token()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for code in [1254001, 1254607, 1254291, 1255006, 1254608, 999999] {
         let u = setup("base_create_outcome").await;
         let auth = authenticate(&u.f).await;
@@ -1178,6 +1190,7 @@ async fn lark_base_write_uncertain_replay_never_calls_provider_and_definite_corr
 #[tokio::test]
 async fn lark_base_write_tenant_token_exchange_and_oauth_user_principals_use_existing_transport_injection()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for tenant in [false, true] {
         let u = setup("base_principals").await;
         if tenant {
@@ -1286,6 +1299,7 @@ async fn receipt_scope(u: &BaseFixture) {
 #[tokio::test]
 async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_missing_option_property_plain_create_and_upload()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_recipe").await;
     receipt_scope(&u).await;
     let auth = authenticate(&u.f).await;
@@ -1362,6 +1376,7 @@ async fn wait_path(u: &BaseFixture, suffix: &str) {
 #[tokio::test]
 async fn lark_base_write_same_photo_distinct_conversations_refuses_stalled_dispatch_then_replays_one_create()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::services::{
         assistant_acknowledgement_service as acks, assistant_authority_tests::new_orchestrator,
     };
@@ -1424,6 +1439,7 @@ async fn lark_base_write_same_photo_distinct_conversations_refuses_stalled_dispa
 
 #[tokio::test]
 async fn lark_base_write_concurrent_overlapping_batches_dispatch_at_most_once() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup("base_overlap_dispatch").await;
     let auth = authenticate(&u.f).await;
     let b = bind_upload(&u.f, b"receipt-b bytes").await;
@@ -1461,6 +1477,7 @@ async fn lark_base_write_concurrent_overlapping_batches_dispatch_at_most_once() 
 #[tokio::test]
 async fn lark_base_write_stale_worker_after_flag_off_sweep_sends_nothing_and_upload_before_persist_reuploads_on_takeover()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::models::lark_base_write::{COLLECTION_NAME as WRITES, WriteState};
     for takeover in [false, true] {
         let u = setup("base_stale_worker").await;
@@ -1524,6 +1541,7 @@ async fn lark_base_write_stale_worker_after_flag_off_sweep_sends_nothing_and_upl
 #[tokio::test]
 async fn lark_base_write_database_failure_before_barrier_blocks_create_and_after_send_keeps_uncertain_barrier()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::models::lark_base_write::{COLLECTION_NAME as WRITES, WriteState};
     for after_send in [false, true] {
         let u = setup("base_db_failure").await;
@@ -1584,6 +1602,7 @@ async fn lark_base_write_database_failure_before_barrier_blocks_create_and_after
 #[tokio::test]
 async fn lark_base_write_single_card_binds_canonical_body_and_all_four_contracts_before_any_child_send()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::services::assistant_acknowledgement_service as acks;
     for dependency in [
         attachment::COMPOSITE_OPERATION,
@@ -1676,6 +1695,7 @@ async fn lark_base_write_single_card_binds_canonical_body_and_all_four_contracts
 
 #[tokio::test]
 async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_preparation() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for drift in ["key", "stop", "credential", "contract", "token_preparation"] {
         let u = setup("base_final_send").await;
         let exchange = PausedTokenExchange::start(drift == "token_preparation").await;
@@ -1833,3 +1853,35 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
 
 #[path = "mcp_lark_base_eligibility_tests.rs"]
 mod eligibility_tests;
+
+#[tokio::test]
+async fn lark_base_non_image_tool_file_remains_refused() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    let u = setup("lark_base_tool_file_refused").await;
+    let auth = authenticate(&u.f).await;
+    let _reservation = uploads::byte_budget::reserve(4).await.unwrap();
+    let result = crate::services::assistant_tool_files::retain(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        auth.chat.as_ref().unwrap(),
+        "report.pdf",
+        "application/pdf",
+        b"%PDF",
+    )
+    .await
+    .unwrap();
+    let metadata: Value = serde_json::from_str(result.lines().next().unwrap()).unwrap();
+    let id = metadata["attachment_id"].as_str().unwrap();
+    for meta in [false, true] {
+        assert_error(&call(&u, &auth, meta, args(id)).await);
+    }
+    assert!(
+        u.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method.as_str() != "POST")
+    );
+    u.f.state.db.drop().await.unwrap();
+}

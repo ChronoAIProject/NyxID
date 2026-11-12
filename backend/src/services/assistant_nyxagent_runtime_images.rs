@@ -317,7 +317,10 @@ mod resource_intent_tests {
         assert!(requests_inspection(&attachment));
         attachment.chat_delivery = Some(false);
         assert!(requests_inspection(&attachment));
+        attachment.content_type = "application/pdf".into();
+        assert!(!requests_inspection(&attachment));
         attachment.origin = "user_upload".into();
+        attachment.content_type = "image/png".into();
         assert!(!requests_inspection(&attachment));
     }
 }

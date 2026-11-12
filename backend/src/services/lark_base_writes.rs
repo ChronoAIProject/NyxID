@@ -209,7 +209,7 @@ pub(crate) async fn prepare(
                 }
                 row.content_sha256.clone()
             }
-            uploads::EgressAttachment::Tool(_) => None,
+            uploads::EgressAttachment::Tool(..) => None,
         };
         let sha256 = if let Some(hash) = stored {
             hash
