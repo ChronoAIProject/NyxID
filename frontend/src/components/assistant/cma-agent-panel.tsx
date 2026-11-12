@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { lazy, Suspense, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -36,6 +38,7 @@ export function CmaAgentPanel({
   readonly agentId: string;
   readonly responseId?: string;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -50,14 +53,14 @@ export function CmaAgentPanel({
               ref={trigger}
               variant="ghost"
               size="icon"
-              aria-label="View execution"
+              aria-label={translateUi("View execution")}
               className="shrink-0 text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
             >
               <ClipboardList aria-hidden="true" />
             </Button>
           </SheetTrigger>
         </TooltipTrigger>
-        <TooltipContent>View execution</TooltipContent>
+        <TooltipContent>{translateUi("View execution")}</TooltipContent>
       </Tooltip>
       <SheetContent
         showCloseButton={false}
@@ -80,21 +83,16 @@ export function CmaAgentPanel({
       >
         <div className="flex shrink-0 items-center justify-between gap-3">
           <SheetHeader className="min-w-0 text-left">
-            <SheetTitle className="type-secondary text-text-tertiary">
-              Cloud assistant
-            </SheetTitle>
-            <SheetDescription className="sr-only">
-              View this assistant’s conversation and shared desktop without
-              leaving your NyxBot chat.
-            </SheetDescription>
+            <SheetTitle className="type-secondary text-text-tertiary">{translateUi("Cloud assistant")}</SheetTitle>
+            <SheetDescription className="sr-only">{translateUi("View this assistant’s conversation and shared desktop without leaving your NyxBot chat.")}</SheetDescription>
           </SheetHeader>
           <div className="flex shrink-0 items-center gap-1">
             <div className="hidden sm:block">
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label={expanded ? "Restore panel width" : "Expand panel"}
-                title={expanded ? "Restore panel width" : "Expand panel"}
+                aria-label={expanded ? translateUi("Restore panel width") : translateUi("Expand panel")}
+                title={expanded ? translateUi("Restore panel width") : translateUi("Expand panel")}
                 aria-pressed={expanded}
                 onClick={() => setExpanded((value) => !value)}
               >
@@ -109,8 +107,8 @@ export function CmaAgentPanel({
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label="Close"
-                title="Close"
+                aria-label={translateUi("Close")}
+                title={translateUi("Close")}
               >
                 <X aria-hidden />
               </Button>
@@ -121,9 +119,7 @@ export function CmaAgentPanel({
           {open && (
             <Suspense
               fallback={
-                <p role="status" className="py-6 text-13 text-text-tertiary">
-                  Loading assistant…
-                </p>
+                <p role="status" className="py-6 text-13 text-text-tertiary">{translateUi("Loading assistant…")}</p>
               }
             >
               <CmaAgentView
@@ -140,8 +136,7 @@ export function CmaAgentPanel({
                       setOpen(false);
                     }}
                   >
-                    <ArrowLeft aria-hidden /> Back to chat
-                  </Button>
+                    <ArrowLeft aria-hidden />{translateUi(" Back to chat")}</Button>
                 }
               />
             </Suspense>

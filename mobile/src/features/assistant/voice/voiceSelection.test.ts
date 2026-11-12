@@ -3,7 +3,7 @@ import test from "node:test";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
 import {
   chooseVoiceOption,
-  showVoiceComposer,
+  composerTrailingControl,
   voiceElapsed,
   voiceOptionKey,
   voiceTariff,
@@ -46,16 +46,57 @@ function preferences(value: VoiceOption): VoicePreferences {
   };
 }
 
-test("automatic voice selection matches web: available default, then first available, then none", () => {
+test("first-use voice selection matches web: platform default, any default, then first available", () => {
   const disabled = option({ model: "disabled", available: false });
   const first = option({ model: "first", default_model: false });
   const preferred = option({ model: "default" });
-  assert.equal(chooseVoiceOption([disabled, first, preferred]), preferred);
+  const ownDefault = option({ key_source: "own", connection_id: connectionId });
+  assert.equal(
+    chooseVoiceOption([disabled, first, ownDefault, preferred], null),
+    preferred,
+  );
+  assert.equal(chooseVoiceOption([disabled, first, ownDefault]), ownDefault);
   assert.equal(chooseVoiceOption([disabled, first]), first);
   assert.equal(chooseVoiceOption([disabled]), undefined);
   assert.equal(chooseVoiceOption([]), undefined);
   assert.notEqual(voiceOptionKey(first), voiceOptionKey(preferred));
   assert.equal(voiceOptionKey(first), voiceOptionKey(preferences(first)));
+});
+
+test("saved voice selection matches every source field instead of choosing an available default", () => {
+  const savedSource = option({
+    key_source: "own",
+    connection_id: connectionId,
+    default_model: false,
+  });
+  const mismatches: Partial<VoiceOption>[] = [
+    { service_id: "33333333-3333-4333-8333-333333333333" },
+    { connection_id: "44444444-4444-4444-8444-444444444444" },
+    { key_source: "platform" },
+    { model: "different-model" },
+  ];
+  const alternatives = mismatches.map((patch) => ({
+    ...savedSource,
+    ...patch,
+  }));
+  const saved = preferences(savedSource);
+  assert.equal(
+    chooseVoiceOption([option(), ...alternatives, savedSource], saved),
+    savedSource,
+  );
+  assert.equal(
+    chooseVoiceOption([option(), ...alternatives], saved),
+    undefined,
+  );
+});
+
+test("an unavailable saved voice source remains selected and never falls back", () => {
+  const unavailable = option({ model: "saved-model", available: false });
+  assert.equal(
+    chooseVoiceOption([option(), unavailable], preferences(unavailable)),
+    unavailable,
+  );
+  assert.equal(chooseVoiceOption([], preferences(unavailable)), undefined);
 });
 
 test("platform tariffs retain exact decimal rates and only list synced applicable components", () => {
@@ -204,27 +245,96 @@ test("missing or unsynced platform duration prices never appear free", () => {
   );
 });
 
-test("composer offers voice only for an eligible empty private thread and never masks Send or Stop", () => {
-  const ready = {
-    enabled: true,
-    running: false,
-    text: "",
-    attachmentCount: 0,
-    uploadBlocked: false,
-  };
-  assert.equal(showVoiceComposer(ready), true);
-  assert.equal(showVoiceComposer({ ...ready, text: "  \n\t" }), true);
-  for (const patch of [
-    { enabled: false },
-    { running: true },
-    { text: "你好" },
-    { attachmentCount: 1 },
-    { uploadBlocked: true },
-    { channel: { platform: "telegram" } },
-    { subagent: true },
-    { destroyed: true },
-  ])
-    assert.equal(showVoiceComposer({ ...ready, ...patch }), false);
+const idleComposer = {
+  enabled: true,
+  running: false,
+  text: "",
+  attachmentCount: 0,
+  uploadBlocked: false,
+  canCompose: true,
+  canSend: false,
+};
+
+for (const conversationId of [undefined, "saved-specialist-thread"]) {
+  test(`empty ${conversationId ? "persisted" : "new"} composer offers enabled voice`, () => {
+    const control = composerTrailingControl({ ...idleComposer, conversationId });
+    assert.equal(control.kind, "voice");
+    assert.equal(control.disabled, false);
+  });
+}
+
+test("whitespace stays empty; typed text and attachments choose Send", () => {
+  assert.equal(
+    composerTrailingControl({ ...idleComposer, text: "  \n\t" }).kind,
+    "voice",
+  );
+  for (const draft of [{ text: "你好" }, { attachmentCount: 1 }]) {
+    assert.deepEqual(
+      composerTrailingControl({ ...idleComposer, ...draft, canSend: true }),
+      { kind: "send", disabled: false },
+    );
+  }
+});
+
+test("active and settling replies keep Stop even with text or voice disabled", () => {
+  for (const enabled of [true, false]) {
+    assert.deepEqual(
+      composerTrailingControl({
+        ...idleComposer,
+        enabled,
+        conversationId: "thread",
+        running: true,
+        text: "guidance",
+        canCompose: false,
+        stopDisabled: false,
+      }),
+      { kind: "stop", disabled: false },
+    );
+  }
+  assert.deepEqual(
+    composerTrailingControl({ ...idleComposer, running: true, canCompose: false }),
+    { kind: "send", disabled: true },
+    "before adoption there is no thread to stop and voice cannot start",
+  );
+});
+
+test("Stop protection and pending Stop remain disabled", () => {
+  assert.deepEqual(
+    composerTrailingControl({
+      ...idleComposer,
+      conversationId: "thread",
+      running: true,
+      stopDisabled: true,
+    }),
+    { kind: "stop", disabled: true },
+  );
+});
+
+for (const [reason, patch] of [
+  ["feature unavailable", { enabled: false }],
+  ["recording", { recording: true }],
+  ["upload or connection blocked", { uploadBlocked: true }],
+  ["channel thread", { channel: { platform: "telegram" } }],
+  ["destroyed agent", { destroyed: true }],
+  ["voice already open", { voiceOpen: true }],
+] as const) {
+  test(`${reason} cannot open voice from an empty composer`, () => {
+    assert.deepEqual(
+      composerTrailingControl({ ...idleComposer, ...patch }),
+      { kind: "send", disabled: true },
+    );
+  });
+}
+
+test("disabled composition and voice startup keep the voice control disabled", () => {
+  assert.deepEqual(
+    composerTrailingControl({ ...idleComposer, canCompose: false }),
+    { kind: "voice", disabled: true, busy: undefined },
+  );
+  assert.deepEqual(
+    composerTrailingControl({ ...idleComposer, openingVoice: true }),
+    { kind: "voice", disabled: true, busy: true },
+  );
 });
 
 test("voice timer floors seconds, clamps future starts and freezes at the server close time", () => {

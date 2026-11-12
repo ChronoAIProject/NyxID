@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label, FieldHelp } from "@/components/ui/label";
 import { DrawerSearchRevealContext } from "@/lib/drawer-search";
 import { SectionInfo } from "@/components/ui/section-info";
@@ -60,6 +62,7 @@ export function AgentOperationScopes({
   readonly onClose?: () => void;
   readonly detailContainer?: HTMLElement | null;
 }) {
+  useUiTranslation();
   const [active, setActive] = useState<string>();
   const guard = useGroupedDraftGuard();
   const parentOwner = useContext(GroupedDraftOwnerContext);
@@ -125,15 +128,13 @@ export function AgentOperationScopes({
   if (!enabled) {
     return (
       <GroupedList
-        title={guests ? "Guest service operations" : "Service operations"}
+        title={guests ? translateUi("Guest service operations") : translateUi("Service operations")}
         footer={
           <p role="status">
-            {guests ? "Guest operation" : "Operation scope"} configuration is
-            not enabled yet. Existing operation limits still apply.
-          </p>
+            {guests ? translateUi("Guest operation") : translateUi("Operation scope")}{translateUi(" configuration is not enabled yet. Existing operation limits still apply.")}</p>
         }
       >
-        <GroupedRow title="Configuration unavailable" />
+        <GroupedRow title={translateUi("Configuration unavailable")} />
       </GroupedList>
     );
   }
@@ -141,22 +142,20 @@ export function AgentOperationScopes({
     <div
       ref={root}
       className="space-y-3"
-      aria-label={guests ? "Guest service operations" : "Service operations"}
+      aria-label={guests ? translateUi("Guest service operations") : translateUi("Service operations")}
     >
       <GroupedList
-        title={guests ? "Guest service operations" : "Service operations"}
+        title={guests ? translateUi("Guest service operations") : translateUi("Service operations")}
         footer={
           guests
-            ? "For guest turns only: withhold a service or select its permitted operations. Your own turns keep the service. The guest level above, specialist limits and confirmations still apply."
-            : "Limit each granted service to the operations this specialist needs. Guest access and confirmations still apply."
+            ? translateUi("For guest turns only: withhold a service or select its permitted operations. Your own turns keep the service. The guest level above, specialist limits and confirmations still apply.")
+            : translateUi("Limit each granted service to the operations this specialist needs. Guest access and confirmations still apply.")
         }
       >
-        {query.isLoading ? <GroupedRow title="Loading operations…" /> : null}
+        {query.isLoading ? <GroupedRow title={translateUi("Loading operations…")} /> : null}
         {query.error ? (
           <GroupedRow>
-            <p role="alert" className="text-destructive">
-              Could not load operation scopes.
-            </p>
+            <p role="alert" className="text-destructive">{translateUi("Could not load operation scopes.")}</p>
           </GroupedRow>
         ) : null}
         {drillIn
@@ -179,14 +178,14 @@ export function AgentOperationScopes({
                 </span>
                 <span className="type-secondary text-text-tertiary">
                   {service.all_operations
-                    ? "All operations"
-                    : `${service.endpoint_ids.length + service.rules.length} selected operations`}
+                    ? translateUi("All operations")
+                    : translateUi("{{value1}} selected operations", { value1: service.endpoint_ids.length + service.rules.length })}
                 </span>
               </GroupedDisclosure>
             ))
           : null}
         {drillIn && !query.isLoading && !query.error && !query.data?.length ? (
-          <GroupedRow title="No granted services" />
+          <GroupedRow title={translateUi("No granted services")} />
         ) : null}
       </GroupedList>
       {query.data?.map((service) => {
@@ -216,7 +215,7 @@ export function AgentOperationScopes({
             }
             data-operation-view={service.service_id}
             data-grouped-level={1}
-            aria-label={`${service.service_name} ${guests ? "guest " : ""}operation details`}
+            aria-label={guests ? translateUi("{{service}} guest operation details", { service: service.service_name }) : translateUi("{{service}} operation details", { service: service.service_name })}
             className="absolute inset-0 z-10 flex flex-col bg-background p-4"
           >
             <div className="relative shrink-0 pb-4 pr-6">
@@ -225,7 +224,7 @@ export function AgentOperationScopes({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  aria-label="Close agent details"
+                  aria-label={translateUi("Close agent details")}
                   className="absolute right-0 top-0"
                   onClick={onClose}
                 >
@@ -240,16 +239,14 @@ export function AgentOperationScopes({
                   if (!guard || await guard.confirmDiscard(`${owner}/${service.service_id}`)) setActive(undefined);
                 }}
               >
-                <ChevronLeft aria-hidden />
-                Back to Access
-              </Button>
+                <ChevronLeft aria-hidden />{translateUi("Back to Access")}</Button>
               <h2
                 tabIndex={-1}
                 className="mt-3 flex items-center gap-1 break-words px-4 type-card-title outline-none"
               >
                 {service.service_name}
-                {guests ? " · Guest operations" : " · Operations"}
-                <SectionInfo title={`${service.service_name} · ${guests ? "Guest operations" : "Operations"}`}>Choose the allowed operations for this service. Permissions remain limited by the agent’s grant and save against the current service revision.</SectionInfo>
+                {guests ? translateUi(" · Guest operations") : translateUi(" · Operations")}
+                <SectionInfo title={`${service.service_name} · ${guests ? "Guest operations" : "Operations"}`}>{translateUi("Choose the allowed operations for this service. Permissions remain limited by the agent’s grant and save against the current service revision.")}</SectionInfo>
               </h2>
             </div>
             <CompactScroll active={visible && active === service.service_id} level={1} className="assistant-scrollbar flex-1">
@@ -288,6 +285,7 @@ export function ServiceOperationForm({
   readonly disabled?: boolean;
   readonly guests?: boolean;
 }) {
+  useUiTranslation();
   const mutation = useSetAgentOperations(agentId, guests);
   return (
     <OperationSelectionForm
@@ -316,6 +314,7 @@ export function OperationSelectionForm({
   readonly guests?: boolean;
   readonly save: (selection: OperationSelection) => Promise<unknown>;
 }) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string>();
   const form = useAppForm<OperationSelection>({
@@ -355,30 +354,27 @@ export function OperationSelectionForm({
   }
   return (
     <form
-      aria-label={`${service.service_name} ${guests ? "guest " : ""}operations`}
+      aria-label={guests ? translateUi("{{service}} guest operations", { service: service.service_name }) : translateUi("{{service}} operations", { service: service.service_name })}
       onSubmit={form.handleSubmit(save)}
       className="space-y-6"
     >
       <GroupedList
         footer={
           <>
-            <p>Revision {service.revision}</p>
+            <p>{translateUi("Revision ")}{service.revision}</p>
             {error ? (
               <p role="alert" className="text-destructive">
-                {error}
+                {translateUi(error)}
               </p>
             ) : null}
             {Object.keys(form.formState.errors).length ? (
-              <p role="alert" className="text-destructive">
-                Check the selection: paths must start with / and at most 256
-                operations may be selected.
-              </p>
+              <p role="alert" className="text-destructive">{translateUi("Check the selection: paths must start with / and at most 256 operations may be selected.")}</p>
             ) : null}
           </>
         }
       >
         <GroupedRow data-drawer-search-target={`operations-${guests ? "guest-" : ""}${service.service_id}`}>
-          <Label asChild><span className="mr-auto">Allowed operations</span></Label>
+          <Label asChild><span className="mr-auto">{translateUi("Allowed operations")}</span></Label>
           <Select
             value={guests ? guestMode : all ? "all" : "selected"}
             disabled={disabled}
@@ -392,20 +388,20 @@ export function OperationSelectionForm({
             }}
           >
             <GroupedSelectTrigger
-              aria-label={`${service.service_name} ${guests ? "guest " : ""}operation access`}
+              aria-label={guests ? translateUi("{{service}} guest operation access", { service: service.service_name }) : translateUi("{{service}} operation access", { service: service.service_name })}
             >
               <SelectValue />
             </GroupedSelectTrigger>
             <SelectContent>
               {guests ? (
-                <SelectItem value="none">No guest access</SelectItem>
+                <SelectItem value="none">{translateUi("No guest access")}</SelectItem>
               ) : null}
               <SelectItem value="all">
                 {guests
-                  ? "All operations permitted by guest level"
-                  : "All operations"}
+                  ? translateUi("All operations permitted by guest level")
+                  : translateUi("All operations")}
               </SelectItem>
-              <SelectItem value="selected">Selected operations</SelectItem>
+              <SelectItem value="selected">{translateUi("Selected operations")}</SelectItem>
             </SelectContent>
           </Select>
         </GroupedRow>
@@ -415,21 +411,20 @@ export function OperationSelectionForm({
           {service.operations.length ? (
             <>
               <GroupedList
-                title="Select operations"
-                footer="An empty selection blocks every operation."
+                title={translateUi("Select operations")}
+                footer={translateUi("An empty selection blocks every operation.")}
               >
                 <GroupedRow>
                   <GroupedInput
-                    aria-label={`Search ${service.service_name} operations`}
-                    placeholder="Search method, path or summary"
+                    aria-label={translateUi("Search {{value1}} operations", { value1: service.service_name })}
+                    placeholder={translateUi("Search method, path or summary")}
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                   />
                 </GroupedRow>
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
                   <span className="text-13 text-text-tertiary">
-                    {selected.length} selected
-                  </span>
+                    {selected.length}{translateUi(" selected")}</span>
                   <Button
                     type="button"
                     size="sm"
@@ -443,9 +438,7 @@ export function OperationSelectionForm({
                           .map((op) => op.endpoint_id),
                       )
                     }
-                  >
-                    Select all reads
-                  </Button>
+                  >{translateUi("Select all reads")}</Button>
                 </div>
                 <div className="assistant-scrollbar max-h-96 overflow-auto">
                   {operations.map((operation) => (
@@ -459,7 +452,7 @@ export function OperationSelectionForm({
                         <Checkbox
                           checked={selected.includes(operation.endpoint_id)}
                           disabled={disabled}
-                          aria-label={`${operation.method} ${operation.path}`}
+                          aria-label={translateUi("{{method}} {{path}}", { method: operation.method, path: operation.path })}
                           onCheckedChange={(checked) =>
                             form.setValue(
                               "endpoint_ids",
@@ -480,19 +473,13 @@ export function OperationSelectionForm({
                           </FieldHelp>
                           <span className="flex gap-1">
                             {operation.read_only ? (
-                              <FieldHelp className="text-text-tertiary">
-                                Read only
-                              </FieldHelp>
+                              <FieldHelp className="text-text-tertiary">{translateUi("Read only")}</FieldHelp>
                             ) : null}
                             {operation.changes_existing ? (
-                              <FieldHelp className="text-warning">
-                                Changes existing
-                              </FieldHelp>
+                              <FieldHelp className="text-warning">{translateUi("Changes existing")}</FieldHelp>
                             ) : null}
                             {savedInputs[operation.endpoint_id] ? (
-                              <FieldHelp className="text-text-tertiary">
-                                Value limits
-                              </FieldHelp>
+                              <FieldHelp className="text-text-tertiary">{translateUi("Value limits")}</FieldHelp>
                             ) : null}
                           </span>
                         </span>
@@ -500,7 +487,7 @@ export function OperationSelectionForm({
                     </GroupedRow>
                   ))}
                   {!operations.length ? (
-                    <GroupedRow title="No matching operations." />
+                    <GroupedRow title={translateUi("No matching operations.")} />
                   ) : null}
                 </div>
               </GroupedList>
@@ -508,19 +495,15 @@ export function OperationSelectionForm({
           ) : service.allows_explicit_rules ? (
             <>
               <GroupedList
-                title="Custom operations"
+                title={translateUi("Custom operations")}
                 footer={
-                  <>
-                    No catalog operations. Add exact methods and paths; a
-                    variable such as {"{id}"} matches one segment. An empty
-                    selection blocks every operation.
-                  </>
+                  <>{translateUi("No catalog operations. Add exact methods and paths; a variable such as ")}{"{id}"}{translateUi(" matches one segment. An empty selection blocks every operation.")}</>
                 }
               >
-                <GroupedRow title="Use exact methods and paths" />
+                <GroupedRow title={translateUi("Use exact methods and paths")} />
               </GroupedList>
               {rules.map((rule, index) => (
-                <GroupedList key={index} title={`Rule ${index + 1}`}>
+                <GroupedList key={index} title={translateUi("Rule {{value1}}", { value1: index + 1 })}>
                   <GroupedRow>
                     <Select
                       value={rule.method}
@@ -534,7 +517,7 @@ export function OperationSelectionForm({
                     >
                       <GroupedSelectTrigger
                         className="w-auto"
-                        aria-label={`Rule ${index + 1} method`}
+                        aria-label={translateUi("Rule {{value1}} method", { value1: index + 1 })}
                       >
                         <SelectValue />
                       </GroupedSelectTrigger>
@@ -555,7 +538,7 @@ export function OperationSelectionForm({
                       </SelectContent>
                     </Select>
                     <GroupedInput
-                      aria-label={`Rule ${index + 1} path`}
+                      aria-label={translateUi("Rule {{value1}} path", { value1: index + 1 })}
                       {...form.register(`rules.${index}.path_template`)}
                       disabled={disabled}
                     />
@@ -570,9 +553,7 @@ export function OperationSelectionForm({
                           rules.filter((_, i) => i !== index),
                         )
                       }
-                    >
-                      Remove
-                    </Button>
+                    >{translateUi("Remove")}</Button>
                   </GroupedRow>
                 </GroupedList>
               ))}
@@ -587,21 +568,19 @@ export function OperationSelectionForm({
                         { method: "GET", path_template: "/" },
                       ])
                     }
-                  >
-                    Add rule
-                  </button>
+                  >{translateUi("Add rule")}</button>
                 </GroupedRow>
               </GroupedList>
             </>
           ) : (
             <GroupedList>
-              <GroupedRow title="No active catalog operations." />
+              <GroupedRow title={translateUi("No active catalog operations.")} />
             </GroupedList>
           )}
           {selected.some(
             (id) => !service.operations.some((op) => op.endpoint_id === id),
           ) ? (
-            <GroupedList footer="Some selected operations are unavailable.">
+            <GroupedList footer={translateUi("Some selected operations are unavailable.")}>
               <GroupedRow asChild interactive>
                 <button
                   type="button"
@@ -614,9 +593,7 @@ export function OperationSelectionForm({
                     )
                   }
                   disabled={disabled}
-                >
-                  Remove unavailable selections
-                </button>
+                >{translateUi("Remove unavailable selections")}</button>
               </GroupedRow>
             </GroupedList>
           ) : null}
@@ -624,11 +601,11 @@ export function OperationSelectionForm({
       ) : null}
       <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "all_operations", label: "Allow all operations" }, { key: "endpoint_ids", label: "Allowed operations", list: (value) => changeList(value).map((id) => { const op = service.operations.find((op) => op.endpoint_id === id); return op ? `${op.method} ${op.path}` : id; }) }, { key: "rules", label: "Custom operations", list: (value) => Array.isArray(value) ? value.map((rule: { method: string; path_template: string }) => `${rule.method} ${rule.path_template}`) : [] }])}
-        label={guests ? "guest operations" : "operations"}
+        label={guests ? translateUi("guest operations") : translateUi("operations")}
         dirty={form.formState.isDirty}
         pending={isSaving}
         disabled={disabled}
-        saveLabel={guests ? "Save guest operations" : "Save operations"}
+        saveLabel={guests ? translateUi("Save guest operations") : translateUi("Save operations")}
         save={form.handleSubmit(save)}
         discard={() => {
           form.reset();

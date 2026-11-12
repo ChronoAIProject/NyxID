@@ -51,6 +51,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `PORT` | `3001` | HTTP listen port |
 | `BASE_URL` | `http://localhost:3001` | Canonical backend base URL (default JWT issuer/audience); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
 | `CHRONO_PROBE_URL` | *(unset)* | Optional trusted internal chrono-probe HTTP(S) origin; connected-service monitoring also requires the default-off `services:monitoring` flag for the acting person. Unset or invalid configuration returns `monitoring_not_configured` (404). No path, credentials, query or fragment. See [Service monitoring](SERVICE_MONITORING.md). |
+| `INVOCATION_DIAGNOSTICS_ENABLED` | `false` | Startup-only opt-in for automatic failure diagnostic handles; requires `CHRONO_PROBE_URL`. Only ordinary unconstrained access-token callers and downstream 5xx/eligible transport failures qualify. Off performs no diagnostic database write or response decoration. Redemption still checks the live `services:monitoring` flag. |
 | `BASE_URL_ALIASES` | *(empty)* | Comma-separated HTTPS API origins accepted during migration; no paths, credentials, query or fragment. Adds JWT issuer/audience verification overlap and equivalent resource, DPoP, webhook and hosted-asset origins. Minted URLs use `BASE_URL`. |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `FRONTEND_URL_ALIASES` | *(empty)* | Comma-separated HTTPS frontend origins additionally trusted by CORS, CSRF, social `return_to`, login approvals and voice. Does not add JWT issuers/audiences. |
@@ -712,7 +713,7 @@ Invitation codes are controlled by the global `auth:invitation-code` feature fla
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
+| `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false**. Existing accounts, including prepared reviewer accounts, can use `/login?enable_email=true` to display the existing email/password login form without enabling email registration. This query parameter only controls form visibility; normal password, MFA and session checks apply. The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
 ## Channel Bot Relay
 

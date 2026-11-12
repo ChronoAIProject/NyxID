@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, getVisibleAdminNav, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
@@ -41,6 +43,7 @@ export function useRightPanel() {
 }
 
 export function DashboardLayout() {
+  useUiTranslation();
   // Keep an active /users/me observer for every dashboard session: its
   // queryFn syncs the auth store, so server-side capability changes (feature
   // flags flipped by an admin, mutation-triggered ["user"] invalidations)
@@ -182,6 +185,7 @@ function sectionTitleFor(pathname: string): string {
 }
 
 function TopBarBreadcrumbs() {
+  useUiTranslation();
   const { pathname, labels, sections } = useContext(BreadcrumbLabelContext);
   const search = useRouterState({ select: (s) => s.location.search });
   const crumbs = buildStudioBreadcrumbs(pathname, labels, search, sections?.[pathname]);
@@ -195,6 +199,7 @@ function TopBar({
   readonly onSearch: () => void;
   readonly onMobileMenu?: () => void;
 }) {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -226,7 +231,7 @@ function TopBar({
             type="button"
             onClick={() => window.history.back()}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-            aria-label="Go back"
+            aria-label={translateUi("Go back")}
           >
             <ChevronLeft className="h-5 w-5" />
           </button>
@@ -263,7 +268,7 @@ function TopBar({
           className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 type-row-title text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <Search className="h-[14px] w-[14px]" />
-          <span>Search...</span>
+          <span>{translateUi("Search...")}</span>
           <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-12 text-text-tertiary">/</kbd>
         </button>
 
@@ -274,28 +279,24 @@ function TopBar({
               data-icon-button=""
               type="button"
               className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
-              aria-label="User menu"
+              aria-label={translateUi("User menu")}
             >
               <User className="h-[14px] w-[14px]" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
             <div className="shell-account-heading">
-              <p className="shell-user-name">{user?.display_name ?? "User"}</p>
+              <p className="shell-user-name">{user?.display_name ?? translateUi("User")}</p>
               <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
               className="rounded-md text-14"
-            >
-              Settings
-            </DropdownMenuItem>
+            >{translateUi("Settings")}</DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => void handleLogout()}
               className="rounded-md text-14 text-destructive focus:text-destructive"
-            >
-              Log out
-            </DropdownMenuItem>
+            >{translateUi("Log out")}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -309,7 +310,7 @@ function TopBar({
           <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
             <Github className="h-3 w-3" />
           </span>
-          <span>GitHub</span>
+          <span>{translateUi("GitHub")}</span>
         </a>
 
         {/* Mobile: profile */}
@@ -319,28 +320,24 @@ function TopBar({
               data-icon-button=""
               type="button"
               className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
-              aria-label="User menu"
+              aria-label={translateUi("User menu")}
             >
               <User className="h-[14px] w-[14px]" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
             <div className="shell-account-heading">
-              <p className="shell-user-name">{user?.display_name ?? "User"}</p>
+              <p className="shell-user-name">{user?.display_name ?? translateUi("User")}</p>
               <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
               className="rounded-md text-14"
-            >
-              Settings
-            </DropdownMenuItem>
+            >{translateUi("Settings")}</DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => void handleLogout()}
               className="rounded-md text-14 text-destructive focus:text-destructive"
-            >
-              Log out
-            </DropdownMenuItem>
+            >{translateUi("Log out")}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -351,7 +348,7 @@ function TopBar({
           target="_blank"
           rel="noopener noreferrer"
           className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
-          aria-label="GitHub"
+          aria-label={translateUi("GitHub")}
         >
           <Github className="h-[14px] w-[14px]" />
         </a>
@@ -362,7 +359,7 @@ function TopBar({
           type="button"
           onClick={onMobileMenu}
           className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-          aria-label="Open menu"
+          aria-label={translateUi("Open menu")}
         >
           <Menu className="h-4 w-4" />
         </button>
@@ -382,6 +379,7 @@ function MobileNavItem({
   readonly active: boolean;
   readonly onClick: () => void;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={item.to}
@@ -398,7 +396,7 @@ function MobileNavItem({
           active ? "text-nyx-secondary-400" : "text-text-tertiary"
         }`}
       />
-      {item.label}
+      {translateUi(item.label)}
     </Link>
   );
 }
@@ -412,6 +410,7 @@ function MobileNav({
   readonly onClose: () => void;
   readonly onAnimationEnd: () => void;
 }) {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const logoutMutation = useLogout();
@@ -472,7 +471,7 @@ function MobileNav({
           type="button"
           onClick={onClose}
           className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-          aria-label="Close menu"
+          aria-label={translateUi("Close menu")}
         >
           <X className="h-4 w-4" />
         </button>
@@ -486,7 +485,7 @@ function MobileNav({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search..."
+            placeholder={translateUi("Search...")}
             className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
           />
           {searchQuery && (
@@ -510,16 +509,15 @@ function MobileNav({
                   className="flex items-center gap-3 rounded-xl px-4 py-3 text-14 text-muted-foreground active:bg-overlay-strong"
                 >
                   <item.icon className="h-[18px] w-[18px] shrink-0 text-text-tertiary" />
-                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="flex-1 text-left">{translateUi(item.label)}</span>
                   {item.group === "action" && (
-                    <span className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                    <span className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Action")}</span>
                   )}
                 </button>
               ))}
             </div>
           ) : (
-            <div className="py-8 text-center text-15 text-text-tertiary">
-              No results for &ldquo;{searchQuery}&rdquo;
+            <div className="py-8 text-center text-15 text-text-tertiary">{translateUi("No results for “")}{searchQuery}&rdquo;
             </div>
           )
         ) : (
@@ -537,9 +535,7 @@ function MobileNav({
             </div>
 
             <div className="flex items-center">
-              <span className="shell-group-label">
-                Approvals
-              </span>
+              <span className="shell-group-label">{translateUi("Approvals")}</span>
             </div>
             <div className="shell-nav-stack">
               {APPROVALS_NAV.map((item) => (
@@ -553,9 +549,7 @@ function MobileNav({
             </div>
 
             <div className="flex items-center">
-              <span className="shell-group-label">
-                Developer
-              </span>
+              <span className="shell-group-label">{translateUi("Developer")}</span>
             </div>
             <div className="shell-nav-stack">
               {DEVELOPER_NAV.map((item) => (
@@ -571,9 +565,7 @@ function MobileNav({
             {(adminNav.length > 0) && (
               <>
                 <div className="flex items-center">
-                  <span className="shell-group-label">
-                    Admin
-                  </span>
+                  <span className="shell-group-label">{translateUi("Admin")}</span>
                 </div>
                 <div className="shell-nav-stack">
                   {adminNav.map((item) => (
@@ -598,7 +590,7 @@ function MobileNav({
             <User className="h-[14px] w-[14px] text-text-tertiary" />
           </div>
           <div className="shell-user-copy">
-            <p className="shell-user-name truncate">{user?.display_name ?? "User"}</p>
+            <p className="shell-user-name truncate">{user?.display_name ?? translateUi("User")}</p>
             <p className="shell-user-email truncate">{user?.email ?? ""}</p>
           </div>
         </div>
@@ -608,17 +600,13 @@ function MobileNav({
             onClick={() => { onClose(); void navigate({ to: "/settings" }); }}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-14 text-muted-foreground active:bg-overlay-strong"
           >
-            <Settings className="h-3.5 w-3.5" />
-            Settings
-          </button>
+            <Settings className="h-3.5 w-3.5" />{translateUi("Settings")}</button>
           <button
             type="button"
             onClick={() => void handleLogout()}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-14 text-destructive active:bg-overlay-strong"
           >
-            <LogOut className="h-3.5 w-3.5" />
-            Log out
-          </button>
+            <LogOut className="h-3.5 w-3.5" />{translateUi("Log out")}</button>
         </div>
       </div>
     </div>

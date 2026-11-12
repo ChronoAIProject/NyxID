@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode, Ref } from "react";
 import {
@@ -31,9 +32,9 @@ import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 const ICON_TILE = 30;
 
 /** Rows wrap to stacked label/value when scaled text leaves too little width. */
-export function useSettingsStacked() {
+export function useSettingsStacked(availableWidth?: number) {
   const { width, fontScale } = useWindowDimensions();
-  return width / fontScale < 340;
+  return (availableWidth ?? width) / fontScale < 340;
 }
 
 /** Scrollable page frame shared by Settings and its sub-pages. */
@@ -193,8 +194,13 @@ export function SettingsRow({
   accessibilityLabel?: string;
   valueTone?: "default" | "danger";
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
-  const stacked = useSettingsStacked();
+  const [rowWidth, setRowWidth] = useState<number>();
+  const stacked = useSettingsStacked(rowWidth);
+  const measureRow = ({ nativeEvent: { layout } }: LayoutChangeEvent) => {
+    if (layout.width > 0) setRowWidth(layout.width);
+  };
   // Rows that open a sub-page get a chevron; centred actions never do.
   const chevron =
     !centered &&
@@ -290,7 +296,10 @@ export function SettingsRow({
           // Value and control stay together at the trailing edge; a short
           // value is never squeezed into wrapping by a long label.
           <View
-            style={[styles.trailing, stacked && !centered && styles.trailingStacked]}
+            style={[
+              styles.trailing,
+              stacked && !centered && styles.trailingStacked,
+            ]}
           >
             {value ? (
               <Text
@@ -321,6 +330,7 @@ export function SettingsRow({
       <View
         accessible={accessibilityLabel ? true : undefined}
         accessibilityLabel={accessibilityLabel}
+        onLayout={measureRow}
         style={[styles.row, fill]}
       >
         {content}
@@ -330,15 +340,16 @@ export function SettingsRow({
     <Pressable
       accessibilityRole={accessibilityRole ?? "button"}
       accessibilityLabel={
-        accessibilityLabel ??
-        [label, badge, value].filter(Boolean).join(", ")
+        accessibilityLabel ?? [label, badge, value].filter(Boolean).join(", ")
       }
       accessibilityHint={
-        accessibilityHint ?? (chevron ? `Opens ${label}` : undefined)
+        accessibilityHint ??
+        (chevron ? t("Opens {{label}}", { label }) : undefined)
       }
       accessibilityState={{ disabled, ...accessibilityState }}
       disabled={disabled}
       onPress={onPress}
+      onLayout={measureRow}
       style={({ pressed }) => [
         styles.row,
         fill,
@@ -439,47 +450,51 @@ export function usePopupMenu<Value extends string>({
   onChange: (value: Value) => void;
   disabled?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
-  const { width: windowWidth, height } = useWindowDimensions();
+  const { width: windowWidth, height, fontScale = 1 } = useWindowDimensions();
+  const menuWidth = Math.min(340, windowWidth - 32);
   const anchor = useRef<View>(null);
+  const placementGeneration = useRef(0);
+  const mounted = useRef(false);
+  const currentViewport = useRef({ disabled, width: windowWidth, height });
+  currentViewport.current = { disabled, width: windowWidth, height };
   const [menu, setMenu] = useState<{
+    generation: number;
     anchorY: number;
     anchorHeight: number;
     left?: number;
     right?: number;
     contentHeight?: number;
   } | null>(null);
-  const menuWindow = useRef({ width: windowWidth, height });
-  const anchorGeneration = useRef(0);
+  // A menu never outlives its authority or a window resize that moved its anchor.
   useLayoutEffect(() => {
-    if (
-      menuWindow.current.width === windowWidth &&
-      menuWindow.current.height === height
-    )
-      return;
-    // The trigger's window coordinates are stale after rotation or resizing.
-    menuWindow.current = { width: windowWidth, height };
-    anchorGeneration.current++;
+    mounted.current = true;
+    placementGeneration.current++;
     setMenu(null);
-  }, [windowWidth, height]);
-  // A menu never outlives the authority to choose from it.
-  useEffect(() => {
-    if (disabled) {
-      anchorGeneration.current++;
-      setMenu(null);
-    }
-  }, [disabled]);
+    return () => {
+      mounted.current = false;
+      placementGeneration.current++;
+    };
+  }, [disabled, windowWidth, height]);
   const open = () => {
     if (disabled) return;
-    const generation = ++anchorGeneration.current;
+    const generation = ++placementGeneration.current;
     // Align with the trigger's nearer edge so the menu stays on screen.
     const place = (
       y: number,
       rowHeight: number,
       side: { left: number } | { right: number },
     ) => {
-      if (generation !== anchorGeneration.current) return;
-      setMenu({ anchorY: y, anchorHeight: rowHeight, ...side });
+      if (
+        !mounted.current ||
+        generation !== placementGeneration.current ||
+        currentViewport.current.disabled ||
+        currentViewport.current.width !== windowWidth ||
+        currentViewport.current.height !== height
+      )
+        return;
+      setMenu({ generation, anchorY: y, anchorHeight: rowHeight, ...side });
     };
     if (!anchor.current?.measureInWindow) {
       place(height / 3, 0, { right: 16 });
@@ -490,13 +505,13 @@ export function usePopupMenu<Value extends string>({
         y,
         triggerHeight,
         x + triggerWidth / 2 < windowWidth / 2
-          ? { left: Math.max(8, Math.min(x, windowWidth - MENU_MIN_WIDTH - 8)) }
+          ? { left: Math.max(8, Math.min(x, windowWidth - menuWidth - 8)) }
           : { right: Math.max(8, windowWidth - (x + triggerWidth) + 8) },
       ),
     );
   };
   const close = () => {
-    anchorGeneration.current++;
+    placementGeneration.current++;
     setMenu(null);
   };
   const below = menu ? menu.anchorY + menu.anchorHeight + 6 : 0;
@@ -507,7 +522,10 @@ export function usePopupMenu<Value extends string>({
   // absolute parent after text wraps to the final menu width.
   const contentHeight =
     menu?.contentHeight ??
-    options.reduce((sum, option) => sum + (option.detail ? 68 : 48), 0) + 8;
+    options.reduce(
+      (sum, option) => sum + (option.detail ? 68 : 48) * Math.max(1, fontScale),
+      0,
+    ) + 8;
   const intrinsicHeight = contentHeight + 2 * StyleSheet.hairlineWidth;
   const flip = intrinsicHeight > roomBelow && roomAbove > roomBelow;
   const maxHeight = flip ? roomAbove : roomBelow;
@@ -517,10 +535,15 @@ export function usePopupMenu<Value extends string>({
     maxHeight,
   };
   const popup = (
-    <Modal transparent visible={!!menu} animationType="fade" onRequestClose={close}>
+    <Modal
+      transparent
+      visible={!!menu}
+      animationType="fade"
+      onRequestClose={close}
+    >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Close menu"
+        accessibilityLabel={t("Close menu")}
         style={styles.menuBackdrop}
         onPress={close}
       />
@@ -534,6 +557,9 @@ export function usePopupMenu<Value extends string>({
               ...position,
               left: menu.left,
               right: menu.right,
+              width: menuWidth,
+              minWidth: Math.min(MENU_MIN_WIDTH, menuWidth),
+              maxWidth: menuWidth,
               backgroundColor: colors.menuFill,
               borderColor: colors.borderSoft,
               shadowColor: "#000",
@@ -545,7 +571,10 @@ export function usePopupMenu<Value extends string>({
             showsVerticalScrollIndicator
             onContentSizeChange={(_width, contentHeight) =>
               setMenu((current) =>
-                current && current.contentHeight !== contentHeight
+                current &&
+                current.generation === menu.generation &&
+                current.generation === placementGeneration.current &&
+                current.contentHeight !== contentHeight
                   ? { ...current, contentHeight }
                   : current,
               )
@@ -560,7 +589,9 @@ export function usePopupMenu<Value extends string>({
                   accessibilityRole="menuitem"
                   accessibilityState={{ selected, checked: selected }}
                   accessibilityLabel={
-                    option.detail ? `${option.label}. ${option.detail}` : option.label
+                    option.detail
+                      ? `${option.label}. ${option.detail}`
+                      : option.label
                   }
                   onPress={() => {
                     close();
@@ -577,7 +608,11 @@ export function usePopupMenu<Value extends string>({
                 >
                   <View style={styles.menuCheck}>
                     {selected ? (
-                      <Check size={17} color={colors.textPrimary} strokeWidth={2.5} />
+                      <Check
+                        size={17}
+                        color={colors.textPrimary}
+                        strokeWidth={2.5}
+                      />
                     ) : null}
                   </View>
                   <View style={styles.menuText}>
@@ -591,7 +626,9 @@ export function usePopupMenu<Value extends string>({
                       {option.label}
                     </Text>
                     {option.detail ? (
-                      <Text style={[styles.detail, { color: colors.textMuted }]}>
+                      <Text
+                        style={[styles.detail, { color: colors.textMuted }]}
+                      >
                         {option.detail}
                       </Text>
                     ) : null}
@@ -629,6 +666,7 @@ export function SettingsMenuRow<Value extends string>({
   onChange: (value: Value) => void;
   disabled?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const menu = usePopupMenu({ options, value, onChange, disabled });
   const current = options.find((option) => option.value === value);
@@ -640,7 +678,9 @@ export function SettingsMenuRow<Value extends string>({
         detail={detail}
         value={current?.label ?? value}
         disabled={disabled}
-        accessibilityHint={`Opens a menu to choose ${label.toLowerCase()}`}
+        accessibilityHint={t("Opens a menu to choose {{label}}", {
+          label: label.toLowerCase(),
+        })}
         accessory={
           <ChevronsUpDown
             size={15}
@@ -667,6 +707,8 @@ export function useSettingsHeaderAction(
     onPress,
   }: { label?: string; enabled: boolean; busy?: boolean; onPress: () => void },
 ) {
+  const { t } = useAppLanguage();
+  label = t(label);
   const { colors } = useTheme();
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -700,7 +742,11 @@ export function useSettingsHeaderAction(
 const styles = StyleSheet.create({
   page: { flex: 1 },
   field: { flex: 1, minHeight: 28, ...typeScale.label },
-  headerAction: { minHeight: 44, justifyContent: "center", paddingHorizontal: 4 },
+  headerAction: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
   menuBackdrop: { ...StyleSheet.absoluteFillObject },
   menu: {
     position: "absolute",
@@ -726,8 +772,15 @@ const styles = StyleSheet.create({
   menuCheck: { width: 18, alignItems: "center" },
   menuText: { flex: 1, minWidth: 0, gap: 2 },
   menuSelected: { fontFamily: fonts.bodySemi, fontWeight: "600" },
-  headerActionLabel: { ...typeScale.label, fontFamily: fonts.bodySemi, fontWeight: "600" },
+  headerActionLabel: {
+    ...typeScale.label,
+    fontFamily: fonts.bodySemi,
+    fontWeight: "600",
+  },
   pageContent: {
+    width: "100%",
+    maxWidth: 720,
+    alignSelf: "center",
     paddingTop: spacing.sm,
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.huge,

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -81,6 +83,7 @@ function Section({
   readonly title: string;
   readonly children: React.ReactNode;
 }) {
+  useUiTranslation();
   return (
     <section id={id} className="scroll-mt-8">
       <h2 className="type-page-title tracking-tight mb-6" style={{ letterSpacing: "-0.02em" }}>
@@ -92,6 +95,7 @@ function Section({
 }
 
 function Swatch({ name, cls, textCls }: { readonly name: string; readonly cls: string; readonly textCls?: string }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-1.5">
       <div className={cn("h-12 w-full rounded-lg border border-hairline", cls)} />
@@ -101,6 +105,7 @@ function Swatch({ name, cls, textCls }: { readonly name: string; readonly cls: s
 }
 
 function TokenRow({ token, value, preview }: { readonly token: string; readonly value: string; readonly preview?: React.ReactNode }) {
+  useUiTranslation();
   return (
     <div className="flex items-center justify-between py-2 border-b border-border/20 last:border-0">
       <code className="text-14 font-mono text-nyx-secondary-400">{token}</code>
@@ -113,6 +118,7 @@ function TokenRow({ token, value, preview }: { readonly token: string; readonly 
 }
 
 function ComponentShowcase({ title, children }: { readonly title: string; readonly children: React.ReactNode }) {
+  useUiTranslation();
   return (
     <div className="space-y-3">
       <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{title}</p>
@@ -148,12 +154,12 @@ const ICON_SIZE_OPTIONS: readonly {
   value: ServiceIconSize;
   label: string;
 }[] = [
-  { value: "2xs", label: "2xs" },
-  { value: "xs", label: "xs" },
-  { value: "sm", label: "sm" },
-  { value: "md", label: "md" },
-  { value: "lg", label: "lg" },
-  { value: "xl", label: "xl" },
+  { value: "2xs", get label() { return translateUi("2xs"); } },
+  { value: "xs", get label() { return translateUi("xs"); } },
+  { value: "sm", get label() { return translateUi("sm"); } },
+  { value: "md", get label() { return translateUi("md"); } },
+  { value: "lg", get label() { return translateUi("lg"); } },
+  { value: "xl", get label() { return translateUi("xl"); } },
 ];
 
 const ICON_AUDIT_SLUGS = [...SPEC_CATALOG_SLUGS, ...CUSTOM_SERVICE_SLUGS];
@@ -167,6 +173,7 @@ function iconAuditLabel(slug: string) {
 }
 
 export function DesignSystemPage() {
+  useUiTranslation();
   const [switchVal, setSwitchVal] = useState(true);
   const [iconSearch, setIconSearch] = useState("");
   const normalizedIconSearch = iconSearch.trim().toLowerCase();
@@ -182,7 +189,7 @@ export function DesignSystemPage() {
     <div className="mx-auto max-w-[1200px] flex gap-10 px-8 py-10">
       {/* Sticky nav */}
       <nav className="hidden xl:flex shrink-0 w-[180px] flex-col gap-1 sticky top-10 self-start">
-        <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary mb-2">Components</p>
+        <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary mb-2">{translateUi("Components")}</p>
         {DS_NAV.map((item) => (
           <a
             key={item.id}
@@ -198,19 +205,15 @@ export function DesignSystemPage() {
       <div className="flex-1 min-w-0 space-y-16">
         {/* Header */}
         <div>
-          <p className="type-secondary-strong uppercase tracking-[1.5px] text-nyx-secondary-400 mb-2">Design System</p>
-          <h1 className="type-page-title" style={{ letterSpacing: "-0.03em" }}>
-            NyxID Components
-          </h1>
-          <p className="text-14 text-muted-foreground mt-2">
-            The canonical reference for every UI primitive. All components in the product must follow these patterns.
-          </p>
+          <p className="type-secondary-strong uppercase tracking-[1.5px] text-nyx-secondary-400 mb-2">{translateUi("Design System")}</p>
+          <h1 className="type-page-title" style={{ letterSpacing: "-0.03em" }}>{translateUi("NyxID Components")}</h1>
+          <p className="text-14 text-muted-foreground mt-2">{translateUi("The canonical reference for every UI primitive. All components in the product must follow these patterns.")}</p>
         </div>
 
         {/* ─── COLORS ─── */}
-        <Section id="colors" title="Colors">
+        <Section id="colors" title={translateUi("Colors")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Brand Primary">
+            <ComponentShowcase title={translateUi("Brand Primary")}>
               <div className="grid grid-cols-5 sm:grid-cols-10 gap-3">
                 <Swatch name="50" cls="bg-nyx-50" />
                 <Swatch name="100" cls="bg-nyx-100" />
@@ -225,7 +228,7 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Brand Secondary">
+            <ComponentShowcase title={translateUi("Brand Secondary")}>
               <div className="grid grid-cols-5 sm:grid-cols-10 gap-3">
                 <Swatch name="50" cls="bg-nyx-secondary-50" />
                 <Swatch name="100" cls="bg-nyx-secondary-100" />
@@ -240,7 +243,7 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Semantic">
+            <ComponentShowcase title={translateUi("Semantic")}>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <Swatch name="background" cls="bg-background" />
                 <Swatch name="card" cls="bg-card" />
@@ -253,7 +256,7 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Border Opacity Scale">
+            <ComponentShowcase title={translateUi("Border Opacity Scale")}>
               <div className="flex flex-col gap-2">
                 <TokenRow token="border-hairline" value="Passive — default borders for chrome elements" preview={<div className="h-8 w-24 rounded-lg border border-hairline" />} />
                 <TokenRow token="border-hairline-strong" value="Hover — elevated state on interactive borders" preview={<div className="h-8 w-24 rounded-lg border border-hairline-strong" />} />
@@ -266,105 +269,105 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── TYPOGRAPHY ─── */}
-        <Section id="typography" title="Typography">
-          <ComponentShowcase title="Scale">
+        <Section id="typography" title={translateUi("Typography")}>
+          <ComponentShowcase title={translateUi("Scale")}>
             <div className="space-y-6">
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Page Title — 48px / bold / -0.035em</p>
-                <h1 className="type-page-title" style={{ letterSpacing: "-0.03em" }}>Page Title</h1>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Page Title — 48px / bold / -0.035em")}</p>
+                <h1 className="type-page-title" style={{ letterSpacing: "-0.03em" }}>{translateUi("Page Title")}</h1>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Section Title — 24px / bold / -0.02em</p>
-                <h2 className="type-page-title" style={{ letterSpacing: "-0.02em" }}>Section Title</h2>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Section Title — 24px / bold / -0.02em")}</p>
+                <h2 className="type-page-title" style={{ letterSpacing: "-0.02em" }}>{translateUi("Section Title")}</h2>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Card Title — 16px (base) / semibold</p>
-                <h3 className="type-body-strong">Card Title</h3>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Card Title — 16px (base) / semibold")}</p>
+                <h3 className="type-body-strong">{translateUi("Card Title")}</h3>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Body — 14px (text-sm) / normal</p>
-                <p className="text-14">Body text for descriptions and content paragraphs.</p>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Body — 14px (text-14) / normal")}</p>
+                <p className="text-14">{translateUi("Body text for descriptions and content paragraphs.")}</p>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Secondary — 13px / normal / text-muted-foreground</p>
-                <p className="text-15 text-muted-foreground">Secondary text for compact descriptions and dashboard UI.</p>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Secondary — 13px / normal / text-muted-foreground")}</p>
+                <p className="text-15 text-muted-foreground">{translateUi("Secondary text for compact descriptions and dashboard UI.")}</p>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Small — 12px / normal</p>
-                <p className="text-14">Small text for table cells, info rows, and metadata.</p>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Small — 12px / normal")}</p>
+                <p className="text-14">{translateUi("Small text for table cells, info rows, and metadata.")}</p>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Overline — 11px / semibold / uppercase / tracking-[1.5px] / text-text-tertiary</p>
-                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Section Overline</p>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Overline — 11px / semibold / uppercase / tracking-[1.5px] / text-text-tertiary")}</p>
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Section Overline")}</p>
               </div>
               <Separator />
               <div>
-                <p className="text-13 text-text-tertiary mb-1">Caption — 10px / medium — badges only</p>
-                <p className="type-group-label">Badge caption text</p>
+                <p className="text-13 text-text-tertiary mb-1">{translateUi("Caption — 10px / medium — badges only")}</p>
+                <p className="type-group-label">{translateUi("Badge caption text")}</p>
               </div>
             </div>
           </ComponentShowcase>
 
           <div className="mt-6">
-            <ComponentShowcase title="Text Colors">
+            <ComponentShowcase title={translateUi("Text Colors")}>
               <div className="space-y-2">
-                <p className="text-foreground text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-foreground</code> Primary text — headings, titles, important content</p>
-                <p className="text-muted-foreground text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-muted-foreground</code> Secondary text — descriptions, body copy</p>
-                <p className="text-text-tertiary text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-text-tertiary</code> Tertiary text — placeholders, overlines, captions</p>
-                <p className="text-nyx-secondary-400 text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-nyx-secondary-400</code> Accent text — links, active states</p>
-                <p className="text-success text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-success</code> Success state</p>
-                <p className="text-warning text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-warning</code> Warning state</p>
-                <p className="text-destructive text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-destructive</code> Destructive / error state</p>
+                <p className="text-foreground text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-foreground</code>{translateUi(" Primary text — headings, titles, important content")}</p>
+                <p className="text-muted-foreground text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-muted-foreground</code>{translateUi(" Secondary text — descriptions, body copy")}</p>
+                <p className="text-text-tertiary text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-text-tertiary</code>{translateUi(" Tertiary text — placeholders, overlines, captions")}</p>
+                <p className="text-nyx-secondary-400 text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-nyx-secondary-400</code>{translateUi(" Accent text — links, active states")}</p>
+                <p className="text-success text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-success</code>{translateUi(" Success state")}</p>
+                <p className="text-warning text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-warning</code>{translateUi(" Warning state")}</p>
+                <p className="text-destructive text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-destructive</code>{translateUi(" Destructive / error state")}</p>
               </div>
             </ComponentShowcase>
           </div>
         </Section>
 
         {/* ─── SPACING & RADIUS ─── */}
-        <Section id="spacing" title="Spacing & Radius">
+        <Section id="spacing" title={translateUi("Spacing & Radius")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Border Radius">
+            <ComponentShowcase title={translateUi("Border Radius")}>
               <div className="flex flex-wrap gap-6 items-end">
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-xl border border-border bg-muted" />
                   <code className="text-14 font-mono text-text-tertiary">rounded-xl</code>
-                  <span className="text-12 text-text-tertiary">Cards, dialogs, selects</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Cards, dialogs, selects")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-lg border border-border bg-muted" />
                   <code className="text-14 font-mono text-text-tertiary">rounded-lg</code>
-                  <span className="text-12 text-text-tertiary">Buttons, inputs, items</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Buttons, inputs, items")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-[8px] border border-border bg-muted" />
                   <code className="text-14 font-mono text-text-tertiary">rounded-[8px]</code>
-                  <span className="text-12 text-text-tertiary">Icon containers</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Icon containers")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-[6px] border border-border bg-muted" />
                   <code className="text-14 font-mono text-text-tertiary">rounded-[6px]</code>
-                  <span className="text-12 text-text-tertiary">Small elements, kbds</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Small elements, kbds")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-[10px] border border-border bg-muted" />
                   <code className="text-14 font-mono text-text-tertiary">rounded-[10px]</code>
-                  <span className="text-12 text-text-tertiary">Badges (pill)</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Badges (pill)")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-full border border-border bg-muted" />
                   <code className="text-14 font-mono text-text-tertiary">rounded-full</code>
-                  <span className="text-12 text-text-tertiary">Status dots, chips</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Status dots, chips")}</span>
                 </div>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Spacing Tokens">
+            <ComponentShowcase title={translateUi("Spacing Tokens")}>
               <div className="flex flex-col gap-2">
                 <TokenRow token="gap-8" value="Between page sections" />
                 <TokenRow token="gap-6" value="Between card groups / major elements" />
@@ -378,7 +381,7 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Transitions">
+            <ComponentShowcase title={translateUi("Transitions")}>
               <div className="flex flex-col gap-2">
                 <TokenRow token="duration-300" value="All hover/state transitions (buttons, cards, borders)" />
                 <TokenRow token="transition-all" value="When multiple properties change (border + bg + transform)" />
@@ -389,68 +392,61 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── BUTTONS ─── */}
-        <Section id="buttons" title="Buttons">
+        <Section id="buttons" title={translateUi("Buttons")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Variants">
+            <ComponentShowcase title={translateUi("Variants")}>
               <div className="flex flex-wrap items-center gap-4">
-                <Button>Default</Button>
-                <Button variant="outline">Outline</Button>
-                <Button variant="secondary">Secondary</Button>
-                <Button variant="ghost">Ghost</Button>
-                <Button variant="destructive">Destructive</Button>
-                <Button variant="primary">Primary Action</Button>
-                <Button variant="link">Link</Button>
+                <Button>{translateUi("Default")}</Button>
+                <Button variant="outline">{translateUi("Outline")}</Button>
+                <Button variant="secondary">{translateUi("Secondary")}</Button>
+                <Button variant="ghost">{translateUi("Ghost")}</Button>
+                <Button variant="destructive">{translateUi("Destructive")}</Button>
+                <Button variant="primary">{translateUi("Primary Action")}</Button>
+                <Button variant="link">{translateUi("Link")}</Button>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  All buttons use <code className="text-nyx-secondary-400">rounded-lg border-hairline</code> at <code className="text-nyx-secondary-400">h-8</code> default height. <code className="text-nyx-secondary-400">variant=&quot;primary&quot;</code> is reserved for prominent form actions (save, submit). One size only — no size variants in application code.
-                </p>
+                <p className="text-13 text-text-tertiary">{translateUi("All buttons use ")}<code className="text-nyx-secondary-400">rounded-lg border-hairline</code>{translateUi(" at ")}<code className="text-nyx-secondary-400">h-8</code>{translateUi(" default height. ")}<code className="text-nyx-secondary-400">variant=&quot;primary&quot;</code>{translateUi(" is reserved for prominent form actions (save, submit). One size only — no size variants in application code.")}</p>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Sizes">
+            <ComponentShowcase title={translateUi("Sizes")}>
               <div className="flex flex-wrap items-center gap-4">
-                <Button>Default (h-8)</Button>
+                <Button>{translateUi("Default (h-8)")}</Button>
                 <Button size="icon"><Plus className="h-4 w-4" /></Button>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  One standard height: <code className="text-nyx-secondary-400">h-8</code> (32px). Icon-only buttons use <code className="text-nyx-secondary-400">size=&quot;icon&quot;</code> (h-8 w-8). No small/large variants in application code.
-                </p>
+                <p className="text-13 text-text-tertiary">{translateUi("One standard height: ")}<code className="text-nyx-secondary-400">h-8</code>{translateUi(" (32px). Icon-only buttons use ")}<code className="text-nyx-secondary-400">size=&quot;icon&quot;</code>{translateUi(" (h-8 w-8). No small/large variants in application code.")}</p>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="States">
+            <ComponentShowcase title={translateUi("States")}>
               <div className="flex flex-wrap items-center gap-4">
-                <Button>Normal</Button>
-                <Button isLoading>Loading</Button>
-                <Button disabled>Disabled</Button>
+                <Button>{translateUi("Normal")}</Button>
+                <Button isLoading>{translateUi("Loading")}</Button>
+                <Button disabled>{translateUi("Disabled")}</Button>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="CTA Button (Add / Create)">
+            <ComponentShowcase title={translateUi("CTA Button (Add / Create)")}>
               <div className="flex flex-wrap items-center gap-4">
-                <AddCtaButton label="Add Service" onClick={() => toast.info("Add Service clicked")} />
-                <AddCtaButton label="New Application" onClick={() => toast.info("New App clicked")} />
-                <AddCtaButton label="Register Node" onClick={() => toast.info("Register Node clicked")} />
+                <AddCtaButton label={translateUi("Add Service")} onClick={() => toast.info(translateUi("Add Service clicked"))} />
+                <AddCtaButton label={translateUi("New Application")} onClick={() => toast.info(translateUi("New App clicked"))} />
+                <AddCtaButton label={translateUi("Register Node")} onClick={() => toast.info(translateUi("Register Node clicked"))} />
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  All &quot;+&quot; CTA buttons use <code className="text-nyx-secondary-400">AddCtaButton</code> at <code className="text-nyx-secondary-400">h-8 rounded-lg</code>. Icon in a <code className="text-nyx-secondary-400">rounded-[6px]</code> bordered container.
-                </p>
+                <p className="text-13 text-text-tertiary">{translateUi("All \"+\" CTA buttons use ")}<code className="text-nyx-secondary-400">AddCtaButton</code>{translateUi(" at ")}<code className="text-nyx-secondary-400">h-8 rounded-lg</code>{translateUi(". Icon in a ")}<code className="text-nyx-secondary-400">rounded-[6px]</code>{translateUi(" bordered container.")}</p>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="With Icons (Bordered Container)">
+            <ComponentShowcase title={translateUi("With Icons (Bordered Container)")}>
               <div className="flex flex-wrap items-center gap-3">
-                <Button><ButtonIcon><Search className="h-3 w-3" /></ButtonIcon> Search</Button>
-                <Button variant="outline"><ButtonIcon><Settings className="h-3 w-3" /></ButtonIcon> Settings</Button>
-                <Button variant="destructive"><ButtonIcon variant="destructive"><Trash2 className="h-3 w-3" /></ButtonIcon> Delete</Button>
-                <Button variant="primary"><ButtonIcon variant="primary"><Search className="h-3 w-3" /></ButtonIcon> Get app</Button>
+                <Button><ButtonIcon><Search className="h-3 w-3" /></ButtonIcon>{translateUi(" Search")}</Button>
+                <Button variant="outline"><ButtonIcon><Settings className="h-3 w-3" /></ButtonIcon>{translateUi(" Settings")}</Button>
+                <Button variant="destructive"><ButtonIcon variant="destructive"><Trash2 className="h-3 w-3" /></ButtonIcon>{translateUi(" Delete")}</Button>
+                <Button variant="primary"><ButtonIcon variant="primary"><Search className="h-3 w-3" /></ButtonIcon>{translateUi(" Get app")}</Button>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  Icons use <code className="text-nyx-secondary-400">ButtonIcon</code> wrapper: <code className="text-nyx-secondary-400">rounded-[6px] border-hairline bg-overlay</code>. Destructive variant uses <code className="text-nyx-secondary-400">border-destructive/20 bg-destructive/10</code>. Primary/gradient variant uses <code className="text-nyx-secondary-400">border-white/20 bg-white/10</code>.
+                <p className="text-13 text-text-tertiary">{translateUi("Icons use ")}<code className="text-nyx-secondary-400">ButtonIcon</code>{translateUi(" wrapper: ")}<code className="text-nyx-secondary-400">rounded-[6px] border-hairline bg-overlay</code>{translateUi(". Destructive variant uses ")}<code className="text-nyx-secondary-400">border-destructive/20 bg-destructive/10</code>{translateUi(". Primary/gradient variant uses ")}<code className="text-nyx-secondary-400">border-white/20 bg-white/10</code>.
                 </p>
               </div>
             </ComponentShowcase>
@@ -458,40 +454,39 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── INPUTS ─── */}
-        <Section id="inputs" title="Inputs">
+        <Section id="inputs" title={translateUi("Inputs")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Text Input">
+            <ComponentShowcase title={translateUi("Text Input")}>
               <div className="max-w-md space-y-4">
                 <div>
-                  <Label>Default</Label>
-                  <Input placeholder="Enter value..." />
+                  <Label>{translateUi("Default")}</Label>
+                  <Input placeholder={translateUi("Enter value...")} />
                 </div>
                 <div>
-                  <Label>Disabled</Label>
-                  <Input placeholder="Disabled input" disabled />
+                  <Label>{translateUi("Disabled")}</Label>
+                  <Input placeholder={translateUi("Disabled input")} disabled />
                 </div>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Select">
+            <ComponentShowcase title={translateUi("Select")}>
               <div className="max-w-md">
                 <Select>
                   <SelectTrigger>
-                    <SelectValue placeholder="Select option..." />
+                    <SelectValue placeholder={translateUi("Select option...")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="a">Option A</SelectItem>
-                    <SelectItem value="b">Option B</SelectItem>
-                    <SelectItem value="c">Option C</SelectItem>
+                    <SelectItem value="a">{translateUi("Option A")}</SelectItem>
+                    <SelectItem value="b">{translateUi("Option B")}</SelectItem>
+                    <SelectItem value="c">{translateUi("Option C")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Input Specs">
+            <ComponentShowcase title={translateUi("Input Specs")}>
               <div className="rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  Height: <code className="text-nyx-secondary-400">h-10</code> | Radius: <code className="text-nyx-secondary-400">rounded-lg</code> | Font: <code className="text-nyx-secondary-400">text-13</code> | Placeholder: <code className="text-nyx-secondary-400">text-text-tertiary</code> | Focus: <code className="text-nyx-secondary-400">ring-2 ring-ring</code>
+                <p className="text-13 text-text-tertiary">{translateUi("Height: ")}<code className="text-nyx-secondary-400">h-10</code>{translateUi(" | Radius: ")}<code className="text-nyx-secondary-400">rounded-lg</code>{translateUi(" | Font: ")}<code className="text-nyx-secondary-400">text-13</code>{translateUi(" | Placeholder: ")}<code className="text-nyx-secondary-400">text-text-tertiary</code>{translateUi(" | Focus: ")}<code className="text-nyx-secondary-400">ring-2 ring-ring</code>
                 </p>
               </div>
             </ComponentShowcase>
@@ -499,49 +494,46 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── CARDS ─── */}
-        <Section id="cards" title="Cards">
+        <Section id="cards" title={translateUi("Cards")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Standard Card">
+            <ComponentShowcase title={translateUi("Standard Card")}>
               <Card>
                 <CardHeader>
-                  <CardTitle>Card Title</CardTitle>
-                  <CardDescription>A description of the card content.</CardDescription>
+                  <CardTitle>{translateUi("Card Title")}</CardTitle>
+                  <CardDescription>{translateUi("A description of the card content.")}</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-14">Card body content goes here.</p>
+                  <p className="text-14">{translateUi("Card body content goes here.")}</p>
                 </CardContent>
               </Card>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Dashboard Panel Card">
+            <ComponentShowcase title={translateUi("Dashboard Panel Card")}>
               <div className="grid gap-4 sm:grid-cols-2">
                 {/* Security Posture style */}
                 <div className="rounded-xl border border-border/50 bg-card p-5 flex flex-col gap-4">
-                  <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Security Posture</p>
+                  <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Security Posture")}</p>
                   <div className="flex items-center gap-4">
                     <div className="shrink-0 flex h-12 w-12 items-center justify-center rounded-full border-2 border-nyx-500/40">
                       <span className="type-body-strong nyx-gradient-text">80%</span>
                     </div>
                     <div className="flex flex-col gap-0.5">
                       <span className="type-section-heading nyx-gradient-text" style={{ letterSpacing: "-0.02em" }}>80%</span>
-                      <span className="text-13 text-text-tertiary">security score</span>
+                      <span className="text-13 text-text-tertiary">{translateUi("security score")}</span>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
-                      <CheckCircle2 className="h-3 w-3 shrink-0" /> Email
-                    </div>
+                      <CheckCircle2 className="h-3 w-3 shrink-0" />{translateUi(" Email")}</div>
                     <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
-                      <CheckCircle2 className="h-3 w-3 shrink-0" /> MFA
-                    </div>
+                      <CheckCircle2 className="h-3 w-3 shrink-0" />{translateUi(" MFA")}</div>
                     <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis text-text-tertiary border border-dashed border-border/40">
-                      <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-border/60" /> Keys
-                    </div>
+                      <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-border/60" />{translateUi(" Keys")}</div>
                   </div>
                 </div>
                 {/* Quick Links style */}
                 <div className="rounded-xl border border-border/50 bg-card p-5 flex flex-col gap-3">
-                  <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Quick Links</p>
+                  <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Quick Links")}</p>
                   <div className="flex flex-col gap-1.5">
                     {["Documentation", "AI Setup Guide", "Integration Guide"].map((label) => (
                       <div key={label} className="flex items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-14 text-muted-foreground transition-colors duration-300 hover:bg-overlay hover:text-foreground cursor-pointer">
@@ -554,7 +546,7 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Stat Card">
+            <ComponentShowcase title={translateUi("Stat Card")}>
               <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
                 {[
                   { label: "Services", value: "12", icon: <Server className="h-3.5 w-3.5" />, footer: "Registered services" },
@@ -575,7 +567,7 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Action Card">
+            <ComponentShowcase title={translateUi("Action Card")}>
               <div className="grid gap-3 sm:grid-cols-3">
                 {[
                   { icon: <Plus className="h-4 w-4" />, title: "Primary action", desc: "With gradient icon container.", primary: true },
@@ -595,10 +587,9 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Card Hover Rules">
+            <ComponentShowcase title={translateUi("Card Hover Rules")}>
               <div className="rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  All interactive cards: <code className="text-nyx-secondary-400">transition-all duration-300</code>. Hover border: <code className="text-nyx-secondary-400">border-hairline-strong</code> (neutral) or <code className="text-nyx-secondary-400">border-nyx-500/40</code> (brand). Icon: <code className="text-nyx-secondary-400">group-hover:-translate-y-0.5</code>.
+                <p className="text-13 text-text-tertiary">{translateUi("All interactive cards: ")}<code className="text-nyx-secondary-400">transition-all duration-300</code>{translateUi(". Hover border: ")}<code className="text-nyx-secondary-400">border-hairline-strong</code>{translateUi(" (neutral) or ")}<code className="text-nyx-secondary-400">border-nyx-500/40</code>{translateUi(" (brand). Icon: ")}<code className="text-nyx-secondary-400">group-hover:-translate-y-0.5</code>.
                 </p>
               </div>
             </ComponentShowcase>
@@ -606,59 +597,59 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── BADGES ─── */}
-        <Section id="badges" title="Badges">
-          <ComponentShowcase title="Variants">
+        <Section id="badges" title={translateUi("Badges")}>
+          <ComponentShowcase title={translateUi("Variants")}>
             <div className="flex flex-wrap gap-3">
-              <Badge>Default</Badge>
-              <Badge variant="secondary">Secondary</Badge>
-              <Badge variant="destructive">Destructive</Badge>
-              <Badge variant="success">Success</Badge>
-              <Badge variant="warning">Warning</Badge>
-              <Badge variant="info">Info</Badge>
-              <Badge variant="accent">Accent</Badge>
+              <Badge>{translateUi("Default")}</Badge>
+              <Badge variant="secondary">{translateUi("Secondary")}</Badge>
+              <Badge variant="destructive">{translateUi("Destructive")}</Badge>
+              <Badge variant="success">{translateUi("Success")}</Badge>
+              <Badge variant="warning">{translateUi("Warning")}</Badge>
+              <Badge variant="info">{translateUi("Info")}</Badge>
+              <Badge variant="accent">{translateUi("Accent")}</Badge>
             </div>
           </ComponentShowcase>
         </Section>
 
         {/* ─── TABS ─── */}
-        <Section id="tabs" title="Tabs">
-          <ComponentShowcase title="Default Tabs">
+        <Section id="tabs" title={translateUi("Tabs")}>
+          <ComponentShowcase title={translateUi("Default Tabs")}>
             <Tabs defaultValue="one">
               <TabsList>
-                <TabsTrigger value="one">First Tab</TabsTrigger>
-                <TabsTrigger value="two">Second Tab</TabsTrigger>
-                <TabsTrigger value="three">Third Tab</TabsTrigger>
+                <TabsTrigger value="one">{translateUi("First Tab")}</TabsTrigger>
+                <TabsTrigger value="two">{translateUi("Second Tab")}</TabsTrigger>
+                <TabsTrigger value="three">{translateUi("Third Tab")}</TabsTrigger>
               </TabsList>
               <TabsContent value="one">
-                <p className="text-14 text-muted-foreground pt-2">Content for the first tab.</p>
+                <p className="text-14 text-muted-foreground pt-2">{translateUi("Content for the first tab.")}</p>
               </TabsContent>
               <TabsContent value="two">
-                <p className="text-14 text-muted-foreground pt-2">Content for the second tab.</p>
+                <p className="text-14 text-muted-foreground pt-2">{translateUi("Content for the second tab.")}</p>
               </TabsContent>
               <TabsContent value="three">
-                <p className="text-14 text-muted-foreground pt-2">Content for the third tab.</p>
+                <p className="text-14 text-muted-foreground pt-2">{translateUi("Content for the third tab.")}</p>
               </TabsContent>
             </Tabs>
           </ComponentShowcase>
         </Section>
 
         {/* ─── TABLES ─── */}
-        <Section id="tables" title="Tables">
-          <ComponentShowcase title="Standard Table">
+        <Section id="tables" title={translateUi("Tables")}>
+          <ComponentShowcase title={translateUi("Standard Table")}>
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  <TableHead>{translateUi("Name")}</TableHead>
+                  <TableHead>{translateUi("Status")}</TableHead>
+                  <TableHead>{translateUi("Type")}</TableHead>
+                  <TableHead className="text-right">{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 <TableRow>
-                  <TableCell className="font-normal">openai-prod</TableCell>
-                  <TableCell><Badge variant="success">Active</Badge></TableCell>
-                  <TableCell>API Key</TableCell>
+                  <TableCell className="font-normal">{translateUi("openai-prod")}</TableCell>
+                  <TableCell><Badge variant="success">{translateUi("Active")}</Badge></TableCell>
+                  <TableCell>{translateUi("API Key")}</TableCell>
                   <TableCell className="text-right">
                     <Button variant="ghost" size="icon"><Edit className="h-3.5 w-3.5" /></Button>
                     <Button variant="ghost" size="icon"><Trash2 className="h-3.5 w-3.5 text-destructive" /></Button>
@@ -666,8 +657,8 @@ export function DesignSystemPage() {
                 </TableRow>
                 <TableRow>
                   <TableCell className="font-normal">anthropic-dev</TableCell>
-                  <TableCell><Badge variant="warning">Expiring</Badge></TableCell>
-                  <TableCell>OAuth</TableCell>
+                  <TableCell><Badge variant="warning">{translateUi("Expiring")}</Badge></TableCell>
+                  <TableCell>{translateUi("OAuth")}</TableCell>
                   <TableCell className="text-right">
                     <Button variant="ghost" size="icon"><Edit className="h-3.5 w-3.5" /></Button>
                     <Button variant="ghost" size="icon"><Trash2 className="h-3.5 w-3.5 text-destructive" /></Button>
@@ -679,101 +670,97 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── DROPDOWNS ─── */}
-        <Section id="dropdowns" title="Dropdowns">
-          <ComponentShowcase title="Dropdown Menu">
+        <Section id="dropdowns" title={translateUi("Dropdowns")}>
+          <ComponentShowcase title={translateUi("Dropdown Menu")}>
             <div className="flex gap-4">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline">
-                    Options <ChevronDown className="ml-2 h-3.5 w-3.5" />
+                  <Button variant="outline">{translateUi("Options ")}<ChevronDown className="ml-2 h-3.5 w-3.5" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent className="p-2">
-                  <DropdownMenuItem className="rounded-lg"><Edit className="mr-2" /> Edit</DropdownMenuItem>
-                  <DropdownMenuItem className="rounded-lg"><Copy className="mr-2" /> Duplicate</DropdownMenuItem>
-                  <DropdownMenuItem className="rounded-lg text-destructive focus:text-destructive [&_svg]:text-destructive"><Trash2 className="mr-2" /> Delete</DropdownMenuItem>
+                  <DropdownMenuItem className="rounded-lg"><Edit className="mr-2" />{translateUi(" Edit")}</DropdownMenuItem>
+                  <DropdownMenuItem className="rounded-lg"><Copy className="mr-2" />{translateUi(" Duplicate")}</DropdownMenuItem>
+                  <DropdownMenuItem className="rounded-lg text-destructive focus:text-destructive [&_svg]:text-destructive"><Trash2 className="mr-2" />{translateUi(" Delete")}</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
             <div className="mt-4 rounded-lg bg-muted/50 p-3">
-              <p className="text-13 text-text-tertiary">
-                Container: <code className="text-nyx-secondary-400">p-2 rounded-xl</code>. Items: <code className="text-nyx-secondary-400">rounded-lg px-2 py-2</code>. No separators — use spacing instead.
-              </p>
+              <p className="text-13 text-text-tertiary">{translateUi("Container: ")}<code className="text-nyx-secondary-400">p-2 rounded-xl</code>{translateUi(". Items: ")}<code className="text-nyx-secondary-400">rounded-lg px-2 py-2</code>{translateUi(". No separators — use spacing instead. ")}</p>
             </div>
           </ComponentShowcase>
         </Section>
 
         {/* ─── DIALOGS ─── */}
-        <Section id="dialogs" title="Dialogs">
-          <ComponentShowcase title="Standard Dialog">
+        <Section id="dialogs" title={translateUi("Dialogs")}>
+          <ComponentShowcase title={translateUi("Standard Dialog")}>
             <Dialog>
               <DialogTrigger asChild>
-                <Button variant="outline">Open Dialog</Button>
+                <Button variant="outline">{translateUi("Open Dialog")}</Button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Dialog Title</DialogTitle>
-                  <DialogDescription>A brief description of what this dialog does.</DialogDescription>
+                  <DialogTitle>{translateUi("Dialog Title")}</DialogTitle>
+                  <DialogDescription>{translateUi("A brief description of what this dialog does.")}</DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4">
                   <div className="space-y-2">
-                    <Label>Name</Label>
-                    <Input placeholder="Enter name..." />
+                    <Label>{translateUi("Name")}</Label>
+                    <Input placeholder={translateUi("Enter name...")} />
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button variant="ghost">Cancel</Button>
-                  <Button>Save</Button>
+                  <Button variant="ghost">{translateUi("Cancel")}</Button>
+                  <Button>{translateUi("Save")}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
             <div className="mt-4 rounded-lg bg-muted/50 p-3">
-              <p className="text-13 text-text-tertiary">
-                Padding: <code className="text-nyx-secondary-400">p-6</code>. Radius: <code className="text-nyx-secondary-400">rounded-xl</code>. Gap: <code className="text-nyx-secondary-400">gap-6</code>. Overlay: <code className="text-nyx-secondary-400">bg-black/60 backdrop-blur-sm</code>.
+              <p className="text-13 text-text-tertiary">{translateUi("Padding: ")}<code className="text-nyx-secondary-400">p-6</code>{translateUi(". Radius: ")}<code className="text-nyx-secondary-400">rounded-xl</code>{translateUi(". Gap: ")}<code className="text-nyx-secondary-400">gap-6</code>{translateUi(". Overlay: ")}<code className="text-nyx-secondary-400">bg-black/60 backdrop-blur-sm</code>.
               </p>
             </div>
           </ComponentShowcase>
         </Section>
 
         {/* ─── TOOLTIPS ─── */}
-        <Section id="tooltips" title="Tooltips">
-          <ComponentShowcase title="Standard Tooltip">
+        <Section id="tooltips" title={translateUi("Tooltips")}>
+          <ComponentShowcase title={translateUi("Standard Tooltip")}>
             <div className="flex gap-4">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="outline">Hover me</Button>
+                  <Button variant="outline">{translateUi("Hover me")}</Button>
                 </TooltipTrigger>
-                <TooltipContent>Tooltip content</TooltipContent>
+                <TooltipContent>{translateUi("Tooltip content")}</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="ghost" size="icon"><Info className="h-4 w-4" /></Button>
                 </TooltipTrigger>
-                <TooltipContent>Information tooltip</TooltipContent>
+                <TooltipContent>{translateUi("Information tooltip")}</TooltipContent>
               </Tooltip>
             </div>
           </ComponentShowcase>
         </Section>
 
         {/* ─── SWITCHES ─── */}
-        <Section id="switches" title="Switches">
-          <ComponentShowcase title="Switch States">
+        <Section id="switches" title={translateUi("Switches")}>
+          <ComponentShowcase title={translateUi("Switch States")}>
             <div className="flex items-center gap-8">
               <div className="flex items-center gap-3">
                 <Switch checked={switchVal} onCheckedChange={setSwitchVal} />
-                <Label>Enabled</Label>
+                <Label>{translateUi("Enabled")}</Label>
               </div>
               <div className="flex items-center gap-3">
                 <Switch checked={false} disabled />
-                <Label className="text-text-tertiary">Disabled</Label>
+                <Label className="text-text-tertiary">{translateUi("Disabled")}</Label>
               </div>
             </div>
           </ComponentShowcase>
         </Section>
 
         {/* ─── SKELETONS ─── */}
-        <Section id="skeletons" title="Skeletons">
-          <ComponentShowcase title="Loading States">
+        <Section id="skeletons" title={translateUi("Skeletons")}>
+          <ComponentShowcase title={translateUi("Loading States")}>
             <div className="space-y-4">
               <div className="space-y-2">
                 <Skeleton className="h-10 w-48" />
@@ -790,38 +777,38 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── ICON STYLING ─── */}
-        <Section id="icons" title="Icon Styling">
+        <Section id="icons" title={translateUi("Icon Styling")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Icon Container Variants">
+            <ComponentShowcase title={translateUi("Icon Container Variants")}>
               <div className="flex flex-wrap gap-6 items-center">
                 <div className="flex flex-col items-center gap-2">
                   <div className="flex h-8 w-8 items-center justify-center rounded-[8px] nyx-gradient-vivid text-white">
                     <Plus className="h-4 w-4" />
                   </div>
-                  <span className="text-12 text-text-tertiary">Gradient</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Gradient")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay text-text-tertiary">
                     <Settings className="h-4 w-4" />
                   </div>
-                  <span className="text-12 text-text-tertiary">Bordered</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Bordered")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-nyx-500/30 bg-nyx-500/15 text-nyx-secondary-400">
                     <Zap className="h-4 w-4" />
                   </div>
-                  <span className="text-12 text-text-tertiary">Brand bordered</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Brand bordered")}</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-hairline bg-overlay text-text-tertiary">
                     <Plus className="h-3 w-3" />
                   </div>
-                  <span className="text-12 text-text-tertiary">Small (CTA)</span>
+                  <span className="text-12 text-text-tertiary">{translateUi("Small (CTA)")}</span>
                 </div>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Icon Sizes">
+            <ComponentShowcase title={translateUi("Icon Sizes")}>
               <div className="flex flex-wrap gap-6 items-end">
                 <div className="flex flex-col items-center gap-2">
                   <Cable className="h-3 w-3 text-text-tertiary" />
@@ -841,17 +828,16 @@ export function DesignSystemPage() {
                 </div>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-13 text-text-tertiary">
-                  Nav sidebar: <code className="text-nyx-secondary-400">16px</code>. Top bar chrome: <code className="text-nyx-secondary-400">18px</code>. Inline buttons: <code className="text-nyx-secondary-400">14px</code>. Stat cards: <code className="text-nyx-secondary-400">14px</code>. Tiny indicators: <code className="text-nyx-secondary-400">12px</code>.
+                <p className="text-13 text-text-tertiary">{translateUi("Nav sidebar: ")}<code className="text-nyx-secondary-400">16px</code>{translateUi(". Top bar chrome: ")}<code className="text-nyx-secondary-400">18px</code>{translateUi(". Inline buttons: ")}<code className="text-nyx-secondary-400">14px</code>{translateUi(". Stat cards: ")}<code className="text-nyx-secondary-400">14px</code>{translateUi(". Tiny indicators: ")}<code className="text-nyx-secondary-400">12px</code>.
                 </p>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Platform icon scale">
+            <ComponentShowcase title={translateUi("Platform icon scale")}>
               <div className="space-y-4 overflow-x-auto">
                 <div className="min-w-[680px]">
                   <div className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/40 pb-2 text-12 font-mono uppercase tracking-[0.08em] text-text-tertiary">
-                    <span>Agent platform</span>
+                    <span>{translateUi("Agent platform")}</span>
                     {ICON_SIZE_OPTIONS.map(({ label }) => (
                       <span key={label} className="text-center">{label}</span>
                     ))}
@@ -876,19 +862,18 @@ export function DesignSystemPage() {
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Catalog service icon audit">
+            <ComponentShowcase title={translateUi("Catalog service icon audit")}>
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="text-14 text-muted-foreground">
-                    {ICON_AUDIT_SLUGS.length} registered service marks, including seeded Pro services and internal platform aliases.
-                  </p>
+                    {ICON_AUDIT_SLUGS.length}{translateUi(" registered service marks, including seeded Pro services and internal platform aliases.")}</p>
                   <div className="relative w-full sm:w-64">
                     <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary" />
                     <Input
                       value={iconSearch}
                       onChange={(event) => setIconSearch(event.target.value)}
-                      placeholder="Filter services"
-                      aria-label="Filter service icons"
+                      placeholder={translateUi("Filter services")}
+                      aria-label={translateUi("Filter service icons")}
                       className="h-8 pl-8 text-14"
                     />
                   </div>
@@ -896,7 +881,7 @@ export function DesignSystemPage() {
                 <div className="overflow-x-auto rounded-lg border border-border/50">
                   <div className="min-w-[680px]">
                     <div className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/50 bg-muted/40 px-3 py-2 text-12 font-mono uppercase tracking-[0.08em] text-text-tertiary">
-                      <span>Service</span>
+                      <span>{translateUi("Service")}</span>
                       {ICON_SIZE_OPTIONS.map(({ label }) => (
                         <span key={label} className="text-center">{label}</span>
                       ))}
@@ -918,9 +903,7 @@ export function DesignSystemPage() {
                       </div>
                     ))}
                     {filteredIconAuditSlugs.length === 0 && (
-                      <p className="px-3 py-8 text-center text-14 text-muted-foreground">
-                        No matching service icons.
-                      </p>
+                      <p className="px-3 py-8 text-center text-14 text-muted-foreground">{translateUi("No matching service icons.")}</p>
                     )}
                   </div>
                 </div>
@@ -930,108 +913,106 @@ export function DesignSystemPage() {
         </Section>
 
         {/* ─── TOASTS ─── */}
-        <Section id="toasts" title="Toasts">
-          <ComponentShowcase title="Toast Variants">
+        <Section id="toasts" title={translateUi("Toasts")}>
+          <ComponentShowcase title={translateUi("Toast Variants")}>
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-3 rounded-xl border border-success/30 bg-success/[0.06] p-3 text-15 text-success">
                 <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-success/20 bg-success/10">
                   <Check className="h-3 w-3" />
                 </span>
-                <span>Action completed successfully</span>
+                <span>{translateUi("Action completed successfully")}</span>
               </div>
               <div className="flex items-center gap-3 rounded-xl border border-destructive/30 bg-destructive/[0.06] p-3 text-15 text-destructive">
                 <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-destructive/20 bg-destructive/10">
                   <X className="h-3 w-3" />
                 </span>
-                <span>Something went wrong</span>
+                <span>{translateUi("Something went wrong")}</span>
               </div>
               <div className="flex items-center gap-3 rounded-xl border border-nyx-500/30 bg-nyx-500/[0.06] p-3 text-15 text-nyx-secondary-400">
                 <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-nyx-500/20 bg-nyx-500/10">
                   <Info className="h-3 w-3" />
                 </span>
-                <span>Here is some information</span>
+                <span>{translateUi("Here is some information")}</span>
               </div>
               <div className="flex items-center gap-3 rounded-xl border border-warning/30 bg-warning/[0.06] p-3 text-15 text-warning">
                 <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
                   <AlertCircle className="h-3 w-3" />
                 </span>
-                <span>Please review this</span>
+                <span>{translateUi("Please review this")}</span>
               </div>
             </div>
           </ComponentShowcase>
         </Section>
 
         {/* ─── PATTERNS ─── */}
-        <Section id="patterns" title="Patterns">
+        <Section id="patterns" title={translateUi("Patterns")}>
           <div className="space-y-6">
-            <ComponentShowcase title="Section Overline + Content">
+            <ComponentShowcase title={translateUi("Section Overline + Content")}>
               <div className="flex flex-col gap-3">
-                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Section Label</p>
-                <p className="text-14 text-muted-foreground">Content below the overline label.</p>
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Section Label")}</p>
+                <p className="text-14 text-muted-foreground">{translateUi("Content below the overline label.")}</p>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Status Banner (All Clear)">
+            <ComponentShowcase title={translateUi("Status Banner (All Clear)")}>
               <div className="flex items-center gap-3 rounded-xl border border-success/15 bg-success/[0.04] px-4 py-3">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-success/10">
                   <ShieldCheck className="h-4.5 w-4.5 text-success" />
                 </div>
                 <div>
-                  <p className="type-card-title text-foreground">All systems clear</p>
-                  <p className="text-13 text-muted-foreground">Nothing needs your attention right now.</p>
+                  <p className="type-card-title text-foreground">{translateUi("All systems clear")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Nothing needs your attention right now.")}</p>
                 </div>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Status Banner (Error)">
-              <ErrorBanner message="Failed to load services" onRetry={() => {}} />
+            <ComponentShowcase title={translateUi("Status Banner (Error)")}>
+              <ErrorBanner message={translateUi("Failed to load services")} onRetry={() => {}} />
             </ComponentShowcase>
 
-            <ComponentShowcase title="Attention Row">
+            <ComponentShowcase title={translateUi("Attention Row")}>
               <div className="flex flex-col gap-2">
                 <div className="group flex items-center gap-3 rounded-lg px-3 py-2 transition-colors duration-300 hover:bg-overlay cursor-pointer">
                   <div className="h-1.5 w-1.5 rounded-full shrink-0 bg-warning" />
                   <span className="shrink-0 text-warning"><ShieldAlert className="h-4 w-4" /></span>
-                  <span className="text-15 text-foreground flex-1">3 pending approvals</span>
+                  <span className="text-15 text-foreground flex-1">{translateUi("3 pending approvals")}</span>
                   <ArrowRight className="h-3 w-3 text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
                 <div className="group flex items-center gap-3 rounded-lg px-3 py-2 transition-colors duration-300 hover:bg-overlay cursor-pointer">
                   <div className="h-1.5 w-1.5 rounded-full shrink-0 bg-error" />
                   <span className="shrink-0 text-error"><AlertCircle className="h-4 w-4" /></span>
-                  <span className="text-15 text-foreground flex-1">1 node offline</span>
+                  <span className="text-15 text-foreground flex-1">{translateUi("1 node offline")}</span>
                   <ArrowRight className="h-3 w-3 text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Status Chips">
+            <ComponentShowcase title={translateUi("Status Chips")}>
               <div className="flex flex-wrap gap-2">
                 <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
-                  <CheckCircle2 className="h-3 w-3 shrink-0" /> Complete
-                </div>
+                  <CheckCircle2 className="h-3 w-3 shrink-0" />{translateUi(" Complete")}</div>
                 <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis text-text-tertiary border border-dashed border-border/40">
-                  <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-border/60" /> Incomplete
-                </div>
+                  <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-border/60" />{translateUi(" Incomplete")}</div>
               </div>
             </ComponentShowcase>
 
-            <ComponentShowcase title="Empty State">
+            <ComponentShowcase title={translateUi("Empty State")}>
               <div className="flex flex-col items-center gap-4 py-12">
                 <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
                   <Cable className="h-6 w-6 text-muted-foreground" />
                 </div>
                 <div className="text-center max-w-md space-y-1">
-                  <p className="type-row-title text-muted-foreground">No items yet</p>
-                  <p className="text-15 text-muted-foreground">Get started by adding your first item.</p>
+                  <p className="type-row-title text-muted-foreground">{translateUi("No items yet")}</p>
+                  <p className="text-15 text-muted-foreground">{translateUi("Get started by adding your first item.")}</p>
                 </div>
-                <AddCtaButton label="Add Item" onClick={() => {}} />
+                <AddCtaButton label={translateUi("Add Item")} onClick={() => {}} />
               </div>
             </ComponentShowcase>
           </div>
         </Section>
 
         {/* ── UX Rules ── */}
-        <Section id="ux-rules" title="UX Rules">
+        <Section id="ux-rules" title={translateUi("UX Rules")}>
           <div className="space-y-6">
             <div className="space-y-4">
               {[

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { UserAllowanceBalance } from "@/schemas/billing-credits";
 import { billingMetricLabel } from "@/lib/billing-units";
 import {
@@ -20,6 +22,7 @@ export function BillingAllowanceBenefits({
   allowances: readonly UserAllowanceBalance[];
   catalog: BillingCatalog;
 }) {
+  useUiTranslation();
   const services = new Map<string, UserAllowanceBalance[]>();
   for (const balance of allowances) {
     const id = balance.allowance.service_id;
@@ -95,17 +98,15 @@ export function BillingAllowanceBenefits({
               <summary className="benefit-summary">
                 <div className="compact-benefit-label">
                   <strong>{serviceName(catalog, slug)}</strong>
-                  <span className="benefit-label-with-help">
-                    Free usage
-                    <FreeUsageHelp balances={balances} />· {balances.length}{" "}
-                    {balances.length === 1 ? "allowance" : "allowances"}
+                  <span className="benefit-label-with-help">{translateUi("Free usage")}<FreeUsageHelp balances={balances} />· {balances.length}{" "}
+                    {balances.length === 1 ? translateUi("allowance") : translateUi("allowances")}
                   </span>
                 </div>
                 <DetailsAction />
                 <div className="benefit-summary-metric">
                   <ul
                     className="compact-coverage stack-legend"
-                    aria-label="Remaining free usage"
+                    aria-label={translateUi("Remaining free usage")}
                   >
                     {stack.entries.map((entry) => (
                       <li
@@ -121,8 +122,8 @@ export function BillingAllowanceBenefits({
                         {entry.status !== "normal" && (
                           <span className="sr-only">
                             {entry.status === "exhausted"
-                              ? "(used up)"
-                              : "(nearly used up)"}
+                              ? translateUi("(used up)")
+                              : translateUi("(nearly used up)")}
                           </span>
                         )}
                       </li>
@@ -130,7 +131,7 @@ export function BillingAllowanceBenefits({
                   </ul>
                   <StackedMeter
                     stack={stack}
-                    label={`${serviceName(catalog, slug)} free usage`}
+                    label={translateUi("{{value1}} free usage", { value1: serviceName(catalog, slug) })}
                   />
                 </div>
               </summary>
@@ -141,7 +142,7 @@ export function BillingAllowanceBenefits({
           );
         })}
         {!services.size && (
-          <p className="empty-inline">No free usage allowances.</p>
+          <p className="empty-inline">{translateUi("No free usage allowances.")}</p>
         )}
       </section>
     </div>

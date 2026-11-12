@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Cable } from "lucide-react";
 import {
   Tooltip,
@@ -30,6 +32,7 @@ export function ServicePoolSummary({
   readonly contentId: string;
   readonly onOpen: () => void;
 }) {
+  useUiTranslation();
   const first = pools[0];
   const name =
     first?.name ??
@@ -54,11 +57,11 @@ export function ServicePoolSummary({
     ...new Set(
       pools.map(
         (pool) =>
-          ({
+          translateUi(({
             priority: "Priority",
             weighted: "Weighted",
             round_robin: "Round-robin",
-          })[pool.strategy],
+          })[pool.strategy]),
       ),
     ),
   ].join(" / ");
@@ -77,7 +80,7 @@ export function ServicePoolSummary({
           <button
             type="button"
             className="flex min-h-[2lh] w-full min-w-0 flex-col rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
-            aria-label={`Show routing for ${serviceName}`}
+            aria-label={translateUi("Show routing for {{value1}}", { value1: serviceName })}
             aria-expanded={expanded}
             aria-controls={contentId}
             onClick={onOpen}
@@ -102,8 +105,7 @@ export function ServicePoolSummary({
               </span>
               {pools.length > 1 && (
                 <span className="ml-auto shrink-0 text-muted-foreground">
-                  {pools.length} pools
-                </span>
+                  {pools.length}{translateUi(" pools")}</span>
               )}
             </span>
             <span className="block w-full truncate pl-[22px] text-muted-foreground">
@@ -130,8 +132,8 @@ export function ServicePoolSummary({
                 </span>
               </p>
               <p>
-                {pool.members.filter((member) => member.enabled).length} of{" "}
-                {pool.members.length} connections enabled ·{" "}
+                {pool.members.filter((member) => member.enabled).length}{translateUi(" of")}{" "}
+                {pool.members.length}{translateUi(" connections enabled ·")}{" "}
                 {poolFailoverLabel(pool)}
               </p>
               <code>/api/v1/proxy/s/{pool.slug}</code>
@@ -139,18 +141,15 @@ export function ServicePoolSummary({
           ))}
           <p className="text-muted-foreground">
             {first
-              ? "Configured policy applies when calling the pool slug. Actual attempts depend on eligible members and the request. Individual connection slugs run directly."
+              ? translateUi("Configured policy applies when calling the pool slug. Actual attempts depend on eligible members and the request. Individual connection slugs run directly.")
               : loading
-                ? "Loading saved pool membership."
+                ? translateUi("Loading saved pool membership.")
                 : incomplete
-                  ? "Pool membership could not be fully checked."
-                  : "No saved pool contains these connections. Individual connection slugs run directly."}
+                  ? translateUi("Pool membership could not be fully checked.")
+                  : translateUi("No saved pool contains these connections. Individual connection slugs run directly.")}
           </p>
           {first && incomplete && (
-            <p className="text-muted-foreground">
-              Showing known pools only; additional organization pools may
-              require admin access.
-            </p>
+            <p className="text-muted-foreground">{translateUi("Showing known pools only; additional organization pools may require admin access.")}</p>
           )}
         </TooltipContent>
       </Tooltip>

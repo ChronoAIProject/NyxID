@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -9,8 +11,8 @@ import {
 import { cn } from "@/lib/utils";
 
 const LEVEL_OPTIONS: readonly { value: AccessLevel; label: string }[] = [
-  { value: "off", label: "Off" },
-  { value: "allow", label: "Allow" },
+  { value: "off", get label() { return translateUi("Off"); } },
+  { value: "allow", get label() { return translateUi("Allow"); } },
 ];
 
 function LevelControl({
@@ -24,6 +26,7 @@ function LevelControl({
   readonly onChange: (level: AccessLevel) => void;
   readonly offDisabled?: boolean;
 }) {
+  useUiTranslation();
   return (
     <div
       role="radiogroup"
@@ -110,6 +113,7 @@ export function ServiceAccessTable({
   onLevelChange,
   className,
 }: ServiceAccessTableProps) {
+  useUiTranslation();
   const [query, setQuery] = useState("");
   const allowsFutureServices =
     defaultLevel === "allow" &&
@@ -131,16 +135,10 @@ export function ServiceAccessTable({
         <h2
           id="oauth-service-access"
           className="type-card-title text-foreground"
-        >
-          Service access
-        </h2>
+        >{translateUi("Service access")}</h2>
         <code className="text-14 text-muted-foreground">proxy</code>
       </div>
-      <p className="mt-1 text-14 text-muted-foreground">
-        Allow lets {clientName} read data and take actions, including creating,
-        updating or deleting data, using that service. Approval prompts depend
-        on your configured policies.
-      </p>
+      <p className="mt-1 text-14 text-muted-foreground">{translateUi("Allow lets ")}{clientName}{translateUi(" read data and take actions, including creating, updating or deleting data, using that service. Approval prompts depend on your configured policies.")}</p>
 
       {rows.length > 0 && (
         <div className="relative mt-3">
@@ -152,8 +150,8 @@ export function ServiceAccessTable({
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={`Search ${rows.length} services`}
-            aria-label="Search services"
+            placeholder={translateUi("Search {{value1}} services", { value1: rows.length })}
+            aria-label={translateUi("Search services")}
             className="h-8 pl-8 text-14"
           />
         </div>
@@ -162,36 +160,31 @@ export function ServiceAccessTable({
       <div className="mt-2 overflow-hidden rounded-lg border border-border/60">
         <div className="flex flex-wrap items-center justify-between gap-3 bg-overlay px-3 py-2">
           <div className="min-w-0">
-            <p className="type-card-title text-foreground">All services</p>
+            <p className="type-card-title text-foreground">{translateUi("All services")}</p>
             <p className="text-13 text-text-tertiary">
               {allowsFutureServices
-                ? "Also applies to services you connect later"
-                : "New services stay off unless all services are allowed"}
+                ? translateUi("Also applies to services you connect later")
+                : translateUi("New services stay off unless all services are allowed")}
             </p>
           </div>
           <LevelControl
-            label="All services"
+            label={translateUi("All services")}
             value={defaultLevel}
             onChange={onDefaultLevelChange}
           />
         </div>
         <div
           role="region"
-          aria-label="Service permissions"
+          aria-label={translateUi("Service permissions")}
           tabIndex={0}
           className="h-75 max-h-[20dvh] min-h-25 divide-y divide-border/60 overflow-y-auto overscroll-contain border-t border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
         >
           {loading ? (
-            <p className="px-3 py-2.5 text-14 text-muted-foreground">
-              Loading services...
-            </p>
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">{translateUi("Loading services...")}</p>
           ) : rows.length === 0 ? (
-            <p className="px-3 py-2.5 text-14 text-muted-foreground">
-              No services connected yet. New ones follow the setting above.
-            </p>
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">{translateUi("No services connected yet. New ones follow the setting above.")}</p>
           ) : visibleRows.length === 0 ? (
-            <p className="px-3 py-2.5 text-14 text-muted-foreground">
-              No services match &ldquo;{query.trim()}&rdquo;.
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">{translateUi("No services match “")}{query.trim()}&rdquo;.
             </p>
           ) : (
             visibleRows.map((row) => (
@@ -209,7 +202,7 @@ export function ServiceAccessTable({
                   {(row.orgName || row.requiredByApp || row.secondary) && (
                     <p className="truncate text-13 text-text-tertiary">
                       {[
-                        row.orgName && `Org · ${row.orgName}`,
+                        row.orgName && translateUi("Org · {{orgName}}", { orgName: row.orgName }),
                         row.requiredByApp ? "Requested by app" : row.secondary,
                       ]
                         .filter(Boolean)
@@ -230,8 +223,7 @@ export function ServiceAccessTable({
       </div>
 
       <p className="mt-2 text-13 text-text-tertiary">
-        {clientName} can discover the services you allow. NyxID supplies
-        credentials to those services without sharing them with {clientName}.
+        {clientName}{translateUi(" can discover the services you allow. NyxID supplies credentials to those services without sharing them with ")}{clientName}.
       </p>
     </section>
   );

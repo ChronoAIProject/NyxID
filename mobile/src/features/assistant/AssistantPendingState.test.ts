@@ -467,3 +467,12 @@ test("live metadata refresh projects authoritative approval, connected and faile
     h.unmount();
   }
 });
+
+test("retained-operation history renders one notice with the distinct request count", () => {
+  const text = "NyxID events (authored by NyxID):\n- Retained operation updates for 6 distinct permission requests. Results appear in the reply.";
+  const restored = JSON.parse(JSON.stringify({ role: "event", text })) as { text: string };
+  const notices = eventNotices(restored.text).map(describeEventNotice);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]?.summary, "Retained operation updates for 6 distinct permission requests");
+  assert.ok(!notices[0]?.detail?.includes("Do not reconstruct"));
+});

@@ -35,7 +35,10 @@ export function waitForVoiceForeground(
     const changed = (state: string, initial = false) => {
       if (signal.aborted || !valid()) aborted();
       else if (state === "active") finish();
-      else if (state === "background" && !(initial && options.allowInitialBackground))
+      else if (
+        state === "background" &&
+        !(initial && options.allowInitialBackground)
+      )
         finish(new Error("Keep NyxID open to start a voice call."));
     };
     signal.addEventListener("abort", aborted, { once: true });

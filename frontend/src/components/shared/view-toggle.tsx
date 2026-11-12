@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, useCallback } from "react";
 import { LayoutGrid, List } from "lucide-react";
 
@@ -29,6 +30,7 @@ export function ViewToggle({
   readonly viewMode: ViewMode;
   readonly onViewModeChange: (mode: ViewMode) => void;
 }) {
+  const { t } = useUiTranslation();
   const toggle = () => onViewModeChange(viewMode === "grid" ? "table" : "grid");
 
   return (
@@ -41,7 +43,7 @@ export function ViewToggle({
         type="button"
         className="relative z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-md transition-colors"
         onClick={toggle}
-        aria-label="Grid view"
+        aria-label={t("Grid view")}
         aria-pressed={viewMode === "grid"}
       >
         <LayoutGrid className={`h-3.5 w-3.5 transition-colors duration-200 ${viewMode === "grid" ? "text-foreground" : "text-text-tertiary hover:text-muted-foreground"}`} />
@@ -50,7 +52,7 @@ export function ViewToggle({
         type="button"
         className="relative z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-md transition-colors"
         onClick={toggle}
-        aria-label="Table view"
+        aria-label={t("Table view")}
         aria-pressed={viewMode === "table"}
       >
         <List className={`h-3.5 w-3.5 transition-colors duration-200 ${viewMode === "table" ? "text-foreground" : "text-text-tertiary hover:text-muted-foreground"}`} />

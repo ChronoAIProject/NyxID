@@ -113,7 +113,8 @@ pub(crate) async fn admit(
                 &headers,
                 unsupported_transport,
             )
-            .await?,
+            .await
+            .map_err(|error| connection_configuration_error(error, caller))?,
         ),
     };
     Ok(DispatchAdmission {
@@ -123,6 +124,21 @@ pub(crate) async fn admit(
             guard,
         },
     })
+}
+
+// Keep the stable conflict code/prefix; identify only the caller's already
+// authorized connection, never URLs, credentials or another owner's account.
+fn connection_configuration_error(error: AppError, caller: &DispatchCaller<'_>) -> AppError {
+    match (error, caller.user_service_id) {
+        (AppError::Conflict(message), Some(connection))
+            if message == "cma_configuration_required" =>
+        {
+            AppError::Conflict(format!(
+                "cma_configuration_required: Check CMA connection {connection}; its target must match the current catalog deployment. For a managed connection, contact the administrator. Keep existing resource and request identities"
+            ))
+        }
+        (error, _) => error,
+    }
 }
 
 /// Every HTTP send uses this gate, including wrappers without an admission.
@@ -216,6 +232,36 @@ mod tests {
             }
             Ok(response)
         }
+    }
+
+    #[tokio::test]
+    async fn configuration_detail_keeps_public_error_code_and_native_recovery_marker() {
+        use axum::response::IntoResponse;
+        let error = connection_configuration_error(
+            AppError::Conflict("cma_configuration_required".into()),
+            &caller(),
+        );
+        let response = error.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error_code"], 1004);
+        assert_eq!(body["error"], "conflict");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("cma_configuration_required: Check CMA connection service-connection")
+        );
+        let native = DispatchCaller {
+            user_service_id: None,
+            ..caller()
+        };
+        assert!(matches!(connection_configuration_error(
+            AppError::Conflict("cma_configuration_required".into()), &native,
+        ), AppError::Conflict(message) if message == "cma_configuration_required"));
     }
 
     fn caller() -> DispatchCaller<'static> {

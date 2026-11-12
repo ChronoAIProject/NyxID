@@ -131,6 +131,9 @@ pub struct UserService {
     /// created services and rows that have never rotated have no predecessor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_predecessor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_verification:
+        Option<super::credential_verification::CredentialVerificationObservation>,
 }
 
 fn default_service_type() -> String {
@@ -195,6 +198,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         let doc = bson::to_document(&svc).expect("serialize");
         let restored: UserService = bson::from_document(doc).expect("deserialize");
@@ -251,6 +255,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         let mut doc = bson::to_document(&svc).expect("serialize");
         doc.remove("node_priority");
@@ -307,6 +312,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         let mut doc = bson::to_document(&svc).expect("serialize");
         // Remove all identity fields to simulate existing documents
@@ -370,6 +376,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         let doc = bson::to_document(&svc).expect("serialize");
         assert!(!doc.contains_key("api_key_id"), "None should be skipped");
@@ -423,6 +430,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: Some("prev-key".to_string()),
+            credential_verification: None,
         };
         let mut doc = bson::to_document(&svc).expect("serialize");
         assert!(doc.contains_key("state_version"));

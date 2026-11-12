@@ -7,21 +7,22 @@ import {
 } from "expo-speech-recognition";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { volumeLevel } from "./voice/dictationLevel";
 import { dictationLocale } from "./voice/dictationLocale";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
+import { claimVoiceAudioSession } from "./voice/audioSessionOwnership";
 
-type Phase =
-  | "idle"
-  | "permission"
-  | "connecting"
-  | "listening"
-  | "stopping";
+type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 
 const NO_SPEECH = "No speech was detected. Try again.";
 const DENIED =
   "Allow microphone and speech recognition access in Settings to dictate. You can keep typing.";
+const START_FAILED =
+  "Dictation could not start. Please try again. You can keep typing.";
+/** Give people time to read the native prompt, separately from the foreground handoff. */
+const PERMISSION_TIMEOUT_MS = 60_000;
 /** Locale discovery or a native recognizer must not leave the composer starting forever. */
 const START_TIMEOUT_MS = 8000;
 /** A stopped recognizer that never reports `end` still releases the microphone. */
@@ -47,7 +48,7 @@ function dictationError(code: ExpoSpeechRecognitionErrorCode) {
     case "language-not-supported":
       return Platform.OS === "android"
         ? "Dictation isn't available in your selected language. Choose another language or keep typing."
-        : "Dictation isn't available in your iPhone's language. You can keep typing.";
+        : "Dictation isn't available in your device's language. You can keep typing.";
     case "network":
       return "Speech recognition needs a connection for your language. Check your connection and try again.";
     case "service-not-allowed":
@@ -71,11 +72,26 @@ function dictationError(code: ExpoSpeechRecognitionErrorCode) {
  * close it.
  */
 let releasing: Promise<void> | undefined;
-function release() {
+type AudioOwner = ReturnType<typeof claimVoiceAudioSession>;
+function deactivate(owner: AudioOwner) {
+  owner.release(() => {
+    if (Platform.OS === "ios") {
+      try {
+        Recognizer.setAudioSessionActiveIOS(false, {
+          notifyOthersOnDeactivation: true,
+        });
+      } catch {
+        // The native session may already have been released by the OS.
+      }
+    }
+  });
+}
+function release(owner: AudioOwner) {
   const done = new Promise<void>((resolve) => {
     const finish = () => {
       subscription.remove();
       clearTimeout(timer);
+      deactivate(owner);
       if (releasing === done) releasing = undefined;
       resolve();
     };
@@ -129,18 +145,25 @@ function levelSource() {
 /**
  * Composer dictation on the device's speech recognizer (on-device when
  * supported). The words appear in the composer as they are recognized and
- * join the draft when recording finishes; nothing reaches NyxID until the
- * person sends the message themselves.
+ * join the draft when recording finishes. Crew voice instead opts into native
+ * utterance boundaries and sends successful final results through its sender.
  */
 export function useComposerDictation({
   scope,
   enabled,
   onInsert,
+  onSilence,
+  continuous = true,
 }: {
   scope: string;
   enabled: boolean;
   onInsert: (text: string) => void;
+  /** Automatic utterance users can pace retries using native session duration. */
+  onSilence?: (durationMs: number) => void;
+  /** Crew voice ends each utterance at native silence detection. */
+  continuous?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const focused = useIsFocused();
   const { sheetOpen } = useWorkspaceAccessibility();
   enabled = enabled && !sheetOpen;
@@ -150,8 +173,15 @@ export function useComposerDictation({
   const [error, setError] = useState<string>();
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [levels] = useState(levelSource);
-  const current = useRef({ scope, epoch, enabled, focused, onInsert });
-  current.current = { scope, epoch, enabled, focused, onInsert };
+  const current = useRef({
+    scope,
+    epoch,
+    enabled,
+    focused,
+    onInsert,
+    onSilence,
+  });
+  current.current = { scope, epoch, enabled, focused, onInsert, onSilence };
   const operation = useRef<{ cancel(): void; stop(): void } | undefined>(
     undefined,
   );
@@ -186,15 +216,22 @@ export function useComposerDictation({
     setPermissionDenied(false);
     const controller = new AbortController();
     const identity = { scope, epoch };
-    let permission = true;
+    let permissionPrompt:
+      | { androidBackgroundAllowed: boolean; androidBackgrounded: boolean }
+      | undefined;
     /** Recognition was started and has not reported `end`: the mic may be on. */
     let native = false;
+    let audioOwner: AudioOwner | undefined;
+    // One utterance keeps the sender/routing that was visible at capture entry.
+    const insert = current.current.onInsert;
     let listening = false;
     let stopping = false;
     let finalText = "";
     let interimText = "";
     let failure: string | undefined;
+    let nativeStartedAt = 0;
     let subscriptions: { remove(): void }[] = [];
+    let permissionTimer: ReturnType<typeof setTimeout> | undefined;
     let startTimer: ReturnType<typeof setTimeout> | undefined;
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
@@ -211,6 +248,7 @@ export function useComposerDictation({
       for (const subscription of subscriptions) subscription.remove();
       subscriptions = [];
       appState.remove();
+      clearTimeout(permissionTimer);
       clearTimeout(startTimer);
       clearTimeout(stopTimer);
     };
@@ -219,7 +257,7 @@ export function useComposerDictation({
       detach();
       if (native) {
         native = false;
-        release();
+        release(audioOwner!);
       }
     };
     /**
@@ -232,6 +270,19 @@ export function useComposerDictation({
       const text = spoken();
       setCaption({ final: "", interim: "" });
       setPhase("idle");
+      // Draft dictation can preserve an interrupted tail for review. Crew
+      // speech dispatches automatically, so only a successful native final
+      // result may cross its sender boundary.
+      if (!continuous && (failure || interimText.trim() || !finalText.trim())) {
+        const silence = !text && (!failure || failure === NO_SPEECH);
+        setError(
+          silence
+            ? undefined
+            : (failure ?? "Speech wasn't finalized. Please try again."),
+        );
+        if (silence) current.current.onSilence?.(Date.now() - nativeStartedAt);
+        return;
+      }
       if (!text) {
         setError((previous) => previous ?? failure ?? NO_SPEECH);
         return;
@@ -243,7 +294,7 @@ export function useComposerDictation({
         current.current.enabled &&
         current.current.focused
       )
-        current.current.onInsert(text);
+        (continuous ? current.current.onInsert : insert)(text);
     };
     const attempt = {
       cancel,
@@ -262,18 +313,31 @@ export function useComposerDictation({
         stopTimer = setTimeout(() => {
           if (!valid()) return;
           native = false;
-          release();
+          release(audioOwner!);
           settle();
         }, STOP_TIMEOUT_MS);
       },
     };
     const appState = AppState.addEventListener("change", (state) => {
-      if (
-        !valid() ||
-        state === "active" ||
-        (permission && state === "inactive")
-      )
+      if (!valid()) return;
+      if (state === "active") {
+        if (permissionPrompt?.androidBackgrounded) {
+          permissionPrompt.androidBackgroundAllowed = false;
+          permissionPrompt.androidBackgrounded = false;
+        }
         return;
+      }
+      // Only a real native permission request may pause before capture starts.
+      if (permissionPrompt && !native) {
+        if (state === "inactive") return;
+        if (
+          state === "background" &&
+          permissionPrompt.androidBackgroundAllowed
+        ) {
+          permissionPrompt.androidBackgrounded = true;
+          return;
+        }
+      }
       discard();
     });
     operation.current = attempt;
@@ -285,30 +349,58 @@ export function useComposerDictation({
           "This device doesn't have a speech recognition service available. You can keep typing.",
         );
       }
-      const result = await Recognizer.requestPermissionsAsync();
+      let result = await Recognizer.getPermissionsAsync();
       if (!valid()) return;
+      if (AppState.currentState !== "active") throw new Error(START_FAILED);
       if (!result.granted) {
-        setPermissionDenied(true);
-        throw new Error(
-          result.restricted
-            ? Platform.OS === "android"
-              ? "Speech recognition is restricted on this device. You can keep typing."
-              : "Speech recognition is restricted on this iPhone in Screen Time. You can keep typing."
-            : permissionDeniedMessage(),
-        );
+        permissionPrompt = {
+          androidBackgroundAllowed: Platform.OS === "android",
+          androidBackgrounded: false,
+        };
+        try {
+          permissionTimer = setTimeout(() => {
+            if (!valid()) return;
+            cancel();
+            operation.current = undefined;
+            setPhase("idle");
+            setError(START_FAILED);
+          }, PERMISSION_TIMEOUT_MS);
+          result = await Recognizer.requestPermissionsAsync();
+          clearTimeout(permissionTimer);
+          permissionTimer = undefined;
+          if (!valid()) return;
+          if (!result.granted) {
+            setPermissionDenied(true);
+            throw new Error(
+              result.restricted
+                ? Platform.OS === "android"
+                  ? "Speech recognition is restricted on this device. You can keep typing."
+                  : "Speech recognition is restricted on this device in Screen Time. You can keep typing."
+                : permissionDeniedMessage(),
+            );
+          }
+          try {
+            await waitForVoiceForeground(AppState, controller.signal, valid, {
+              allowInitialBackground: permissionPrompt.androidBackgroundAllowed,
+            });
+          } catch {
+            if (!valid()) return;
+            throw new Error(START_FAILED);
+          }
+        } finally {
+          clearTimeout(permissionTimer);
+          permissionPrompt = undefined;
+        }
       }
-      await waitForVoiceForeground(AppState, controller.signal, valid);
-      permission = false;
       if (!valid()) return;
+      if (AppState.currentState !== "active") throw new Error(START_FAILED);
       setPhase("connecting");
       startTimer = setTimeout(() => {
         if (!valid()) return;
         cancel();
         operation.current = undefined;
         setPhase("idle");
-        setError(
-          (previous) => previous ?? "Dictation could not start. Please try again. You can keep typing.",
-        );
+        setError((previous) => previous ?? START_FAILED);
       }, START_TIMEOUT_MS);
       const lang = await recognitionLanguage();
       if (!valid()) return;
@@ -346,19 +438,22 @@ export function useComposerDictation({
           if (!message || (message === NO_SPEECH && spoken())) return;
           if (event.error === "not-allowed") setPermissionDenied(true);
           failure = message;
-          setError(message);
+          if (continuous || message !== NO_SPEECH) setError(message);
         }),
         Recognizer.addListener("end", () => {
           if (!valid()) return;
           native = false;
+          deactivate(audioOwner!);
           settle();
         }),
       ];
       native = true;
+      audioOwner = claimVoiceAudioSession();
+      nativeStartedAt = Date.now();
       Recognizer.start({
         ...(lang ? { lang } : {}),
         interimResults: true,
-        continuous: true,
+        continuous,
         addsPunctuation: true,
         maxAlternatives: 1,
         iosTaskHint: "dictation",
@@ -384,7 +479,7 @@ export function useComposerDictation({
     /** Settled words and the recognizer's still-changing tail, for display only. */
     final: caption.final,
     interim: caption.interim,
-    error,
+    error: error ? t(error) : undefined,
     permissionDenied,
     subscribeLevel: levels.subscribe,
     active: phase !== "idle",
@@ -397,7 +492,7 @@ export function useComposerDictation({
         setError(
           Platform.OS === "android"
             ? "Open your device Settings to allow microphone access."
-            : "Open your iPhone Settings to allow microphone and speech recognition access.",
+            : "Open your device Settings to allow microphone and speech recognition access.",
         ),
       );
     },

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Sunset } from "lucide-react";
 import { toast } from "sonner";
@@ -36,6 +38,7 @@ export function FlagOrganizationEditor({
   canWrite: boolean;
   groups: string[];
 }) {
+  useUiTranslation();
   const update = useUpdateAdminFeatureFlagMetadata();
   const [baseline, setBaseline] = useState(current);
   const [observed, setObserved] = useState(current);
@@ -75,7 +78,7 @@ export function FlagOrganizationEditor({
         tags: saved.tags ?? [],
         sunset: saved.sunset ?? false,
       });
-      toast.success("Flag organization saved");
+      toast.success(translateUi("Flag organization saved"));
     },
     (pending) =>
       hasFieldConflicts(
@@ -107,9 +110,9 @@ export function FlagOrganizationEditor({
   if (!canWrite)
     return (
       <p className="py-1.5 text-14 text-muted-foreground">
-        {current.group ?? "Grouped by namespace"} ·{" "}
-        {current.tags.length ? current.tags.join(", ") : "No tags"} ·{" "}
-        {current.sunset ? "Sunset" : "Active"}
+        {current.group ?? translateUi("Grouped by namespace")} ·{" "}
+        {current.tags.length ? current.tags.join(", ") : translateUi("No tags")} ·{" "}
+        {current.sunset ? translateUi("Sunset") : translateUi("Active")}
       </p>
     );
 
@@ -126,13 +129,13 @@ export function FlagOrganizationEditor({
       )}
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1">
-          <Label htmlFor={`flag-group-${flagKey}`}>Group</Label>
+          <Label htmlFor={`flag-group-${flagKey}`}>{translateUi("Group")}</Label>
           <Input
             id={`flag-group-${flagKey}`}
             value={group}
             onChange={(e) => setGroup(e.target.value)}
             maxLength={MAX_FEATURE_FLAG_GROUP_LENGTH}
-            placeholder="Use flag namespace"
+            placeholder={translateUi("Use flag namespace")}
             list={`flag-groups-${flagKey}`}
             disabled={review.saving || update.isPending}
           />
@@ -141,17 +144,15 @@ export function FlagOrganizationEditor({
               <option key={name} value={name} />
             ))}
           </datalist>
-          <p className="text-13 text-muted-foreground">
-            Keep related flags together. Leave blank to use the namespace.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("Keep related flags together. Leave blank to use the namespace.")}</p>
         </div>
         <div className="space-y-1">
-          <Label htmlFor={`flag-tags-${flagKey}`}>Tags</Label>
+          <Label htmlFor={`flag-tags-${flagKey}`}>{translateUi("Tags")}</Label>
           <Input
             id={`flag-tags-${flagKey}`}
             value={tagText}
             onChange={(e) => setTagText(e.target.value)}
-            placeholder="voice, rollout, infrastructure"
+            placeholder={translateUi("voice, rollout, infrastructure")}
             disabled={review.saving || update.isPending}
             aria-invalid={!validation.success}
             aria-describedby={`flag-tags-hint-${flagKey}`}
@@ -162,7 +163,7 @@ export function FlagOrganizationEditor({
             role={validation.success ? undefined : "alert"}
           >
             {validation.success
-              ? "Comma-separated. Up to 12 tags; letters, digits, hyphens and underscores."
+              ? translateUi("Comma-separated. Up to 12 tags; letters, digits, hyphens and underscores.")
               : validation.error.issues[0]?.message}
           </p>
         </div>
@@ -170,12 +171,8 @@ export function FlagOrganizationEditor({
       <div className="flex items-start gap-3">
         <Sunset className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
         <div className="flex-1 space-y-1">
-          <Label htmlFor={`flag-sunset-${flagKey}`}>Mark for sunset</Label>
-          <p className="text-14 text-muted-foreground">
-            Hide this flag from the default view while code cleanup is pending.
-            Its default and rollout overrides continue to apply. Turn this off
-            to restore it to Active.
-          </p>
+          <Label htmlFor={`flag-sunset-${flagKey}`}>{translateUi("Mark for sunset")}</Label>
+          <p className="text-14 text-muted-foreground">{translateUi("Hide this flag from the default view while code cleanup is pending. Its default and rollout overrides continue to apply. Turn this off to restore it to Active.")}</p>
         </div>
         <Switch
           id={`flag-sunset-${flagKey}`}
@@ -210,9 +207,7 @@ export function FlagOrganizationEditor({
               }),
             )
           }
-        >
-          Save organization
-        </Button>
+        >{translateUi("Save organization")}</Button>
       </div>
     </div>
   );

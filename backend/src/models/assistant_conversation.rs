@@ -613,6 +613,9 @@ pub struct AssistantConversation {
     pub title: String,
     #[serde(default)]
     pub title_source: TitleSource,
+    /// First-party UI language for title generation only, never agent instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_language: Option<String>,
     pub model: String,
     /// Exact route admitted by an owner on this thread, including legacy channel
     /// threads whose profile differs from the agent default. Never browser input.

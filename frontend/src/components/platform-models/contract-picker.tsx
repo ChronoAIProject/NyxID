@@ -1,3 +1,4 @@
+import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
 import type {
   CertifiedContract,
   UsageContract,
@@ -16,10 +17,11 @@ export function ContractPicker({
   readonly value: UsageContract;
   readonly onChange: (value: UsageContract) => void;
 }) {
+  useUiTranslation();
   const definition = definitions.find((d) => d.version === value.version)!;
   return (
     <div className="space-y-3">
-      <Field title="Certified contract">
+      <Field title={translateUi("Certified contract")}>
         <NativeSelect
           value={value.version}
           onChange={(e) => {
@@ -37,13 +39,11 @@ export function ContractPicker({
         </NativeSelect>
       </Field>
       <p className="type-secondary text-muted-foreground">
-        Transports: {definition.transports.join(", ")}. Token and cache-read
-        accounting are required. Defaults include all supported cache-write
-        TTLs; verify and price every selected class.
+        {translateUi("Transports: {{transports}}. Token and cache-read accounting are required. Defaults include all supported cache-write TTLs; verify and price every selected class.", { transports: definition.transports.join(", ") })}
       </p>
       <details>
         <summary className="type-secondary cursor-pointer">
-          Fixture digest
+          {translateUi("Fixture digest")}
         </summary>
         <p className="type-code break-all">{definition.fixture_sha256}</p>
       </details>
@@ -52,7 +52,7 @@ export function ContractPicker({
         .map(([key]) => {
           const flag = key as keyof CertifiedContract["flags"];
           return (
-            <Field key={flag} title={titleCase(flag)}>
+            <Field key={flag} title={translateUi(titleCase(flag))}>
               <Checkbox
                 checked={value[flag]}
                 onCheckedChange={(checked) =>
@@ -63,7 +63,7 @@ export function ContractPicker({
           );
         })}
       {definition.cache_write_ttls.map((ttl) => (
-        <Field key={ttl} title={`Cache writes: ${titleCase(ttl)}`}>
+        <Field key={ttl} title={translateUi("Cache writes: {{ttl}}", { ttl: translateUi(titleCase(ttl)) })}>
           <Checkbox
             checked={value.cache_write_ttls.includes(ttl)}
             onCheckedChange={(checked) =>
@@ -79,7 +79,7 @@ export function ContractPicker({
         </Field>
       ))}
       {definition.input_modalities.map((modality) => (
-        <Field key={modality} title={`Separate ${modality} input accounting`}>
+        <Field key={modality} title={translateUi("Separate {{modality}} input accounting", { modality: translateUi(titleCase(modality)) })}>
           <Checkbox
             checked={value.input_modalities.includes(modality)}
             onCheckedChange={(checked) =>
@@ -95,8 +95,7 @@ export function ContractPicker({
         </Field>
       ))}
       <p className="type-secondary text-muted-foreground">
-        Accounting options do not enable model features. Prices and request
-        bounds must match your verified model limits.
+        {translateUi("Accounting options do not enable model features. Prices and request bounds must match your verified model limits.")}
       </p>
     </div>
   );

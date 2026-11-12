@@ -1,10 +1,5 @@
-import {
-  Keyboard,
-  Pressable,
-  StyleSheet,
-  TextInput,
-  View,
-} from "react-native";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { Keyboard, Pressable, StyleSheet, TextInput, View } from "react-native";
 import { BookOpen, Search, X } from "lucide-react-native";
 import {
   SettingsGroup,
@@ -66,6 +61,7 @@ export function SkillLibrary({
   onOpenSkill: (id: string, name: string, description?: string | null) => void;
   offline?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const needle = searchable(query);
   const filtered = added.items.filter((skill) =>
@@ -119,9 +115,12 @@ export function SkillLibrary({
       {offline && !added.known && (
         <SettingsGroup
           title={addedTitle}
-          footer="Reconnect to load this agent's skills."
+          footer={t("Reconnect to load this agent's skills.")}
         >
-          <SettingsRow icon={BookOpen} label="Added skills unavailable offline" />
+          <SettingsRow
+            icon={BookOpen}
+            label={t("Added skills unavailable offline")}
+          />
         </SettingsGroup>
       )}
       {added.loading && (
@@ -158,7 +157,9 @@ export function SkillLibrary({
           >
             <SettingsRow
               icon={BookOpen}
-              label={needle ? "No matching added skills" : "No skills added yet"}
+              label={
+                needle ? "No matching added skills" : "No skills added yet"
+              }
             />
           </SettingsGroup>
         )
@@ -179,9 +180,12 @@ export function SkillLibrary({
       {offline && !catalog.known && (
         <SettingsGroup
           title="Discover"
-          footer="Reconnect to search the skill catalog."
+          footer={t("Reconnect to search the skill catalog.")}
         >
-          <SettingsRow icon={Search} label="Skill catalog unavailable offline" />
+          <SettingsRow
+            icon={Search}
+            label={t("Skill catalog unavailable offline")}
+          />
         </SettingsGroup>
       )}
       {catalog.items.length ? (

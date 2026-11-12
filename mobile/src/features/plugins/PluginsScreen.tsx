@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -48,6 +49,7 @@ export function PluginsScreen({
   initialTab = "connectors",
   connectorId,
 }: { agentId?: string; initialTab?: Tab; connectorId?: string } = {}) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
@@ -92,9 +94,11 @@ export function PluginsScreen({
   const cached = connections.data !== undefined || catalog.data !== undefined;
   const offlineBanner = !isConnected ? (
     <OfflineBanner
-      subtitle={cached
-        ? "Showing cached plugins. Reconnect to refresh."
-        : "Reconnect to load your plugins."}
+      subtitle={
+        cached
+          ? t("Showing cached plugins. Reconnect to refresh.")
+          : t("Reconnect to load your plugins.")
+      }
     />
   ) : null;
   // Only the user's own pull or Refresh tap shows a spinner; background
@@ -150,7 +154,9 @@ export function PluginsScreen({
         onRefresh={refresh}
       >
         {offlineBanner}
-        {isConnected && loadError && <Notice message={errorText(loadError)} tone="error" />}
+        {isConnected && loadError && (
+          <Notice message={errorText(loadError)} tone="error" />
+        )}
         {manageItem ? (
           <SettingsGroup
             title={manageItem.name}
@@ -192,9 +198,13 @@ export function PluginsScreen({
             ))}
           </SettingsGroup>
         ) : (
-          <SettingsGroup footer={!isConnected
-            ? "Reconnect to load these connections."
-            : "These connections are no longer in your list. Refresh Plugins to see the current catalog."}>
+          <SettingsGroup
+            footer={
+              !isConnected
+                ? t("Reconnect to load these connections.")
+                : "These connections are no longer in your list. Refresh Plugins to see the current catalog."
+            }
+          >
             <SettingsRow
               label="Refresh plugins"
               tone="action"
@@ -217,13 +227,14 @@ export function PluginsScreen({
       key: "added",
       title: `Added${addedCount === undefined ? "" : ` · ${addedCount}`}`,
       data: added,
-      empty: !isConnected && !connections.data
-        ? "Reconnect to load your added connectors."
-        : connections.isError
-        ? "Your connections could not be loaded."
-        : searching
-          ? "No added connectors match this search."
-          : "No connectors added yet. Add one from Discover below.",
+      empty:
+        !isConnected && !connections.data
+          ? t("Reconnect to load your added connectors.")
+          : connections.isError
+            ? "Your connections could not be loaded."
+            : searching
+              ? "No added connectors match this search."
+              : "No connectors added yet. Add one from Discover below.",
     },
     {
       key: "discover",
@@ -231,12 +242,12 @@ export function PluginsScreen({
       data: available,
       empty:
         !isConnected && (!catalog.data || !catalogKnown)
-          ? "Reconnect to load available connectors."
+          ? t("Reconnect to load available connectors.")
           : catalog.isError || !catalogKnown
-          ? "The available catalog could not be confirmed. Retry loading plugins."
-          : searching
-            ? "No available connectors match this search."
-            : "All available connectors are already added.",
+            ? "The available catalog could not be confirmed. Retry loading plugins."
+            : searching
+              ? "No available connectors match this search."
+              : "All available connectors are already added.",
     },
   ];
   return (

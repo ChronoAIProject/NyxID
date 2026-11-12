@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import type { AgentKeySummary } from "@/schemas/agent-key-login";
@@ -35,6 +36,7 @@ export function LoginAccessRows({
   scopes?: ReactNode;
   disabled: boolean;
 }) {
+  const { t } = useUiTranslation();
   const required = requestedGroups(requested);
   const connections = effectiveLoginConnections(apiKey, inventory);
   const options = permissionOptions(inventory);
@@ -86,7 +88,7 @@ export function LoginAccessRows({
           <details
             key={group}
             className="group/row"
-            aria-label={`${name} access`}
+            aria-label={t("{{name}} access", { name: name })}
           >
             <summary className="flex cursor-pointer list-none items-center gap-3 p-3 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
               <PermissionIcon group={group} />
@@ -100,8 +102,8 @@ export function LoginAccessRows({
                     : accounts.length
                       ? accounts.map((c) => c.label).join(", ")
                       : missing
-                        ? `${requestedEntries.length || 1} requested permission${requestedEntries.length === 1 ? "" : "s"}`
-                        : `${matched.length + extras.length} permissions`}
+                        ? t("{{count}} requested permissions", { count: requestedEntries.length || 1 })
+                        : t("{{value}} permissions", { value: matched.length + extras.length })}
                 </span>
               </span>
               <span
@@ -109,13 +111,13 @@ export function LoginAccessRows({
               >
                 {missing
                   ? accounts.length
-                    ? "Check access"
-                    : "Choose account"
+                    ? t("Check access")
+                    : t("Choose account")
                   : nyxidMissing
-                    ? "Choose permissions"
+                    ? t("Choose permissions")
                     : extras.length
-                      ? `${matched.length ? "Matched + " : "+ "}${extras.length} extra${extras.length === 1 ? "" : "s"}`
-                      : `${matched.length} selected`}
+                      ? t(matched.length ? "Matched + {{count}} extra permissions" : "+ {{count}} extra permissions", { count: extras.length })
+                      : t("{{length}} selected", { length: matched.length })}
               </span>
               <ChevronDown
                 aria-hidden="true"
@@ -124,7 +126,7 @@ export function LoginAccessRows({
             </summary>
             <div className="space-y-3 border-t border-border/50 p-3">
               {selection && requestedEntries.length > 0 && (
-                <AccessEntries label="Requested" entries={requestedEntries} />
+                <AccessEntries label={t("Requested")} entries={requestedEntries} />
               )}
               {group === "nyxid" && scopes}
               {selection &&
@@ -138,12 +140,10 @@ export function LoginAccessRows({
                     disabled={disabled}
                   />
                 )}
-              <AccessEntries label="Included permissions" entries={matched} />
-              <AccessEntries label="Extra access included" entries={extras} />
+              <AccessEntries label={t("Included permissions")} entries={matched} />
+              <AccessEntries label={t("Extra access included")} entries={extras} />
               {selection && group !== "nyxid" && accounts.length > 0 && (
-                <p className="text-11 text-muted-foreground">
-                  The selected accounts keep all their provider permissions.
-                </p>
+                <p className="text-11 text-muted-foreground">{t("The selected accounts keep all their provider permissions.")}</p>
               )}
             </div>
           </details>

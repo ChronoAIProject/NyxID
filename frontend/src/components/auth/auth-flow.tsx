@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useRef } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
@@ -100,6 +102,7 @@ interface AuthFlowProps {
   readonly returnTo?: string;
   readonly socialError?: string;
   readonly initialInviteCode?: string;
+  readonly enableEmailLogin?: boolean;
 }
 
 export function AuthFlow({
@@ -107,7 +110,9 @@ export function AuthFlow({
   returnTo,
   socialError,
   initialInviteCode,
+  enableEmailLogin = false,
 }: AuthFlowProps) {
+  useUiTranslation();
   const normalizedInitialInviteCode =
     initialInviteCode?.trim().toUpperCase() ?? "";
   const { data: publicConfig } = usePublicConfig({ refetchInterval: 30_000 });
@@ -180,6 +185,7 @@ export function AuthFlow({
         const nextParams = new URLSearchParams();
         if (returnTo) nextParams.set("return_to", returnTo);
         if (initialInviteCode) nextParams.set("code", initialInviteCode);
+        if (target === 0 && enableEmailLogin) nextParams.set("enable_email", "true");
         const qs = nextParams.toString();
         window.history.replaceState(
           null,
@@ -236,7 +242,7 @@ export function AuthFlow({
         password: data.password,
         invite_code: data.inviteCode,
       });
-      toast.info(result.message || "Registration processed. Sign in to continue.");
+      toast.info(translateUi(result.message || "Registration processed. Sign in to continue."));
       slideToPanel(0);
     } catch (error) {
       if (error instanceof ApiError) {
@@ -288,12 +294,8 @@ export function AuthFlow({
            ================================================================ */
         <div>
           <div className="mb-8">
-            <h1 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-              Welcome back
-            </h1>
-            <p className="mt-1 text-15 text-muted-foreground">
-              Sign in to your account
-            </p>
+            <h1 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>{translateUi("Welcome back")}</h1>
+            <p className="mt-1 text-15 text-muted-foreground">{translateUi("Sign in to your account")}</p>
           </div>
 
           {socialError && (
@@ -303,11 +305,12 @@ export function AuthFlow({
               className="mb-4 rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
             >
               {SOCIAL_ERROR_MESSAGES[socialError] ??
-                "Social sign-in failed. Please try again."}
+                translateUi("Social sign-in failed. Please try again.")}
             </div>
           )}
 
           <LoginMethods
+            enableEmailLogin={enableEmailLogin}
             returnTo={returnTo}
             disabled={loginMutation.isPending}
             onSignUp={() => slideToPanel(1)}
@@ -337,11 +340,11 @@ export function AuthFlow({
                   name="email"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Email</FormLabel>
+                      <FormLabel>{translateUi("Email")}</FormLabel>
                       <FormControl>
                         <Input
                           type="email"
-                          placeholder="you@example.com"
+                          placeholder={translateUi("you@example.com")}
                           autoComplete="email"
                           {...field}
                           ref={(el) => {
@@ -363,18 +366,16 @@ export function AuthFlow({
                   render={({ field }) => (
                     <FormItem>
                       <div className="flex items-center justify-between">
-                        <FormLabel>Password</FormLabel>
+                        <FormLabel>{translateUi("Password")}</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
                           className="type-row-title text-nyx-secondary-400 hover:text-nyx-300"
-                        >
-                          Forgot password?
-                        </Link>
+                        >{translateUi("Forgot password?")}</Link>
                       </div>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Enter your password"
+                          placeholder={translateUi("Enter your password")}
                           autoComplete="current-password"
                           {...field}
                         />
@@ -389,9 +390,7 @@ export function AuthFlow({
                   variant="primary"
                   className="mt-1 h-[44px] w-full text-14 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                   isLoading={loginMutation.isPending}
-                >
-                  Sign in
-                </Button>
+                >{translateUi("Sign in")}</Button>
               </form>
             </Form>
           </LoginMethods>
@@ -410,12 +409,8 @@ export function AuthFlow({
           className={`w-1/2 shrink-0 transition-[visibility] duration-300 ${showEmailForm ? "invisible" : "visible"}`}
         >
           <div className="mb-8">
-            <h1 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-              Create your account
-            </h1>
-            <p className="mt-1 text-15 text-muted-foreground">
-              Start securing your digital identity
-            </p>
+            <h1 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>{translateUi("Create your account")}</h1>
+            <p className="mt-1 text-15 text-muted-foreground">{translateUi("Start securing your digital identity")}</p>
           </div>
 
           {/* Step 1: Invite Code (only when invite gate is enabled) */}
@@ -449,9 +444,7 @@ export function AuthFlow({
                   "1"
                 )}
               </div>
-              <p className="mb-3 type-card-title text-muted-foreground">
-                Enter your invite code
-              </p>
+              <p className="mb-3 type-card-title text-muted-foreground">{translateUi("Enter your invite code")}</p>
               <FormField
                 control={registerForm.control}
                 name="inviteCode"
@@ -485,22 +478,15 @@ export function AuthFlow({
                 )}
               />
               {inviteError && (
-                <p className="mt-2 type-row-title text-destructive">
-                  An invite code is required to use NyxID at this time.
-                </p>
+                <p className="mt-2 type-row-title text-destructive">{translateUi("An invite code is required to use NyxID at this time.")}</p>
               )}
-              <p className="mt-2 text-13 text-muted-foreground">
-                NyxID is in closed beta.{" "}
+              <p className="mt-2 text-13 text-muted-foreground">{translateUi("NyxID is in closed beta.")}{" "}
                 <a
                   href="https://discord.gg/QMvcs8UQBW"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
-                >
-                  Join our Discord
-                </a>{" "}
-                to request an invite code.
-              </p>
+                >{translateUi("Join our Discord")}</a>{" "}{translateUi("to request an invite code.")}</p>
             </div>
           </Form>
           )}
@@ -512,9 +498,7 @@ export function AuthFlow({
             <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 type-secondary-strong text-nyx-secondary-400">
               2
             </div>
-            <p className="mb-3 type-card-title text-muted-foreground">
-              Choose how to sign up
-            </p>
+            <p className="mb-3 type-card-title text-muted-foreground">{translateUi("Choose how to sign up")}</p>
             </>
             )}
 
@@ -531,7 +515,7 @@ export function AuthFlow({
               {emailAuthEnabled && (
                 <LoginProviderRow
                   icon={<Mail className="h-4 w-4" />}
-                  label="Continue with Email"
+                  label={translateUi("Continue with Email")}
                   onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
                 />
               )}
@@ -539,15 +523,12 @@ export function AuthFlow({
           </div>
 
           {/* Footer */}
-          <div className="mt-8 text-center text-15 text-muted-foreground">
-            Already have an account?{" "}
+          <div className="mt-8 text-center text-15 text-muted-foreground">{translateUi("Already have an account?")}{" "}
             <button
               type="button"
               onClick={() => slideToPanel(0)}
               className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
-            >
-              Sign in
-            </button>
+            >{translateUi("Sign in")}</button>
           </div>
         </div>
 
@@ -564,7 +545,7 @@ export function AuthFlow({
               type="button"
               onClick={() => slideToPanel(1)}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay hover:text-foreground"
-              aria-label="Back to sign-up methods"
+              aria-label={translateUi("Back to sign-up methods")}
             >
               <svg
                 className="h-4 w-4"
@@ -579,12 +560,8 @@ export function AuthFlow({
               </svg>
             </button>
             <div>
-              <h2 className="type-card-title tracking-tight">
-                Email registration
-              </h2>
-              <p className="text-13 text-muted-foreground">
-                Create your account with email and password
-              </p>
+              <h2 className="type-card-title tracking-tight">{translateUi("Email registration")}</h2>
+              <p className="text-13 text-muted-foreground">{translateUi("Create your account with email and password")}</p>
             </div>
           </div>
 
@@ -610,9 +587,7 @@ export function AuthFlow({
               type="button"
               onClick={() => slideToPanel(1)}
               className="ml-auto border-0 bg-transparent type-secondary-emphasis text-muted-foreground transition-colors duration-300 hover:text-foreground"
-            >
-              Edit
-            </button>
+            >{translateUi("Edit")}</button>
           </div>
           )}
 
@@ -639,10 +614,10 @@ export function AuthFlow({
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Full Name</FormLabel>
+                    <FormLabel>{translateUi("Full Name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="John Doe"
+                        placeholder={translateUi("John Doe")}
                         autoComplete="name"
                         className="h-[42px] text-14"
                         {...field}
@@ -664,11 +639,11 @@ export function AuthFlow({
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Email</FormLabel>
+                    <FormLabel>{translateUi("Email")}</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
-                        placeholder="you@example.com"
+                        placeholder={translateUi("you@example.com")}
                         autoComplete="email"
                         className="h-[42px] text-14"
                         {...field}
@@ -684,11 +659,11 @@ export function AuthFlow({
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Password</FormLabel>
+                    <FormLabel>{translateUi("Password")}</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
-                        placeholder="Min 8 characters"
+                        placeholder={translateUi("Min 8 characters")}
                         autoComplete="new-password"
                         className="h-[42px] text-14"
                         {...field}
@@ -702,7 +677,7 @@ export function AuthFlow({
                           aria-valuenow={strength.score}
                           aria-valuemin={0}
                           aria-valuemax={6}
-                          aria-label={`Password strength: ${strength.label}`}
+                          aria-label={translateUi("Password strength: {{value1}}", { value1: strength.label })}
                         >
                           {Array.from({ length: 6 }).map((_, i) => (
                             <div
@@ -730,13 +705,11 @@ export function AuthFlow({
                 name="confirmPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>
-                      Confirm Password
-                    </FormLabel>
+                    <FormLabel>{translateUi("Confirm Password")}</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
-                        placeholder="Re-enter your password"
+                        placeholder={translateUi("Re-enter your password")}
                         autoComplete="new-password"
                         className="h-[42px] text-14"
                         {...field}
@@ -752,22 +725,17 @@ export function AuthFlow({
                 variant="primary"
                 className="mt-1 h-[44px] w-full text-14 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
-              >
-                Create Account
-              </Button>
+              >{translateUi("Create Account")}</Button>
             </form>
           </Form>
 
           {/* Footer */}
-          <div className="mt-8 text-center text-15 text-muted-foreground">
-            Already have an account?{" "}
+          <div className="mt-8 text-center text-15 text-muted-foreground">{translateUi("Already have an account?")}{" "}
             <button
               type="button"
               onClick={() => slideToPanel(0)}
               className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
-            >
-              Sign in
-            </button>
+            >{translateUi("Sign in")}</button>
           </div>
         </div>
         </div>

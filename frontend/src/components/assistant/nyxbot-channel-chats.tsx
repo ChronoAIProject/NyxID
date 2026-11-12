@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useDrawerSearchEntries, useDrawerSearchEnabled } from "@/lib/drawer-search";
 import {
@@ -45,6 +48,7 @@ export function ChatKindIcon({
   readonly kind: string | null | undefined;
   readonly className?: string;
 }) {
+  useUiTranslation();
   if (kind === "private") return <User aria-hidden="true" className={className} />;
   if (kind === "group") return <Users aria-hidden="true" className={className} />;
   if (kind === "channel") return <Megaphone aria-hidden="true" className={className} />;
@@ -68,6 +72,7 @@ function SettingSelect<T extends string>({
   readonly disabled: boolean;
   readonly onChange: (value: T) => void;
 }) {
+  useUiTranslation();
   return (
     <Select
       value={value}
@@ -101,6 +106,7 @@ function ChatRow({
   readonly botAgentName: string;
   readonly onError: (message: string | undefined) => void;
 }) {
+  useUiTranslation();
   const agentId =
     chat.agent_id ??
     channel.agent_id ??
@@ -183,10 +189,10 @@ function ChatRow({
         {group ? (
           <>
             <GroupedRow
-              title="Answers"
+              title={translateUi("Answers")}
               accessory={
                 <SettingSelect
-                  label={`Replies in ${title}`}
+                  label={translateUi("Replies in {{value1}}", { value1: title })}
                   value={chat.reply_mode}
                   disabled={update.isPending}
                   options={[
@@ -199,10 +205,10 @@ function ChatRow({
             />
             {chat.thread_capabilities?.thread_follow ? (
               <GroupedRow
-                title="Threads"
+                title={translateUi("Threads")}
                 accessory={
                   <SettingSelect
-                    label={`Thread follow in ${title}`}
+                    label={translateUi("Thread follow in {{value1}}", { value1: title })}
                     value={chat.threads ?? "off"}
                     disabled={update.isPending}
                     options={[
@@ -215,10 +221,10 @@ function ChatRow({
               />
             ) : null}
             <GroupedRow
-              title="Who can talk"
+              title={translateUi("Who can talk")}
               accessory={
                 <SettingSelect
-                  label={`Who can talk in ${title}`}
+                  label={translateUi("Who can talk in {{value1}}", { value1: title })}
                   value={chat.members_setting ?? "default"}
                   disabled={update.isPending}
                   options={[
@@ -242,10 +248,10 @@ function ChatRow({
           </>
         ) : null}
         <GroupedRow
-          title="Answered by"
+          title={translateUi("Answered by")}
           accessory={
             <SettingSelect
-              label={`Agent for ${title}`}
+              label={translateUi("Agent for {{value1}}", { value1: title })}
               value={chat.agent_id ?? "default"}
               disabled={update.isPending}
               options={[
@@ -263,12 +269,12 @@ function ChatRow({
           }
         />
         <GroupedRow
-          title="Posts on its own"
+          title={translateUi("Posts on its own")}
           accessory={
             <Switch
               checked={chat.allow_posts}
               disabled={update.isPending}
-              aria-label={`Let the agent post in ${title} on its own`}
+              aria-label={translateUi("Let the agent post in {{value1}} on its own", { value1: title })}
               onCheckedChange={(allow_posts) => void change({ allow_posts })}
             />
           }
@@ -297,6 +303,7 @@ export function ChannelChats({
   readonly agents: readonly AssistantAgent[];
   readonly botAgentName: string;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState(CHATS_SHOWN);
   const [error, setError] = useState<string>();
@@ -337,53 +344,43 @@ export function ChannelChats({
 
   return (
     <>
-      <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
-        Chats and posting
-      </GroupedDisclosure>
+      <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>{translateUi("Chats and posting")}</GroupedDisclosure>
       <GroupedDetail
         searchPage={searchId}
         open={open}
-        title={`${channel.bot_label} · Chats`}
+        title={translateUi("{{value1}} · Chats", { value1: channel.bot_label })}
         info="Manage posting and the bot’s behavior in each connected chat. Changes to these controls apply immediately."
         onReveal={() => setOpen(true)}
-        backLabel="Back to Channels"
+        backLabel={translateUi("Back to Channels")}
         onBack={() => setOpen(false)}
       >
         <GroupedList
-          title="Private chats"
+          title={translateUi("Private chats")}
           data-drawer-search-target={searchId}
           footer={
             <>
               <p>{botAudienceDescription(channel)}</p>
               <p>{channel.org_specialist
-                ? "An admin talking in a group opens its default audience to enabled guests; other members cannot widen it."
-                : "Members of a group can talk to the bot once you have talked to it there. In groups it answers when mentioned or replied to unless set to every message."}</p>
-              <p>
-                The agent can send updates after a customer first messages this
-                bot. Existing chats keep their settings; you can still turn
-                posting off for individual chats. Groups and topics need their
-                own permission. This does not change who can talk to the bot.
-              </p>
+                ? translateUi("An admin talking in a group opens its default audience to enabled guests; other members cannot widen it.")
+                : translateUi("Members of a group can talk to the bot once you have talked to it there. In groups it answers when mentioned or replied to unless set to every message.")}</p>
+              <p>{translateUi("The agent can send updates after a customer first messages this bot. Existing chats keep their settings; you can still turn posting off for individual chats. Groups and topics need their own permission. This does not change who can talk to the bot.")}</p>
               {applyToExisting ? (
-                <p>
-                  Applies the current setting to up to 1,000 changed private
-                  chats, including individual overrides.
-                </p>
+                <p>{translateUi("Applies the current setting to up to 1,000 changed private chats, including individual overrides.")}</p>
               ) : null}
               {!channel.org_specialist ? <GuestReadiness readiness={readiness.data} /> : null}
               {error ? (
                 <p role="alert" className="text-destructive">
-                  {error}
+                  {translateUi(error)}
                 </p>
               ) : null}
             </>
           }
         >
           <GroupedRow
-            title="Allow posts in new private chats"
+            title={translateUi("Allow posts in new private chats")}
             accessory={
               <Switch
-                aria-label={`Allow posts in new private chats with ${channel.bot_label}`}
+                aria-label={translateUi("Allow posts in new private chats with {{value1}}", { value1: channel.bot_label })}
                 checked={channel.private_chat_posts}
                 disabled={posts.isPending}
                 onCheckedChange={(value) => void setPosts(value)}
@@ -392,9 +389,7 @@ export function ChannelChats({
           />
           <GroupedRow asChild interactive>
             <Label>
-              <span className="min-w-0 flex-1">
-                Also apply to existing private chats
-              </span>
+              <span className="min-w-0 flex-1">{translateUi("Also apply to existing private chats")}</span>
               <Switch
                 checked={applyToExisting}
                 disabled={posts.isPending}
@@ -410,33 +405,28 @@ export function ChannelChats({
                 type="button"
                 disabled={posts.isPending}
                 onClick={() => void setPosts(channel.private_chat_posts)}
-              >
-                Apply current setting
-              </button>
+              >{translateUi("Apply current setting")}</button>
             </GroupedRow>
           ) : null}
         </GroupedList>
         {chats.error ? (
           <GroupedList
             footer={
-              <p role="alert" className="text-destructive">
-                Could not load chats. {chats.error.message}
+              <p role="alert" className="text-destructive">{translateUi("Could not load chats. ")}{translateErrorMessage(chats.error.message)}
               </p>
             }
           >
             <GroupedRow asChild interactive>
-              <button type="button" onClick={() => void chats.refetch()}>
-                Retry chats
-              </button>
+              <button type="button" onClick={() => void chats.refetch()}>{translateUi("Retry chats")}</button>
             </GroupedRow>
           </GroupedList>
         ) : chats.isPending ? (
           <GroupedList>
-            <GroupedRow title="Loading chats..." />
+            <GroupedRow title={translateUi("Loading chats...")} />
           </GroupedList>
         ) : rows.length ? (
           <ul
-            aria-label={`Chats of ${channel.bot_label}`}
+            aria-label={translateUi("Chats of {{value1}}", { value1: channel.bot_label })}
             className="space-y-6"
           >
             {roots.slice(0, shown).map((chat) => (
@@ -465,8 +455,8 @@ export function ChannelChats({
           </ul>
         ) : (
           <GroupedList>
-            <GroupedRow title="No chats yet." />
-            <GroupedRow title="Message the bot, or add it to a group and mention it." />
+            <GroupedRow title={translateUi("No chats yet.")} />
+            <GroupedRow title={translateUi("Message the bot, or add it to a group and mention it.")} />
           </GroupedList>
         )}
         {roots.length > shown ? (
@@ -475,9 +465,7 @@ export function ChannelChats({
               <button
                 type="button"
                 onClick={() => setShown((value) => value + CHATS_SHOWN * 2)}
-              >
-                Show {Math.min(roots.length - shown, CHATS_SHOWN * 2)} more
-              </button>
+              >{translateUi("Show ")}{Math.min(roots.length - shown, CHATS_SHOWN * 2)}{translateUi(" more")}</button>
             </GroupedRow>
           </GroupedList>
         ) : null}

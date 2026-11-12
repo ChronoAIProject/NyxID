@@ -5,13 +5,33 @@ import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type E = { type: any; props: Record<string, any> };
 const nodes = (n: any): E[] =>
-  n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
+  n?.props
+    ? typeof n.type === "function" &&
+      [
+        "ChatComposerInput",
+        "ChatComposerToolbar",
+        "TranscriptViewport",
+        "ChatComposerDock",
+        "ChatMessageTurn",
+        "ChatIconButton",
+      ].includes(n.type.name)
+      ? nodes(n.type(n.props))
+      : [
+          n,
+          ...[n.props.children, n.props.ListFooterComponent]
+            .flat(Infinity)
+            .flatMap(nodes),
+        ]
+    : [];
 
 function setup({
   draftStore = createAssistantDraftStore(() => 1),
   missingResearch = false,
 } = {}) {
   let options: any;
+  let settingsOpened = 0;
+  let dictationOptions: any;
+  const dictation = { active: false, phase: "idle" };
   const members = [
     { id: "bot", name: "nyxbot", display_name: "NyxBot", kind: "nyxbot" },
     {
@@ -22,6 +42,7 @@ function setup({
     },
   ];
   const posted: any[] = [];
+  const attachmentChoices: unknown[][] = [];
   const chat: any = {
     active: true,
     epoch: 1,
@@ -46,6 +67,7 @@ function setup({
     },
   };
   const h = hookHarness<E>({
+    "./CrewVoiceComposer": { CrewVoiceComposer: "CrewVoice" },
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
       GroupAgentAccessRequest: "GroupAgentAccessRequest",
@@ -61,6 +83,7 @@ function setup({
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "react-native": {
+      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -74,11 +97,15 @@ function setup({
         ].map((n) => [n, n]),
       ),
       StyleSheet: { create: (v: unknown) => v },
+      LayoutAnimation: {
+        configureNext: () => {},
+        Presets: { easeInEaseOut: {} },
+      },
     },
     "lucide-react-native": {
       Check: "Check",
       Plus: "Plus",
-      Settings2: "Settings",
+      MoreHorizontal: "MoreHorizontal",
       X: "X",
     },
     "../assistant/ChatIdentityHeader": {
@@ -150,6 +177,7 @@ function setup({
     "../assistant/assistantSelectableMarkdown": {},
     "../assistant/useAssistantUploads": {
       useAssistantUploads: () => ({
+        choose: (...actions: unknown[]) => attachmentChoices.push(actions),
         files: [],
         session: {
           sending: false,
@@ -158,7 +186,12 @@ function setup({
       }),
     },
     "../assistant/useComposerDictation": {
-      useComposerDictation: () => ({ active: false }),
+      useComposerDictation: (options: any) => {
+        dictationOptions = options;
+        return dictation;
+      },
+      appendDictation: (draft: string, text: string) =>
+        `${draft}${draft ? " " : ""}${text}`,
     },
     "../assistant/ComposerDictation": {
       ComposerDictationButton: "Dictation",
@@ -173,6 +206,35 @@ function setup({
       useGroupChat: () => chat,
     },
   });
+  h.mock("./AssistantMentionInput", { AssistantMentionInput: "Input" });
+  h.mock("./ComposerDictation", {
+    ComposerDictationButton: "Dictation",
+    ComposerDictationReview: "DictationReview",
+  });
+  h.mock("./ChatComposer", {
+    ChatComposerRow: "ChatComposerRow",
+    ComposerAttachButton: "ComposerAttachButton",
+  });
+  h.mock(
+    "../assistant/ChatComposerInput",
+    h.load(
+      fileURLToPath(
+        new URL("../assistant/ChatComposerInput.tsx", import.meta.url),
+      ),
+    ),
+  );
+  h.mock("../assistant/TranscriptViewport", {
+    TranscriptViewport: (p: any) => ({
+      type: "View",
+      props: { ...p, style: { flex: 1, minHeight: 0 } },
+    }),
+  });
+  h.mock(
+    "../assistant/ChatSurface",
+    h.load(
+      fileURLToPath(new URL("../assistant/ChatSurface.tsx", import.meta.url)),
+    ),
+  );
   const Screen = h.load(
     fileURLToPath(new URL("./GroupChatScreen.tsx", import.meta.url)),
   ).GroupChatScreen as any;
@@ -180,7 +242,9 @@ function setup({
     const outer = Screen({
       groupId: "crew",
       onBack: () => {},
-      onSettings: () => {},
+      onSettings: () => {
+        settingsOpened++;
+      },
     });
     return outer.type(outer.props);
   });
@@ -191,7 +255,19 @@ function setup({
     nodes(input().props.renderActions()).find(
       (n) => n.type === "ComposerSubmitButton",
     )!;
-  return { h, chat, posted, identity, input, submit };
+  return {
+    h,
+    chat,
+    posted,
+    attachmentChoices,
+    identity,
+    headerActions: () => nodes(options.headerRight()),
+    settingsOpened: () => settingsOpened,
+    input,
+    submit,
+    dictation,
+    dictationOptions: () => dictationOptions,
+  };
 }
 
 test("crew header shows member identity and narrows recipients through its picker without losing draft", () => {
@@ -242,8 +318,10 @@ test("crew header shows member identity and narrows recipients through its picke
   chat.data.group.working_agent_ids = ["research"];
   h.render();
   assert.equal(identity().props.status, "Running");
-  const working = nodes(h.value()).find((n) => n.type === "FlatList")!.props
-    .ListFooterComponent;
+  const working = nodes(
+    nodes(h.value()).find((n) => n.type === "FlatList")!.props
+      .ListFooterComponent,
+  ).find((n) => n.props.accessibilityLiveRegion === "polite")!;
   assert.equal(
     working.props.accessibilityLabel,
     "Agents working. Researcher is working…",
@@ -267,11 +345,76 @@ test("crew header shows member identity and narrows recipients through its picke
   chat.data.group.working_agent_ids = [];
   h.render();
   assert.equal(
-    nodes(h.value()).find((n) => n.type === "FlatList")!.props
-      .ListFooterComponent,
-    null,
+    nodes(h.value())
+      .find((n) => n.type === "FlatList")!
+      .props.ListFooterComponent.props.children.filter(Boolean).length,
+    0,
   );
   h.unmount();
+});
+
+test("the header Modal discards capture before opening and fences an utterance across recipient changes", async () => {
+  const f = setup();
+  f.submit().props.onPress();
+  f.h.flush();
+  const voice = () => nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(voice().props.enabled, true);
+  const oldSender = voice().props.onSend;
+  let discarded = false;
+  voice().props.captureControl.current = () => {
+    discarded = true;
+  };
+  f.identity().props.onPress();
+  assert.equal(discarded, true, "capture stops before Modal presentation");
+  assert.equal(await oldSender("old confidential utterance"), false);
+  f.h.flush();
+  assert.ok(
+    nodes(f.h.value()).some((n) => n.type === "Modal" && n.props.visible),
+  );
+  assert.equal(voice().props.enabled, false);
+  assert.equal(await voice().props.onSend("behind modal"), false);
+  nodes(f.h.value())
+    .find((n) => n.props.accessibilityLabel === "Message Researcher")!
+    .props.onPress();
+  f.h.flush();
+  assert.equal(voice().props.enabled, true);
+  assert.equal(await oldSender("late final after recipient change"), false);
+  assert.equal(f.posted.length, 0);
+  assert.equal(await voice().props.onSend("new utterance @nyxbot"), true);
+  assert.deepEqual(Array.from(f.posted[0].recipient_agent_ids), ["research"]);
+  f.h.unmount();
+});
+
+test("the real crew attachment control never passes its native press event to the picker service", () => {
+  const f = setup();
+  const attach = nodes(f.input().props.renderActions()).find(
+    (n) => n.type === "ComposerAttachButton",
+  )!;
+  attach.props.onPress({ nativeEvent: { timestamp: 1 } });
+  assert.deepEqual(
+    f.attachmentChoices.map((args) => args.length),
+    [0],
+  );
+  f.h.unmount();
+});
+
+test("a capture-time recipient binding still uses the current crew authority gates", async () => {
+  const f = setup();
+  f.identity().props.onPress();
+  f.h.flush();
+  nodes(f.h.value())
+    .find((n) => n.props.accessibilityLabel === "Message Researcher")!
+    .props.onPress();
+  f.h.flush();
+  f.submit().props.onPress();
+  f.h.flush();
+  const sender = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!.props
+    .onSend;
+  f.chat.data.group.members[1].unavailable = true;
+  f.h.render();
+  assert.equal(await sender("retained utterance"), false);
+  assert.equal(f.posted.length, 0);
+  f.h.unmount();
 });
 
 test("revoking or removing a mentioned shared agent blocks dispatch until an explicit replacement", async () => {
@@ -529,4 +672,184 @@ test("a crew's first load shows a transcript skeleton", () => {
     "Loading crew",
   );
   h.unmount();
+});
+
+test("crew shares dictation, review and attachments with private chat while retaining routed recipients", async () => {
+  const f = setup();
+  f.input().props.onChangeText("Draft");
+  f.h.flush();
+  const actions = nodes(
+    f.input().props.renderActions({ type: "Mentions", props: {} }),
+  );
+  for (const type of [
+    "ComposerAttachButton",
+    "Mentions",
+    "Dictation",
+    "ComposerSubmitButton",
+  ])
+    assert.ok(
+      actions.some((n) => n.type === type),
+      type,
+    );
+  assert.equal(
+    actions.some(
+      (n) => n.props.accessibilityLabel === "Crew composer settings",
+    ),
+    false,
+  );
+  f.dictation.active = true;
+  f.h.render();
+  assert.equal(f.submit().props.disabled, true);
+  assert.ok(
+    nodes(f.h.value()).some(
+      (n) => n.type === "DictationReview" && n.props.dictation.active,
+    ),
+  );
+  f.dictation.active = false;
+  f.dictationOptions().onInsert("spoken words");
+  f.h.flush();
+  assert.equal(f.input().props.value, "Draft spoken words");
+  f.submit().props.onPress();
+  await f.h.settle();
+  assert.equal(f.posted[0].text, "Draft spoken words");
+  assert.deepEqual(Array.from(f.posted[0].recipient_agent_ids), ["bot"]);
+  f.h.unmount();
+});
+
+test("crew decisions scroll in the transcript footer and reserve no separate composer space", () => {
+  const f = setup();
+  f.chat.data.group.collaboration = collaboration;
+  f.h.render();
+  assert.equal(
+    nodes(f.h.value()).some(
+      (n) => n.props.accessibilityLabel === "Collaboration decisions",
+    ),
+    false,
+  );
+  f.chat.data.collaboration_decisions = [{ id: "decision" }];
+  f.h.render();
+  const decisions = nodes(f.h.value()).find(
+    (n) => n.props.accessibilityLabel === "Collaboration decisions",
+  )!;
+  const list = nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  assert.ok(nodes(list.props.ListFooterComponent).includes(decisions));
+  assert.equal(decisions.type, "View");
+  assert.equal(decisions.props.style.flex, undefined);
+  assert.equal(decisions.props.style.maxHeight, undefined);
+  assert.equal(list.props.ListFooterComponent.props.style.paddingTop, 20);
+  f.h.unmount();
+});
+
+test("crew voice starts from the composer, routes spoken turns through selected recipients, and keeps running when minimized", async () => {
+  const f = setup();
+  assert.equal(f.submit().props.kind, "voice");
+  assert.equal(f.submit().props.label, "Start crew voice");
+  f.submit().props.onPress();
+  f.h.flush();
+  let panel = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.ok(panel);
+  assert.equal(f.dictationOptions().enabled, false);
+  assert.equal(await panel.props.onSend("@researcher review the launch"), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.posted[0])), {
+    text: "@researcher review the launch",
+    recipient_agent_ids: ["bot"],
+  });
+  nodes(f.h.value())
+    .find((n) => n.props.onTouchStart)!
+    .props.onTouchStart();
+  f.h.flush();
+  panel = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(panel.props.minimized, true);
+  panel.props.onExpand();
+  f.h.flush();
+  assert.equal(
+    nodes(f.h.value()).find((n) => n.type === "CrewVoice")!.props.minimized,
+    false,
+  );
+  f.chat.recoveryRequired = true;
+  f.h.render();
+  panel = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(panel.props.enabled, false);
+  assert.equal(await panel.props.onSend("do not send again"), false);
+  assert.equal(f.posted.length, 1);
+  panel.props.onClose();
+  f.h.flush();
+  assert.equal(f.submit().props.kind, "voice");
+  f.h.unmount();
+});
+
+test("a refused spoken mention retains its exact recipient binding when the roster changes", async () => {
+  const f = setup();
+  f.chat.post = async () => false;
+  f.submit().props.onPress();
+  f.h.flush();
+  const voice = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(
+    await voice.props.onSend("@researcher review the launch"),
+    false,
+  );
+  f.h.flush();
+  nodes(f.h.value())
+    .find((n) => n.type === "CrewVoice")!
+    .props.onClose();
+  f.h.flush();
+  assert.equal(f.input().props.value, "@researcher review the launch");
+  f.chat.data.group.members = [
+    { id: "replacement", name: "researcher", kind: "specialist" },
+  ];
+  f.h.render();
+  assert.equal(f.submit().props.disabled, true);
+  assert.ok(
+    nodes(f.h.value()).some((n) =>
+      n.props.accessibilityLabel?.startsWith("Remove unavailable recipient"),
+    ),
+  );
+  f.h.unmount();
+});
+
+test("crew voice exposes only speech controls and ending restores the normal composer", () => {
+  const f = setup();
+  f.input().props.onChangeText(" ");
+  f.h.flush();
+  f.submit().props.onPress();
+  f.h.flush();
+  const panel = () => nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  for (const prop of ["draft", "onChangeText", "onSendText", "canSendText"])
+    assert.equal(prop in panel().props, false);
+  assert.equal(panel().props.enabled, true);
+  panel().props.onClose();
+  f.h.flush();
+  assert.equal(f.input().props.value, " ");
+  f.h.unmount();
+});
+
+test("crew options use the private header overflow affordance and avoid a duplicate composer control", () => {
+  const f = setup();
+  const actions = f.headerActions();
+  const options = actions.find(
+    (n) => n.props.accessibilityLabel === "Crew options",
+  )!;
+  assert.ok(options);
+  assert.ok(
+    actions.some((n) => n.type === "MoreHorizontal" && n.props.size === 23),
+  );
+  assert.equal(
+    actions.some((n) => n.type === "Settings"),
+    false,
+  );
+  options.props.onPress();
+  assert.equal(f.settingsOpened(), 1);
+  const toolbar = nodes(f.input().props.renderActions());
+  assert.equal(
+    toolbar.some(
+      (n) => n.props.accessibilityLabel === "Crew composer settings",
+    ),
+    false,
+  );
+  assert.equal(
+    toolbar.some((n) => n.type === "MoreHorizontal"),
+    false,
+  );
+  assert.equal(f.identity().props.members.length, 2);
+  f.h.unmount();
 });

@@ -478,6 +478,13 @@ impl std::fmt::Debug for NyxbotEvent {
 /// TTL-expired.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyxbotWatch {
+    /// Binds setup origin to the exact hosted request. Legacy writers replacing
+    /// a pending watch may leave unknown fields behind; a mismatch is unknown context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_connect_link_id: Option<String>,
+    /// Exact live turn that requested setup; server-authored, absent on legacy watches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     #[serde(rename = "_id")]

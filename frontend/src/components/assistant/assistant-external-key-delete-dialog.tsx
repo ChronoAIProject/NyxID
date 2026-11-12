@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -55,6 +57,7 @@ export function AssistantExternalKeyDeleteDialog({
   readonly params: AssistantExternalKeyDeleteParams;
   readonly onComplete: (externalKeyId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -185,20 +188,20 @@ export function AssistantExternalKeyDeleteDialog({
         <DialogHeader>
           <DialogTitle>
             {result?.replayed
-              ? "External credential already deleted"
-              : "Delete external credential"}
+              ? translateUi("External credential already deleted")
+              : translateUi("Delete external credential")}
           </DialogTitle>
           <DialogDescription>
             {result
-              ? "NyxID verified the credential is gone through its authorization evidence returning 404. This action is never remembered."
-              : "This permanently deletes the stored credential. Confirm every time — NyxID will not remember this choice."}
+              ? translateUi("NyxID verified the credential is gone through its authorization evidence returning 404. This action is never remembered.")
+              : translateUi("This permanently deletes the stored credential. Confirm every time — NyxID will not remember this choice.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
           <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">External key</span>
+              <span className="text-muted-foreground">{translateUi("External key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -211,31 +214,25 @@ export function AssistantExternalKeyDeleteDialog({
 
         {error ? (
           <p role="alert" className="text-13 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-13 text-success">
-            External credential absence verified.
-          </p>
+          <p className="text-13 text-success">{translateUi("External credential absence verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!result ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void deleteKey()}
-              >
-                Delete credential
-              </Button>
+              >{translateUi("Delete credential")}</Button>
             </>
           ) : (
             <>
@@ -248,9 +245,7 @@ export function AssistantExternalKeyDeleteDialog({
                     void verifyAbsence(result.resource.externalKeyId)
                   }
                 >
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -260,9 +255,7 @@ export function AssistantExternalKeyDeleteDialog({
                   onComplete(result.resource.externalKeyId);
                   close();
                 }}
-              >
-                Report deletion
-              </Button>
+              >{translateUi("Report deletion")}</Button>
             </>
           )}
         </DialogFooter>

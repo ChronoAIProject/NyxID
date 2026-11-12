@@ -8,6 +8,19 @@ pub(super) async fn outcome(
     source: &str,
     result: Result<&Inbound, ()>,
 ) -> AppResult<()> {
+    if row.platform == "x" {
+        let observed = match &result {
+            Ok(Inbound::Turn(_)) => Some(XOutcome::TurnStarted),
+            Ok(Inbound::Queued) => Some(XOutcome::Queued),
+            Ok(Inbound::Busy) => None, // finish() records the refusal.
+            Ok(Inbound::Silent("handled")) | Ok(Inbound::Reply(_)) => None,
+            // finish() records these after the per-message update.
+            Ok(Inbound::Silent(_)) | Err(()) => None,
+        };
+        if let Some(outcome) = observed {
+            x_diagnostics::for_channel(&state.db, row, outcome).await;
+        }
+    }
     let code = match result {
         Ok(Inbound::Silent("handled")) => return Ok(()),
         Ok(Inbound::Silent(reason)) => reason,

@@ -14,6 +14,16 @@ function recognizer(events: string[]) {
   const module = {
     available: true,
     onDevice: true,
+    permissionStatus: { granted: false } as Permission,
+    permissionReads: 0,
+    setAudioSessionActiveIOS: (
+      active: boolean,
+      options: { notifyOthersOnDeactivation: boolean },
+    ) => {
+      assert.equal(active, false);
+      assert.equal(options.notifyOthersOnDeactivation, true);
+      events.push("audio-release");
+    },
     options: undefined as Record<string, unknown> | undefined,
     isRecognitionAvailable: () => {
       events.push("availability");
@@ -22,6 +32,10 @@ function recognizer(events: string[]) {
     requestPermissionsAsync: () => {
       events.push("permission");
       return permission.promise;
+    },
+    getPermissionsAsync: async () => {
+      module.permissionReads++;
+      return module.permissionStatus;
     },
     getSupportedLocales: async () => ({
       locales: ["en-GB", "en-US"],
@@ -56,7 +70,15 @@ function recognizer(events: string[]) {
   return module;
 }
 
-function setup({ chosen, platform = "ios" }: { chosen?: string; platform?: "ios" | "android" } = {}) {
+function setup({
+  chosen,
+  continuous = true,
+  platform = "ios",
+}: {
+  chosen?: string;
+  continuous?: boolean;
+  platform?: "ios" | "android";
+} = {}) {
   let state = "active",
     focused = true,
     sheetOpen = false,
@@ -64,63 +86,80 @@ function setup({ chosen, platform = "ios" }: { chosen?: string; platform?: "ios"
   const appListeners = new Set<(state: string) => void>();
   const events: string[] = [],
     inserted: string[] = [];
-  let resolveForeground: (() => void) | undefined;
+  const silentDurations: number[] = [];
+  let time = 10_000;
   const native = recognizer(events);
   const locales: [string | undefined, readonly string[]][] = [];
   const props = {
     scope: "agent:chat:0",
+    continuous,
     enabled: true,
     onInsert: (text: string) => {
       inserted.push(text);
     },
+    onSilence: (durationMs: number) => silentDurations.push(durationMs),
   };
-  const h = hookHarness<ReturnType<typeof useComposerDictation>>({
-    "react-native": {
-      Platform: { OS: platform },
-      Linking: {
-        openSettings: async () => {
-          events.push("settings");
+  let translate = (phrase: string) => phrase;
+  const h = hookHarness<ReturnType<typeof useComposerDictation>>(
+    {
+      "react-native": {
+        Platform: { OS: platform },
+        Linking: {
+          openSettings: async () => {
+            events.push("settings");
+          },
+        },
+        AppState: {
+          get currentState() {
+            return state;
+          },
+          addEventListener: (_: string, callback: (state: string) => void) => {
+            appListeners.add(callback);
+            return { remove: () => appListeners.delete(callback) };
+          },
         },
       },
-      AppState: {
-        get currentState() {
-          return state;
+      "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
+      "@react-navigation/native": { useIsFocused: () => focused },
+      "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+      "../../lib/accessibility/workspaceAccessibility": {
+        useWorkspaceAccessibility: () => ({ sheetOpen }),
+      },
+      "../../i18n/LanguageProvider": {
+        useAppLanguage: () => ({ t: translate }),
+      },
+      "./voice/dictationLanguage": {
+        savedDictationLanguage: async () => chosen,
+      },
+      "./voice/dictationLocale": {
+        dictationLocale: (
+          phone: string | undefined,
+          list: readonly string[],
+        ) => {
+          locales.push([phone, list]);
+          return "en-GB";
         },
-        addEventListener: (_: string, callback: (state: string) => void) => {
-          appListeners.add(callback);
-          return { remove: () => appListeners.delete(callback) };
-        },
       },
     },
-    "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
-    "@react-navigation/native": { useIsFocused: () => focused },
-    "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../../lib/accessibility/workspaceAccessibility": {
-      useWorkspaceAccessibility: () => ({ sheetOpen }),
-    },
-    "./voice/dictationLanguage": {
-      savedDictationLanguage: async () => chosen,
-    },
-    "./voice/dictationLocale": {
-      dictationLocale: (phone: string | undefined, list: readonly string[]) => {
-        locales.push([phone, list]);
-        return "en-GB";
+    {
+      Date: class extends Date {
+        static override now() {
+          return time;
+        }
       },
     },
-    "./voice/voicePermission": {
-      waitForVoiceForeground: async (_app: unknown, signal: AbortSignal) => {
-        if (state === "active") return;
-        await new Promise<void>((resolve, reject) => {
-          resolveForeground = resolve;
-          signal.addEventListener(
-            "abort",
-            () => reject(new Error("cancelled")),
-            { once: true },
-          );
-        });
-      },
-    },
-  });
+  );
+  const ownership = h.load(
+    fileURLToPath(new URL("./voice/audioSessionOwnership.ts", import.meta.url)),
+  ) as typeof import("./voice/audioSessionOwnership");
+  h.mock("./voice/audioSessionOwnership", ownership);
+  h.mock("./audioSessionOwnership", ownership);
+  h.mock(
+    "./voice/voicePermission",
+    h.load(
+      fileURLToPath(new URL("./voice/voicePermission.ts", import.meta.url)),
+    ),
+  );
   const module = h.load(
     fileURLToPath(new URL("./useComposerDictation.ts", import.meta.url)),
   );
@@ -138,7 +177,16 @@ function setup({ chosen, platform = "ios" }: { chosen?: string; platform?: "ios"
     props,
     events,
     inserted,
+    silentDurations,
+    translate: (next: (phrase: string) => string) => {
+      translate = next;
+      h.render();
+    },
+    advance: (ms: number) => {
+      time += ms;
+    },
     native,
+    ownership,
     locales,
     emit,
     result,
@@ -162,7 +210,6 @@ function setup({ chosen, platform = "ios" }: { chosen?: string; platform?: "ios"
     app: (next: string) => {
       state = next;
       for (const cb of [...appListeners]) cb(next);
-      if (next === "active") resolveForeground?.();
       h.flush();
     },
   };
@@ -208,7 +255,10 @@ test("Android without a recognition service explains the unavailable feature bef
   assert.deepEqual(x.events, ["availability"]);
   assert.equal(x.h.value().phase, "idle");
   assert.equal(x.h.value().permissionDenied, false);
-  assert.match(x.h.value().error!, /device.*speech recognition service.*keep typing/i);
+  assert.match(
+    x.h.value().error!,
+    /device.*speech recognition service.*keep typing/i,
+  );
   t.mock.timers.tick(60_000);
   x.h.flush();
   assert.match(x.h.value().error!, /speech recognition service/);
@@ -219,8 +269,176 @@ test("Android without a recognition service explains the unavailable feature bef
   assert.equal(x.h.value().error, undefined);
   x.native.available = true;
   await x.begin();
-  assert.deepEqual(x.events, ["availability", "availability", "permission", "start"]);
+  assert.deepEqual(x.events, [
+    "availability",
+    "availability",
+    "permission",
+    "start",
+  ]);
   assert.equal(x.h.value().recording, true);
+});
+
+test("Android permission activity can dwell before granting and gets a separate foreground handoff", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  x.app("background");
+  t.mock.timers.tick(59_000);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "permission");
+  x.native.grant({ granted: true });
+  await x.h.settle();
+  t.mock.timers.tick(4999);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "permission");
+  assert.equal(
+    x.events.includes("start"),
+    false,
+    "no background microphone acquisition",
+  );
+
+  x.app("active");
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  assert.deepEqual(x.events, ["availability", "permission", "start"]);
+  x.emit("start");
+  x.result("Granted draft words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["Granted draft words"]);
+});
+
+test("an unanswered Android permission prompt is bounded and a late grant cannot revive crew capture", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android", continuous: false });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  t.mock.timers.tick(59_999);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "permission");
+  t.mock.timers.tick(1);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "idle");
+  assert.match(x.h.value().error!, /could not start/);
+  x.native.grant({ granted: true });
+  x.app("active");
+  await pending;
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+  assert.deepEqual(
+    x.silentDurations,
+    [],
+    "an unanswered permission prompt is not a silent utterance",
+  );
+});
+
+test("a granted Android prompt that never returns foreground fails after five seconds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  x.native.grant({ granted: true });
+  await x.h.settle();
+  t.mock.timers.tick(5000);
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "idle");
+  assert.match(x.h.value().error!, /could not start/);
+  x.app("active");
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+});
+
+test("returning active consumes Android's permission background exception", async () => {
+  const x = setup({ platform: "android" });
+  const pending = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  x.app("active");
+  x.app("background");
+  assert.equal(x.h.value().phase, "idle");
+  x.native.grant({ granted: true });
+  x.app("active");
+  await pending;
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
+});
+
+test("already granted Android permission skips the prompt and background still cancels active capture", async () => {
+  const x = setup({ platform: "android" });
+  x.native.permissionStatus = { granted: true };
+  await x.h.value().start();
+  await x.h.settle();
+  assert.equal(x.native.permissionReads, 1);
+  assert.deepEqual(x.events, ["availability", "start"]);
+  x.emit("start");
+  x.result("Private draft words");
+  x.app("background");
+  assert.equal(x.h.value().phase, "idle");
+  assert.equal(x.events.at(-1), "abort");
+  x.result("Late words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
+});
+
+test("background during the Android permission getter receives no prompt exception", async () => {
+  const x = setup({ platform: "android" });
+  const status = deferred<Permission>();
+  x.native.getPermissionsAsync = () => status.promise;
+  const pending = x.h.value().start();
+  x.app("background");
+  status.resolve({ granted: true });
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "idle");
+  assert.deepEqual(x.events, ["availability"]);
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
+});
+
+test("a cancelled Android prompt's late grant cannot replace or clear the next attempt", async () => {
+  const x = setup({ platform: "android" });
+  const firstPermission = deferred<Permission>();
+  const nextPermission = deferred<Permission>();
+  let requests = 0;
+  x.native.requestPermissionsAsync = () => {
+    x.events.push("permission");
+    return (++requests === 1 ? firstPermission : nextPermission).promise;
+  };
+  const first = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  x.h.value().stop();
+  x.h.flush();
+  x.app("active");
+  const next = x.h.value().start();
+  await x.h.settle();
+  firstPermission.resolve({ granted: true });
+  await first;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "permission");
+  assert.equal(x.events.includes("start"), false);
+  nextPermission.resolve({ granted: true });
+  await next;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  assert.equal(x.events.filter((event) => event === "start").length, 1);
+  x.emit("start");
+  x.result("The next draft", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["The next draft"]);
+  x.h.unmount();
 });
 
 test("a recognizer that never starts times out, releases the microphone and supports a clean retry", async (t) => {
@@ -254,7 +472,11 @@ test("a recognizer that never starts times out, releases the microphone and supp
   assert.equal(x.h.value().error, undefined);
   t.mock.timers.tick(60_000);
   x.h.flush();
-  assert.equal(x.h.value().phase, "listening", "a started recognizer clears its startup deadline");
+  assert.equal(
+    x.h.value().phase,
+    "listening",
+    "a started recognizer clears its startup deadline",
+  );
   x.result("retry words", true);
   x.emit("end");
   assert.deepEqual(x.inserted, ["retry words"]);
@@ -264,7 +486,8 @@ test("a stalled locale lookup cannot start recognition after its startup deadlin
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const x = setup({ platform: "android" });
   t.after(x.h.unmount);
-  const locales = deferred<Awaited<ReturnType<typeof x.native.getSupportedLocales>>>();
+  const locales =
+    deferred<Awaited<ReturnType<typeof x.native.getSupportedLocales>>>();
   x.native.getSupportedLocales = () => locales.promise;
   const pending = x.h.value().start();
   x.native.grant({ granted: true });
@@ -290,8 +513,16 @@ test("Android permission and recognition errors provide device-appropriate recov
     await pending;
     await x.h.settle();
     assert.equal(x.h.value().permissionDenied, true);
-    assert.match(x.h.value().error!, restricted ? /restricted on this device/ : /Allow microphone access in Settings/);
-    assert.doesNotMatch(x.h.value().error!, /iPhone|Screen Time|General.*Keyboard/);
+    assert.match(
+      x.h.value().error!,
+      restricted
+        ? /restricted on this device/
+        : /Allow microphone access in Settings/,
+    );
+    assert.doesNotMatch(
+      x.h.value().error!,
+      /iPhone|Screen Time|General.*Keyboard/,
+    );
     x.h.value().openSettings();
     assert.equal(x.events.at(-1), "settings");
   }
@@ -303,8 +534,39 @@ test("Android permission and recognition errors provide device-appropriate recov
     x.emit("end");
     assert.equal(x.h.value().active, false);
     assert.match(x.h.value().error!, /language|device.*speech recognition/i);
-    assert.doesNotMatch(x.h.value().error!, /iPhone|Screen Time|General.*Keyboard/);
+    assert.doesNotMatch(
+      x.h.value().error!,
+      /iPhone|Screen Time|General.*Keyboard/,
+    );
   }
+});
+
+test("dictation errors follow the app language without restarting capture or dropping draft words", async () => {
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.result("Keep these draft words");
+  x.emit("error", { error: "network" });
+  const message = x.h.value().error!;
+  assert.match(message, /Speech recognition needs a connection/);
+  const events = [...x.events];
+
+  x.translate((phrase) =>
+    phrase === message ? "语音识别需要网络连接，请检查网络后重试。" : phrase,
+  );
+  assert.equal(x.h.value().error, "语音识别需要网络连接，请检查网络后重试。");
+  assert.equal(x.h.value().phase, "listening");
+  assert.equal(x.h.value().text, "Keep these draft words");
+  assert.deepEqual(
+    x.events,
+    events,
+    "translation does not restart or abort native capture",
+  );
+
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["Keep these draft words"]);
+  x.translate((phrase) => phrase);
+  assert.equal(x.h.value().error, message);
+  x.h.unmount();
 });
 
 test("interim words are replaced, final segments append, and finishing inserts once into the draft", async () => {
@@ -414,6 +676,8 @@ test("late permission cannot start recognition after cancellation or unmount", a
   ]) {
     const x = setup();
     const pending = x.h.value().start();
+    await x.h.settle();
+    assert.deepEqual(x.events, ["permission"]);
     if (change === "unmount") x.h.unmount();
     else x.change(change);
     x.native.grant({ granted: true });
@@ -433,7 +697,9 @@ test("permission denial links to Settings and never starts recognition", async (
     await x.h.settle();
     assert.match(
       x.h.value().error!,
-      restricted ? /restricted.*Screen Time/ : /microphone and speech recognition.*Settings/,
+      restricted
+        ? /restricted.*Screen Time/
+        : /microphone and speech recognition.*Settings/,
     );
     assert.equal(x.h.value().permissionDenied, true);
     assert.equal(x.h.value().active, false);
@@ -446,6 +712,8 @@ test("permission denial links to Settings and never starts recognition", async (
 test("the permission prompt's inactive state waits for foreground; background during capture aborts", async () => {
   const x = setup();
   const pending = x.h.value().start();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["permission"]);
   x.app("inactive");
   x.native.grant({ granted: true });
   await x.h.settle();
@@ -464,6 +732,7 @@ test("the permission prompt's inactive state waits for foreground; background du
 test("hold release before the microphone opens cancels without recognizing", async () => {
   const x = setup();
   const pending = x.h.value().start();
+  await x.h.settle();
   x.h.value().stop();
   x.native.grant({ granted: true });
   await pending;
@@ -498,7 +767,11 @@ test("a new attempt waits for an aborted session's end before listening", async 
   await pending;
   await x.h.settle();
   assert.equal(x.events.at(-1), "start");
-  assert.equal(x.h.value().phase, "connecting", "the stale end did not settle it");
+  assert.equal(
+    x.h.value().phase,
+    "connecting",
+    "the stale end did not settle it",
+  );
   x.emit("start", null);
   assert.equal(x.h.value().phase, "listening");
   x.h.unmount();
@@ -508,7 +781,7 @@ test("recognizer errors explain themselves; text heard before a failure still jo
   const cases: [string, RegExp][] = [
     ["no-speech", /No speech was detected/],
     ["network", /connection/],
-    ["language-not-supported", /iPhone's language/],
+    ["language-not-supported", /device's language/],
     ["service-not-allowed", /Dictation is on in Settings/],
     ["audio-capture", /microphone couldn't record/],
   ];
@@ -551,7 +824,11 @@ test("recognizer errors explain themselves; text heard before a failure still jo
   late.emit("end", null);
   assert.equal(late.h.value().phase, "idle");
   assert.deepEqual(late.inserted, ["Heard"]);
-  assert.equal(late.h.value().error, undefined, "no-speech after words is not an error");
+  assert.equal(
+    late.h.value().error,
+    undefined,
+    "no-speech after words is not an error",
+  );
   late.h.unmount();
 });
 
@@ -565,4 +842,358 @@ test("a chosen dictation language the recognizer supports wins over the phone's"
   await unsupported.begin();
   assert.equal(unsupported.native.options?.lang, "en-GB");
   unsupported.h.unmount();
+});
+
+test("crew speech uses native utterance boundaries and delivers the final words once", async () => {
+  const x = setup({ continuous: false });
+  await x.begin();
+  assert.equal(x.native.options?.continuous, false);
+  x.native.emit("result", {
+    isFinal: true,
+    results: [{ transcript: "Review the launch" }],
+  });
+  x.native.emit("end");
+  x.h.flush();
+  x.native.emit("end");
+  assert.deepEqual(x.inserted, ["Review the launch"]);
+  x.h.unmount();
+});
+
+test("crew speech never dispatches an interrupted or still-interim utterance", async () => {
+  for (const failed of [false, true]) {
+    const x = setup({ continuous: false });
+    await x.begin();
+    x.native.emit("result", {
+      isFinal: failed,
+      results: [{ transcript: "unfinished words" }],
+    });
+    if (failed) x.native.emit("error", { error: "interrupted" });
+    x.native.emit("end");
+    x.h.flush();
+    assert.deepEqual(x.inserted, []);
+    assert.ok(x.h.value().error);
+    x.h.unmount();
+  }
+});
+
+test("silent crew utterances end without error or delivery and can re-arm; failures retain errors", async () => {
+  for (const event of [
+    "nomatch",
+    "no-speech",
+    "speech-timeout",
+    "empty",
+    "not-allowed",
+    "service-not-allowed",
+  ]) {
+    const x = setup({ continuous: false });
+    await x.begin();
+    if (event === "nomatch") x.native.emit(event, null);
+    else if (event !== "empty") x.native.emit("error", { error: event });
+    x.native.emit("end");
+    x.h.flush();
+    assert.deepEqual(x.inserted, []);
+    assert.equal(
+      !!x.h.value().error,
+      ["not-allowed", "service-not-allowed"].includes(event),
+      event,
+    );
+    assert.deepEqual(x.silentDurations, x.h.value().error ? [] : [0], event);
+    if (!x.h.value().error) {
+      await x.begin();
+      assert.equal(x.h.value().active, true);
+    }
+    x.h.unmount();
+  }
+});
+
+test("crew silence duration measures the native session and excludes time waiting for permission", async () => {
+  const x = setup({ continuous: false });
+  const pending = x.h.value().start();
+  x.advance(5000);
+  x.native.grant({ granted: true });
+  await pending;
+  await x.h.settle();
+  x.emit("start");
+  x.advance(75);
+  x.native.emit("nomatch");
+  x.emit("end");
+  assert.deepEqual(x.silentDurations, [75]);
+  x.h.unmount();
+});
+
+test("cancelled crew capture and ordinary draft dictation never report automatic silence", async () => {
+  for (const continuous of [true, false]) {
+    const x = setup({ continuous });
+    await x.begin();
+    if (!continuous) x.h.value().discard();
+    x.native.emit("nomatch");
+    x.emit("end");
+    assert.deepEqual(x.silentDurations, []);
+    x.h.unmount();
+  }
+});
+
+test("an utterance retains its capture-time insertion callback", async () => {
+  const f = setup({ continuous: false });
+  await f.begin();
+  const replacements: string[] = [];
+  f.props.onInsert = (text) => {
+    replacements.push(text);
+  };
+  f.h.render();
+  f.result("capture-time route", true);
+  f.emit("end");
+  assert.deepEqual(f.inserted, ["capture-time route"]);
+  assert.deepEqual(replacements, []);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("normal/error completion releases iOS audio with notify-others exactly once", async () => {
+  for (const error of [false, true]) {
+    const f = setup();
+    await f.begin();
+    if (error) f.emit("error", { error: "audio-capture" });
+    f.emit("end");
+    f.emit("end");
+    f.h.unmount();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  }
+});
+
+test("discard/background/unmount wait for native end before releasing the audio session", async () => {
+  for (const transition of ["discard", "background", "unmount"]) {
+    const f = setup();
+    await f.begin();
+    if (transition === "unmount") f.h.unmount();
+    else if (transition === "discard") f.h.value().discard();
+    else f.app("background");
+    assert.ok(f.events.includes("abort"));
+    assert.equal(f.events.includes("audio-release"), false);
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  }
+});
+
+test("a delayed recognizer end cannot deactivate a newer voice owner", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const newer = f.ownership.claimVoiceAudioSession();
+  f.native.emit("end");
+  assert.equal(f.events.includes("audio-release"), false);
+  newer.release();
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  newer.release();
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("a missing native end releases after the bounded abort timeout", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  context.mock.timers.tick(1499);
+  assert.equal(f.events.includes("audio-release"), false);
+  context.mock.timers.tick(1);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("ordinary editable dictation appends through the latest draft callback", async () => {
+  const f = setup();
+  await f.begin();
+  const replacements: string[] = [];
+  f.props.onInsert = (text) => {
+    replacements.push(text);
+  };
+  f.h.render();
+  f.result("append to the edited draft", true);
+  f.emit("end");
+  assert.deepEqual(f.inserted, []);
+  assert.deepEqual(replacements, ["append to the edited draft"]);
+  f.h.unmount();
+});
+
+/** The real bridge class and lease; only its native message port is replaced. */
+function privateAudio(f: ReturnType<typeof setup>) {
+  f.h.mock("react-native", { StyleSheet: { create: (v: unknown) => v } });
+  f.h.mock("react-native-webview", { WebView: "WebView" });
+  // These leases cover the WebView engine; native WebRTC is unavailable here.
+  f.h.mock("./createNativeOpenAIMedia", {
+    createNativeOpenAIMedia: () => undefined,
+  });
+  const { NativeVoiceMedia } = f.h.load(
+    fileURLToPath(new URL("./voice/VoiceMediaBridge.tsx", import.meta.url)),
+  ) as typeof import("./voice/VoiceMediaBridge");
+  return (ready: boolean, respond = true) => {
+    const media = new NativeVoiceMedia();
+    const commands: Record<string, unknown>[] = [];
+    media.connect((message) => {
+      commands.push(message);
+      if (message.type === "close") f.events.push("private-close");
+      if (respond && message.type === "prepare")
+        queueMicrotask(() =>
+          media.receive(
+            JSON.stringify({
+              type: "response",
+              generation: message.generation,
+              requestId: message.requestId,
+              result: "offer",
+            }),
+          ),
+        );
+    });
+    if (ready) media.receive(JSON.stringify({ type: "ready" }));
+    const controller = new AbortController();
+    const preparation = media
+      .prepare("openai_live", controller.signal)
+      .catch((error: Error) => error.message);
+    return { media, commands, controller, preparation };
+  };
+}
+
+for (const closeFirst of [false, true]) {
+  test(`cancelled private handoff before bridge readiness releases recognition exactly once: cancel ${closeFirst ? "before" : "after"} native end`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(false);
+    if (closeFirst) p.controller.abort();
+    f.native.emit("end");
+    p.controller.abort();
+    assert.equal(await p.preparation, "Voice audio was closed.");
+    assert.equal(
+      p.commands.length,
+      0,
+      "the bridge never acquired native media",
+    );
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+
+  test(`cancelled private media acquisition inherits pending release: cancel ${closeFirst ? "before" : "after"} native end`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(true, false);
+    assert.equal(p.commands[0]?.type, "prepare");
+    if (closeFirst) p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), closeFirst);
+    p.media.close();
+    assert.equal(await p.preparation, "Voice audio was closed.");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+
+  test(`prepared private media preserves the obligation until all owners finish: private closes ${closeFirst ? "first" : "last"}`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(true);
+    assert.equal(await p.preparation, "offer");
+    if (closeFirst) p.media.close();
+    f.native.emit("end");
+    assert.equal(
+      f.events.includes("audio-release"),
+      closeFirst,
+      "an active newer owner must not be deactivated",
+    );
+    p.media.close();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    assert.ok(
+      f.events.indexOf("private-close") < f.events.indexOf("audio-release"),
+    );
+    p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+}
+
+test("private bridge readiness timeout cannot take away a recognizer's deactivation", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(false);
+  f.native.emit("end");
+  context.mock.timers.tick(15000);
+  assert.equal(
+    await p.preparation,
+    "Voice audio is not ready. Please try again.",
+  );
+  assert.equal(p.commands.length, 0);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("private bridge failure and late recognizer end release the last owner exactly once", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(false);
+  p.media.unavailable();
+  assert.equal(await p.preparation, "Voice audio was closed.");
+  assert.equal(f.events.includes("audio-release"), false);
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("native media preparation failure runs the inherited deactivation", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(true, false);
+  f.native.emit("end");
+  assert.equal(f.events.includes("audio-release"), false);
+  const command = p.commands[0]!;
+  p.media.receive(
+    JSON.stringify({
+      type: "response",
+      generation: command.generation,
+      requestId: command.requestId,
+      error: "Media preparation failed.",
+    }),
+  );
+  assert.equal(await p.preparation, "Media preparation failed.");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("rapid repeated recognition/private handoffs retain one obligation until the final owner closes", async () => {
+  const f = setup();
+  const prepare = privateAudio(f);
+  await f.begin();
+  f.h.value().discard();
+  let p = prepare(true);
+  assert.equal(await p.preparation, "offer");
+  f.native.emit("end");
+  for (let i = 0; i < 5; i++) {
+    await f.begin();
+    p.media.close();
+    assert.equal(f.events.includes("audio-release"), false);
+    f.h.value().discard();
+    p = prepare(true);
+    assert.equal(await p.preparation, "offer");
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), false);
+  }
+  p.media.close();
+  p.media.close();
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
 });

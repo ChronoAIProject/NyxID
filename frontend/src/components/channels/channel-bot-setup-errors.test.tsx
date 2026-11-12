@@ -47,7 +47,7 @@ it.each([false, true].flatMap((hosted) => [400, 429, 502].map((status) => ({ hos
 );
 
 it.each([false, true])("never dumps a non-JSON edge-proxy error (hosted: %s)", async (hosted) => {
-  await submitRejectedBot(hosted, new Response("<html>private provider body</html>", { status: 502 }), "Request failed with status 502");
+  await submitRejectedBot(hosted, new Response("<html>private provider body</html>", { status: 502 }), "NyxID is temporarily unavailable. Try again in a moment.");
 });
 
 async function submitRejectedBot(hosted: boolean, response: Response, message: string) {

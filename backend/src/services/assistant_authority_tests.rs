@@ -2433,6 +2433,16 @@ async fn channel_setup_health_discovery_is_authorized_metadata_and_has_no_provid
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
     bots.insert_one(&bot).await.unwrap();
+    let observed = crate::services::channel_bot_service::get_bot(&f.state.db, &bot_id)
+        .await
+        .unwrap();
+    crate::services::channel_inbound_diagnostics::record(
+        &f.state.db,
+        &observed,
+        crate::services::channel_inbound_diagnostics::Outcome::EncryptedChatUnsupported,
+    )
+    .await;
+    let bot = bots.find_one(doc! {"_id":&bot_id}).await.unwrap().unwrap();
     let args = json!({"bot_id":bot_id});
     let result = f
         .tools()
@@ -2469,6 +2479,20 @@ async fn channel_setup_health_discovery_is_authorized_metadata_and_has_no_provid
         .unwrap();
     let view = call(&f, "get_channel_bot", args).await;
     let health = &view["health"];
+    assert_eq!(
+        health["last_inbound_outcome"]["code"],
+        "x_encrypted_chat_unsupported"
+    );
+    assert_eq!(
+        health["inbound_outcomes"]["x_encrypted_chat_unsupported"]["count"],
+        1
+    );
+    assert!(
+        health["recommended_action_text"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read or reply")
+    );
     assert_eq!(health["provider_slug"], "twitter");
     assert_eq!(health["credential_connection_id"], "credential-id");
     assert_eq!(health["authorization"], "not_probed");

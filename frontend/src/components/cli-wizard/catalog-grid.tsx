@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 /**
  * Step 1 of the `nyxid service add` (ai-key) wizard: pick a service.
@@ -69,19 +71,19 @@ function flowShapeOf(entry: CatalogEntry): FlowShape {
 function shapeLabel(shape: FlowShape, entry: CatalogEntry): string {
   switch (shape) {
     case "no-auth":
-      return "1-click connect"
+      return translateUi("1-click connect")
     case "gateway-url":
-      return "URL + API key"
+      return translateUi("URL + API key")
     case "token-exchange":
-      return `${(entry.token_exchange_credential_fields ?? []).length} fields`
+      return translateUi("{{count}} fields", { count: (entry.token_exchange_credential_fields ?? []).length })
     case "oauth":
-      return "OAuth sign-in"
+      return translateUi("OAuth sign-in")
     case "device-code":
-      return "device code"
+      return translateUi("device code")
     case "ssh":
-      return "SSH cert"
+      return translateUi("SSH cert")
     case "paste-key":
-      return "paste API key"
+      return translateUi("paste API key")
   }
 }
 
@@ -132,6 +134,7 @@ function fuzzyScore(target: string, query: string): number | null {
 }
 
 export function CatalogGrid({ onSelect }: CatalogGridProps) {
+  useUiTranslation();
   const [filter, setFilter] = useState("")
   const { data, isLoading, error } = useQuery({
     queryKey: ["cli-wizard", "catalog"],
@@ -174,13 +177,11 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         <Label
           htmlFor="catalog-search"
           className="uppercase tracking-wide text-muted-foreground"
-        >
-          Search
-        </Label>
+        >{translateUi("Search")}</Label>
         <Input
           id="catalog-search"
           type="search"
-          placeholder="search services…"
+          placeholder={translateUi("search services…")}
           autoComplete="off"
           spellCheck={false}
           value={filter}
@@ -190,18 +191,18 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         />
       </div>
 
-      <SectionLabel>Simple setup</SectionLabel>
+      <SectionLabel>{translateUi("Simple setup")}</SectionLabel>
       {isLoading ? (
-        <p className="text-14 text-muted-foreground">Loading catalog…</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Loading catalog…")}</p>
       ) : error ? (
         <p className="text-14 text-destructive">
           {error instanceof ApiError
-            ? `Couldn't load the catalog: ${error.message} (${String(error.status)})`
-            : "Couldn't load the catalog. Check the CLI logs for details."}
+            ? translateUi("Couldn't load the catalog: {{value1}} ({{value2}})", { value1: error.message, value2: String(error.status) })
+            : translateUi("Couldn't load the catalog. Check the CLI logs for details.")}
         </p>
       ) : visible.length === 0 ? (
         <p className="text-14 text-muted-foreground">
-          {f ? "No services match your search." : "Catalog is empty."}
+          {f ? translateUi("No services match your search.") : translateUi("Catalog is empty.")}
         </p>
       ) : (
         // Cap the grid at ~3 rows (6 cards on 2-col layouts) and let
@@ -228,7 +229,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         </div>
       )}
 
-      <SectionLabel>Advanced</SectionLabel>
+      <SectionLabel>{translateUi("Advanced")}</SectionLabel>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <CustomCard
           onClick={() => {
@@ -241,6 +242,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
 }
 
 function SectionLabel({ children }: { readonly children: React.ReactNode }) {
+  useUiTranslation();
   return (
     <div className="type-secondary-emphasis uppercase tracking-wide text-muted-foreground">
       {children}
@@ -255,6 +257,7 @@ function CatalogCard({
   readonly entry: CatalogEntry
   readonly onClick: () => void
 }) {
+  useUiTranslation();
   const shape = flowShapeOf(entry)
   const badge = BADGE_LABEL[shape]
   return (
@@ -266,7 +269,7 @@ function CatalogCard({
     >
       {badge ? (
         <span className="absolute right-3 top-3 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-12 uppercase tracking-wide text-muted-foreground">
-          {badge}
+          {translateUi(badge)}
         </span>
       ) : null}
       <div className="flex w-full items-center gap-2">
@@ -288,19 +291,15 @@ function CatalogCard({
 }
 
 function CustomCard({ onClick }: { readonly onClick: () => void }) {
+  useUiTranslation();
   return (
     <button
       type="button"
       onClick={onClick}
       className="flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-dashed border-border/50 bg-transparent p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-card/40 focus-visible:outline-none"
     >
-      <span className="type-card-title text-foreground">
-        Custom / self-hosted…
-      </span>
-      <span className="text-13 text-muted-foreground">
-        For anything that isn't in the catalog above — paste your own
-        endpoint URL + credential.
-      </span>
+      <span className="type-card-title text-foreground">{translateUi("Custom / self-hosted…")}</span>
+      <span className="text-13 text-muted-foreground">{translateUi("For anything that isn't in the catalog above — paste your own endpoint URL + credential.")}</span>
     </button>
   )
 }

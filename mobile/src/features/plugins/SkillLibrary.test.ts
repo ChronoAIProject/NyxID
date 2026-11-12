@@ -1,3 +1,5 @@
+import { translate, type TranslationValues } from "../../i18n/translate";
+import type { Language } from "../../i18n/language";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -88,13 +90,22 @@ const catalog: CatalogSkill[] = [
   },
 ];
 
-function setup(overrides: Record<string, unknown> = {}) {
+function setup(
+  overrides: Record<string, unknown> = {},
+  language: Language = "en",
+) {
   const calls: { kind: string; args: unknown[] }[] = [];
   const record =
     (kind: string) =>
     (...args: unknown[]) =>
       calls.push({ kind, args });
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({
+        t: (phrase: string, values?: TranslationValues) =>
+          translate(language, phrase, values),
+      }),
+    },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -391,13 +402,11 @@ test("catalog pagination has explicit boundaries, busy state and no Added pagina
     { kind: "page", args: [3] },
   ]);
   assert.equal(
-    setup({ page: 1, totalPages: 4 }).control("Previous").props
-      .disabled,
+    setup({ page: 1, totalPages: 4 }).control("Previous").props.disabled,
     true,
   );
   assert.equal(
-    setup({ page: 4, totalPages: 4 }).control("Next").props
-      .disabled,
+    setup({ page: 4, totalPages: 4 }).control("Next").props.disabled,
     true,
   );
   const busy = setup({
@@ -434,7 +443,12 @@ test("blank descriptions offer review guidance rather than another opaque slug",
 });
 
 test("offline unknown sections explain missing cache without claiming empty skills or showing busy states", () => {
-  const unknown = { items: [], known: false, loading: false, onRetry: () => {} };
+  const unknown = {
+    items: [],
+    known: false,
+    loading: false,
+    onRetry: () => {},
+  };
   const env = setup({ offline: true, added: unknown, catalog: unknown });
   assert.match(env.text(), /Added skills unavailable offline/);
   assert.match(env.text(), /Skill catalog unavailable offline/);
@@ -447,9 +461,23 @@ test("offline unknown sections explain missing cache without claiming empty skil
 
 test("offline cached rows remain reviewable and searchable while remote paging and retries are disabled", () => {
   const env = setup({
-    offline: true, page: 2, totalPages: 4,
-    added: { items: pins, known: true, loading: false, error: "Old error", onRetry: () => {} },
-    catalog: { items: catalog, known: true, loading: false, error: "Old error", onRetry: () => {} },
+    offline: true,
+    page: 2,
+    totalPages: 4,
+    added: {
+      items: pins,
+      known: true,
+      loading: false,
+      error: "Old error",
+      onRetry: () => {},
+    },
+    catalog: {
+      items: catalog,
+      known: true,
+      loading: false,
+      error: "Old error",
+      onRetry: () => {},
+    },
   });
   assert.equal(env.addedRows().length, 2);
   assert.equal(env.catalogRows().length, 2);
@@ -459,5 +487,26 @@ test("offline cached rows remain reviewable and searchable while remote paging a
   assert.equal(env.control("Retry skill catalog").props.disabled, true);
   env.addedRows()[0]!.props.onPress();
   env.control("Search skills").props.onChangeText("DNS");
-  assert.deepEqual(env.calls.map((call) => call.kind), ["open", "query"]);
+  assert.deepEqual(
+    env.calls.map((call) => call.kind),
+    ["open", "query"],
+  );
+});
+
+test("offline skill availability and reconnection guidance use the shared app translations", () => {
+  for (const [language, expected] of [
+    ["zh-CN", "离线时无法加载已添加的技能"],
+    ["zh-TW", "離線時無法載入已新增的技能"],
+  ] as const) {
+    const env = setup(
+      {
+        offline: true,
+        added: { items: [], known: false, loading: false, onRetry() {} },
+        catalog: { items: [], known: false, loading: false, onRetry() {} },
+      },
+      language,
+    );
+    assert.ok(env.hasText(expected));
+    assert.doesNotMatch(env.text(), /Reconnect|unavailable offline/);
+  }
 });

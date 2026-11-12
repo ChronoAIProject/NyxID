@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { Circle, Clock3, ExternalLink, Loader2 } from "lucide-react";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
@@ -19,6 +22,8 @@ import { CmaCardDetails, CmaCardFrame } from "./cma-card-frame";
 
 function presentation(operation: CmaOperation) {
   const { state, reason, status, kind } = operation;
+  if (!["cma_response", "cma_agent", "cma_provisioning"].includes(kind))
+    return { label: "Activity details unavailable in this app version.", tone: "muted" };
   if (state === "cancelled")
     return { label: "Tracking stopped", tone: "muted" };
   if (state === "cancelling")
@@ -140,16 +145,19 @@ export function CmaOperationCard({
 }: {
   readonly operation: CmaOperation;
 }) {
+  useUiTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const detailsId = useId();
   const scrollBody = useRef<HTMLDivElement>(null);
   const cmaUrl = safeCmaUrl(operation.cma_url);
+  if (!["cma_response", "cma_agent", "cma_provisioning"].includes(operation.kind))
+    return <p className="text-13 text-muted-foreground">{translateUi("Activity details unavailable in this app version.")}</p>;
   const title =
     operation.kind === "cma_provisioning" ? "CMA setup" : "CMA task";
   return (
     <CmaCardFrame
       title={title}
-      ariaLabel={`CMA submission: ${title}`}
+      ariaLabel={translateUi("CMA submission: {{value1}}", { value1: title })}
       controlSubject="CMA submission"
       operationId={operation.id}
       collapsed={collapsed}
@@ -172,13 +180,13 @@ export function CmaOperationCard({
                     href={cmaUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-label="View in CMA"
+                    aria-label={translateUi("View in CMA")}
                   >
                     <ExternalLink aria-hidden="true" />
                   </a>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>View in CMA</TooltipContent>
+              <TooltipContent>{translateUi("View in CMA")}</TooltipContent>
             </Tooltip>
           ) : null}
         </>
@@ -206,6 +214,7 @@ export function CmaOperationProgress({
   readonly operation: CmaOperation;
   readonly animate?: boolean;
 }) {
+  useUiTranslation();
   const observed = presentation(operation);
   const pending = isCmaOperationPending(operation);
   const [now, setNow] = useState(Date.now);
@@ -262,26 +271,17 @@ export function CmaOperationProgress({
           ·
         </span>
         <span className="text-13 text-muted-foreground">
-          {pending ? "Tracking progress" : "Status recorded"}
+          {pending ? translateUi("Tracking progress") : translateUi("Status recorded")}
         </span>
       </div>
       {takingLonger ? (
-        <p className="text-13 text-warning">
-          This request has been open for at least 10 minutes. CMA still reports
-          it as running. View its progress, or ask NyxBot to cancel this task.
-        </p>
+        <p className="text-13 text-warning">{translateUi("This request has been open for at least 10 minutes. CMA still reports it as running. View its progress, or ask NyxBot to cancel this task.")}</p>
       ) : null}
       {operation.reason === "timeout" ? (
-        <p className="text-13 text-warning">
-          Automatic tracking reached its time limit. CMA may still be running.
-          Check its status before submitting it again.
-        </p>
+        <p className="text-13 text-warning">{translateUi("Automatic tracking reached its time limit. CMA may still be running. Check its status before submitting it again.")}</p>
       ) : null}
       {tone === "warning" && !pending && operation.reason !== "timeout" ? (
-        <p className="text-13 text-muted-foreground">
-          CMA’s final outcome could not be confirmed. Check the operation before
-          submitting it again.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("CMA’s final outcome could not be confirmed. Check the operation before submitting it again.")}</p>
       ) : null}
       {operation.phase && phases[operation.phase] && pending ? (
         <p className="text-13 text-muted-foreground">
@@ -289,14 +289,10 @@ export function CmaOperationProgress({
         </p>
       ) : null}
       {tone === "success" && operation.reason?.startsWith("result_") ? (
-        <p className="text-13 text-muted-foreground">
-          CMA finished, but its final result is unavailable here.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("CMA finished, but its final result is unavailable here.")}</p>
       ) : null}
       {operation.state === "cancelled" ? (
-        <p className="text-13 text-muted-foreground">
-          Tracking ended. CMA may still be running.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Tracking ended. CMA may still be running.")}</p>
       ) : null}
     </>
   );
@@ -311,9 +307,10 @@ export function CmaOperationDetails({
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
 }) {
+  useUiTranslation();
   return (
     <CmaCardDetails
-      label="Submission details"
+      label={translateUi("Submission details")}
       scrollBody={scrollBody}
       visible={visible}
     >
@@ -329,20 +326,21 @@ function CmaOperationMetadata({
 }: {
   readonly operation: CmaOperation;
 }) {
+  useUiTranslation();
   const lastChecked = operation.checked_at
     ? new Date(operation.checked_at)
     : null;
   return (
     <>
       <div>
-        <dt>Monitored by</dt>
+        <dt>{translateUi("Monitored by")}</dt>
         <dd className="mt-0.5 break-words text-muted-foreground">
           {operation.monitor_name}
         </dd>
       </div>
       {operation.agent_id ? (
         <div>
-          <dt>Session ID</dt>
+          <dt>{translateUi("Session ID")}</dt>
           <dd className="mt-0.5 break-all font-mono text-muted-foreground">
             {operation.agent_id}
           </dd>
@@ -351,7 +349,7 @@ function CmaOperationMetadata({
       {operation.operation_id &&
       operation.operation_id !== operation.agent_id ? (
         <div>
-          <dt>Operation ID</dt>
+          <dt>{translateUi("Operation ID")}</dt>
           <dd className="mt-0.5 break-all font-mono text-muted-foreground">
             {operation.operation_id}
           </dd>
@@ -359,7 +357,7 @@ function CmaOperationMetadata({
       ) : null}
       {operation.idempotency_key ? (
         <div>
-          <dt>Idempotency key</dt>
+          <dt>{translateUi("Idempotency key")}</dt>
           <dd className="mt-0.5 break-all font-mono text-muted-foreground">
             {operation.idempotency_key}
           </dd>
@@ -367,10 +365,10 @@ function CmaOperationMetadata({
       ) : null}
       {lastChecked && Number.isFinite(lastChecked.getTime()) ? (
         <div>
-          <dt>Last checked</dt>
+          <dt>{translateUi("Last checked")}</dt>
           <dd className="mt-0.5 text-muted-foreground">
             <time dateTime={operation.checked_at!}>
-              {lastChecked.toLocaleString()}
+              {lastChecked.toLocaleString(getFormattingLocale())}
             </time>
           </dd>
         </div>
@@ -398,6 +396,7 @@ export function CmaExecutionControl({
 }: {
   readonly operations: readonly CmaOperation[];
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const operation = orderedRequests(operations).find(hasExecutionReference);
   if (!enabled || !operation) return null;
@@ -419,21 +418,22 @@ export function CmaSessionRequests({
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
 }) {
+  useUiTranslation();
   const [limit, setLimit] = useState(3);
   const ordered = orderedRequests(operations);
   if (!ordered.length) return null;
   return (
     <CmaCardDetails
-      label="Submission details"
+      label={translateUi("Submission details")}
       scrollBody={scrollBody}
       visible={visible}
     >
-      <section aria-label="CMA requests" className="space-y-3">
-        <h4 className="type-group-label text-text-tertiary">Request status</h4>
+      <section aria-label={translateUi("CMA requests")} className="space-y-3">
+        <h4 className="type-group-label text-text-tertiary">{translateUi("Request status")}</h4>
         {ordered.slice(0, limit).map((operation) => (
           <section
             key={operation.id}
-            aria-label={`CMA request: ${operation.monitor_name}, ${operation.created_at}`}
+            aria-label={translateUi("CMA request: {{value1}}, {{value2}}", { value1: operation.monitor_name, value2: operation.created_at })}
             data-cma-request={operation.id}
             className="space-y-1"
           >
@@ -441,8 +441,8 @@ export function CmaSessionRequests({
               {operation.monitor_name} ·{" "}
               <time dateTime={operation.created_at}>
                 {Number.isFinite(Date.parse(operation.created_at))
-                  ? new Date(operation.created_at).toLocaleString()
-                  : "Time unavailable"}
+                  ? new Date(operation.created_at).toLocaleString(getFormattingLocale())
+                  : translateUi("Time unavailable")}
               </time>
             </p>
             <CmaOperationProgress operation={operation} animate={false} />
@@ -456,8 +456,7 @@ export function CmaSessionRequests({
             variant="ghost"
             size="sm"
             onClick={() => setLimit((value) => value + 3)}
-          >
-            Show older requests ({ordered.length - limit})
+          >{translateUi("Show older requests (")}{ordered.length - limit})
           </Button>
         ) : null}
       </section>

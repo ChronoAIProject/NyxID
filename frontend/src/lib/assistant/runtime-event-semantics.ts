@@ -81,12 +81,12 @@ export type RuntimeToolCallInfo = {
   conversationId?: string;
   id: string;
   name: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "unknown";
   startedAt: number;
   finishedAt?: number;
   result?: string;
   error?: string;
-  failure?: { readonly reason?: string; readonly kind: "service_status" | "tool_error" | "refused" | "internal"; readonly status?: number } | null;
+  failure?: { readonly reason?: string; readonly kind: string; readonly status?: number } | null;
 };
 
 export type RuntimeToolApprovalRequestInfo = {

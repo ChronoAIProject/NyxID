@@ -556,7 +556,6 @@ export class AssistantVoiceClient {
         this.controlSocket.send(
           JSON.stringify({ type: pressed ? "ptt_begin" : "ptt_commit" }),
         );
-      if (this.audio) this.audio.volume = pressed ? 0.25 : 1;
     }
     this.held = pressed;
     this.updateInput();

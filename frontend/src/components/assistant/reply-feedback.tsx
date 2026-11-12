@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useId, useState } from "react";
 import { Check, MessageSquare, ThumbsDown, ThumbsUp } from "lucide-react";
 import { toast } from "sonner";
@@ -55,15 +57,16 @@ function feedbackComment(reasons: readonly string[], note: string): string {
 
 /** Helpful and Not helpful, for a reply's action line. */
 export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedback }) {
+  useUiTranslation();
   return (
-    <div role="group" aria-label="Reply feedback" className="flex max-w-full flex-wrap items-center gap-1">
+    <div role="group" aria-label={translateUi("Reply feedback")} className="flex max-w-full flex-wrap items-center gap-1">
       {(["up", "down"] as const).map((next) => {
         const Icon = next === "up" ? ThumbsUp : ThumbsDown;
         return (
           <button
             key={next}
             type="button"
-            aria-label={next === "up" ? "Helpful" : "Not helpful"}
+            aria-label={next === "up" ? translateUi("Helpful") : translateUi("Not helpful")}
             aria-pressed={feedback.vote === next}
             data-icon-button=""
             disabled={feedback.pending}
@@ -78,7 +81,7 @@ export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedb
         );
       })}
       {feedback.vote ? (
-        <button type="button" data-icon-button="" aria-label={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} title={feedback.comment ? "Edit feedback comment" : "Add feedback comment"} disabled={feedback.pending} onClick={feedback.edit} className="rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50">
+        <button type="button" data-icon-button="" aria-label={feedback.comment ? translateUi("Edit feedback comment") : translateUi("Add feedback comment")} title={feedback.comment ? translateUi("Edit feedback comment") : translateUi("Add feedback comment")} disabled={feedback.pending} onClick={feedback.edit} className="rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50">
           <MessageSquare className="h-3.5 w-3.5" />
         </button>
       ) : null}
@@ -91,6 +94,7 @@ export function ReplyFeedbackVotes({ feedback }: { readonly feedback: ReplyFeedb
  * the vote itself.
  */
 export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFeedback }) {
+  useUiTranslation();
   const vote = feedback.vote;
   return (
     <>
@@ -112,9 +116,7 @@ export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFe
         ) : null}
       </Dialog>
       {feedback.error ? (
-        <p role="alert" className="mt-1 text-13 text-destructive">
-          Unable to save feedback. Try again.
-        </p>
+        <p role="alert" className="mt-1 text-13 text-destructive">{translateUi("Unable to save feedback. Try again.")}</p>
       ) : null}
     </>
   );
@@ -133,6 +135,7 @@ function FeedbackDetails({
   readonly onSend: (comment: string) => Promise<boolean>;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const fieldId = useId();
   const [initial] = useState(() => feedbackDetails(initialComment, vote));
   const [chosen, setChosen] = useState<readonly string[]>(initial.chosen);
@@ -148,21 +151,21 @@ function FeedbackDetails({
     const saved = await onSend(comment);
     setSubmitting(false);
     setFailed(!saved);
-    if (saved) toast.success("Thanks for the feedback.");
+    if (saved) toast.success(translateUi("Thanks for the feedback."));
   };
   return (
     <DialogContent className="md:max-w-md">
       <DialogHeader>
         <DialogTitle>
-          {vote === "up" ? "Give positive feedback" : "Give negative feedback"}
+          {vote === "up" ? translateUi("Give positive feedback") : translateUi("Give negative feedback")}
         </DialogTitle>
         <DialogDescription>
           {vote === "up"
-            ? "What did you like about this reply? Choose any that apply."
-            : "What went wrong with this reply? Choose any that apply."}
+            ? translateUi("What did you like about this reply? Choose any that apply.")
+            : translateUi("What went wrong with this reply? Choose any that apply.")}
         </DialogDescription>
       </DialogHeader>
-      <div role="group" aria-label="Reasons" className="flex flex-wrap gap-2">
+      <div role="group" aria-label={translateUi("Reasons")} className="flex flex-wrap gap-2">
         {options.map((reason) => {
           const on = chosen.includes(reason);
           return (
@@ -189,7 +192,7 @@ function FeedbackDetails({
         })}
       </div>
       <div className="space-y-2">
-        <Label htmlFor={fieldId}>Details (optional)</Label>
+        <Label htmlFor={fieldId}>{translateUi("Details (optional)")}</Label>
         <Textarea
           id={fieldId}
           value={note}
@@ -204,29 +207,23 @@ function FeedbackDetails({
           className="min-h-24 resize-none text-14"
           placeholder={
             vote === "up"
-              ? "What was satisfying about this reply?"
-              : "What should the reply have done instead?"
+              ? translateUi("What was satisfying about this reply?")
+              : translateUi("What should the reply have done instead?")
           }
         />
       </div>
       {failed ? (
-        <p role="alert" className="text-14 text-destructive">
-          Unable to save feedback. Try again.
-        </p>
+        <p role="alert" className="text-14 text-destructive">{translateUi("Unable to save feedback. Try again.")}</p>
       ) : null}
       <DialogFooter>
-        <Button type="button" variant="outline" onClick={onClose}>
-          Cancel
-        </Button>
+        <Button type="button" variant="outline" onClick={onClose}>{translateUi("Cancel")}</Button>
         <Button
           type="button"
           variant="primary"
           disabled={pending || comment.length > COMMENT_LIMIT}
           isLoading={submitting}
           onClick={() => void submit()}
-        >
-          Submit
-        </Button>
+        >{translateUi("Submit")}</Button>
       </DialogFooter>
     </DialogContent>
   );

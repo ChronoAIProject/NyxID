@@ -169,6 +169,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        title_language: None,
         automation_work: None,
         automation_parent: None,
         execution_enrollment: false,
@@ -1010,6 +1011,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: execution_parent
                 .and_then(crate::services::trigger_schedule::direct::parent),
@@ -1210,13 +1212,13 @@ fn action_summary(name: &str, args: &Value) -> String {
             }
             if let Some(budget) = guests.get("daily_credits").and_then(Value::as_str) {
                 details.push(format!(
-                    "daily organization guest budget {} credits",
+                    "legacy daily organization guest budget {} credits (ignored after Grants rollout)",
                     crate::services::assistant_nyxagent::identifier(budget)
                 ));
             }
             if let Some(services) = guests.get("service_ids").and_then(Value::as_array) {
                 details.push(format!(
-                    "{} delegated organization services",
+                    "{} legacy delegated organization services (ignored after Grants rollout)",
                     services.len()
                 ));
             }
@@ -1456,11 +1458,17 @@ async fn execute_authorized_tool_impl(
             };
             let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
             auto_allowed = gate.auto_allowed();
-            let summary = sharing_preview
+            let mut summary = sharing_preview
                 .as_ref()
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
                 .unwrap_or_else(|| if group_delegation { format!("Enable guest access for agent {} in group {}. Current and future participants without use rights may use the owner’s guest service policy; the owner pays. Membership revision {}, guest revision {}.",text_arg(&args["change"],"agent_id"),text_arg(args,"group"),args["expected_revision"],args["change"]["guest_revision"]) } else {action_summary(name,args)});
+            let audience_readiness = if name == "update_channel_access" && args["private_chats"] == "everyone" {
+                let facts = super::nyxbot::chats::audience_readiness(state, &chat.user_id, text_arg(args, "channel_agent_id")).await?;
+                summary.push('\n');
+                summary.push_str(&facts.summary());
+                Some(facts)
+            } else { None };
             if let Some(need) = gate.ask() {
                 if (group_delegation || sharing_preview
                     .as_ref()
@@ -1477,10 +1485,13 @@ async fn execute_authorized_tool_impl(
                     .await?;
                 }
                 if !delegation_approved
-                    && let Some(refusal) =
+                    && let Some(mut refusal) =
                         acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary)
                             .await?
                 {
+                    if let Some(facts) = &audience_readiness {
+                        refusal["audience_readiness"] = json!(facts);
+                    }
                     return Ok((refusal, true));
                 }
             }
@@ -2952,7 +2963,9 @@ async fn dispatch_channels(
                 text_arg(args, "platform"),
                 args["label"].as_str(),
                 &agent,
-                crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
+                crate::services::nyxbot_watch_service::ReportProvenance::from_channel_setup_chat(
+                    chat,
+                ),
             )
             .await?
         }

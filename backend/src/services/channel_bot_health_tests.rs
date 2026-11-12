@@ -4,6 +4,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 
 fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
     HealthFacts {
+        inbound_outcome: None,
         platform,
         status,
         webhook_registered: true,
@@ -163,6 +164,7 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
     ];
     for (platform, status, registered, reason, backoff, expected) in rows {
         let facts = HealthFacts {
+            inbound_outcome: None,
             platform,
             status,
             webhook_registered: *registered,

@@ -1,4 +1,5 @@
 import { advanceAuthEpoch } from './authEpoch';
+import { setAuthAccountId } from './authAccount';
 import type { StoredAuthSession } from './sessionCoordinator';
 import * as SecureStore from 'expo-secure-store';
 import { analyticsConsentState } from '../analyticsConsentState';
@@ -11,6 +12,7 @@ export function persistAuthSession(session: StoredAuthSession) {
   return coordinator.persist(session);
 }
 export function clearStoredAuthSession() {
+  setAuthAccountId(null);
   advanceAuthEpoch();
   return coordinator.clear();
 }

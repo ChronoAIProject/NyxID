@@ -39,7 +39,10 @@ function fatal(message) {
 
 function readProfile(env, prefix) {
   const googleServicesKey = `${prefix}_GOOGLE_SERVICES_FILE`;
-  const googleServicesFile = Object.prototype.hasOwnProperty.call(env, googleServicesKey)
+  const googleServicesFile = Object.prototype.hasOwnProperty.call(
+    env,
+    googleServicesKey,
+  )
     ? String(env[googleServicesKey] ?? "").trim()
     : prefix === "PROD"
       ? "./google-services.json"
@@ -65,7 +68,9 @@ function readProfile(env, prefix) {
 }
 
 function validateAndroidGoogleServicesFile(file, androidPackage) {
-  const absolutePath = path.isAbsolute(file) ? file : path.join(MOBILE_ROOT, file);
+  const absolutePath = path.isAbsolute(file)
+    ? file
+    : path.join(MOBILE_ROOT, file);
   if (!fs.existsSync(absolutePath)) {
     fatal(
       `Android Google Services file not found at ${file}. ` +
@@ -102,7 +107,9 @@ const NEW_DOMAIN_URLS = [
 // Production builds embed this second URL set when all three are configured;
 // the NyxID admin flag `mobile:new-domains` selects between the sets at launch.
 function readNewProductionDomains(env) {
-  const values = NEW_DOMAIN_URLS.map(([, variable]) => (env[variable] || "").trim());
+  const values = NEW_DOMAIN_URLS.map(([, variable]) =>
+    (env[variable] || "").trim(),
+  );
   if (values.every((value) => !value)) return null;
 
   const domains = {};
@@ -112,10 +119,20 @@ function readNewProductionDomains(env) {
     try {
       url = new URL(value);
     } catch {
-      fatal(`${variable} must be an absolute HTTPS URL. Set all three PROD_NEW_* URLs, or none.`);
+      fatal(
+        `${variable} must be an absolute HTTPS URL. Set all three PROD_NEW_* URLs, or none.`,
+      );
     }
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-      fatal(`${variable} must be an HTTPS URL without credentials, a query, or a fragment.`);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      fatal(
+        `${variable} must be an HTTPS URL without credentials, a query, or a fragment.`,
+      );
     }
     domains[field] = value;
   });
@@ -196,7 +213,10 @@ function resolveProfile(appEnv, env, options = {}) {
         "Set DEV_ANDROID_PACKAGE and/or PROD_ANDROID_PACKAGE in mobile/.env.{dev,prod}.",
     );
   }
-  if (resolved.androidGoogleServicesFile && options.validateAndroidGoogleServices) {
+  if (
+    resolved.androidGoogleServicesFile &&
+    options.validateAndroidGoogleServices
+  ) {
     validateAndroidGoogleServicesFile(
       resolved.androidGoogleServicesFile,
       resolved.androidPackage,

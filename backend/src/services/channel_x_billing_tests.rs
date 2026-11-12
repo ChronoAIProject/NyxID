@@ -681,6 +681,16 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
     let failed = channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
+    assert_eq!(
+        failed.diagnostics.inbound_outcomes["x_billing_refused"].count,
+        1
+    );
+    let health = crate::services::channel_bot_health::setup_evidence(&state.db, &failed, false)
+        .await
+        .unwrap();
+    assert_eq!(health["recommended_action"], "enable_billing");
+    assert_eq!(health["last_inbound_outcome"]["code"], "x_billing_refused");
+    assert!(failed.diagnostics.last_outbound_at.is_none());
     assert_eq!(failed.status, "failed");
     assert!(
         failed.webhook_registered,

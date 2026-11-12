@@ -1,3 +1,5 @@
+import { translate, type TranslationValues } from "../../i18n/translate";
+import type { Language } from "../../i18n/language";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -89,18 +91,21 @@ function setup({
   initialPage,
   connected = true,
   pageOnly = false,
+  language = "en",
 }: {
   wrapperOnly?: boolean;
   agentId?: string;
   initialPage?: any;
   connected?: boolean;
   pageOnly?: boolean;
+  language?: Language;
 } = {}) {
   const calls: { method: string; args: any[] }[] = [];
   const queries = new Map<string, QueryOptions>();
   const state = new Map<string, any>();
   let focused = true;
   let isConnected = connected;
+  let currentLanguage = language;
   let epoch = 1;
   let requestedAgent = agentId;
   let readCurrent = async () => currentSkills;
@@ -177,6 +182,15 @@ function setup({
   state.set("history", response({ items: [] }));
   const client = { invalidateQueries: record("invalidate") };
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => {
+        const renderedLanguage = currentLanguage;
+        return {
+          t: (phrase: string, values?: TranslationValues) =>
+            translate(renderedLanguage, phrase, values),
+        };
+      },
+    },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -226,7 +240,9 @@ function setup({
       useQuery: (options: QueryOptions) => {
         const name =
           options.queryKey[1] === "agents"
-            ? options.queryKey[2] === "detail" ? "agent-detail" : "agents"
+            ? options.queryKey[2] === "detail"
+              ? "agent-detail"
+              : "agents"
             : String(options.queryKey[3]);
         queries.set(name, options);
         return state.get(name) ?? response();
@@ -303,7 +319,11 @@ function setup({
   harness.mount(() => {
     const wrapper = pageOnly
       ? PluginSkillPage({
-          route: { key: "skill-page", name: "SkillVersions", params: routePage },
+          route: {
+            key: "skill-page",
+            name: "SkillVersions",
+            params: routePage,
+          },
         })
       : PluginSkills({ agentId: requestedAgent });
     manager = elements(wrapper).find(
@@ -366,6 +386,10 @@ function setup({
     },
     requestedAgent: (value: string | undefined) => {
       requestedAgent = value;
+      harness.render();
+    },
+    language: (value: Language) => {
+      currentLanguage = value;
       harness.render();
     },
     unmount: () => harness.unmount(),
@@ -693,7 +717,9 @@ test("skill detail is read-only with version choice, newest supported pin and ag
     assert.ok(
       env
         .elements()
-        .some((row) => row.props.footer === "To change this skill, ask NyxBot."),
+        .some(
+          (row) => row.props.footer === "To change this skill, ask NyxBot.",
+        ),
     );
     env.state.get("versions").data.items = [
       { ...version, version: "deprecated", deprecated: true },
@@ -728,7 +754,9 @@ test("skill detail is read-only with version choice, newest supported pin and ag
     assert.equal(confirm.title, "Remove from agent?");
     assert.deepEqual(
       JSON.parse(
-        JSON.stringify(confirm.buttons.map((button) => [button.text, button.style])),
+        JSON.stringify(
+          confirm.buttons.map((button) => [button.text, button.style]),
+        ),
       ),
       [
         ["Cancel", "cancel"],
@@ -779,7 +807,9 @@ test("skill details distinguish loading or failed pin reads from a known unattac
   const text = (value: string) =>
     env
       .elements()
-      .some((item) => item.props.children === value || item.props.value === value);
+      .some(
+        (item) => item.props.children === value || item.props.value === value,
+      );
   try {
     const query = env.state.get(first.id);
     Object.assign(query, { data: undefined, isPending: true });
@@ -921,11 +951,16 @@ test("first loads show skeletons and a background catalog refetch keeps cached r
     env.harness.render();
     assert.equal(env.library().props.catalog.loading, false);
     assert.equal(env.library().props.catalog.items.length, 1);
-    Object.assign(env.state.get("agents")!, { data: undefined, isPending: true });
+    Object.assign(env.state.get("agents")!, {
+      data: undefined,
+      isPending: true,
+    });
     env.harness.render();
     const skeleton = env
       .elements()
-      .find((item) => item.props.accessibilityLabel === "Loading agents for skills");
+      .find(
+        (item) => item.props.accessibilityLabel === "Loading agents for skills",
+      );
     assert.equal(skeleton?.type, "SkeletonRows");
     assert.equal(
       env.elements().some((item) => item.type === "ActivityIndicator"),
@@ -944,15 +979,26 @@ test("offline cold agent list gives reconnect guidance without an endless pendin
       data: undefined,
       isPending: true,
       fetchStatus: "paused",
-      refetch: async () => { retries++; },
+      refetch: async () => {
+        retries++;
+      },
     });
     env.harness.render();
     assert.equal(env.queries.get("agents")?.enabled, false);
-    assert.equal(env.elements().some((item) => item.type === "SkeletonRows"), false);
-    assert.ok(env.elements().some((item) =>
-      item.type === "OfflineBanner" &&
-      item.props.subtitle === "Reconnect to load agents and their skills.",
-    ));
+    assert.equal(
+      env.elements().some((item) => item.type === "SkeletonRows"),
+      false,
+    );
+    assert.ok(
+      env
+        .elements()
+        .some(
+          (item) =>
+            item.type === "OfflineBanner" &&
+            item.props.subtitle ===
+              "Reconnect to load agents and their skills.",
+        ),
+    );
     Object.assign(env.state.get("agents"), { isPending: false, isError: true });
     env.harness.render();
     const retry = env.control("Retry agents").props;
@@ -975,7 +1021,9 @@ test("offline missing Added and catalog data stop both busy states and reject cu
         data: undefined,
         isPending: true,
         fetchStatus: "paused",
-        refetch: async () => { retries++; },
+        refetch: async () => {
+          retries++;
+        },
       });
     }
     env.harness.render();
@@ -1023,7 +1071,9 @@ test("cached skill pins stay readable offline but stale attach and confirmed rem
     assert.equal(env.calls.length, 0);
     env.online(true);
     env.navigation("SkillVersions", {
-      agentId: first.id, skillId: "catalog-opaque", name: "weekly_report",
+      agentId: first.id,
+      skillId: "catalog-opaque",
+      name: "weekly_report",
     });
     env.control(`Select version ${version.version}`).props.onPress();
     const attach = env.control("Attach skill").props.onPress;
@@ -1045,19 +1095,31 @@ test("offline versions and history give guidance without pending skeletons and r
     env.library().props.onOpenSkill("pin-original", "dns-helper");
     for (const key of ["versions", "history"]) {
       Object.assign(env.state.get(key), {
-        data: undefined, isPending: true, fetchStatus: "paused",
+        data: undefined,
+        isPending: true,
+        fetchStatus: "paused",
       });
     }
     env.online(false);
     env.navigation("SkillVersions", {
-      agentId: first.id, skillId: "pin-original", name: "dns-helper",
+      agentId: first.id,
+      skillId: "pin-original",
+      name: "dns-helper",
     });
-    assert.equal(env.elements().some((item) => item.type === "SkeletonRows"), false);
+    assert.equal(
+      env.elements().some((item) => item.type === "SkeletonRows"),
+      false,
+    );
     assert.ok(env.elements().some((item) => item.type === "OfflineBanner"));
     env.navigation("SkillHistory", {
-      agentId: first.id, skillId: "pin-original", name: "dns-helper",
+      agentId: first.id,
+      skillId: "pin-original",
+      name: "dns-helper",
     });
-    assert.equal(env.elements().some((item) => item.type === "SkeletonRows"), false);
+    assert.equal(
+      env.elements().some((item) => item.type === "SkeletonRows"),
+      false,
+    );
     assert.equal(env.queries.get("history")?.enabled, false);
     env.online(true);
     assert.equal(env.queries.get("history")?.enabled, true);
@@ -1075,15 +1137,30 @@ test("losing connection during mutation preflight prevents a delayed skill write
     env.library().props.onOpenSkill("pin-original", "dns-helper");
     env.control("Remove from agent").props.onPress();
     env.alerts.at(-1)!.buttons[1]!.onPress!();
-    assert.equal(env.calls.filter((call) => call.method === "current").length, 1);
+    assert.equal(
+      env.calls.filter((call) => call.method === "current").length,
+      1,
+    );
     env.online(false);
     pending.resolve(currentSkills);
     await env.harness.settle();
-    assert.equal(env.calls.some((call) => call.method === "write"), false);
-    assert.equal(env.calls.some((call) => call.method === "invalidate"), false);
-    assert.ok(env.elements().some((item) =>
-      item.props.message === "Reconnect before changing this agent's skills.",
-    ));
+    assert.equal(
+      env.calls.some((call) => call.method === "write"),
+      false,
+    );
+    assert.equal(
+      env.calls.some((call) => call.method === "invalidate"),
+      false,
+    );
+    assert.ok(
+      env
+        .elements()
+        .some(
+          (item) =>
+            item.props.message ===
+            "Reconnect before changing this agent's skills.",
+        ),
+    );
   } finally {
     pending.resolve(currentSkills);
     env.unmount();
@@ -1092,21 +1169,66 @@ test("losing connection during mutation preflight prevents a delayed skill write
 
 test("an uncached skill page agent does not spin offline or claim that the agent was removed", () => {
   const env = setup({
-    connected: false, wrapperOnly: true, pageOnly: true,
-    initialPage: { agentId: first.id, skillId: "pin-original", name: "dns-helper" },
+    connected: false,
+    wrapperOnly: true,
+    pageOnly: true,
+    initialPage: {
+      agentId: first.id,
+      skillId: "pin-original",
+      name: "dns-helper",
+    },
   });
   try {
     Object.assign(env.state.get("agent-detail"), {
-      data: undefined, isPending: true, fetchStatus: "paused",
+      data: undefined,
+      isPending: true,
+      fetchStatus: "paused",
     });
     env.harness.render();
     assert.equal(env.queries.get("agent-detail")?.enabled, false);
-    assert.equal(env.elements().some((item) => item.type === "SkeletonRows"), false);
+    assert.equal(
+      env.elements().some((item) => item.type === "SkeletonRows"),
+      false,
+    );
     assert.ok(env.elements().some((item) => item.type === "OfflineBanner"));
     env.online(true);
     assert.equal(env.queries.get("agent-detail")?.enabled, true);
     assert.ok(env.control("Loading skill agent"));
   } finally {
+    env.unmount();
+  }
+});
+
+test("a delayed skill preflight failure uses the latest app language and never writes offline", async () => {
+  const env = setup();
+  const pending = deferred<typeof currentSkills>();
+  try {
+    env.currentRead(() => pending.promise);
+    env.library().props.onOpenSkill("pin-original", "dns-helper");
+    env.control("Remove from agent").props.onPress();
+    env.alerts.at(-1)!.buttons[1]!.onPress!();
+    env.language("zh-TW");
+    env.online(false);
+    pending.resolve(currentSkills);
+    await env.harness.settle();
+    assert.ok(
+      env
+        .elements()
+        .some(
+          (item) =>
+            item.props.message === "請先重新連線，再修改此智慧體的技能。",
+        ),
+    );
+    assert.equal(
+      env.calls.some((call) => call.method === "write"),
+      false,
+    );
+    assert.equal(
+      env.calls.some((call) => call.method === "invalidate"),
+      false,
+    );
+  } finally {
+    pending.resolve(currentSkills);
     env.unmount();
   }
 });

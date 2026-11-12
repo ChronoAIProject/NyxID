@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ProviderConfig } from "@/types/api";
 import type { UpdateProviderFormData } from "@/schemas/providers";
 // `splitScopes` is functionally identical to the implementation in
@@ -6,10 +7,10 @@ import { splitScopes } from "./provider-list.helpers";
 export { splitScopes };
 
 export const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-  telegram_widget: "Telegram Widget",
+  get oauth2() { return translateUi("OAuth 2.0"); },
+  get api_key() { return translateUi("API Key"); },
+  get device_code() { return translateUi("Device Code"); },
+  get telegram_widget() { return translateUi("Telegram Widget"); },
 };
 
 export function stripEmptyStrings<T extends Record<string, unknown>>(

@@ -39,7 +39,8 @@ const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
 const env = loadEnv();
 const r = resolveProfile(APP_ENV, env);
 
-const KEYSTORE_PATH = env.ANDROID_KEYSTORE_PATH || "./credentials/release.keystore";
+const KEYSTORE_PATH =
+  env.ANDROID_KEYSTORE_PATH || "./credentials/release.keystore";
 const KEYSTORE_PASSWORD = env.ANDROID_KEYSTORE_PASSWORD;
 const KEY_ALIAS = env.ANDROID_KEY_ALIAS;
 const KEY_PASSWORD = env.ANDROID_KEY_PASSWORD;
@@ -79,12 +80,16 @@ console.log(`[build-android] APP_ENV=${APP_ENV}`);
 console.log(`[build-android] API URL:         ${r.apiBaseUrl}`);
 console.log(`[build-android] Frontend URL:    ${r.frontendUrl}`);
 console.log(`[build-android] Legal URL:       ${r.legalBaseUrl}`);
-console.log(`[build-android] New domains:     ${r.newApiBaseUrl ? `${r.newApiBaseUrl} (selected at launch by mobile:new-domains)` : "not configured"}`);
+console.log(
+  `[build-android] New domains:     ${r.newApiBaseUrl ? `${r.newApiBaseUrl} (selected at launch by mobile:new-domains)` : "not configured"}`,
+);
 console.log(`[build-android] Android package: ${r.androidPackage}`);
 console.log(`[build-android] versionCode:     ${r.androidVersionCode}`);
 console.log(`[build-android] Keystore:        ${keystoreAbs}`);
 
-console.log("\n[build-android] Step 1/3: expo prebuild --platform android --clean");
+console.log(
+  "\n[build-android] Step 1/3: expo prebuild --platform android --clean",
+);
 process.env.APP_ENV = APP_ENV;
 run("npx expo prebuild --platform android --clean --no-install");
 
@@ -93,9 +98,7 @@ process.env.EAS_BUILD_PLATFORM = "android";
 run(`node ${path.join("scripts", "patch-android-build-gradle.js")}`);
 
 console.log("\n[build-android] Step 3/3: gradlew bundleRelease");
-const gradleArgs = [
-  ":app:bundleRelease",
-];
+const gradleArgs = [":app:bundleRelease"];
 const gradleEnv = buildGradleSigningEnvironment(process.env, {
   storeFile: keystoreAbs,
   storePassword: KEYSTORE_PASSWORD,
@@ -122,5 +125,7 @@ if (!fs.existsSync(aabPath)) {
   process.exit(1);
 }
 console.log(`\n[build-android] ✓ produced: ${aabPath}`);
-console.log(`\nNext: pnpm submit:android   (uploads this .aab to Play Internal testing)`);
+console.log(
+  `\nNext: pnpm submit:android   (uploads this .aab to Play Internal testing)`,
+);
 process.stdout.write(`\n${aabPath}\n`);

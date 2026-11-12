@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getProviderBrand } from "@/lib/provider-branding";
 import type {
   AssistantAgent,
@@ -13,14 +14,14 @@ const PLATFORM_NAMES: Readonly<Record<string, string>> = {
   "telegram-new": "Telegram",
   whatsapp: "WhatsApp",
   x: "X",
-  aurinko: "Email",
+  get aurinko() { return translateUi("Email"); },
 };
 
 /** Display name of a channel platform id ("telegram" -> "Telegram"). */
 export function channelPlatformName(platform: string): string {
   const known = PLATFORM_NAMES[platform] ?? getProviderBrand(platform).label;
   if (known) return known;
-  return platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : "Channel";
+  return platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : translateUi("Channel");
 }
 
 /** A channel chat's name, or what kind of chat it is when unnamed. */
@@ -31,9 +32,9 @@ export function channelChatTitle(
 ): string {
   if (title) return title;
   const name = channelPlatformName(platform);
-  if (kind === "private") return `Private ${name} chat`;
-  if (kind === "channel") return `${name} channel`;
-  return kind === "group" ? `${name} group` : `${name} chat`;
+  if (kind === "private") return translateUi("Private {{name}} chat", { name });
+  if (kind === "channel") return translateUi("{{name}} channel", { name });
+  return kind === "group" ? translateUi("{{name}} group", { name }) : translateUi("{{name}} chat", { name });
 }
 
 /** An agent's threads through one channel bot, newest first. */
@@ -72,16 +73,16 @@ export function splitChannelThreads(threads: readonly Conversation[]): {
     bots: [...bots].map(([key, group]) => ({
       key,
       platform: group.platform,
-      label: group.label ?? `${channelPlatformName(group.platform)} bot`,
+      label: group.label ?? translateUi("{{platform}} bot", { platform: channelPlatformName(group.platform) }),
       threads: group.threads,
     })),
   };
 }
 
 export const AGENT_STATUS_LABEL = {
-  running: "Running",
-  idle: "Idle",
-  destroyed: "Destroyed",
+  get running() { return translateUi("Running"); },
+  get idle() { return translateUi("Idle"); },
+  get destroyed() { return translateUi("Destroyed"); },
 } as const;
 
 // "NyxID events (authored by NyxID; ...):" -- the parenthetical has changed
@@ -114,7 +115,7 @@ export function eventNotices(text: string): string[] {
   return kept.length ? kept : [text.trim()];
 }
 
-export const AGENT_KIND_LABEL = { nyxbot: "NyxBot", specialist: "Specialist" } as const;
+export const AGENT_KIND_LABEL = { get nyxbot() { return translateUi("NyxBot"); }, get specialist() { return translateUi("Specialist"); } } as const;
 
 export type EventNoticeKind =
   | "reply"
@@ -293,7 +294,7 @@ export function workingLabel(names: readonly string[]): string {
 }
 
 interface NamedAgent {
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "unknown";
   /** The @handle ("NyxBot" for NyxBot). */
   readonly name: string;
   readonly display_name?: string | null;
@@ -359,9 +360,9 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
 }
 
 export const ACCESS_MODE_LABEL = {
-  autopilot: "Full access",
-  nyxmode: "Auto",
-  ask_every_time: "Ask every time",
+  get autopilot() { return translateUi("Full access"); },
+  get nyxmode() { return translateUi("Auto"); },
+  get ask_every_time() { return translateUi("Ask every time"); },
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** What each access mode asks before, in one line. */
@@ -381,22 +382,22 @@ export function effectiveAccessMode(
 }
 
 export const ACTION_RISK_LABEL = {
-  read: "Read",
-  change: "Change",
-  sensitive: "Sensitive",
-  destructive: "Destructive",
+  get read() { return translateUi("Read"); },
+  get change() { return translateUi("Change"); },
+  get sensitive() { return translateUi("Sensitive"); },
+  get destructive() { return translateUi("Destructive"); },
 } as const;
 
 /** Why a card asks, for its risk line. */
 export function confirmationReason(confirmation: NyxAgentActionConfirmation): string {
-  if (confirmation.reason === "org_connection") return "Using this organization connection requires your instruction, including in Full access.";
-  if (confirmation.reason === "webhook") return "This automation's confirmation policy asks.";
+  if (confirmation.reason === "org_connection") return translateUi("Using this organization connection requires your instruction, including in Full access.");
+  if (confirmation.reason === "webhook") return translateUi("This automation's confirmation policy asks.");
   if (confirmation.reason === "policy") {
-    return "This machine's or saved login's confirmation setting asks.";
+    return translateUi("This machine's or saved login's confirmation setting asks.");
   }
   return confirmation.access_mode
-    ? `Your access mode is ${ACCESS_MODE_LABEL[confirmation.access_mode]}.`
-    : "Your access mode asks.";
+    ? translateUi("Your access mode is {{mode}}.", { mode: ACCESS_MODE_LABEL[confirmation.access_mode] })
+    : translateUi("Your access mode asks.");
 }
 
 /** Missing deployment metadata is unknown, never a reason to omit an image. */

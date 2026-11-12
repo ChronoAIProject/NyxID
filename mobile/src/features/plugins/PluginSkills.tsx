@@ -1,12 +1,7 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { useEffect, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ActivityIndicator, Alert, StyleSheet, Text, View } from "react-native";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, Check, ChevronsUpDown } from "lucide-react-native";
@@ -56,6 +51,7 @@ const failure = (cause: unknown) =>
     : "The request could not be completed. Try again.";
 /** The catalog and every pin belong to the explicitly selected agent. */
 export function PluginSkills({ agentId }: { agentId?: string }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
@@ -94,7 +90,9 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
   return (
     <View style={styles.stack}>
       {!isConnected && !agent && (
-        <OfflineBanner subtitle="Reconnect to load agents and their skills." />
+        <OfflineBanner
+          subtitle={t("Reconnect to load agents and their skills.")}
+        />
       )}
       <SettingsGroup title="Agent">
         <SettingsRow
@@ -188,6 +186,7 @@ const skillRoutes = {
 export function PluginSkillPage({
   route,
 }: ContentScreenProps<"SkillDetail" | "SkillVersions" | "SkillHistory">) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
@@ -208,7 +207,7 @@ export function PluginSkillPage({
       contentStyle={styles.grouped}
     >
       {!isConnected && !agent.data && (
-        <OfflineBanner subtitle="Reconnect to load this skill's agent." />
+        <OfflineBanner subtitle={t("Reconnect to load this skill's agent.")} />
       )}
       {isConnected && agent.isPending && (
         <SkeletonRows rows={3} title accessibilityLabel="Loading skill agent" />
@@ -261,6 +260,9 @@ function AgentSkillsManager({
   skillPage?: SkillPageParams;
   view?: SkillView;
 }) {
+  const { t } = useAppLanguage();
+  const currentTranslation = useRef(t);
+  currentTranslation.current = t;
   const { colors } = useTheme();
   const client = useQueryClient();
   const focused = useIsFocused();
@@ -412,7 +414,11 @@ function AgentSkillsManager({
           "Your account session changed. Reopen Plugins to continue.",
         );
       if (!currentCanFetch.current)
-        throw new Error("Reconnect before changing this agent's skills.");
+        throw new Error(
+          currentTranslation.current(
+            "Reconnect before changing this agent's skills.",
+          ),
+        );
       await api.write(agent.id, selection);
       await refresh();
       setTesting(false);
@@ -441,9 +447,13 @@ function AgentSkillsManager({
   );
   const cached = Boolean(
     current.data ||
-    (!skillPage ? catalog.data :
-      view === "versions" ? versions.data || preview.data :
-      view === "history" ? history.data : versions.data),
+    (!skillPage
+      ? catalog.data
+      : view === "versions"
+        ? versions.data || preview.data
+        : view === "history"
+          ? history.data
+          : versions.data),
   );
   function retry(refetch: () => unknown) {
     if (currentCanFetch.current) void refetch();
@@ -452,9 +462,15 @@ function AgentSkillsManager({
   return (
     <View style={styles.stack}>
       {!isConnected && (
-        <OfflineBanner subtitle={cached
-          ? "Showing cached skill information. Reconnect to refresh or make changes."
-          : "Reconnect to load skill information."} />
+        <OfflineBanner
+          subtitle={
+            cached
+              ? t(
+                  "Showing cached skill information. Reconnect to refresh or make changes.",
+                )
+              : t("Reconnect to load skill information.")
+          }
+        />
       )}
       {!detail && notice && <Notice tone="success" message={notice} />}
       {!detail && error && <Notice tone="error" message={error} />}
@@ -475,7 +491,10 @@ function AgentSkillsManager({
             })),
             known: Boolean(current.data),
             loading: isConnected && current.isPending,
-            error: isConnected && current.isError ? failure(current.error) : undefined,
+            error:
+              isConnected && current.isError
+                ? failure(current.error)
+                : undefined,
             onRetry: () => {
               retry(() => current.refetch());
             },
@@ -550,12 +569,16 @@ function AgentSkillsManager({
           {view === "detail" && detail && (
             <>
               <SettingsGroup
-                footer={metadata?.description || detail.description || undefined}
+                footer={
+                  metadata?.description || detail.description || undefined
+                }
               >
                 <SettingsRow
                   icon={BookOpen}
                   label={detail.name}
-                  detail={pin ? `Attached to ${titleOf(agent)}` : "Ornn catalog"}
+                  detail={
+                    pin ? `Attached to ${titleOf(agent)}` : "Ornn catalog"
+                  }
                 />
               </SettingsGroup>
               <SettingsGroup
@@ -647,7 +670,9 @@ function AgentSkillsManager({
                           : "Read pinned package"
                       }
                       tone="action"
-                      disabled={busy || !canFetch || (testing && tested.isFetching)}
+                      disabled={
+                        busy || !canFetch || (testing && tested.isFetching)
+                      }
                       accessory={
                         isConnected && testing && tested.isFetching ? (
                           <ActivityIndicator color={colors.primary} />
@@ -660,10 +685,10 @@ function AgentSkillsManager({
                       }}
                     />
                     {testing &&
-                      tested.data &&
-                      (!tested.isFetching || !isConnected) &&
-                      !tested.isError &&
-                      tested.data.excerpt ? (
+                    tested.data &&
+                    (!tested.isFetching || !isConnected) &&
+                    !tested.isError &&
+                    tested.data.excerpt ? (
                       <View style={styles.excerpt}>
                         <Label selectable mono style={styles.excerptText}>
                           {tested.data.excerpt}
@@ -706,11 +731,14 @@ function AgentSkillsManager({
                       tone="danger"
                       disabled={busy || !canFetch || !currentReady}
                       onPress={() =>
-                        confirmRemoval(pin.name, titleOf(agent), () =>
-                          void change({
-                            type: "detach",
-                            skillId: pin.skill_id,
-                          }),
+                        confirmRemoval(
+                          pin.name,
+                          titleOf(agent),
+                          () =>
+                            void change({
+                              type: "detach",
+                              skillId: pin.skill_id,
+                            }),
                         )
                       }
                     />
@@ -744,7 +772,7 @@ function AgentSkillsManager({
               )}
               {!isConnected && !versions.data && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  Reconnect to load published skill versions.
+                  {t("Reconnect to load published skill versions.")}
                 </Text>
               )}
               {versions.data?.items.length === 0 && (
@@ -832,41 +860,43 @@ function AgentSkillsManager({
               )}
               {!isConnected && selectedVersion && !preview.data && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  Reconnect to load this package preview.
+                  {t("Reconnect to load this package preview.")}
                 </Text>
               )}
-              {preview.data && selectedVersion && (!preview.isFetching || !isConnected) && (
-                <SettingsGroup
-                  title="Package"
-                  inset={false}
-                  footer={
-                    selectedVersion.deprecated
-                      ? "This version is deprecated. Choose a supported version unless you intentionally need this exact package."
-                      : preview.data.description || undefined
-                  }
-                >
-                  <SettingsRow
-                    label="Size"
-                    value={`${preview.data.size_bytes.toLocaleString()} bytes`}
-                  />
-                  <SettingsRow
-                    label="Pinned dependencies"
-                    value={String(preview.data.reference.dependencies.length)}
-                  />
-                  <SettingsRow
-                    label={preview.data.reference.skill_id}
-                    detail="Skill ID"
-                    mono
-                    selectable
-                  />
-                  <SettingsRow
-                    label={preview.data.reference.sha256}
-                    detail="SHA-256"
-                    mono
-                    selectable
-                  />
-                </SettingsGroup>
-              )}
+              {preview.data &&
+                selectedVersion &&
+                (!preview.isFetching || !isConnected) && (
+                  <SettingsGroup
+                    title="Package"
+                    inset={false}
+                    footer={
+                      selectedVersion.deprecated
+                        ? "This version is deprecated. Choose a supported version unless you intentionally need this exact package."
+                        : preview.data.description || undefined
+                    }
+                  >
+                    <SettingsRow
+                      label="Size"
+                      value={`${preview.data.size_bytes.toLocaleString()} bytes`}
+                    />
+                    <SettingsRow
+                      label="Pinned dependencies"
+                      value={String(preview.data.reference.dependencies.length)}
+                    />
+                    <SettingsRow
+                      label={preview.data.reference.skill_id}
+                      detail="Skill ID"
+                      mono
+                      selectable
+                    />
+                    <SettingsRow
+                      label={preview.data.reference.sha256}
+                      detail="SHA-256"
+                      mono
+                      selectable
+                    />
+                  </SettingsGroup>
+                )}
               <SettingsGroup
                 inset={false}
                 footer={
@@ -881,7 +911,9 @@ function AgentSkillsManager({
                   label={pin ? "Update exact version" : "Attach skill"}
                   tone="action"
                   accessory={
-                    busy ? <ActivityIndicator color={colors.primary} /> : undefined
+                    busy ? (
+                      <ActivityIndicator color={colors.primary} />
+                    ) : undefined
                   }
                   disabled={
                     busy ||
@@ -936,7 +968,7 @@ function AgentSkillsManager({
               )}
               {!isConnected && !history.data && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  Reconnect to load skill history.
+                  {t("Reconnect to load skill history.")}
                 </Text>
               )}
               {history.data?.items.length === 0 && (
@@ -950,7 +982,8 @@ function AgentSkillsManager({
                     <SettingsRow
                       key={item.id}
                       label={
-                        SKILL_HISTORY_LABELS[item.event_type] ?? "Skill activity"
+                        SKILL_HISTORY_LABELS[item.event_type] ??
+                        "Skill activity"
                       }
                       detail={[
                         `${new Date(item.created_at).toLocaleString()}${

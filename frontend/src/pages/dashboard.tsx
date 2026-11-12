@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useCallback, useEffect } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAuthStore } from "@/stores/auth-store";
@@ -40,6 +42,7 @@ const ONBOARDING_DISMISSED_KEY = "nyxid:onboarding-dismissed";
 const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 
 export function DashboardPage() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const { data: apiKeys, isLoading: keysLoading } = useApiKeys();
   const { data: services, isLoading: servicesLoading } = useKeys();
@@ -128,8 +131,7 @@ export function DashboardPage() {
         <h1
           className="type-compact-page-title sm:type-page-title"
           style={{ letterSpacing: "-0.03em" }}
-        >
-          Welcome back, {user?.display_name ?? "there"}
+        >{translateUi("Welcome back, {{name}}", { name: user?.display_name ?? translateUi("there") })}
         </h1>
         <p className="text-14 text-muted-foreground mt-1">
           {user?.email ?? ""}
@@ -149,8 +151,8 @@ export function DashboardPage() {
               )
             }
             iconColor={emailVerified ? "text-success" : "text-destructive"}
-            label="Email"
-            value={emailVerified ? "Verified" : "Unverified"}
+            label={translateUi("Email")}
+            value={emailVerified ? translateUi("Verified") : translateUi("Unverified")}
             loading={false}
             href="/settings"
           />
@@ -163,24 +165,24 @@ export function DashboardPage() {
               )
             }
             iconColor={mfaEnabled ? "text-success" : "text-destructive"}
-            label="MFA"
-            value={mfaEnabled ? "Enabled" : "Disabled"}
+            label={translateUi("MFA")}
+            value={mfaEnabled ? translateUi("Enabled") : translateUi("Disabled")}
             loading={false}
             href="/settings?tab=security"
           />
           <StatusCell
             icon={<Server className="h-4 w-4" />}
             iconColor="text-muted-foreground"
-            label="Services"
-            value={serviceCount > 0 ? `${String(serviceCount)} connected` : "No services"}
+            label={translateUi("Services")}
+            value={serviceCount > 0 ? translateUi("{{value1}} connected", { value1: String(serviceCount) }) : translateUi("No services")}
             loading={servicesLoading}
             href="/keys"
           />
           <StatusCell
             icon={<KeyRound className="h-4 w-4" />}
             iconColor="text-muted-foreground"
-            label="API Keys"
-            value={activeKeys > 0 ? `${String(activeKeys)} active` : "No keys"}
+            label={translateUi("API Keys")}
+            value={activeKeys > 0 ? translateUi("{{value1}} active", { value1: String(activeKeys) }) : translateUi("No keys")}
             loading={keysLoading}
             href="/keys?tab=nyxid"
           />
@@ -193,11 +195,11 @@ export function DashboardPage() {
               )
             }
             iconColor={onlineNodes > 0 ? "text-success" : "text-muted-foreground"}
-            label="Nodes"
+            label={translateUi("Nodes")}
             value={
               totalNodes > 0
                 ? `${String(onlineNodes)}/${String(totalNodes)} online`
-                : "No nodes"
+                : translateUi("No nodes")
             }
             loading={nodesLoading}
             href="/nodes"
@@ -205,8 +207,8 @@ export function DashboardPage() {
           <StatusCell
             icon={<Shield className="h-4 w-4" />}
             iconColor="text-muted-foreground"
-            label="Approvals"
-            value="Configure"
+            label={translateUi("Approvals")}
+            value={translateUi("Configure")}
             loading={false}
             href="/approvals/settings"
           />
@@ -224,38 +226,36 @@ export function DashboardPage() {
 
       {/* Shortcuts */}
       <div>
-        <h2 className="type-card-title text-foreground mb-3">
-          Shortcuts
-        </h2>
+        <h2 className="type-card-title text-foreground mb-3">{translateUi("Shortcuts")}</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <QuickActionCard
             icon={<Server className="h-4 w-4" />}
-            title="Services"
-            desc="Connect an API"
+            title={translateUi("Services")}
+            desc={translateUi("Connect an API")}
             href="/keys?action=add-service"
           />
           <QuickActionCard
             icon={<KeyRound className="h-4 w-4" />}
-            title="API Keys"
-            desc="Create a scoped key"
+            title={translateUi("API Keys")}
+            desc={translateUi("Create a scoped key")}
             href="/keys?tab=nyxid&action=create-key"
           />
           <QuickActionCard
             icon={<Wifi className="h-4 w-4" />}
-            title="Nodes"
-            desc="Register a node"
+            title={translateUi("Nodes")}
+            desc={translateUi("Register a node")}
             href="/nodes"
           />
           <QuickActionCard
             icon={<Building2 className="h-4 w-4" />}
-            title="Organizations"
-            desc="Manage your orgs"
+            title={translateUi("Organizations")}
+            desc={translateUi("Manage your orgs")}
             href="/orgs"
           />
           <QuickActionCard
             icon={<Radio className="h-4 w-4" />}
-            title="Channel Bots"
-            desc="Set up a bot"
+            title={translateUi("Channel Bots")}
+            desc={translateUi("Set up a bot")}
             href="/channel-bots"
           />
         </div>
@@ -268,13 +268,11 @@ export function DashboardPage() {
         {!aiDismissed && <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />}
         <ApprovalsCard demotePrimary={siblingDemote} />
         <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
-          <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
-            Quick Links
-          </p>
+          <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Quick Links")}</p>
           <div className="flex flex-col gap-1.5">
-            <QuickLink to="/docs" label="Documentation" />
-            <QuickLink to="/ai-setup" label="AI Setup Guide" />
-            <QuickLink to="/integration-guide" label="Integration Guide" />
+            <QuickLink to="/docs" label={translateUi("Documentation")} />
+            <QuickLink to="/ai-setup" label={translateUi("AI Setup Guide")} />
+            <QuickLink to="/integration-guide" label={translateUi("Integration Guide")} />
           </div>
         </div>
       </div>
@@ -299,30 +297,31 @@ function OnboardingChecklist({
   readonly verifyKeyLoading: boolean;
   readonly onDismiss: () => void;
 }) {
+  useUiTranslation();
   const steps = [
     {
       done: serviceConnected,
-      title: "Connect a Service",
-      description: "Add an API service to proxy through NyxID.",
+      get title() { return translateUi("Connect a Service"); },
+      get description() { return translateUi("Add an API service to proxy through NyxID."); },
       icon: <Cable className="h-4 w-4" />,
       href: "/keys?action=add-service",
-      cta: "Add service",
+      get cta() { return translateUi("Add service"); },
     },
     {
       done: activeKeys > 0,
-      title: "Create an Agent Key",
-      description: "Generate a scoped key for your AI agent.",
+      get title() { return translateUi("Create an Agent Key"); },
+      get description() { return translateUi("Generate a scoped key for your AI agent."); },
       icon: <KeyRound className="h-4 w-4" />,
       href: "/keys?tab=nyxid&action=create-key",
-      cta: "Create Key",
+      get cta() { return translateUi("Create Key"); },
     },
     {
       done: firstProxyCallSucceeded,
-      title: "Make first proxy call",
-      description: "Use your agent key to route a request through NyxID.",
+      get title() { return translateUi("Make first proxy call"); },
+      get description() { return translateUi("Use your agent key to route a request through NyxID."); },
       icon: <Wifi className="h-4 w-4" />,
       href: "/keys",
-      cta: "Make a call",
+      get cta() { return translateUi("Make a call"); },
     },
   ];
 
@@ -335,18 +334,15 @@ function OnboardingChecklist({
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="type-card-title text-foreground">
-            Getting started
-          </h2>
+          <h2 className="type-card-title text-foreground">{translateUi("Getting started")}</h2>
           <p className="text-13 text-muted-foreground mt-0.5">
-            {steps.filter((s) => s.done).length} of {steps.length} complete
-          </p>
+            {translateUi("{{done}} of {{total}} complete", { done: steps.filter((s) => s.done).length, total: steps.length })}</p>
         </div>
         <button
           type="button"
           onClick={onDismiss}
           className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary/40 hover:text-foreground transition-colors"
-          aria-label="Dismiss"
+          aria-label={translateUi("Dismiss")}
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -403,9 +399,7 @@ function OnboardingChecklist({
                       </p>
                       {step.done ? (
                         <span className="mt-2 inline-flex items-center gap-1.5 type-row-title text-success/70">
-                          <Check className="h-3.5 w-3.5" />
-                          Completed
-                        </span>
+                          <Check className="h-3.5 w-3.5" />{translateUi("Completed")}</span>
                       ) : (
                         <Button
                           variant={
@@ -474,9 +468,7 @@ function OnboardingChecklist({
                     <p className={cn("text-13 mt-1 ", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
                     {step.done ? (
                       <span className="mt-3 inline-flex items-center gap-1.5 type-row-title text-success/70">
-                        <Check className="h-3.5 w-3.5" />
-                        Completed
-                      </span>
+                        <Check className="h-3.5 w-3.5" />{translateUi("Completed")}</span>
                     ) : (
                       <Button
                         variant={
@@ -532,6 +524,7 @@ function StatusCell({
   readonly loading: boolean;
   readonly href: string;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={href}
@@ -576,31 +569,32 @@ function AccountPostureCard({
   readonly activeKeys: number;
   readonly loading: boolean;
 }) {
+  useUiTranslation();
   const items = [
     {
       done: emailVerified,
-      label: "Email verified",
+      get label() { return translateUi("Email verified"); },
       icon: <Mail className="h-3.5 w-3.5" />,
       href: "/settings",
       cta: "Verify",
     },
     {
       done: mfaEnabled,
-      label: "MFA enabled",
+      get label() { return translateUi("MFA enabled"); },
       icon: <Shield className="h-3.5 w-3.5" />,
       href: "/settings?tab=security",
       cta: "Enable",
     },
     {
       done: serviceCount > 0,
-      label: "Service connected",
+      get label() { return translateUi("Service connected"); },
       icon: <Server className="h-3.5 w-3.5" />,
       href: serviceCount > 0 ? "/keys" : "/keys?action=add-service",
       cta: "Connect",
     },
     {
       done: activeKeys > 0,
-      label: "API key created",
+      get label() { return translateUi("API key created"); },
       icon: <KeyRound className="h-3.5 w-3.5" />,
       href:
         activeKeys > 0
@@ -635,9 +629,7 @@ function AccountPostureCard({
           <ShieldCheck className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div>
-          <p className="type-card-title text-foreground">
-            Security Posture
-          </p>
+          <p className="type-card-title text-foreground">{translateUi("Security Posture")}</p>
           <p className={cn("type-secondary-emphasis ", statusColor)}>
             {statusLabel}
           </p>
@@ -693,7 +685,7 @@ function AccountPostureCard({
       <div className="border-t border-border/50 px-4 py-2.5">
         <div className="flex items-center justify-between mb-2">
           <span className="text-13 text-text-tertiary">
-            {doneCount} of {items.length}
+            {doneCount}{translateUi(" of ")}{items.length}
           </span>
           <span className="type-secondary-emphasis text-foreground">
             {score}%
@@ -710,8 +702,7 @@ function AccountPostureCard({
             to={nextStep.href}
             className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 type-row-title transition-colors duration-200 hover:bg-overlay"
           >
-            <span className="text-muted-foreground">
-              Next: <span className="text-foreground">{nextStep.label}</span>
+            <span className="text-muted-foreground">{translateUi("Next: ")}<span className="text-foreground">{nextStep.label}</span>
             </span>
             <ArrowRight className="h-3 w-3 text-nyx-secondary-400 transition-transform duration-200 group-hover:translate-x-0.5" />
           </Link>
@@ -734,6 +725,7 @@ function QuickActionCard({
   readonly desc: string;
   readonly href: string;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={href}
@@ -757,17 +749,16 @@ function RightPanelContent({
 }: {
   readonly demotePrimary?: boolean;
 }) {
+  useUiTranslation();
   return (
     <>
       <ApprovalsCard demotePrimary={demotePrimary} />
       <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
-        <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
-          Quick Links
-        </p>
+        <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Quick Links")}</p>
         <div className="flex flex-col gap-1.5">
-          <QuickLink to="/docs" label="Documentation" />
-          <QuickLink to="/ai-setup" label="AI Setup Guide" />
-          <QuickLink to="/integration-guide" label="Integration Guide" />
+          <QuickLink to="/docs" label={translateUi("Documentation")} />
+          <QuickLink to="/ai-setup" label={translateUi("AI Setup Guide")} />
+          <QuickLink to="/integration-guide" label={translateUi("Integration Guide")} />
         </div>
       </div>
     </>
@@ -781,21 +772,15 @@ function AiSetupCard({
   readonly onDismiss: () => void;
   readonly demotePrimary?: boolean;
 }) {
+  useUiTranslation();
   return (
     <div className="group relative overflow-hidden rounded-xl border border-nyx-500/20 transition-[border-color] duration-300 hover:border-nyx-500/40 dark:border-nyx-500/30 dark:hover:border-nyx-500/50">
       <div className="absolute inset-0 bg-gradient-to-b from-nyx-500/[0.04] via-nyx-500/[0.02] to-transparent dark:from-nyx-500/15 dark:via-nyx-500/5 dark:to-transparent" />
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200%] h-[120px] bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.07)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.25)_0%,transparent_70%)]" />
       <div className="relative flex flex-col gap-3 p-4">
-        <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 type-table-header text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">
-          NEW
-        </span>
-        <h3 className="type-card-title text-foreground">
-          Give your AI agents superpowers
-        </h3>
-        <p className="text-14 text-muted-foreground">
-          Install NyxID skills in Claude Code, Cursor, or Codex to unlock
-          secure credential brokering.
-        </p>
+        <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 type-table-header text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">{translateUi("NEW")}</span>
+        <h3 className="type-card-title text-foreground">{translateUi("Give your AI agents superpowers")}</h3>
+        <p className="text-14 text-muted-foreground">{translateUi("Install NyxID skills in Claude Code, Cursor, or Codex to unlock secure credential brokering.")}</p>
         <Button
           variant={demotePrimary ? "outline" : "primary"}
           asChild
@@ -804,15 +789,13 @@ function AiSetupCard({
           <Link to="/ai-setup">
             <ButtonIcon variant={demotePrimary ? "default" : "primary"}>
               <ArrowRight className="h-3 w-3" />
-            </ButtonIcon>
-            Set up
-          </Link>
+            </ButtonIcon>{translateUi("Set up")}</Link>
         </Button>
         <button
           type="button"
           onClick={onDismiss}
           className="absolute right-3 top-3 flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary/60 hover:text-foreground transition-colors duration-300"
-          aria-label="Dismiss"
+          aria-label={translateUi("Dismiss")}
         >
           <X className="h-3 w-3" />
         </button>
@@ -828,6 +811,7 @@ function QuickLink({
   readonly to: string;
   readonly label: string;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={to}
@@ -844,14 +828,11 @@ function ApprovalsCard({
 }: {
   readonly demotePrimary?: boolean;
 }) {
+  useUiTranslation();
   return (
     <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-3">
-      <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
-        Approvals
-      </p>
-      <p className="text-14 text-muted-foreground">
-        Approve AI agent access via Telegram or the NyxID mobile app.
-      </p>
+      <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Approvals")}</p>
+      <p className="text-14 text-muted-foreground">{translateUi("Approve AI agent access via Telegram or the NyxID mobile app.")}</p>
       <div className="flex flex-col gap-2">
         <Button asChild>
           <Link to="/approvals/settings">
@@ -863,17 +844,13 @@ function ApprovalsCard({
               >
                 <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
               </svg>
-            </ButtonIcon>
-            Connect Telegram
-          </Link>
+            </ButtonIcon>{translateUi("Connect Telegram")}</Link>
         </Button>
         <Button variant={demotePrimary ? "outline" : "primary"} asChild>
           <a href={MOBILE_APP_LINK} target="_blank" rel="noopener noreferrer">
             <ButtonIcon variant={demotePrimary ? "default" : "primary"}>
               <Smartphone className="h-3 w-3" />
-            </ButtonIcon>
-            Get App
-          </a>
+            </ButtonIcon>{translateUi("Get App")}</a>
         </Button>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 
 import type { BlogArticle } from "../types";
@@ -12,6 +13,7 @@ interface ArticleViewProps {
 }
 
 export function ArticleView({ article, previewBanner = false }: ArticleViewProps) {
+  const { t } = useUiTranslation();
   const readingMinutes = estimateReadingMinutes(article.body);
 
   return (
@@ -22,9 +24,7 @@ export function ArticleView({ article, previewBanner = false }: ArticleViewProps
         <Link
           to="/blog"
           className="font-mono text-xs tracking-wider text-gray-500 transition-colors hover:text-primary-text"
-        >
-          ← Back to Field Notes
-        </Link>
+        >{t("← Back to Field Notes")}</Link>
 
         {article.tags[0] ? (
           <p className="mt-8 font-mono text-11 tracking-[1.5px] text-primary-text uppercase">
@@ -88,17 +88,17 @@ export function ArticleView({ article, previewBanner = false }: ArticleViewProps
 }
 
 function PreviewBanner({ article }: { readonly article: BlogArticle }) {
+  const { t } = useUiTranslation();
   return (
     <div className="bg-primary/5 mb-10 flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 px-4 py-3">
       <StatusBadge status={article.status} />
-      <span className="text-sm text-gray-300">
-        Preview mode — visible only via the secret preview URL.
-      </span>
+      <span className="text-sm text-gray-300">{t("Preview mode — visible only via the secret preview URL.")}</span>
     </div>
   );
 }
 
 function AuthorBio({ article }: { readonly article: BlogArticle }) {
+  const { t } = useUiTranslation();
   const author = article.author;
   if (!author.description) return null;
 
@@ -109,9 +109,7 @@ function AuthorBio({ article }: { readonly article: BlogArticle }) {
         {(author.last_name?.[0] ?? "").toUpperCase()}
       </span>
       <div>
-        <p className="font-mono text-11 tracking-[1.5px] text-primary-text uppercase">
-          Written by
-        </p>
+        <p className="font-mono text-11 tracking-[1.5px] text-primary-text uppercase">{t("Written by")}</p>
         <p className="mt-1 font-serif text-xl text-white">
           {author.first_name} {author.last_name}
         </p>

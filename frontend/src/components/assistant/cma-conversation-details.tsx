@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +27,7 @@ export function CmaConversationDetails({
   readonly events: readonly CmaDisplayEvent[];
   readonly status: string;
 }) {
+  useUiTranslation();
   const activity = events.filter((event) => event.type !== "message");
   const technicalMessages = turn.messages.filter(
     (message) => !["user", "assistant"].includes(message.role),
@@ -38,9 +41,7 @@ export function CmaConversationDetails({
           size="sm"
           className="type-button text-text-tertiary"
         >
-          <ChevronRight aria-hidden />
-          Execution details
-          {count > 0 && (
+          <ChevronRight aria-hidden />{translateUi("Execution details")}{count > 0 && (
             <span className="rounded bg-overlay px-1.5 type-badge">
               {count}
             </span>
@@ -49,10 +50,8 @@ export function CmaConversationDetails({
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Execution details</DialogTitle>
-          <DialogDescription>
-            Activity for this request. Other requests stay in the conversation.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Execution details")}</DialogTitle>
+          <DialogDescription>{translateUi("Activity for this request. Other requests stay in the conversation.")}</DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap items-center gap-3">
           <CmaStatus status={status} />
@@ -65,8 +64,7 @@ export function CmaConversationDetails({
               className="space-y-2 py-3 first:pt-0"
             >
               <h3 className="type-group-label">
-                {cmaReadableLabel(message.role)} message
-              </h3>
+                {cmaReadableLabel(message.role)}{translateUi(" message")}</h3>
               <p className="whitespace-pre-wrap break-words text-12 text-text-tertiary [overflow-wrap:anywhere]">
                 {cmaPublicText(message.content)}
               </p>
@@ -92,13 +90,11 @@ export function CmaConversationDetails({
           ))}
         </div>
         {!count && (
-          <p className="text-12 text-text-tertiary">
-            No execution details in the loaded activity.
-          </p>
+          <p className="text-12 text-text-tertiary">{translateUi("No execution details in the loaded activity.")}</p>
         )}
         <details className="border-t border-hairline pt-3 type-secondary text-text-tertiary">
-          <summary className="cursor-pointer">Technical reference</summary>
-          <p className="mt-3">Work reference: {turn.turn_sequence}</p>
+          <summary className="cursor-pointer">{translateUi("Technical reference")}</summary>
+          <p className="mt-3">{translateUi("Work reference: ")}{turn.turn_sequence}</p>
         </details>
       </DialogContent>
     </Dialog>

@@ -1,3 +1,5 @@
+import { LanguageSettingsScreen } from "../features/account/LanguageSettingsScreen";
+import { useAppLanguage } from "../i18n/LanguageProvider";
 import { WorkspacePageSurface } from "./WorkspacePageSurface";
 import { workspaceContentAnimation } from "../components/workspace/workspacePushState";
 import {
@@ -323,6 +325,7 @@ const WorkspacePagePaintedContext = createContext<(identity: string) => void>(
 );
 
 function WorkspaceNavigator() {
+  const { t } = useAppLanguage();
   const rootSwap = useContext(WorkspaceRootSwapContext);
   const onPainted = useContext(WorkspacePagePaintedContext);
   const onOpenMenu = useContext(WorkspaceMenuContext);
@@ -367,22 +370,22 @@ function WorkspaceNavigator() {
       <ContentStack.Screen
         name="AssistantDetails"
         component={AssistantDetailsScreen}
-        options={{ title: "Chat details" }}
+        options={{ title: t("Chat details") }}
       />
       <ContentStack.Screen
         name="AssistantTitleEdit"
         component={AssistantTitleEditScreen}
-        options={{ title: "Title" }}
+        options={{ title: t("Title") }}
       />
       <ContentStack.Screen
         name="AssistantHistory"
         component={WorkspaceRecentsScreen}
-        options={{ title: "Chat history" }}
+        options={{ title: t("Chat history") }}
       />
       <ContentStack.Screen
         name="AssistantWorkingContext"
         component={AssistantWorkingContextScreen}
-        options={{ title: "Working context" }}
+        options={{ title: t("Working context") }}
       />
       <ContentStack.Group
         screenOptions={{
@@ -393,53 +396,53 @@ function WorkspaceNavigator() {
         <ContentStack.Screen
           name="Automations"
           component={AutomationsScreen}
-          options={{ title: "Automations" }}
+          options={{ title: t("Automations") }}
         />
         <ContentStack.Screen
           name="Agents"
           component={AgentsRoute}
-          options={{ title: "Agents & Crews" }}
+          options={{ title: t("Agents & Crews") }}
         />
         <ContentStack.Screen
           name="Plugins"
           component={PluginsRoute}
-          options={{ title: "Plugins" }}
+          options={{ title: t("Plugins") }}
         />
         <ContentStack.Screen
           name="Services"
           component={ServicesScreen}
-          options={{ title: "Services" }}
+          options={{ title: t("Services") }}
         />
         <ContentStack.Screen
           name="Machines"
           component={MachinesScreen}
-          options={{ title: "Machines" }}
+          options={{ title: t("Machines") }}
         />
         <ContentStack.Screen
           name="Activity"
           component={ActivityScreen}
-          options={{ title: "Activity" }}
+          options={{ title: t("Activity") }}
         />
         <ContentStack.Screen
           name="WorkspaceSearch"
           component={WorkspaceSearchScreen}
-          options={{ title: "Search" }}
+          options={{ title: t("Search") }}
         />
         <ContentStack.Screen
           name="WorkspaceRecents"
           component={WorkspaceRecentsScreen}
-          options={{ title: "Recents" }}
+          options={{ title: t("Recents") }}
         />
       </ContentStack.Group>
       <ContentStack.Screen
         name="AgentCreate"
         component={AgentCreateRoute}
-        options={{ title: "New agent" }}
+        options={{ title: t("New agent") }}
       />
       <ContentStack.Screen
         name="AgentDetail"
         component={AgentDetailRoute}
-        options={{ title: "Agent" }}
+        options={{ title: t("Agent") }}
       />
       <ContentStack.Screen
         name="AgentProfileEdit"
@@ -452,7 +455,7 @@ function WorkspaceNavigator() {
         name="GroupEditor"
         component={GroupEditorRoute}
         options={({ route }) => ({
-          title: route.params?.groupId ? "Crew settings" : "New crew",
+          title: route.params?.groupId ? t("Crew settings") : t("New crew"),
         })}
       />
       <ContentStack.Screen
@@ -460,24 +463,24 @@ function WorkspaceNavigator() {
         component={ServiceSetupRoute}
         options={({ route }) => ({
           title: route.params.catalogSlug
-            ? "Connect service"
-            : "Manage connection",
+            ? t("Connect service")
+            : t("Manage connection"),
         })}
       />
       <ContentStack.Screen
         name="MachineDetail"
         component={MachinesScreen}
-        options={{ title: "Machine" }}
+        options={{ title: t("Machine") }}
       />
       <ContentStack.Screen
         name="AgentMachineEditor"
         component={AgentMachinesScreen}
-        options={{ title: "Machine access" }}
+        options={{ title: t("Machine access") }}
       />
       <ContentStack.Screen
         name="PluginConnections"
         component={PluginConnectionsRoute}
-        options={{ title: "Connections" }}
+        options={{ title: t("Connections") }}
       />
       <ContentStack.Screen
         name="ConnectionHistoryDetail"
@@ -487,13 +490,13 @@ function WorkspaceNavigator() {
       <ContentStack.Screen
         name="ActiveGrants"
         component={ActivityScreen}
-        options={{ title: "Active grants" }}
+        options={{ title: t("Active grants") }}
       />
       <ContentStack.Screen
         name="MachinePolicy"
         component={MachinePolicyScreen}
         options={{
-          title: "Owner policy and updates",
+          title: t("Owner policy and updates"),
           header: WorkspacePageHeader,
         }}
       />
@@ -501,37 +504,37 @@ function WorkspaceNavigator() {
         name="MachineActivity"
         component={MachineActivityScreen}
         options={{
-          title: "Machine activity",
+          title: t("Machine activity"),
           header: WorkspacePageHeader,
         }}
       />
       <ContentStack.Screen
         name="MachineActivityFilter"
         component={MachineActivityFilterScreen}
-        options={{ title: "Agent", header: WorkspacePageHeader }}
+        options={{ title: t("Agent"), header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="MachineActivityDetail"
         component={MachineActivityDetailScreen}
-        options={{ title: "Activity", header: WorkspacePageHeader }}
+        options={{ title: t("Activity"), header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="MachineSavedLogin"
         component={SavedLoginScreen}
-        options={{ title: "Saved login", header: WorkspacePageHeader }}
+        options={{ title: t("Saved login"), header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="AgentMachines"
         component={AgentMachinesScreen}
         options={{
-          title: "Agent machine access",
+          title: t("Agent machine access"),
           header: WorkspacePageHeader,
         }}
       />
       <ContentStack.Screen
         name="AgentSkills"
         component={AgentSkillsRoute}
-        options={{ title: "Agent skills" }}
+        options={{ title: t("Agent skills") }}
       />
       <ContentStack.Screen
         name="SkillDetail"
@@ -541,42 +544,42 @@ function WorkspaceNavigator() {
       <ContentStack.Screen
         name="SkillVersions"
         component={PluginSkillPage}
-        options={{ title: "Skill versions" }}
+        options={{ title: t("Skill versions") }}
       />
       <ContentStack.Screen
         name="SkillHistory"
         component={PluginSkillPage}
-        options={{ title: "Skill history" }}
+        options={{ title: t("Skill history") }}
       />
       <ContentStack.Screen
         name="AuthoredSkillReview"
         component={AuthoredSkillPage}
-        options={{ title: "Review skill draft" }}
+        options={{ title: t("Review skill draft") }}
       />
       <ContentStack.Screen
         name="AutomationDetail"
         component={AutomationDetailScreen}
-        options={{ title: "Automation" }}
+        options={{ title: t("Automation") }}
       />
       <ContentStack.Screen
         name="AutomationRuns"
         component={AutomationRunsScreen}
-        options={{ title: "Run history" }}
+        options={{ title: t("Run history") }}
       />
       <ContentStack.Screen
         name="AutomationRunDetail"
         component={AutomationRunDetailScreen}
-        options={{ title: "Run" }}
+        options={{ title: t("Run") }}
       />
       <ContentStack.Screen
         name="AutomationAgentFilter"
         component={AutomationAgentFilterScreen}
-        options={{ title: "Agent" }}
+        options={{ title: t("Agent") }}
       />
       <ContentStack.Screen
         name="ActivityDetail"
         component={ActivityDetailScreen}
-        options={{ title: "Approval detail" }}
+        options={{ title: t("Approval detail") }}
       />
     </ContentStack.Navigator>
   );
@@ -586,6 +589,7 @@ function SettingsSheetRoute({
   navigation,
   route,
 }: NativeStackScreenProps<RootStackParamList, "WorkspaceSheet">) {
+  const { t } = useAppLanguage();
   // The route renders outside SheetThemeProvider, so header colors read the drawer palette directly.
   const { mode } = useTheme();
   const colors = mode === "light" ? lightSheetColors : darkSheetColors;
@@ -706,40 +710,45 @@ function SettingsSheetRoute({
           <SheetStack.Screen
             name="AccountSettings"
             component={AccountSettingsScreen}
-            options={{ title: "Settings" }}
+            options={{ title: t("Settings") }}
           />
           <SheetStack.Screen
             name="UsageCredits"
             component={UsageCreditsScreen}
             options={{
-              title: "Usage & credits",
+              title: t("Usage & credits"),
               header: WorkspaceDrawerHeader,
             }}
           />
           <SheetStack.Screen
             name="AccountSecurity"
             component={AccountSecurityScreen}
-            options={{ title: "Account & security" }}
+            options={{ title: t("Account & security") }}
           />
           <SheetStack.Screen
             name="NotificationSettings"
             component={NotificationSettingsScreen}
-            options={{ title: "Notifications" }}
+            options={{ title: t("Notifications") }}
           />
           <SheetStack.Screen
             name="DisplaySettings"
             component={DisplaySettingsScreen}
-            options={{ title: "Display" }}
+            options={{ title: t("Display") }}
+          />
+          <SheetStack.Screen
+            name="LanguageSettings"
+            component={LanguageSettingsScreen}
+            options={{ title: t("Language") }}
           />
           <SheetStack.Screen
             name="VoiceSettings"
             component={VoiceSettingsScreen}
-            options={{ title: "Voice" }}
+            options={{ title: t("Voice") }}
           />
           <SheetStack.Screen
             name="PrivacySettings"
             component={PrivacySettingsScreen}
-            options={{ title: "Privacy" }}
+            options={{ title: t("Privacy") }}
           />
           <SheetStack.Screen
             name="ProfileEdit"
@@ -751,34 +760,38 @@ function SettingsSheetRoute({
           <SheetStack.Screen
             name="SessionDetail"
             component={SessionDetailScreen}
-            options={{ title: "Session" }}
+            options={{ title: t("Session") }}
           />
           <SheetStack.Screen
             name="ChatLayoutEdit"
             component={ChatLayoutEditScreen}
-            options={({ route }) => ({ title: chatLayoutTitle(route.params.key) })}
+            options={({ route }) => ({
+              title: chatLayoutTitle(route.params.key),
+            })}
           />
           <SheetStack.Screen
             name="TermsOfService"
             component={TermsOfServiceScreen}
-            options={{ title: "Terms of Service" }}
+            options={{ title: t("Terms of Service") }}
           />
           <SheetStack.Screen
             name="PrivacyPolicy"
             component={PrivacyPolicyScreen}
-            options={{ title: "Privacy Policy" }}
+            options={{ title: t("Privacy Policy") }}
           />
           <SheetStack.Screen
             name="DeviceLogin"
             component={DeviceLoginScreen}
-            options={{ title: "Scan QR Code" }}
+            options={{ title: t("Scan QR Code") }}
           />
           <SheetStack.Screen
             name="AgentKeyLogin"
             component={AgentKeyLoginScreen}
             // Minting a terminal code says so, matching the drawer row.
             options={({ route }) => ({
-              title: route.params?.mint ? "Terminal Login Code" : "Agent Key Login",
+              title: route.params?.mint
+                ? t("Terminal Login Code")
+                : t("Agent Key Login"),
             })}
           />
         </SheetStack.Navigator>
@@ -823,13 +836,14 @@ export function AppNavigator({
   suppressWorkspaceAnimation?: boolean;
   renderWorkspace: (children: React.ReactNode) => React.ReactElement;
 }) {
+  const { t } = useAppLanguage();
   const { isAuthenticated, isRestoring } = useAuthSession();
   const reducedMotion = useReducedMotion();
   const { colors } = useTheme();
   if (isRestoring)
     return (
       <FullScreenLoading
-        title="Signing you in…"
+        title={t("Signing you in…")}
         subtitle="Restoring your secure session"
       />
     );
@@ -899,7 +913,7 @@ export function AppNavigator({
                         name="Auth"
                         navigationKey="auth"
                         component={AuthHomeScreen}
-                        options={{ title: "NyxID Sign In" }}
+                        options={{ title: t("NyxID Sign In") }}
                       />
                     )}
                     <Stack.Group
@@ -914,7 +928,7 @@ export function AppNavigator({
                             ? SheetEntryRoute
                             : TermsOfServiceScreen
                         }
-                        options={{ title: "Terms of Service" }}
+                        options={{ title: t("Terms of Service") }}
                       />
                       <Stack.Screen
                         name="PrivacyPolicy"
@@ -923,14 +937,14 @@ export function AppNavigator({
                             ? SheetEntryRoute
                             : PrivacyPolicyScreen
                         }
-                        options={{ title: "Privacy Policy" }}
+                        options={{ title: t("Privacy Policy") }}
                       />
                       <Stack.Screen
                         name="DeviceLogin"
                         component={
                           isAuthenticated ? SheetEntryRoute : DeviceLoginScreen
                         }
-                        options={{ title: "Approve Device Login" }}
+                        options={{ title: t("Approve Device Login") }}
                       />
                       <Stack.Screen
                         name="AgentKeyLogin"
@@ -939,7 +953,7 @@ export function AppNavigator({
                             ? SheetEntryRoute
                             : AgentKeyLoginScreen
                         }
-                        options={{ title: "Agent Key Login" }}
+                        options={{ title: t("Agent Key Login") }}
                       />
                     </Stack.Group>
                   </Stack.Navigator>

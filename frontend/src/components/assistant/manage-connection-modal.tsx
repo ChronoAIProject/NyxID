@@ -1,3 +1,7 @@
+import { CredentialCheck } from "./credential-check";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -109,12 +113,14 @@ function DetailRow({
   readonly label: string;
   readonly children: React.ReactNode;
 }) {
+  useUiTranslation();
   return <GroupedRow title={label} accessory={children} />;
 }
 
 /** Inline credential replacement — the one rotation path a plugin user needs,
  *  kept in this modal so managing a connection never leaves it. */
 function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [credential, setCredential] = useState("");
   const updateApiKey = useUpdateExternalApiKey();
@@ -126,15 +132,15 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
       { keyId: apiKeyId, credential: next },
       {
         onSuccess: () => {
-          toast.success("Credential replaced");
+          toast.success(translateUi("Credential replaced"));
           setCredential("");
           setOpen(false);
         },
         onError: (error) =>
           toast.error(
-            error instanceof ApiError
+            translateErrorMessage(error instanceof ApiError
               ? error.message
-              : "Could not replace the credential.",
+              : "Could not replace the credential."),
           ),
       },
     );
@@ -142,21 +148,17 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
 
   if (!open)
     return (
-      <GroupedList footer="Paste a new secret to replace the stored one.">
+      <GroupedList footer={translateUi("Paste a new secret to replace the stored one.")}>
         <GroupedRow asChild interactive>
-          <button type="button" onClick={() => setOpen(true)}>
-            Replace
-          </button>
+          <button type="button" onClick={() => setOpen(true)}>{translateUi("Replace")}</button>
         </GroupedRow>
       </GroupedList>
     );
   return (
     <div>
-      <GroupedList title="Replace credential">
+      <GroupedList title={translateUi("Replace credential")}>
         <GroupedRow>
-          <Label className="w-full text-text-tertiary">
-            New credential
-            <GroupedInput
+          <Label className="w-full text-text-tertiary">{translateUi("New credential")}<GroupedInput
               type="password"
               autoFocus
               value={credential}
@@ -167,13 +169,13 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
                   submit();
                 }
               }}
-              placeholder="New credential"
+              placeholder={translateUi("New credential")}
             />
           </Label>
         </GroupedRow>
         {!credential && (
           <GroupedRow asChild interactive>
-            <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+            <button type="button" onClick={() => setOpen(false)}>{translateUi("Cancel")}</button>
           </GroupedRow>
         )}
       </GroupedList>
@@ -188,9 +190,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
               setCredential("");
               setOpen(false);
             }}
-          >
-            Cancel
-          </Button>
+          >{translateUi("Cancel")}</Button>
           <Button
             type="button"
             variant="primary"
@@ -198,9 +198,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
             disabled={!credential.trim()}
             isLoading={updateApiKey.isPending}
             onClick={submit}
-          >
-            Save
-          </Button>
+          >{translateUi("Save")}</Button>
         </GroupedSaveBar>
       )}
     </div>
@@ -222,6 +220,7 @@ function ConnectionPanel({
   readonly showLabel: boolean;
   readonly onRevoked: () => void;
 }) {
+  useUiTranslation();
   const { data: key, isLoading, error, refetch } = useKey(keyId);
   const { data: catalogEntry } = useCatalogEntry(
     key?.catalog_service_slug ?? null,
@@ -240,9 +239,9 @@ function ConnectionPanel({
       {
         onSuccess: () =>
           toast.success(
-            nextActive ? "Connection enabled" : "Connection disabled",
+            translateUi(nextActive ? "Connection enabled" : "Connection disabled"),
           ),
-        onError: () => toast.error("Could not update the connection."),
+        onError: () => toast.error(translateErrorMessage("Could not update the connection.")),
       },
     );
   }
@@ -256,9 +255,9 @@ function ConnectionPanel({
     deleteKey.mutate(input, {
       onSuccess: (response) => {
         toast.success(
-          response?.upstream_revocation_scheduled === true
+          translateUi(response?.upstream_revocation_scheduled === true
             ? "Removed from NyxID. Upstream revocation scheduled."
-            : "Removed from NyxID. Upstream revocation is not confirmed.",
+            : "Removed from NyxID. Upstream revocation is not confirmed."),
         );
         setCascadeDetails(null);
         // A service with other connections keeps the modal open on what's
@@ -277,7 +276,7 @@ function ConnectionPanel({
           setConfirmingRevoke(false);
           return;
         }
-        toast.error("Could not delete the connection.");
+        toast.error(translateErrorMessage("Could not delete the connection."));
       },
     });
   }
@@ -293,24 +292,20 @@ function ConnectionPanel({
   if (error || !key) {
     return (
       <div className="flex h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-14 text-muted-foreground">
-          Couldn't load this connection.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("Couldn't load this connection.")}</p>
         <Button
           type="button"
           variant="outline"
           size="sm"
           onClick={() => void refetch()}
-        >
-          Try again
-        </Button>
+        >{translateUi("Try again")}</Button>
       </div>
     );
   }
 
   const grantedScopes = key.granted_scopes ?? null;
   const modifiable = canModifyKey(key);
-  const statusMeta = credentialStatusMeta(key.status);
+  const statusMeta = credentialStatusMeta(key.status, key);
   const revokesGrant =
     key.revocation?.revokes_grant ??
     catalogEntry?.revocation?.revokes_grant ??
@@ -327,10 +322,7 @@ function ConnectionPanel({
           footer={
             <>
               {key.credential_missing ? (
-                <p className="text-warning">
-                  The stored credential is missing. Reconnect or delete this
-                  service.
-                </p>
+                <p className="text-warning">{translateUi("The stored credential is missing. Reconnect or delete this service.")}</p>
               ) : isProblemStatus(key.status) ? (
                 <>
                   <p
@@ -340,7 +332,7 @@ function ConnectionPanel({
                         : "text-warning"
                     }
                   >
-                    {statusMeta.tooltip}
+                    {translateUi(statusMeta.tooltip)}
                   </p>
                   {key.error_message ? (
                     <p className="break-words">{key.error_message}</p>
@@ -348,29 +340,26 @@ function ConnectionPanel({
                 </>
               ) : null}
               {modifiable ? (
-                <p>
-                  Disable to stop the assistant using this connection. Your
-                  credential is kept — you can enable it again any time.
-                </p>
+                <p>{translateUi("Disable to stop the assistant using this connection. Your credential is kept — you can enable it again any time.")}</p>
               ) : (
                 <p>{readOnlyReason(key)}</p>
               )}
             </>
           }
         >
-          <DetailRow label="Status">{statusMeta.label}</DetailRow>
-          <DetailRow label="Credential">
+          <DetailRow label={translateUi("Status")}>{translateUi(statusMeta.label)}</DetailRow>
+          <DetailRow label={translateUi("Credential")}>
             {key.credential_missing
-              ? "Missing - reconnect or delete"
+              ? translateUi("Missing - reconnect or delete")
               : key.credential_type.replaceAll("_", " ")}
           </DetailRow>
           {grantedScopes && grantedScopes.length > 0 ? (
-            <DetailRow label="Scopes">
+            <DetailRow label={translateUi("Scopes")}>
               <span className="break-words">{grantedScopes.join(" · ")}</span>
             </DetailRow>
           ) : null}
           {key.proxy_url ? (
-            <DetailRow label="Proxy URL">
+            <DetailRow label={translateUi("Proxy URL")}>
               <span className="inline-flex max-w-full items-start gap-2">
                 <span className="min-w-0 break-all text-right text-13">
                   {key.proxy_url}
@@ -378,10 +367,10 @@ function ConnectionPanel({
                 <button
                   type="button"
                   data-icon-button=""
-                  aria-label="Copy proxy URL"
+                  aria-label={translateUi("Copy proxy URL")}
                   onClick={() => {
                     void navigator.clipboard?.writeText(key.proxy_url ?? "");
-                    toast.success("Proxy URL copied");
+                    toast.success(translateUi("Proxy URL copied"));
                   }}
                   className="text-text-tertiary hover:text-foreground"
                 >
@@ -390,12 +379,12 @@ function ConnectionPanel({
               </span>
             </DetailRow>
           ) : null}
-          <DetailRow label="Last used">
-            {key.last_used_at ? formatDate(key.last_used_at) : "Never"}
+          <DetailRow label={translateUi("Last used")}>
+            {key.last_used_at ? formatDate(key.last_used_at) : translateUi("Never")}
           </DetailRow>
           {modifiable ? (
             <GroupedRow
-              title="Enabled"
+              title={translateUi("Enabled")}
               accessory={
                 <Switch
                   checked={key.is_active}
@@ -404,7 +393,7 @@ function ConnectionPanel({
                     (Boolean(key.credential_missing) && !key.is_active)
                   }
                   onCheckedChange={toggleActive}
-                  aria-label="Toggle connection enabled"
+                  aria-label={translateUi("Toggle connection enabled")}
                 />
               }
             />
@@ -413,19 +402,20 @@ function ConnectionPanel({
             <GroupedRow asChild interactive>
               <button type="button" onClick={() => setReconnectOpen(true)}>
                 {key.credential_missing
-                  ? "Reconnect"
+                  ? translateUi("Reconnect")
                   : reconnectLabel(key.status)}
               </button>
             </GroupedRow>
           ) : null}
         </GroupedList>
+        <CredentialCheck connection={key} canManage={modifiable} />
         {modifiable && canReplaceCredential(key) && !key.credential_missing ? (
           <ReplaceCredential apiKeyId={key.api_key_id as string} />
         ) : null}
         <GroupedList>
           <GroupedRow asChild interactive>
             <Link to="/keys/$keyId" params={{ keyId: key.id }}>
-              <span className="flex-1">Advanced settings</span>
+              <span className="flex-1">{translateUi("Advanced settings")}</span>
               <ExternalLink
                 aria-hidden
                 className="size-[1.125em] text-text-tertiary"
@@ -437,9 +427,7 @@ function ConnectionPanel({
               <button
                 type="button"
                 onClick={() => setConfirmingRevoke(true)}
-              >
-                Delete
-              </button>
+              >{translateUi("Delete")}</button>
             </GroupedRow>
           ) : null}
         </GroupedList>
@@ -500,6 +488,7 @@ export function ManageConnectionModal({
   readonly iconUrl?: string | null;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const multiple = keyIds.length > 1;
 
   return (
@@ -517,13 +506,10 @@ export function ManageConnectionModal({
             <span className="min-w-0 truncate">{serviceName}</span>
             {multiple && (
               <span className="type-secondary text-text-tertiary">
-                {keyIds.length} connections
-              </span>
+                {keyIds.length}{translateUi(" connections")}</span>
             )}
           </DialogTitle>
-          <DialogDescription className="sr-only">
-            Manage the credentials this service is connected with.
-          </DialogDescription>
+          <DialogDescription className="sr-only">{translateUi("Manage the credentials this service is connected with.")}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-6 pb-5 md:pb-0">

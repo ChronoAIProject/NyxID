@@ -1,0 +1,9 @@
+We are resubmitting NyxID version 1.0.4, build 58, with updated App Store text and screenshots that reflect the current app.
+
+NyxID includes AI conversations, live voice, connected services, agents, approvals, and account controls. This update refines the iPhone voice layout, improves native loudspeaker routing and call recovery, and adds language settings for supported native screens. It also includes adaptive iPad layouts.
+
+Account deletion is available under Settings → Delete Account. The app explains the consequences before confirmation and signs out after the deletion request is accepted. Cleanup may continue afterward under the published retention policy.
+
+Microphone and speech-recognition permissions support user-initiated voice and dictation. Camera and photo permissions support QR scanning and attachments. Completed assistant responses provide a Report control. Support is available under Settings → Contact support.
+
+The App Review notes provide the feature-review flow and account-deletion instructions.

@@ -74,6 +74,7 @@ pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
 pub mod channel_delivery_service;
 pub mod channel_event_service;
+pub(crate) mod channel_inbound_diagnostics;
 pub mod channel_inbound_service;
 pub mod channel_managed;
 pub mod channel_media_authority;
@@ -113,6 +114,7 @@ pub mod content_type;
 pub mod coordination_service;
 pub mod credential_push_service;
 pub(crate) mod credential_record_service;
+pub mod credential_verification;
 pub mod delegation_service;
 pub mod destination_routing;
 pub mod developer_webhook_service;
@@ -315,6 +317,7 @@ pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
 pub mod assistant_nyxagent_runtime;
+pub mod assistant_onboarding_connect;
 pub mod assistant_onboarding_service;
 pub mod assistant_platform_model;
 pub mod assistant_platform_reply_decision;
@@ -572,6 +575,7 @@ pub mod cma_session_origin;
 pub mod org_channel_service;
 
 pub mod generated_artifacts;
+pub(crate) mod invocation_diagnostic_service;
 
 pub mod platform_model_execution;
 pub mod platform_model_service;
@@ -581,3 +585,6 @@ pub(crate) mod execution_permission_channel;
 pub mod assistant_activity_decision;
 pub mod lark_wiki;
 pub mod platform_model_credentials;
+
+pub mod assistant_tool_result_service;
+pub(crate) mod catalog_endpoint_service;

@@ -1,3 +1,5 @@
+import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
+import { historyErrorMessage, HISTORY_UNSUPPORTED, HISTORY_UNAVAILABLE } from "./assistantHistoryCompat";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -109,7 +111,8 @@ export function useAssistant(
     queryKey: ["workspace", "agents", "list"],
     queryFn: ({ signal }) => agentsApi.list(signal),
     enabled: active,
-    retry: false,
+    retry: (count, error) => activeRef.current && retryAgentRead(count, error),
+    retryDelay: agentReadRetryDelay,
     staleTime: 15_000,
   });
   const agentId = resolveChatAgentId(
@@ -779,7 +782,7 @@ export function useAssistant(
     loadingIndex,
     deciding,
     mutating,
-    error: error ?? interruptionError,
+    error: error ?? interruptionError ?? (history?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
     online,
     recoveryRequired,
     interrupted:
@@ -806,11 +809,13 @@ export function useAssistant(
 }
 
 function errorMessage(cause: unknown): string {
+  if (cause && typeof cause === "object" && "name" in cause && cause.name === "ZodError")
+    return HISTORY_UNAVAILABLE;
   if (cause instanceof ApiError && cause.errorKey === "turn_active")
     return "The assistant is already working on this chat. Refresh its history.";
   if (cause instanceof ApiError && cause.statusCode === 404)
     return "This chat is unavailable, or Assistant is not enabled for your account.";
   return cause instanceof Error
-    ? cause.message
+    ? historyErrorMessage(cause)!
     : "Could not reach the assistant. Try again.";
 }

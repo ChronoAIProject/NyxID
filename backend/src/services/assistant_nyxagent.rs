@@ -437,7 +437,7 @@ pub fn base_prompt(
     prompt.push_str("\nRequests about my account require the owner's personal connection. Never present an organization's account or data as the owner's. If only an organization connection exists, offer nyx__connect_service for their own account first. When the owner asks to connect a service, call nyx__connect_service immediately, even if connections already exist. Give its hosted link immediately and mention existing connections in one short line (ownership, label, enabled/disabled; never guess the provider account identity). Never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link (/keys or Plugins). Honor one-step success. For already_connected, say the service is already connected in one short line: there is no separate account to add. Explain connect_unavailable reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot connect the service, sending a hosted link when supported, followed by a separate specialist grant; no automatic takeover.");
     prompt.push_str(TASK_COMPLETION_PROMPT);
     if row.role == AgentRole::Orchestrator && !row.guest_turn {
-        prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
+        prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot. Keep unanswered onboarding questions pending across setup links and resumes. Creating or linking a bot is not customer readiness or consent to open access. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Model readiness alone and field presence do not prove this. An explicit owner choice can open access now; disclose audience_readiness facts and unresolved questions without another confirmation.");
     }
     prompt.push_str(WEB_RESEARCH_PROMPT);
     prompt.push_str(CLI_PROMPT);
@@ -690,6 +690,8 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    /// Validated first-party UI language; not forwarded to NyxAgent.
+    pub title_language: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) automation_parent: Option<super::trigger_schedule::direct::Parent>,
     /// Copied from a verified person's already-loaded enrollment. Not a client field.
@@ -868,6 +870,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
@@ -918,6 +921,11 @@ pub fn events_text(events: &[AgentEvent]) -> String {
             "NyxID events (authored by NyxID; only a quoted owner message is a request from the user; continuation lines are indented):"
         },
     );
+    if let Some(notice) = super::execution_permission_dispatch::proposals::delivery_notice(events) {
+        text.push_str("\n- ");
+        text.push_str(&notice);
+        return text;
+    }
     for event in events {
         text.push_str("\n- ");
         text.push_str(&event_notice_text(event));
@@ -945,7 +953,9 @@ pub(crate) fn event_notice_text(event: &AgentEvent) -> String {
 
 /// Queued owner messages keep more text than status notices.
 pub fn event_text_limit(event: &AgentEvent) -> usize {
-    if matches!(
+    if event.kind == "channel_bot_linked" {
+        4800
+    } else if matches!(
         event.kind.as_str(),
         "message" | "group_settled" | "skill_request_allowed"
     ) {
@@ -1193,6 +1203,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::async_service_operation::ensure_indexes(db).await?;
     super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
+    super::assistant_tool_result_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
     // Retire legacy per-person keys before lifting the unique owner index.
@@ -2229,6 +2240,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            title_language: None,
             automation_v2: false,
             artifact_head: None,
             collaboration: None,
@@ -2308,6 +2320,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         && start.channel.is_none()
     {
         row.title = super::assistant_title_service::provisional(&start.text);
+        row.title_language = start
+            .title_language
+            .as_deref()
+            .and_then(super::assistant_title_service::language);
     }
     if start.group_request_id.is_some() {
         row.group_request_id = start.group_request_id.clone();
@@ -6370,6 +6386,7 @@ pub(crate) async fn delete_in_session(
             super::assistant_service_execution::COLLECTION,
             crate::models::assistant_attachment::COLLECTION_NAME,
             crate::models::assistant_resource::COLLECTION_NAME,
+            crate::models::assistant_tool_result::COLLECTION_NAME,
             crate::models::nyxbot_gateway_response::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,

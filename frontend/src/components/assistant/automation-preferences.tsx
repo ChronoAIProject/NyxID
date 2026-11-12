@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import { ChevronRight } from "lucide-react";
@@ -36,6 +38,7 @@ import {
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "Could not save preferences";
 export function AgentAutomations({ agentId }: { readonly agentId: string }) {
+  useUiTranslation();
   const triggers = useTriggers();
   const settings = useNyxBotSettings();
   const rows =
@@ -43,24 +46,24 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
       (t) => t.delivery.type === "assistant" && t.delivery.agent_id === agentId,
     ) ?? [];
   return (
-    <GroupedList title="Automations">
+    <GroupedList title={translateUi("Automations")}>
       {rows.map((row) => (
         <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: "Overview › Automations", keywords: `${row.source} ${row.status}` }} key={row.id} asChild interactive>
           <Link to="/assistant/automations" search={{ agent: agentId }}>
             <span className="min-w-0 flex-1 break-words">{row.label}</span>
             <span className="text-13 text-text-tertiary">
               {row.status === "active"
-                ? row.source === "webhook" ? "Runs on webhook events" : row.next_run_at
+                ? row.source === "webhook" ? translateUi("Runs on webhook events") : row.next_run_at
                   ? formatAutomationTime(row.next_run_at, settings.data?.timezone ?? browserTimezone())
-                  : "No run scheduled"
-                : "Paused"}
+                  : translateUi("No run scheduled")
+                : translateUi("Paused")}
             </span>
           </Link>
         </GroupedRow>
       ))}
       <GroupedRow search={{ id: "manage-automations", title: `Manage automations (${rows.length})`, breadcrumb: "Overview › Automations" }} asChild interactive>
         <Link to="/assistant/automations" search={{ agent: agentId }}>
-          <span className="flex-1">Manage automations ({rows.length})</span>
+          <span className="flex-1">{translateUi("Manage automations (")}{rows.length})</span>
           <ChevronRight
             aria-hidden
             className="size-[1.125em] shrink-0 text-text-tertiary"
@@ -72,6 +75,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
 }
 
 export function AutomationPreferences({ title = "Automations" }: { readonly title?: string }) {
+  useUiTranslation();
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [open, setOpen] = useState(false);
@@ -89,9 +93,7 @@ export function AutomationPreferences({ title = "Automations" }: { readonly titl
             )
               setOpen(!open);
           }}
-        >
-          Timezone and automation budgets
-        </GroupedDisclosure>
+        >{translateUi("Timezone and automation budgets")}</GroupedDisclosure>
       </GroupedList>
       {open && settings.data && (
         <GroupedDraftOwnerContext value="automation-preferences">
@@ -135,6 +137,7 @@ function AutomationPreferencesForm({
     trigger_runs_per_day: number;
   }) => Promise<void>;
 }) {
+  useUiTranslation();
   const id = useId();
   const form = useAppForm({
     resolver: zodResolver(automationPreferencesSchema),
@@ -158,11 +161,11 @@ function AutomationPreferencesForm({
   return (
     <form className="space-y-6" onSubmit={submit}>
       <GroupedList
-        title="Timezone and automation budgets"
+        title={translateUi("Timezone and automation budgets")}
         footer={
           error && (
             <p role="alert" className="text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           )
         }
@@ -221,7 +224,7 @@ function AutomationPreferencesForm({
       </GroupedList>
       <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "timezone", label: "Timezone" }, { key: "schedule_minimum_minutes", label: "Minimum interval (minutes)" }, { key: "trigger_runs_per_hour", label: "Runs per hour" }, { key: "trigger_runs_per_day", label: "Runs per day" }])}
-        label="automation preferences"
+        label={translateUi("automation preferences")}
         dirty={form.formState.isDirty}
         pending={form.formState.isSubmitting}
         save={submit}
@@ -229,7 +232,7 @@ function AutomationPreferencesForm({
           form.reset();
           setError(undefined);
         }}
-        saveLabel="Save preferences"
+        saveLabel={translateUi("Save preferences")}
       />
     </form>
   );

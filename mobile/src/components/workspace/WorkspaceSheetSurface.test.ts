@@ -88,6 +88,8 @@ function setup(
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
       View: "View",
+      KeyboardAvoidingView: "KeyboardAvoidingView",
+      Platform: { OS: "ios" },
       InteractionManager: {
         runAfterInteractions: (callback: () => void) => {
           callback();
@@ -217,6 +219,13 @@ function setup(
   const gesture = (dy: number, vy = 0, dx = 0): Gesture => ({ dx, dy, vy });
   return {
     panel,
+    layoutViewport: (width: number, height: number) => {
+      const host = all().find(
+        (node) => node.props.testID === "workspace-sheet-viewport",
+      )!;
+      host.props.onLayout({ nativeEvent: { layout: { width, height } } });
+      harness.flush();
+    },
     rotate: (width: number, height: number, top: number) => {
       dimensions = { width, height };
       insetTop = top;
@@ -430,16 +439,18 @@ test("the accessible backdrop delegates dismissal through the same guarded onClo
   assert.equal(env.springs.length, 1);
 });
 
-test("drawer geometry clears the top safe area at small, large, short and wide native sizes", () => {
+test("narrow drawers retain phone geometry and the 44pt handle across split-screen sizes", () => {
   for (const [width, height, top] of [
     [320, 568, 20],
     [390, 844, 47],
     [430, 932, 59],
     [640, 360, 24],
-    [1024, 768, 24],
+    [507, 1024, 24],
+    [744, 1133, 24],
   ]) {
     const env = setup(false, { width: width!, height: height! }, top!);
     assert.equal(env.panel().props.style[1].height, height! - top! - 10);
+    assert.equal(env.panel().props.style[1].width, width);
     const handle = env
       .all()
       .find((node) => node.props.onMoveShouldSetPanResponder);
@@ -448,6 +459,59 @@ test("drawer geometry clears the top safe area at small, large, short and wide n
     assert.equal(env.panel().props.style[0].borderTopLeftRadius, 24);
     env.harness.unmount();
   }
+});
+
+test("iPad portrait and landscape drawers are bounded cards with safe margins and a full backdrop", () => {
+  for (const [width, height] of [
+    [834, 1194],
+    [1194, 834],
+    [1024, 1366],
+  ]) {
+    const env = setup(false, { width: width!, height: height! }, 24);
+    const panel = env.panel().props.style[1];
+    assert.equal(panel.width, 720);
+    assert.equal(panel.height, Math.min(860, height! - 48 - 58));
+    const provider = env
+      .all()
+      .find((node) => node.type === "SafeAreaProvider")!;
+    const frame = provider.props.initialMetrics.frame;
+    assert.equal(frame.x, (width! - 720) / 2);
+    assert.ok(frame.y >= 48);
+    assert.ok(frame.y + frame.height <= height! - 58);
+    assert.deepEqual(
+      { ...provider.props.initialMetrics.insets },
+      {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+      },
+    );
+    assert.equal(env.panel().props.style[2].borderRadius, 24);
+    assert.equal(env.backdrop().props.style.position, "absolute");
+    assert.equal(env.backdrop().props.style.height, undefined);
+    env.harness.unmount();
+  }
+});
+
+test("the keyboard viewport shrinks a wide sheet without remounting its navigator and live resize restores narrow geometry", () => {
+  const env = setup(false, { width: 834, height: 1194 }, 24);
+  const keyboard = env
+    .all()
+    .find((node) => node.type === "KeyboardAvoidingView")!;
+  assert.equal(keyboard.props.behavior, "padding");
+  env.layoutViewport(834, 520);
+  assert.equal(env.panel().props.style[1].height, 414);
+  assert.ok(env.all().includes(env.child));
+  assert.equal(env.timings.length, 2, "keyboard layout never replays entrance");
+  env.layoutViewport(507, 520);
+  assert.equal(env.panel().props.style[1].width, 507);
+  assert.equal(env.panel().props.style[1].height, 486);
+  assert.equal(env.panel().props.style[2], false);
+  env.rotate(507, 1194, 24);
+  assert.equal(env.panel().props.style[1].height, 1160);
+  assert.ok(env.all().includes(env.child));
+  env.harness.unmount();
 });
 test("reduced motion dismisses without travelling or springing and accessibility escape shares the guard", async () => {
   const env = setup(true);
@@ -670,15 +734,24 @@ test("a sheet follows landscape dimensions and safe areas, then dismisses below 
   const x = setup();
   assert.equal(x.panel().props.style[1].height, 787);
   x.rotate(844, 390, 0);
-  assert.equal(x.panel().props.style[1].height, 380);
+  assert.equal(x.panel().props.style[1].height, 308);
   let provider = x.all().find((node) => node.type === "SafeAreaProvider")!;
-  assert.deepEqual({ ...provider.props.initialMetrics.frame }, { x: 0, y: 10, width: 844, height: 380 });
+  assert.deepEqual(
+    { ...provider.props.initialMetrics.frame },
+    { x: 62, y: 24, width: 720, height: 308 },
+  );
   assert.equal(x.offset().value, 0);
   x.rotate(390, 844, 47);
   assert.equal(x.panel().props.style[1].height, 787);
   provider = x.all().find((node) => node.type === "SafeAreaProvider")!;
-  assert.deepEqual({ ...provider.props.initialMetrics.frame }, { x: 0, y: 57, width: 390, height: 787 });
-  assert.ok(x.all().includes(x.child), "rotation keeps the sheet's navigator mounted");
+  assert.deepEqual(
+    { ...provider.props.initialMetrics.frame },
+    { x: 0, y: 57, width: 390, height: 787 },
+  );
+  assert.ok(
+    x.all().includes(x.child),
+    "rotation keeps the sheet's navigator mounted",
+  );
   x.controller.current!.dismiss();
   await x.harness.settle();
   assert.equal(x.timings.at(-1)?.to, 844);

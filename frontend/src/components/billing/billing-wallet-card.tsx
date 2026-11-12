@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { formatRelativeTime } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import { Label } from "@/components/ui/label";
@@ -60,9 +63,10 @@ export function BillingWalletActions({
   topUpOpen,
   onTopUpOpenChange,
 }: BillingWalletActionsProps) {
+  useUiTranslation();
   if (loading)
     return (
-      <Skeleton aria-label="Loading wallet actions" className="h-8 w-28" />
+      <Skeleton aria-label={translateUi("Loading wallet actions")} className="h-8 w-28" />
     );
   if (
     error &&
@@ -86,26 +90,19 @@ export function BillingWalletActions({
       >
         <ButtonIcon variant="primary">
           <Plus className="h-3 w-3" />
-        </ButtonIcon>
-        Provision Wallet
-      </Button>
+        </ButtonIcon>{translateUi("Provision Wallet")}</Button>
     );
   if (!wallet) return null;
   if (needsSubscription)
     return (
       <div className="max-w-sm space-y-2">
-        <p role="status" className="type-secondary text-muted-foreground">
-          Finish setting up the organization subscription before adding credits
-          or enabling guests.
-        </p>
+        <p role="status" className="type-secondary text-muted-foreground">{translateUi("Finish setting up the organization subscription before adding credits or enabling guests.")}</p>
         <Button
           variant="primary"
           onClick={onProvision}
           disabled={!billingReady || provisioning}
           isLoading={provisioning}
-        >
-          Finish wallet setup
-        </Button>
+        >{translateUi("Finish wallet setup")}</Button>
       </div>
     );
   return (
@@ -124,37 +121,34 @@ export function BillingWalletBreakdown({
 }: {
   wallet: BillingWalletResponse;
 }) {
+  useUiTranslation();
   return (
-    <section aria-label="Wallet breakdown">
-      <h3 className="type-secondary-strong">Wallet</h3>
-      <p className="mt-1 type-secondary text-muted-foreground">
-        Updated {formatRelativeTime(wallet.balance_synced_at)}
+    <section aria-label={translateUi("Wallet breakdown")}>
+      <h3 className="type-secondary-strong">{translateUi("Wallet")}</h3>
+      <p className="mt-1 type-secondary text-muted-foreground">{translateUi("Updated ")}{formatRelativeTime(wallet.balance_synced_at)}
       </p>
       <div className="my-3">
         <BreakdownRow
-          label="Available"
-          hint="Wallet credits available now"
+          label={translateUi("Available")}
+          hint={translateUi("Wallet credits available now")}
           value={formatCredits(wallet.available ?? wallet.available_credits)}
         />
       </div>
-      <p className="type-secondary text-muted-foreground">
-        Not all of your balance is spendable at any moment — requests in flight
-        hold credits until they finish.
-      </p>
+      <p className="type-secondary text-muted-foreground">{translateUi("Not all of your balance is spendable at any moment — requests in flight hold credits until they finish.")}</p>
       <div className="mt-3 space-y-1.5">
         <BreakdownRow
-          label="Balance"
-          hint="Last provider-synced balance"
+          label={translateUi("Balance")}
+          hint={translateUi("Last provider-synced balance")}
           value={formatCredits(wallet.balance ?? wallet.balance_credits)}
         />
         <BreakdownRow
-          label="Reserved"
-          hint="Held for requests in flight"
+          label={translateUi("Reserved")}
+          hint={translateUi("Held for requests in flight")}
           value={formatCredits(wallet.reserved ?? wallet.reserved_credits)}
         />
         <BreakdownRow
-          label="Pending"
-          hint="Charged, awaiting provider sync"
+          label={translateUi("Pending")}
+          hint={translateUi("Charged, awaiting provider sync")}
           value={formatCredits(
             wallet.pending_debits ?? wallet.pending_lago_debits,
           )}
@@ -163,8 +157,8 @@ export function BillingWalletBreakdown({
           wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
         ) && (
           <BreakdownRow
-            label="Expiring"
-            hint="Held while expired purchases are removed"
+            label={translateUi("Expiring")}
+            hint={translateUi("Held while expired purchases are removed")}
             value={formatCredits(
               wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
             )}
@@ -172,8 +166,8 @@ export function BillingWalletBreakdown({
         )}
         {hasCredits(wallet.overdraft_cap ?? wallet.overdraft_cap_credits) && (
           <BreakdownRow
-            label="Overdraft"
-            hint="Extra capacity beyond your balance"
+            label={translateUi("Overdraft")}
+            hint={translateUi("Extra capacity beyond your balance")}
             value={formatCredits(
               wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
             )}
@@ -182,12 +176,10 @@ export function BillingWalletBreakdown({
       </div>
       <hr className="my-3 border-border" />
       <div className="flex items-center justify-between type-secondary text-muted-foreground">
-        <span>Plan</span>
+        <span>{translateUi("Plan")}</span>
         <span className="text-foreground">{labelize(wallet.plan_kind)}</span>
       </div>
-      <p className="mt-2 type-secondary text-muted-foreground">
-        Available = Balance - Reserved - Pending - Expiring.
-      </p>
+      <p className="mt-2 type-secondary text-muted-foreground">{translateUi("Available = Balance - Reserved - Pending - Expiring.")}</p>
     </section>
   );
 }
@@ -205,6 +197,7 @@ function AddCreditsDialog({
   readonly open?: boolean;
   readonly onOpenChange?: (open: boolean) => void;
 }) {
+  useUiTranslation();
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
   const setOpen = (next: boolean) => {
@@ -219,9 +212,7 @@ function AddCreditsDialog({
     <Button variant="primary" disabled={!billingReady || pending}>
       <ButtonIcon variant="primary">
         <Plus className="h-3 w-3" />
-      </ButtonIcon>
-      Add credits
-    </Button>
+      </ButtonIcon>{translateUi("Add credits")}</Button>
   );
 
   if (!billingReady) {
@@ -230,9 +221,7 @@ function AddCreditsDialog({
         <TooltipTrigger asChild>
           <span tabIndex={0}>{trigger}</span>
         </TooltipTrigger>
-        <TooltipContent side="left">
-          Payments aren&apos;t enabled on this deployment yet.
-        </TooltipContent>
+        <TooltipContent side="left">{translateUi("Payments aren't enabled on this deployment yet.")}</TooltipContent>
       </Tooltip>
     );
   }
@@ -242,14 +231,12 @@ function AddCreditsDialog({
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
-          <DialogTitle>Add credits</DialogTitle>
-          <DialogDescription>
-            1 credit = 1 USD. Purchased credits expire one year after payment.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Add credits")}</DialogTitle>
+          <DialogDescription>{translateUi("1 credit = 1 USD. Purchased credits expire one year after payment.")}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <span className="type-row-title">Amount</span>
+            <span className="type-row-title">{translateUi("Amount")}</span>
             <div className="flex flex-wrap gap-2">
               {TOP_UP_PRESETS.map((preset) => (
                 <Button
@@ -265,7 +252,7 @@ function AddCreditsDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="topup-credits">Or enter an amount</Label>
+            <Label htmlFor="topup-credits">{translateUi("Or enter an amount")}</Label>
             <div className="flex items-center gap-3">
               <Input
                 id="topup-credits"
@@ -286,15 +273,10 @@ function AddCreditsDialog({
               </span>
             </div>
           </div>
-          <p className="type-secondary text-muted-foreground">
-            We&apos;ll hand you to Stripe to pay, then bring you back here.
-            Credits land once the payment clears.
-          </p>
+          <p className="type-secondary text-muted-foreground">{translateUi("We'll hand you to Stripe to pay, then bring you back here. Credits land once the payment clears.")}</p>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => setOpen(false)}>{translateUi("Cancel")}</Button>
           <Button
             variant="primary"
             disabled={!billingReady || !amountValid || pending}
@@ -303,9 +285,7 @@ function AddCreditsDialog({
           >
             <ButtonIcon variant="primary">
               <ExternalLink className="h-3 w-3" />
-            </ButtonIcon>
-            Continue to payment
-          </Button>
+            </ButtonIcon>{translateUi("Continue to payment")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -321,6 +301,7 @@ function BreakdownRow({
   readonly hint: string;
   readonly value: string;
 }) {
+  useUiTranslation();
   return (
     <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       <div className="min-w-0">
@@ -339,12 +320,12 @@ function formatCredits(value: string | number): string {
 }
 
 function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
+  return new Intl.NumberFormat(getFormattingLocale()).format(value);
 }
 
 function formatUsd(credits: number): string {
   if (!Number.isFinite(credits) || credits <= 0) return "—";
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat(getFormattingLocale(), {
     style: "currency",
     currency: "USD",
   }).format(credits);

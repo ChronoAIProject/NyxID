@@ -1,3 +1,5 @@
+import { translate, type TranslationValues } from "../../i18n/translate";
+import type { Language } from "../../i18n/language";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
@@ -71,11 +73,13 @@ export function setupSettingsScreen(
     pushDevices = 0,
     voiceEnabled = false,
     params,
+    language = "en",
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
     voiceEnabled?: boolean;
     params?: Record<string, unknown>;
+    language?: Language;
   } = {},
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
@@ -107,6 +111,13 @@ export function setupSettingsScreen(
     { get: (_target, name) => (name === "__esModule" ? false : String(name)) },
   );
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({
+        language,
+        t: (phrase: string, values?: TranslationValues) =>
+          translate(language, phrase, values),
+      }),
+    },
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
       ...Object.fromEntries(
@@ -148,26 +159,28 @@ export function setupSettingsScreen(
         isFetching: false,
         isError: false,
         data:
-          queryKey[1] === "profile"
-            ? {
-                display_name: "Alex Example",
-                email: "alex.long-address@example.test",
-                social_provider: null,
-              }
-            : queryKey[1] === "notificationSettings"
+          queryKey[1] === "voice-options" || queryKey[1] === "voice-settings"
+            ? undefined
+            : queryKey[1] === "profile"
               ? {
-                  push_device_count: pushDevices,
-                  push_enabled: true,
-                  telegram_connected: connectedTelegram,
-                  telegram_enabled: true,
-                  telegram_username: "a_very_long_telegram_username",
-                  global_approval_mode: "writes_only",
+                  display_name: "Alex Example",
+                  email: "alex.long-address@example.test",
+                  social_provider: null,
                 }
-              : queryKey[1] === "voice-features"
-                ? voiceEnabled
-                  ? ["assistant:voice"]
-                  : []
-                : { enabled: true },
+              : queryKey[1] === "notificationSettings"
+                ? {
+                    push_device_count: pushDevices,
+                    push_enabled: true,
+                    telegram_connected: connectedTelegram,
+                    telegram_enabled: true,
+                    telegram_username: "a_very_long_telegram_username",
+                    global_approval_mode: "writes_only",
+                  }
+                : queryKey[1] === "voice-features"
+                  ? voiceEnabled
+                    ? ["assistant:voice"]
+                    : []
+                  : { enabled: true },
       }),
       useMutation: () => ({
         mutate: (value: unknown) => mutations.push(value),
@@ -189,6 +202,7 @@ export function setupSettingsScreen(
     "../../components/settings/SettingsList": settingsList,
     "../../components/SegmentControl": { SegmentControl: renderSegmentControl },
     "../../components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
+    "../../components/workspace/WorkspaceUI": { Notice: "Notice" },
     "../../components/Skeleton": {
       SkeletonRows: "SkeletonRows",
       SkeletonCards: "SkeletonCards",
@@ -213,7 +227,17 @@ export function setupSettingsScreen(
       useNetworkStatus: () => ({ isConnected: true }),
     },
     "../../lib/api/mobileApi": { mobileApi: {} },
+    "../assistant/voice/useDictationLanguage": {
+      useDictationLanguage: () => ({
+        value: "automatic",
+        options: [],
+        choose() {},
+      }),
+    },
     "../../lib/api/assistantVoiceApi": {
+      nativeVoiceEnvironment: () => {
+        throw new Error("Unavailable in this fixture");
+      },
       assistantVoiceFeatures: async () => [],
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
@@ -273,6 +297,10 @@ export function setupSettingsScreen(
     preferences,
     harness,
     render: (node: Element) => renderRows(node, dimensions.fontScale),
+    language: (value: Language) => {
+      language = value;
+      harness.render();
+    },
     pending: () => {
       pending = true;
       harness.render();

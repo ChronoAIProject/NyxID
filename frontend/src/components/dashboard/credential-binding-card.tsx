@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { toast } from "sonner";
 import type { KeyInfo, CatalogEntry } from "@/types/keys";
@@ -18,6 +21,7 @@ export function CredentialBindingCard({
   readonly catalog?: CatalogEntry;
   readonly readOnly: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [credential, setCredential] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -56,25 +60,25 @@ export function CredentialBindingCard({
       setClientSecret("");
       if (platform && oauth && result.status === "pending_auth")
         setReconnect(result);
-      toast.success("Credential binding updated");
+      toast.success(translateUi("Credential binding updated"));
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Could not switch key",
+        translateErrorMessage(error instanceof Error ? error.message : "Could not switch key"),
       );
     }
   }
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-15">Service key</CardTitle>
+        <CardTitle className="text-15">{t("Service key")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-13">
         <p>
-          {platform ? "Using NyxID's key" : "Using your own key"} —{" "}
+          {platform ? t("Using NyxID's key") : t("Using your own key")} —{" "}
           {!service.platform_key_pricing &&
           !service.byok_pricing &&
           catalog?.billing?.platform_billable
-            ? "Current service/plan pricing applies"
+            ? t("Current service/plan pricing applies")
             : lanePriceLabel(
                 platform ? service.platform_key_pricing : service.byok_pricing,
               )}
@@ -83,9 +87,7 @@ export function CredentialBindingCard({
           <>
             {platform && !oauth && (
               <div className="space-y-2">
-                <Label htmlFor="binding-credential">
-                  Your replacement credential
-                </Label>
+                <Label htmlFor="binding-credential">{t("Your replacement credential")}</Label>
                 <Input
                   id="binding-credential"
                   type="password"
@@ -97,17 +99,13 @@ export function CredentialBindingCard({
             )}
             {platform && needsApp && (
               <div className="space-y-2">
-                <Label htmlFor="binding-client-id">
-                  Your OAuth app client ID
-                </Label>
+                <Label htmlFor="binding-client-id">{t("Your OAuth app client ID")}</Label>
                 <Input
                   id="binding-client-id"
                   value={clientId}
                   onChange={(event) => setClientId(event.target.value)}
                 />
-                <Label htmlFor="binding-client-secret">
-                  Your OAuth app client secret
-                </Label>
+                <Label htmlFor="binding-client-secret">{t("Your OAuth app client secret")}</Label>
                 <Input
                   id="binding-client-secret"
                   type="password"
@@ -117,10 +115,7 @@ export function CredentialBindingCard({
                 />
               </div>
             )}
-            <p className="text-muted-foreground">
-              Switching to NyxID's key keeps your saved personal credential for
-              future use.
-            </p>
+            <p className="text-muted-foreground">{t("Switching to NyxID's key keeps your saved personal credential for future use.")}</p>
             <Button
               disabled={
                 update.isPending ||
@@ -132,7 +127,7 @@ export function CredentialBindingCard({
               isLoading={update.isPending}
               onClick={() => void switchBinding()}
             >
-              {platform ? "Use your own key" : "Use NyxID's key"}
+              {platform ? t("Use your own key") : t("Use NyxID's key")}
             </Button>
             {platform && !service.auto_connected && (
               <Button
@@ -140,17 +135,15 @@ export function CredentialBindingCard({
                 onClick={() =>
                   update.mutate(
                     { keyId: service.id, is_active: !service.is_active },
-                    { onError: (error) => toast.error(error.message) },
+                    { onError: (error) => toast.error(translateErrorMessage(error.message)) },
                   )
                 }
               >
-                {service.is_active ? "Disable" : "Enable"}
+                {service.is_active ? t("Disable") : t("Enable")}
               </Button>
             )}
             {service.node_id && (
-              <p className="text-muted-foreground">
-                Remove node routing before choosing NyxID's key.
-              </p>
+              <p className="text-muted-foreground">{t("Remove node routing before choosing NyxID's key.")}</p>
             )}
           </>
         )}

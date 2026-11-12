@@ -287,7 +287,7 @@ macro_rules! assistant_direct_billing_routes {
     };
 }
 
-macro_rules! codex_connection_billing_routes {
+macro_rules! credential_check_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
@@ -295,6 +295,15 @@ macro_rules! codex_connection_billing_routes {
                 "/api/v1/providers/codex-connection/verify",
                 "handlers::codex_connection::verify",
                 post(handlers::codex_connection::verify),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/keys/{key_id}/verify",
+                "/api/v1/keys/{key_id}/verify",
+                "handlers::credential_verification::check",
+                post(handlers::credential_verification::check),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                     crate::services::billing::BillingIngress::Proxy
                 )
@@ -560,7 +569,7 @@ pub(crate) fn mounted_billing_route_inventory()
         collect_billing_route_specs,
         ()
     ));
-    routes.extend(codex_connection_billing_routes!(
+    routes.extend(credential_check_billing_routes!(
         collect_billing_route_specs,
         ()
     ));
@@ -2483,6 +2492,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route(
+            "/monitoring/invocation-diagnostics",
+            post(handlers::invocation_diagnostics::redeem).layer(DefaultBodyLimit::max(256)),
+        )
         .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
@@ -2973,6 +2986,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_onboarding::save_onboarding),
         )
         .route(
+            "/nyxagent/onboarding/suggestions/{id}",
+            get(handlers::assistant_onboarding::suggestion_setup),
+        )
+        .route(
             "/nyxagent/onboarding/suggestions/hide",
             post(handlers::assistant_onboarding::hide_suggestions),
         )
@@ -3073,6 +3090,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/agents/{id}/org-guest-grants",
+            get(handlers::org_specialist_channels::adoption_preview)
+                .post(handlers::org_specialist_channels::adopt_grants),
         )
         .route(
             "/nyxagent/channels/{id}/org-specialist",
@@ -3400,6 +3422,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_voice::options),
         )
         .route(
+            "/assistant/nyxagent/voice/active",
+            get(handlers::assistant_voice::account_active_session),
+        )
+        .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
             post(handlers::assistant_voice::start)
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
@@ -3581,7 +3607,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/providers/codex-connection",
             get(handlers::codex_connection::status).post(handlers::codex_connection::import),
         )
-        .merge(codex_connection_billing_routes!(
+        .merge(credential_check_billing_routes!(
             register_billing_routes,
             Router::new()
         ))

@@ -174,8 +174,18 @@ test("specialist tool grants exclude NyxBot Voice by catalog identity and legacy
   assert.deepEqual(
     grantOptions([
       voice,
-      { ...voice, id: "legacy-voice", slug: "nyxbot-voice", catalog_service_slug: undefined },
-      { ...voice, id: "legacy-null-voice", slug: "nyxbot-voice", catalog_service_slug: null },
+      {
+        ...voice,
+        id: "legacy-voice",
+        slug: "nyxbot-voice",
+        catalog_service_slug: undefined,
+      },
+      {
+        ...voice,
+        id: "legacy-null-voice",
+        slug: "nyxbot-voice",
+        catalog_service_slug: null,
+      },
       key,
     ]).map((option) => option.value),
     ["api-github"],
@@ -199,10 +209,32 @@ test("specialist tool grants exclude NyxBot Voice by catalog identity and legacy
 test("other HTTP, automatic and temporarily unavailable connections remain grantable", () => {
   const connections = [
     key,
-    { ...key, id: "public", slug: "public-tools", auto_connected: true, service_type: "http" },
-    { ...key, id: "offline", slug: "offline-tools", status: "offline", credential_missing: true },
-    { ...key, id: "similarly-named", slug: "nyxbot-voice-helper", catalog_service_slug: undefined },
-    { ...key, id: "different-catalog", slug: "nyxbot-voice", catalog_service_slug: "other-service" },
+    {
+      ...key,
+      id: "public",
+      slug: "public-tools",
+      auto_connected: true,
+      service_type: "http",
+    },
+    {
+      ...key,
+      id: "offline",
+      slug: "offline-tools",
+      status: "offline",
+      credential_missing: true,
+    },
+    {
+      ...key,
+      id: "similarly-named",
+      slug: "nyxbot-voice-helper",
+      catalog_service_slug: undefined,
+    },
+    {
+      ...key,
+      id: "different-catalog",
+      slug: "nyxbot-voice",
+      catalog_service_slug: "other-service",
+    },
   ];
   assert.deepEqual(
     grantOptions(connections).map((option) => option.value),

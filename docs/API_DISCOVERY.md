@@ -888,6 +888,42 @@ External MCP clients keep the legacy connection response contract. See
 [the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
 for bounds, owner checks, failures, and readiness-gated personal intent locks.
 
+### Attachment eligibility and legacy publication (#2327)
+
+Chat discovery and preparation use the same live attachment eligibility gate.
+It checks the non-guest owner turn, bound active/unexpired conversation key,
+`assistant:attachment-writes`, exact catalog/connection identity, instance-spec
+absence and current compiled operation contracts. Managed Base creation also
+requires an active credential belonging to the hosted user connection and all
+four published dependencies. Platform credential bindings and no-auth connections
+cannot supply this managed capability. Every
+child effect repeats the gate, including the flag and operation-generation
+checks, alongside the existing destination, scope and credential fences.
+
+An active legacy endpoint without `publication` is Published, consistent with
+Tool publication defaults. Explicit draft, validated or paused rows are never
+republished by this fix. No data repair is required. A second connection such
+as `api-lark-2` uses its exact UserService ID and canonical catalog identity;
+its display slug grants no authority. An instance OpenAPI override remains
+untrusted even when it contains an exact hosted spec or falls back to catalog
+rows; clearing it restores eligibility when the other gates pass.
+
+Refusals carry static `attachment_write_*` reasons, including `guest_turn`,
+`flag_off`, `not_live_owner_chat`, `key_ineligible`, `untrusted_spec_override`,
+`operation_not_published`, `required_operation_missing`, `untrusted_contract`,
+`invalid_operation_generation`, `operation_generation_changed`,
+`hosted_connection_required`, `connection_credential_required`,
+`credential_unavailable` and `contract_changed`. These messages contain no
+request content, credentials or attachment identifiers. Database failures remain
+infrastructure errors. Discovery cannot promise that future arguments satisfy
+saved destination/input scopes or that the vendor has granted upload access.
+
+The journal, reservation identities and dispatch barrier are unchanged. Mixed
+fleets fail closed on old readers that still require explicit publication; upgrade
+all readers for consistent legacy-row availability. This fix requires no new
+drain, schema migration or environment variable. The existing attachment-feature
+rollout and rollback rules still apply.
+
 ## Lark/Feishu wiki document links
 
 The four Lark/Feishu catalog services expose read-only `wiki_get_node`
@@ -945,3 +981,60 @@ Official references (read 2026-11-10):
 - [Feishu node lookup](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node)
 - [Docx raw content](https://open.larksuite.com/document/server-docs/docs/docs/docx-v1/document/raw_content)
 - [Feishu scope setup and publishing](https://open.feishu.cn/document/faq/trouble-shooting/how-to-fix-the-99991672-error)
+
+### Saved credential verification
+
+For ordinary server-held API-key/bearer connections, `GET /keys` and
+`GET /keys/{id}` expose additive `credential_verification` metadata:
+`state` (`not_verified`, `verified`, `rejected`), `reason_code`, `observed_at`,
+`source`, and `can_check`. Missing metadata means **Saved, not verified**.
+Neither credential lifecycle `status: active`, service `is_active`, nor
+`last_used_at` proves provider acceptance. Enable/Disable and Delete keep their
+existing semantics. OAuth, no-auth, node-managed/routed and platform-key
+connections keep their existing status contracts.
+
+A first-party human owner or live organization admin can call
+`POST /keys/{id}/verify`. Creation and credential/destination updates on the
+unified key routes, plus hosted API-key completion, attempt the same check
+best effort after saving. Failure to check never undoes a save. Inventory reads
+and polling do not call the provider. A successful ordinary proxy/MCP/model
+request does **not** record verification in this release; `source: request` is
+reserved. The legacy MCP direct-credential save keeps its existing connection
+shape and reports `not_verified/legacy_connection_check_unavailable` instead
+of selecting an unrelated unified connection.
+
+An administrator may declare `credential_verification: { operation, query }`
+on catalog metadata through the service update API. It asserts that the named
+operation authenticates the supplied credential. NyxID requires one live,
+published, read-only GET without body, dynamic path, alternate target or async
+contract. Fixed arguments are bounded numeric pagination parameters only.
+Trusted hosted overlays seed `models_list` for `llm-anthropic`, `llm-openai`,
+`llm-deepseek`, `llm-mistral` and `llm-google-ai`. OpenRouter's public model list
+is not credential evidence and is not seeded. Remote specs cannot enable checks. An admin edit
+or explicit null clear suppresses startup defaults. No declaration means no
+probe; NyxID never guesses a health or identity URL from a service name.
+
+Checks reuse normal proxy authorization and injection with an exact saved
+connection, disable redirects, allow at most ten seconds and discard at most
+64 KiB of response data without retaining a body. Evidence binds key ID and
+credential epoch, connection/endpoint/catalog revisions and the published
+operation generation. Replacement, destination or operation changes invalidate
+old evidence, including writes by older replicas. Node routes, agent overrides,
+platform credentials and mismatched bindings cannot supply verification.
+Checks are limited to one attempt per connection per ten seconds.
+
+A completed 2xx check records `verified/provider_accepted`; 401 records
+`rejected/provider_unauthorized`; 403 records `rejected/provider_forbidden`
+(permission denial does not necessarily mean an invalid key). Outages,
+timeouts, oversized responses, redirects and local policy refusals remain
+`not_verified` with bounded reason codes. Audit contains connection ID, state
+and reason only. The web and mobile surfaces show the observed result, not a
+promise that every operation or future request will succeed. Existing mobile
+installs need a new app build for the corrected labels.
+
+Credential verification checks (on save and `POST /api/v1/keys/{key_id}/verify`)
+use the normal authorized proxy with the exact saved credential. They record
+request-count usage metadata when billing metering is enabled, but never apply
+catalog prices or consume wallet credits, grants or allowances. This exemption
+is server-authored and limited to the declared verification operation; ordinary
+requests through the same connection retain their configured billing policy.

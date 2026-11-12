@@ -1,7 +1,11 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { loadEnv, resolveProfile, appIdentity } = require("./scripts/lib/load-env");
+const {
+  loadEnv,
+  resolveProfile,
+  appIdentity,
+} = require("./scripts/lib/load-env");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { buildNativeLinks } = require("./scripts/lib/native-links");
 
@@ -44,7 +48,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     userInterfaceStyle: "automatic",
     assetBundlePatterns: ["**/*"],
     ios: {
-      supportsTablet: false,
+      supportsTablet: true,
+      requireFullScreen: false,
       bundleIdentifier: r.iosBundleId,
       buildNumber: r.iosBuildNumber,
       associatedDomains,
@@ -55,6 +60,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "UIInterfaceOrientationLandscapeLeft",
           "UIInterfaceOrientationLandscapeRight",
         ],
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight",
+        ],
+        // Bundle resolves the device-qualified value before Expo reads its default.
+        // iPhone keeps the plugin's portrait default; iPad follows its window.
+        "EXDefaultScreenOrientationMask~ipad": "UIInterfaceOrientationMaskAll",
         NSCameraUsageDescription:
           "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
         NSMicrophoneUsageDescription:
@@ -84,13 +98,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       intentFilters: androidIntentFilters,
     },
     plugins: [
+      "./plugins/withVoiceAudio",
       ["expo-screen-orientation", { initialOrientation: "PORTRAIT_UP" }],
       [
         "expo-image-picker",
         {
           photosPermission:
             "Allow NyxID to attach photos you choose from your library to chats.",
-          cameraPermission: "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
+          cameraPermission:
+            "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
           microphonePermission:
             "Allow NyxID to use your microphone for dictation and voice conversations.",
         },
@@ -130,7 +146,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       [
         "expo-camera",
         {
-          cameraPermission: "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
+          cameraPermission:
+            "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
           microphonePermission:
             "Allow NyxID to use your microphone for dictation and voice conversations.",
           recordAudioAndroid: true,

@@ -2988,7 +2988,7 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
-        "nyxid__task_status" => (true, false, false),
+        "nyxid__task_status" | "nyxid__read_tool_result" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
@@ -3016,6 +3016,11 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
             }
         }
     };
+    if name == "nyxid__read_tool_result" {
+        return Some(
+            serde_json::json!({"title":tool_title(name, services)?,"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true}),
+        );
+    }
     Some(serde_json::json!({
         "title": tool_title(name, services)?,
         "readOnlyHint": read_only,
@@ -3034,6 +3039,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
         "nyxid__task_status" => "Read task execution status",
+        "nyxid__read_tool_result" => "Read a retained tool result",
         "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
@@ -4381,7 +4387,13 @@ pub fn prepare_proxy_tool_call(
             Some(super::lark_attachment_tool::Projection::ImRefused)
         )
     {
-        return Err(super::lark_attachment_tool::refused());
+        return Err(
+            if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+                super::lark_attachment_tool::eligibility::Reason::LiveExecutionRequired.error()
+            } else {
+                super::lark_attachment_tool::refused()
+            },
+        );
     }
     prepare_proxy_tool_call_inner(service, endpoint, args)
 }
@@ -4508,17 +4520,23 @@ pub fn prepare_chat_proxy_tool_call<'a>(
         if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
             return prepare_proxy_tool_call(service, endpoint, args);
         }
+        if endpoint.async_operation.is_some() {
+            return Err(super::lark_attachment_tool::eligibility::Reason::AsyncUnsupported.error());
+        }
         if matches!(
             endpoint.attachment_input,
             Some(super::lark_attachment_tool::Projection::Managed(_))
         ) {
             let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
-            let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
+            let chat = chat
+                .ok_or_else(|| super::lark_attachment_tool::eligibility::Reason::NotLive.error())?;
             let key = db
                 .collection::<crate::models::api_key::ApiKey>("api_keys")
                 .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
                 .await?
-                .ok_or_else(super::lark_attachment_tool::refused)?;
+                .ok_or_else(|| {
+                    super::lark_attachment_tool::eligibility::Reason::KeyIneligible.error()
+                })?;
             let body: serde_json::Value =
                 serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
                     .map_err(|_| super::lark_attachment_tool::refused())?;
@@ -6070,26 +6088,30 @@ async fn execute_tool_resolved_inner(
     if super::lark_attachment_tool::is_attachment_operation(endpoint)
         && prepared.managed_base.is_none()
     {
-        let binding = prepared
-            .attachment_binding
-            .as_ref()
-            .ok_or_else(super::lark_attachment_tool::refused)?;
-        if !super::lark_attachment_tool::binding_matches(binding, user_id, exec_ctx.api_key_id)
-            || prepared.async_submission.is_some()
-            || prepared.async_continuation.is_some()
-        {
-            return Err(super::lark_attachment_tool::refused());
+        let binding = prepared.attachment_binding.as_ref().ok_or_else(|| {
+            super::lark_attachment_tool::eligibility::Reason::LiveExecutionRequired.error()
+        })?;
+        if !super::lark_attachment_tool::binding_matches(binding, user_id, exec_ctx.api_key_id) {
+            return Err(super::lark_attachment_tool::eligibility::Reason::BindingChanged.error());
+        }
+        if prepared.async_submission.is_some() || prepared.async_continuation.is_some() {
+            return Err(super::lark_attachment_tool::eligibility::Reason::AsyncUnsupported.error());
         }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
-    if let Some(base) = &prepared.managed_base
-        && (base.chat.user_id != user_id
+    if let Some(base) = &prepared.managed_base {
+        use super::lark_attachment_tool::eligibility::Reason;
+        if base.chat.user_id != user_id
             || exec_ctx.api_key_id != Some(base.chat.api_key_id.as_str())
-            || prepared.async_submission.is_some()
-            || prepared.async_continuation.is_some()
-            || node_route.is_some())
-    {
-        return Err(super::lark_attachment_tool::refused());
+        {
+            return Err(Reason::BindingChanged.error());
+        }
+        if prepared.async_submission.is_some() || prepared.async_continuation.is_some() {
+            return Err(Reason::AsyncUnsupported.error());
+        }
+        if node_route.is_some() {
+            return Err(Reason::HostedRequired.error());
+        }
     }
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -6709,7 +6731,7 @@ async fn execute_tool_resolved_inner(
 
         if let Some(base)=managed_base.as_ref() {
             return box_mcp_forwarding(|| async move {
-            let admission=assistant_admission.as_ref().ok_or_else(super::lark_attachment_tool::refused)?;
+            let admission=assistant_admission.as_ref().ok_or_else(|| super::lark_attachment_tool::eligibility::Reason::NotLive.error())?;
             let guard=super::assistant_service_execution::LarkManagedGuard::new(db,encryption_keys,admission,
                 &target,service,endpoint,base,&path,body.as_deref().unwrap_or_default())?;
             guard.revalidate().await?;
@@ -8049,6 +8071,7 @@ pub async fn connect_service(
         "status": "connected",
         "service_name": result.service_name,
         "connected_at": result.connected_at.to_rfc3339(),
+        "credential_verification": if has_credential {Some(crate::services::credential_verification::VerificationView::unverified("legacy_connection_check_unavailable",false))}else{None},
     }))
 }
 
@@ -12071,8 +12094,8 @@ mod tests {
         let db = connect_test_database("mcp_connect_scopes").await.unwrap();
         let now = mongodb::bson::DateTime::now();
         let provider: ProviderConfig = mongodb::bson::from_document(doc! {
-            "_id": uuid::Uuid::new_v4().to_string(), "slug": "scope-provider",
-            "name": "Scope Provider", "provider_type": "oauth2", "is_active": true,
+            "_id": uuid::Uuid::new_v4().to_string(), "slug": "github",
+            "name": "GitHub", "provider_type": "oauth2", "is_active": true,
             "created_by": "test", "created_at": now, "updated_at": now,
         })
         .unwrap();
@@ -12089,7 +12112,7 @@ mod tests {
             .unwrap();
         let actor = uuid::Uuid::new_v4().to_string();
         let scopes = parse_connect_scopes(Some(&serde_json::json!(
-            "public_repo, read:org public_repo"
+            "public_repo, read:org read:project project public_repo"
         )))
         .unwrap();
         let result = connect_service(
@@ -12109,7 +12132,7 @@ mod tests {
         assert_eq!(result["status"], "pending_connection");
         assert_eq!(
             result["scopes"],
-            serde_json::json!(["public_repo", "read:org"])
+            serde_json::json!(["public_repo", "read:org", "read:project", "project"])
         );
         let view = connect_link_service::get_for_actor(
             &db,
@@ -12118,7 +12141,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(view.link.scopes, ["public_repo", "read:org"]);
+        assert_eq!(
+            view.link.scopes,
+            ["public_repo", "read:org", "read:project", "project"]
+        );
         let error = connect_service(
             &db,
             &test_encryption_keys(),
@@ -15693,6 +15719,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
