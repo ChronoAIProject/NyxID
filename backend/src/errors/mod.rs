@@ -2,6 +2,7 @@ pub mod access_denial;
 pub mod memory_write;
 pub mod refresh;
 pub mod skill_draft;
+pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -131,6 +132,10 @@ pub enum AppError {
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
+
+    /// Additive fixed diagnostics for attached skill reads.
+    #[error("{0:?}")]
+    SkillRead(skill_read::SkillReadReason),
 
     /// Same forbidden / 1002 response with additive, fixed recovery metadata.
     #[error("Forbidden: {message}")]
@@ -876,6 +881,9 @@ impl AppError {
     /// Generic policy refusals, with or without additive recovery guidance.
     /// Specialized 403 errors retain their own control-flow semantics.
     pub fn is_forbidden(&self) -> bool {
+        if let Self::SkillRead(reason) = self {
+            return reason.legacy_error().is_forbidden();
+        }
         matches!(
             self,
             Self::Forbidden(_)
@@ -886,6 +894,7 @@ impl AppError {
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::SkillRead(reason) => reason.legacy_error().status_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
             Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
@@ -1130,6 +1139,7 @@ impl AppError {
     pub(crate) fn error_code(&self) -> u32 {
         match self {
             Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
+            Self::SkillRead(reason) => reason.legacy_error().error_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
             Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
@@ -1417,6 +1427,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::SkillRead(reason) => reason.error_key(),
             Self::MemoryWrite(reason) => reason.error_key(),
             Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
@@ -1683,6 +1694,11 @@ impl AppError {
     pub fn response_body(&self) -> ErrorResponse {
         if let Self::InvocationDiagnostic { source, .. } = self {
             return source.response_body();
+        }
+        if let Self::SkillRead(reason) = self {
+            let mut response = reason.legacy_error().response_body();
+            response.details = Some(serde_json::json!({"reason": reason}));
+            return response;
         }
         if let Self::RefreshRefused { source, reason } = self {
             let mut response = source.response_body();
