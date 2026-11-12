@@ -552,7 +552,7 @@ fn error_result_inner(
                 value,
             };
         }
-        AppError::SkillDraftValidation(_) | AppError::MemoryWrite(_) => {
+        AppError::SkillDraftValidation(_) | AppError::MemoryWrite(_) | AppError::SkillRead(_) => {
             return ToolResult {
                 permission_request: None,
                 is_error: true,

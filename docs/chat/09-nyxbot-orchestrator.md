@@ -1636,7 +1636,12 @@ keeps its base pin's disabled state.
 
 Per attached pin the app offers **Test** (`GET /agents/{id}/skills/{skill_id}/preview`:
 verifies the exact pinned version in Ornn, then reads SKILL.md through the same
-reader as `nyxid__skill_read`; a disabled pin reports `readable: false`) and
+reader as `nyxid__skill_read`; a disabled pin reports `readable: false`). For an
+organization agent both use an accessible organization Ornn connection and the
+acting person's signed identity, including Ornn's narrowly scoped membership
+callback. This certifies that person's current visibility; a different member,
+changed grants or runtime key/turn/policy can still refuse. See
+[Agent skills](../AGENT_SKILLS.md#storage-and-authority). The app also offers
 **Edit** (`POST /agents/{id}/skills/{skill_id}/improve`: an authored improve
 draft prefilled from the exact package's SKILL.md body and `.md`/`.txt` files,
 with its review card raised in NyxBot's home thread; organization agents are

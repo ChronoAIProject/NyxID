@@ -161,6 +161,40 @@ fn classified_outcomes_keep_native_read_error_contract() {
     assert_eq!(OrnnOutcome::Ok(vec![1]).into_app_result().unwrap(), vec![1]);
 }
 
+#[test]
+fn bound_skill_refusals_distinguish_principal_denial_from_upstream_failure() {
+    use crate::errors::skill_read::SkillReadReason;
+    for status in [401, 403, 404, 429, 500, 503] {
+        let error = OrnnOutcome::Response {
+            status,
+            code: OrnnCode::Unknown,
+            rules: vec![],
+        }
+        .into_skill_read_result()
+        .unwrap_err();
+        assert_eq!(
+            matches!(
+                error,
+                AppError::SkillRead(SkillReadReason::OrnnPrincipalDenied)
+            ),
+            matches!(status, 401 | 403 | 404)
+        );
+    }
+    assert!(matches!(
+        OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable).into_skill_read_result(),
+        Err(AppError::SkillRead(
+            SkillReadReason::OwnerConnectionUnavailable
+        ))
+    ));
+    assert!(matches!(
+        OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ScopeForbidden(
+            "operation restricted".into()
+        ))
+        .into_skill_read_result(),
+        Err(AppError::ApiKeyScopeForbidden(_))
+    ));
+}
+
 const ID: &str = "128393f3-d528-4ce2-b197-f1b13cb8fd5b";
 fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -252,9 +286,21 @@ async fn agent_skill_pin_integrity_and_exact_guid_version() {
         bad_hash: true,
         ..Registry::new()
     };
-    assert!(
-        matches!(preview(&broken,ID,"1.0").await,Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
-    );
+    assert!(matches!(
+        preview(&broken, ID, "1.0").await,
+        Err(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch
+        ))
+    ));
+    let other_id = uuid::Uuid::new_v4().to_string();
+    for (id, version) in [(other_id.as_str(), "1.0"), (ID, "2.0")] {
+        assert!(matches!(
+            preview(&registry, id, version).await,
+            Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch
+            ))
+        ));
+    }
     assert!(preview(&registry, ID, "latest").await.is_err());
 }
 
@@ -461,9 +507,12 @@ async fn agent_skill_reader_uses_only_attached_pins_and_never_runs_scripts() {
         bytes: archive(&[("SKILL.md", b"changed after pinning")]),
         ..Registry::new()
     };
-    assert!(
-        matches!(read(&tampered, &agent, ID, None, "SKILL.md", 0).await, Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
-    );
+    assert!(matches!(
+        read(&tampered, &agent, ID, None, "SKILL.md", 0).await,
+        Err(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch
+        ))
+    ));
     let mut dependency = registry.reference();
     dependency.skill_id = uuid::Uuid::new_v4().to_string();
     dependency.name = "dependency".into();
@@ -783,10 +832,15 @@ async fn disabled_pins_are_inaccessible_to_skill_read() {
     agent.skills = vec![reader.reference()];
     assert!(read(&reader, &agent, ID, None, "/", 0).await.is_ok());
     agent.skills[0].disabled = true;
+    let error = read(&reader, &agent, ID, None, "/", 0).await.unwrap_err();
     assert!(matches!(
-        read(&reader, &agent, ID, None, "/", 0).await,
-        Err(AppError::Forbidden(_))
+        error,
+        AppError::SkillRead(crate::errors::skill_read::SkillReadReason::SkillNotBound)
     ));
+    let body = serde_json::to_value(error.response_body()).unwrap();
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["error_code"], 1002);
+    assert_eq!(body["details"]["reason"], "skill_not_bound");
     f.state.db.drop().await.unwrap();
 }
 
