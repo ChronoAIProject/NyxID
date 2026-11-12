@@ -1,4 +1,6 @@
 {
+  "Show {{count}} more_one": "Show {{count}} more",
+  "Show {{count}} more_other": "Show {{count}} more",
   "{{count}} requests_one": "{{count}} request",
   "{{count}} requests_other": "{{count}} requests",
   "{{count}} pending requests_one": "{{count}} pending request",
