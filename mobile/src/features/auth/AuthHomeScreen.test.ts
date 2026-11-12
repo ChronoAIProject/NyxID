@@ -301,8 +301,10 @@ for (const platform of ["ios", "android"] as const) {
 
     const scrolls: unknown[] = [];
     scroller.props.ref.current = {
-      measureInWindow: (callback: (...args: number[]) => void) =>
-        callback(0, 120, 390, 700),
+      getNativeScrollRef: () => ({
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(0, 120, 390, 700),
+      }),
       scrollTo: (position: unknown) => scrolls.push(plain(position)),
     };
     const inputGeometry = (label: string, top: number) => {
@@ -355,6 +357,45 @@ for (const platform of ["ios", "android"] as const) {
   });
 }
 
+test("focus reveal waits for a mounted native scroll viewport", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let mounted = false;
+  let inputMeasurements = 0;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () =>
+      mounted
+        ? {
+            measureInWindow: (callback: (...args: number[]) => void) =>
+              callback(0, 120, 390, 700),
+          }
+        : null,
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) => {
+      inputMeasurements++;
+      callback(40, 480, 300, 28);
+    },
+  };
+  screen.showKeyboard();
+  assert.doesNotThrow(() => screen.input("Password").props.onFocus());
+  assert.equal(inputMeasurements, 0);
+  assert.deepEqual(scrolls, []);
+
+  mounted = true;
+  screen.input("Password").props.onFocus();
+  assert.equal(inputMeasurements, 1);
+  assert.deepEqual(scrolls, [
+    { y: 480 + 28 + spacing.xl - 500, animated: true },
+  ]);
+});
+
 test("MFA focus is revealed while the software keyboard is already open", async (t) => {
   const screen = setup();
   t.after(screen.harness.unmount);
@@ -371,8 +412,10 @@ test("MFA focus is revealed while the software keyboard is already open", async 
   );
   assert.ok(scroller);
   scroller.props.ref.current = {
-    measureInWindow: (callback: (...args: number[]) => void) =>
-      callback(0, 120, 390, 700),
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
     scrollTo: (position: unknown) => scrolls.push(plain(position)),
   };
   screen.input("Authenticator code").props.ref.current = {
@@ -395,8 +438,10 @@ test("late field measurements do not scroll after focus changes or the keyboard 
   assert.ok(scroller);
   const scrolls: unknown[] = [];
   scroller.props.ref.current = {
-    measureInWindow: (callback: (...args: number[]) => void) =>
-      callback(0, 120, 390, 700),
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
     scrollTo: (position: unknown) => scrolls.push(plain(position)),
   };
   let emailMeasurement: ((...args: number[]) => void) | undefined;
@@ -440,9 +485,11 @@ test("a native scroll between field and viewport measurements invalidates the ol
   const scrolls: unknown[] = [];
   let viewportMeasurement: ((...args: number[]) => void) | undefined;
   scroller.props.ref.current = {
-    measureInWindow: (callback: typeof viewportMeasurement) => {
-      viewportMeasurement = callback;
-    },
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: typeof viewportMeasurement) => {
+        viewportMeasurement = callback;
+      },
+    }),
     scrollTo: (position: unknown) => scrolls.push(plain(position)),
   };
   screen.input("Email").props.ref.current = {

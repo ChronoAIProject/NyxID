@@ -406,6 +406,8 @@ for (const boundary of ["stop", "approval", "send", "live"] as const) {
       before.conversation.active_turn = {
         turn_id: "running",
         started_at: DATE,
+        activities: [],
+        attachments: [],
       };
     }
     if (boundary === "approval") {

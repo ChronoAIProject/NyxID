@@ -194,42 +194,41 @@ export function AuthHomeScreen({ navigation }: Props) {
   const scrollOffset = useRef(0);
   const focusRevision = useRef(0);
 
-  const revealFocusedInput = useCallback(
-    (input: TextInput | null) => {
-      // Native insets handle the initial keyboard animation. A focus change
-      // with the keyboard already open does not always emit a new frame.
-      const revision = ++focusRevision.current;
-      const keyboard = Keyboard.metrics();
-      const scroller = scrollViewRef.current;
-      if (Platform.OS !== "ios" || !keyboard || !input || !scroller) return;
-      const measuredOffset = scrollOffset.current;
-      input.measureInWindow((_x, y, _width, height) => {
-        scroller.measureInWindow((_left, top, _viewWidth, viewHeight) => {
-          const currentKeyboard = Keyboard.metrics();
-          if (
-            revision !== focusRevision.current ||
-            scrollViewRef.current !== scroller ||
-            scrollOffset.current !== measuredOffset ||
-            currentKeyboard?.screenY !== keyboard.screenY
-          ) {
-            return;
-          }
-          const bottom = Math.min(top + viewHeight, keyboard.screenY);
-          const delta =
-            y < top + spacing.xl
-              ? y - top - spacing.xl
-              : Math.max(0, y + height + spacing.xl - bottom);
-          if (delta) {
-            scroller.scrollTo({
-              y: Math.max(0, measuredOffset + delta),
-              animated: true,
-            });
-          }
-        });
+  const revealFocusedInput = useCallback((input: TextInput | null) => {
+    // Native insets handle the initial keyboard animation. A focus change
+    // with the keyboard already open does not always emit a new frame.
+    const revision = ++focusRevision.current;
+    const keyboard = Keyboard.metrics();
+    const scroller = scrollViewRef.current;
+    if (Platform.OS !== "ios" || !keyboard || !input || !scroller) return;
+    const viewport = scroller.getNativeScrollRef();
+    if (!viewport) return;
+    const measuredOffset = scrollOffset.current;
+    input.measureInWindow((_x, y, _width, height) => {
+      viewport.measureInWindow((_left, top, _viewWidth, viewHeight) => {
+        const currentKeyboard = Keyboard.metrics();
+        if (
+          revision !== focusRevision.current ||
+          scrollViewRef.current !== scroller ||
+          scrollOffset.current !== measuredOffset ||
+          currentKeyboard?.screenY !== keyboard.screenY
+        ) {
+          return;
+        }
+        const bottom = Math.min(top + viewHeight, keyboard.screenY);
+        const delta =
+          y < top + spacing.xl
+            ? y - top - spacing.xl
+            : Math.max(0, y + height + spacing.xl - bottom);
+        if (delta) {
+          scroller.scrollTo({
+            y: Math.max(0, measuredOffset + delta),
+            animated: true,
+          });
+        }
       });
-    },
-    [],
-  );
+    });
+  }, []);
 
   const showToast = (message: string, kind: ToastKind) => {
     setToast({ message, kind });

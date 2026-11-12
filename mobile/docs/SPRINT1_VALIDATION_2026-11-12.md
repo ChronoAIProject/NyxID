@@ -131,8 +131,71 @@ permission/modal condition described in #2266.
 - The original #2266 first-login/new-account device scenario, including its exact original touch/modal state, has not been reproduced on the new build.
 - The exact originally affected #2326 saved conversation has not been rerun on a native device. Timeout, Retry, pagination, and attachment recovery currently have hook/fixture evidence.
 - Android and iPad native behavior for these Sprint 1 changes has not been claimed as tested in this record. The iPad-approved voice implementation is outside this change scope.
-- Full CI results for the separate implementation branch are not part of this local verification record.
+- The first PR CI result and its follow-up corrections are recorded below. Full verification runs on GitHub CI.
 
 Quality-gate result: **PASS WITH NOTES**. Independent review found no remaining
 confirmed blocking defect in the final diff, and the 177 focused tests passed.
 The native and CI verification boundaries above remain explicit.
+
+## PR #2417 CI follow-up
+
+The first [Mobile CI job](https://github.com/ChronoAIProject/NyxID/actions/runs/43223968497/job/131202512631)
+on `d829be9edd4b9e03277f74f3e124c881c2e0492b` passed installation, native-sync,
+and the full unit-test step, then **failed TypeScript checking**. The original
+177 focused passing tests did not establish a passing CI result.
+
+Two corrections address all six reported TypeScript diagnostics:
+
+- The history test's `active_turn` fixture now includes the required `activities`
+  and `attachments` arrays.
+- The keyboard helper now obtains the native viewport through the public
+  `ScrollView.getNativeScrollRef()` API before calling `measureInWindow()`.
+  This preserves the viewport geometry and existing stale-measurement guards,
+  provides the public host type for callback inference, and safely skips an
+  unmounted host. The scroll-view mocks follow that public API. A regression
+  verifies no measurement or scroll before mounting and successful reveal on
+  the next focus after mounting.
+
+Follow-up focused command, from `mobile/`:
+
+```bash
+/Users/abigaildeng/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node \
+  --import tsx --test \
+  src/features/auth/AuthHomeScreen.test.ts \
+  src/features/auth/AuthTextInput.test.ts \
+  src/features/assistant/useAssistant.history.test.ts
+```
+
+Result: **57 passed, 0 failed, 0 skipped**. Independent final review found no
+blocking issues and separately passed the two directly changed test files
+(55 tests). This is a focused follow-up run, not a rerun of the earlier
+177-test selection.
+
+Static checks for this follow-up, from the repository root:
+
+```bash
+git diff --check
+node /Users/abigaildeng/.npm/_npx/75399663b1768a01/node_modules/prettier/bin/prettier.cjs \
+  --check mobile/src/features/assistant/useAssistant.history.test.ts
+node /Users/abigaildeng/.npm/_npx/75399663b1768a01/node_modules/prettier/bin/prettier.cjs \
+  --check --range-start 9181 --range-end 10573 \
+  mobile/src/features/auth/AuthHomeScreen.tsx
+node /Users/abigaildeng/.npm/_npx/75399663b1768a01/node_modules/prettier/bin/prettier.cjs \
+  --check --range-start 8788 --range-end 17013 \
+  mobile/src/features/auth/AuthHomeScreen.test.ts
+```
+
+The whole-file Auth formatting limitation described above remains. Only the
+changed callback and test region were formatted. Full typechecking remains
+delegated to GitHub CI because no native affected target exists.
+
+After the public-API correction, the root agent reloaded the separate unsigned-in
+QA iPhone, confirmed its development menu was connected to Metro **8083**, and
+repeated **Email → Password → Email** with the software keyboard open. Both
+fields remained visible; after switching to Password, Email, Password, and
+Sign In were all above the keyboard. This smoke check did not submit credentials
+or change the existing signed-in devices.
+
+The latest full Mobile CI result is tracked on
+[PR #2417](https://github.com/ChronoAIProject/NyxID/pull/2417); the failed first
+run above must not be mistaken for a passing result.
