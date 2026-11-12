@@ -174,6 +174,24 @@ the agent/skill IDs, revision, file count and byte count, never file content.
 Upgrade all backend replicas before configuring preloads; older replicas omit
 the new context and can replace skill metadata without the new settings.
 
+## Skill outlines (NYX template)
+
+Behind the default-off, per-person `assistant:skill-runs` flag, skills written in
+the [NYX skill template](SKILL_TEMPLATES.md) expose an author-written outline:
+`## Overview`, numbered `## Approach` steps with optional `Uses:` and `Asks you`
+tags, and `## Needs and produces`. `skill_read` accepts `section: "outline"` for
+an attached root or pinned dependency, and NyxBot's `preview_agent_skill` adds an
+`outline` page for a verified, not-yet-attached version. Both reuse the reader,
+hash checks and tool-response paging above; `Uses` resolves only to a pin in the
+root's verified closure that the frontmatter also declares. Malformed or
+oversized sections yield no outline, never a truncated one. Outlines are
+untrusted guidance; nothing is stored on the agent and nothing enters audit.
+With the flag on, owner turns get guidance to explain a skill's outline before
+multi-step work, NyxBot drafts get advisory `outline_warnings`, and the app's
+catalog preview adds the structured `outline` and the Ornn `author` for the Find
+skills card. With the flag off, tool lists, results, instructions and the
+catalog preview are unchanged.
+
 ## Owner-requested authoring
 
 Reuse comes first: `search_agent_skills` → `preview_agent_skill` →

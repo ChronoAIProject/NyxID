@@ -60,6 +60,8 @@ export const FEATURE_FLAG = {
   ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
+  // NYX skill template outlines; off by default, piloted per person.
+  SKILL_RUNS: "assistant:skill-runs",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",

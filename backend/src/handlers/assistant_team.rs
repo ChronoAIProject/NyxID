@@ -1351,7 +1351,24 @@ async fn execute_authorized_tool_impl(
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     let result = async {
-        assistant_team_tools::validate(name, args)?;
+        // Outline arguments are valid only where discovery advertised them:
+        // owner chats with `assistant:skill-runs` on. Ordinary calls skip the
+        // flag lookup, and a failed lookup validates as with the flag off.
+        if crate::services::skill_outline::uses_outline_arguments(name, args)
+            && !chat.guest
+            && Box::pin(crate::services::skill_outline::enabled(
+                &state.db,
+                &chat.user_id,
+            ))
+            .await
+            .unwrap_or(false)
+        {
+            let mut schema = assistant_team_tools::schema(name);
+            crate::services::skill_outline::extend_schema(name, &mut schema);
+            assistant_team_tools::validate_against(name, args, &schema)?;
+        } else {
+            assistant_team_tools::validate(name, args)?;
+        }
         let (caller_agent, access) = Box::pin(
             crate::services::org_agent_service::chat_agent_with_access(&state.db, chat),
         )

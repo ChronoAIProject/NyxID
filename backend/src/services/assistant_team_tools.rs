@@ -985,7 +985,12 @@ fn input_rules_schema() -> Value {
 /// Strict validation mirroring the schemas: unknown keys, wrong types and
 /// out-of-range values are rejected before any state is read.
 pub fn validate(name: &str, args: &Value) -> AppResult<()> {
-    let schema = schema(name);
+    validate_against(name, args, &schema(name))
+}
+
+/// [`validate`] against an already-extended schema, such as the skill tools'
+/// outline arguments (`skill_outline::extend_schema`).
+pub fn validate_against(name: &str, args: &Value, schema: &Value) -> AppResult<()> {
     let invalid = || AppError::ValidationError(format!("Invalid arguments for nyxid__{name}"));
     let object = args.as_object().ok_or_else(invalid)?;
     let properties = schema["properties"].as_object().ok_or_else(invalid)?;
@@ -1004,7 +1009,7 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
         }
         super::assistant_team_service::validate_memory_text(text)?;
     }
-    validate_input_rules(name, object, &schema)?;
+    validate_input_rules(name, object, schema)?;
     for (key, value) in object {
         let spec = properties.get(key).ok_or_else(invalid)?;
         if !matches_spec(value, spec) {

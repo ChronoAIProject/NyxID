@@ -176,6 +176,9 @@ struct Registry {
     calls: Mutex<Vec<String>>,
     deny: bool,
     bad_hash: bool,
+    closure: Vec<Value>,
+    /// Extra Ornn metadata fields, such as the publisher.
+    meta: Value,
 }
 impl Registry {
     fn new() -> Self {
@@ -187,6 +190,8 @@ impl Registry {
             calls: Mutex::new(vec![]),
             deny: false,
             bad_hash: false,
+            closure: vec![],
+            meta: json!({}),
         }
     }
     fn reference(&self) -> SkillReference {
@@ -212,14 +217,20 @@ impl OrnnReader for Registry {
             return Ok(self.bytes.clone());
         }
         if path.contains("/closure") {
-            return Ok(serde_json::to_vec(&json!({"data":{"items":[]}})).unwrap());
+            return Ok(serde_json::to_vec(&json!({"data":{"items":self.closure}})).unwrap());
         }
         let hash = if self.bad_hash {
             "0".repeat(64)
         } else {
             self.reference().sha256
         };
-        Ok(serde_json::to_vec(&json!({"data":{"guid":ID,"name":"example","description":"Useful\nguidance","version":"1.0","skillHash":hash}})).unwrap())
+        let mut data = json!({"guid":ID,"name":"example","description":"Useful\nguidance","version":"1.0","skillHash":hash});
+        if let Some(extra) = self.meta.as_object() {
+            for (key, value) in extra {
+                data[key] = value.clone();
+            }
+        }
+        Ok(serde_json::to_vec(&json!({ "data": data })).unwrap())
     }
 }
 #[tokio::test]
@@ -924,5 +935,404 @@ async fn full_access_failed_skill_attach_writes_no_receipt() {
             .unwrap()
             .is_empty()
     );
+    f.state.db.drop().await.unwrap();
+}
+
+const OUTLINE_SKILL: &str = "---\nname: example\ndescription: Example.\nmetadata:\n  category: plain\n---\n# Example\n\n## Overview\nYou get one tidy summary.\n\n## Approach\n1. **Read.** I read the inputs.\n2. **Summarise.** I write the summary.\n   Asks you\n\n## Needs and produces\nNeeds: the inputs.\nProduces: one summary.\n\n## Details\nScripts are text only.\n";
+
+fn outline_registry(skill_md: &str) -> Registry {
+    Registry {
+        bytes: archive(&[("SKILL.md", skill_md.as_bytes())]),
+        ..Registry::new()
+    }
+}
+
+/// A valid outline at every hard limit, in CJK (three UTF-8 bytes per character).
+fn max_cjk_outline() -> String {
+    use crate::services::skill_outline as outline;
+    let mut skill = format!(
+        "## Overview\n{}\n\n## Approach\n",
+        "概".repeat(outline::MAX_OVERVIEW)
+    );
+    for n in 1..=outline::MAX_STEPS {
+        skill.push_str(&format!(
+            "{n}. **{}** {}\n",
+            "题".repeat(outline::MAX_TITLE),
+            "步".repeat(outline::MAX_STEP_TEXT)
+        ));
+    }
+    skill.push_str(&format!(
+        "\n## Needs and produces\nNeeds: {}\nProduces: {}\n",
+        "需".repeat(outline::MAX_NEEDS),
+        "产".repeat(outline::MAX_NEEDS)
+    ));
+    skill
+}
+
+/// Pages `fetch` from offset 0 to completion, checking every page's budget.
+async fn collect_pages<F, Fut>(mut fetch: F) -> String
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let mut offset = 0;
+    let mut output = String::new();
+    let mut pages = 0;
+    loop {
+        let page = fetch(offset).await;
+        assert!(wire_len(&page) <= 9200, "{}", wire_len(&page));
+        assert_eq!(page["untrusted_guidance"], true);
+        output.push_str(page["content"].as_str().unwrap());
+        pages += 1;
+        match page["next_offset"].as_u64() {
+            Some(next) => offset = next as usize,
+            None => break,
+        }
+    }
+    assert!(
+        pages > 1,
+        "the maximum CJK outline needs more than one page"
+    );
+    output
+}
+
+#[tokio::test]
+async fn preview_outline_is_bounded_untrusted_and_absent_without_template() {
+    let registry = outline_registry(OUTLINE_SKILL);
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    // The verified SKILL.md never appears in the plain preview response.
+    let plain = json!(verified);
+    assert!(plain.get("skill_md").is_none());
+    assert!(!plain.to_string().contains("tidy summary"));
+    let value = preview_with_outline(&verified, None, None).unwrap();
+    assert_eq!(value["reference"], plain["reference"]);
+    assert!(value.get("skill_md").is_none());
+    let outline = &value["outline"];
+    assert_eq!(outline["untrusted_guidance"], true);
+    assert_eq!(outline["complete"], true);
+    let content = outline["content"].as_str().unwrap();
+    assert!(content.starts_with("Overview:\nYou get one tidy summary."));
+    assert!(content.contains("2. Summarise: I write the summary.\n   Asks you"));
+    // outline_offset asks for an outline-only page.
+    let only = preview_with_outline(&verified, Some(0), None).unwrap();
+    assert!(only.get("reference").is_none());
+    assert_eq!(only["content"], outline["content"]);
+
+    // A legacy skill keeps working; it simply has no outline.
+    let legacy = preview(&Registry::new(), ID, "1.0").await.unwrap();
+    let value = preview_with_outline(&legacy, None, None).unwrap();
+    assert_eq!(value["outline"]["outline_available"], false);
+    assert!(value["outline"].get("content").is_none());
+}
+
+#[tokio::test]
+async fn preview_with_maximum_metadata_defers_the_outline_within_budget() {
+    let mut registry = outline_registry(OUTLINE_SKILL);
+    let hash = registry.reference().sha256;
+    // Sixteen dependencies with long accepted names leave too little room.
+    registry.closure = (0..16)
+        .map(|n| json!({"guid": uuid::Uuid::new_v4().to_string(), "name": format!("{n:02}{}", "n".repeat(240)), "version": "1.0", "skillHash": hash}))
+        .collect();
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    assert_eq!(verified.reference.dependencies.len(), 16);
+    let value = preview_with_outline(&verified, None, None).unwrap();
+    assert!(wire_len(&value) <= 9200, "{}", wire_len(&value));
+    assert_eq!(value["outline"]["outline_available"], true);
+    assert_eq!(value["outline"]["next_offset"], 0);
+    assert!(value["outline"].get("content").is_none());
+    let only = preview_with_outline(&verified, Some(0), None).unwrap();
+    assert!(wire_len(&only) <= 9200);
+    assert!(only["content"].as_str().unwrap().starts_with("Overview:"));
+
+    // A seventeenth dependency is refused before any outline is read.
+    registry.closure.push(json!({"guid": uuid::Uuid::new_v4().to_string(), "name": "extra", "version": "1.0", "skillHash": hash}));
+    assert!(preview(&registry, ID, "1.0").await.is_err());
+}
+
+#[tokio::test]
+async fn max_size_cjk_outline_pages_through_skill_read_and_preview() {
+    let f = fixture("agent_skill_outline_cjk").await;
+    let skill = max_cjk_outline();
+    let expected = crate::services::skill_outline::render(
+        &crate::services::skill_outline::parse(&skill, &[]).expect("valid at the limits"),
+    );
+    let registry = outline_registry(&skill);
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    agent.skills = vec![registry.reference()];
+    let first = read_outline(&registry, &agent, ID, None, 0, None)
+        .await
+        .unwrap();
+    let read_print = first["outline_fingerprint"].as_str().unwrap().to_owned();
+    let via_read = collect_pages(|offset| {
+        let (registry, agent, print) = (&registry, &agent, &read_print);
+        async move {
+            read_outline(registry, agent, ID, None, offset, Some(print))
+                .await
+                .unwrap()
+        }
+    })
+    .await;
+    assert_eq!(via_read, expected);
+    // Later pages must name the page they continue.
+    let next = first["next_offset"].as_u64().unwrap() as usize;
+    let unbound = read_outline(&registry, &agent, ID, None, next, None)
+        .await
+        .unwrap();
+    assert_eq!(unbound["outline_changed"], true);
+    assert!(unbound.get("content").is_none());
+
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    let first = preview_with_outline(&verified, None, None).unwrap();
+    assert!(wire_len(&first) <= 9200, "{}", wire_len(&first));
+    let print = first["outline"]["outline_fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let via_preview = collect_pages(|offset| {
+        let (verified, print) = (&verified, &print);
+        async move { preview_with_outline(verified, Some(offset), Some(print)).unwrap() }
+    })
+    .await;
+    assert_eq!(via_preview, expected);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn outline_reads_only_attached_pins_and_resolves_uses_in_the_root_closure() {
+    let f = fixture("agent_skill_outline_reader").await;
+    let dependency_id = uuid::Uuid::new_v4().to_string();
+    let root_md = "---\nname: example\nmetadata:\n  depends-on:\n    - helper@1.0\n---\n## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n   Uses: helper\n";
+    let registry = outline_registry(root_md);
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(
+        read_outline(&registry, &agent, ID, None, 0, None)
+            .await
+            .is_err()
+    );
+    assert!(registry.calls.lock().unwrap().is_empty());
+    let mut reference = registry.reference();
+    reference.dependencies.push(SkillPin {
+        source: "ornn".into(),
+        skill_id: dependency_id.clone(),
+        name: "helper".into(),
+        version: "1.0".into(),
+        sha256: reference.sha256.clone(),
+    });
+    agent.skills = vec![reference.clone()];
+    let page = read_outline(&registry, &agent, ID, None, 0, None)
+        .await
+        .unwrap();
+    assert_eq!(page["path"], "outline");
+    assert_eq!(page["untrusted_guidance"], true);
+    assert!(page["content"].as_str().unwrap().contains(&format!(
+        "Uses: helper (skill {dependency_id}, version 1.0)"
+    )));
+    // Re-pinning only the dependency keeps the root's identity but changes
+    // the outline, so a page bound to the old one restarts instead of splicing.
+    let print = page["outline_fingerprint"].as_str().unwrap().to_owned();
+    agent.skills[0].dependencies[0].version = "1.10".into();
+    let moved = read_outline(&registry, &agent, ID, None, 0, Some(&print))
+        .await
+        .unwrap();
+    assert_eq!(moved["outline_changed"], true);
+    assert_eq!(moved["next_offset"], 0);
+    assert!(moved.get("content").is_none());
+    agent.skills = vec![reference.clone()];
+    // A pinned dependency is readable through its root; same package here.
+    assert!(
+        read_outline(&registry, &agent, ID, Some("helper"), 0, None)
+            .await
+            .is_ok()
+    );
+    // A dependency that is not pinned with this root is refused.
+    assert!(
+        read_outline(&registry, &agent, ID, Some("not-pinned"), 0, None)
+            .await
+            .is_err()
+    );
+    // Disabled pins and tampered packages are refused like ordinary reads.
+    let tampered = outline_registry("changed after pinning");
+    assert!(
+        matches!(read_outline(&tampered, &agent, ID, None, 0, None).await, Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
+    );
+    agent.skills[0].disabled = true;
+    assert!(
+        read_outline(&registry, &agent, ID, None, 0, None)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn oversized_previews_stay_identical_to_the_flag_off_response() {
+    // Accepted maximums with JSON escaping: the preview alone exceeds the budget.
+    let heavy = |hash: String| -> Vec<Value> {
+        (0..16)
+            .map(|n| json!({"guid": uuid::Uuid::new_v4().to_string(), "name": format!("{n:02}{}", "\"\\".repeat(127)), "version": "1234567890123456.123456789012345", "skillHash": hash}))
+            .collect()
+    };
+    let mut registry = outline_registry(OUTLINE_SKILL);
+    registry.closure = heavy(registry.reference().sha256);
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    let plain = json!(verified);
+    assert!(wire_len(&plain) > 9200);
+    assert_eq!(preview_with_outline(&verified, None, None).unwrap(), plain);
+    // The outline remains readable on its own.
+    let only = preview_with_outline(&verified, Some(0), None).unwrap();
+    assert!(wire_len(&only) <= 9200);
+    assert!(only["content"].as_str().unwrap().starts_with("Overview:"));
+    // So does the no-outline case.
+    let mut legacy = Registry::new();
+    legacy.closure = heavy(legacy.reference().sha256);
+    let legacy = preview(&legacy, ID, "1.0").await.unwrap();
+    assert_eq!(
+        preview_with_outline(&legacy, None, None).unwrap(),
+        json!(legacy)
+    );
+}
+
+#[tokio::test]
+async fn outline_pages_cannot_splice_two_resolved_closures() {
+    let skill = format!(
+        "---\nname: example\nmetadata:\n  depends-on:\n    - helper@beta\n---\n## Overview\n{}\n\n## Approach\n1. **Prepare.** I get ready.\n   Uses: helper\n{}",
+        "概".repeat(1_200),
+        (2..=8)
+            .map(|n| format!("{n}. **Write {n}.** {}\n", "步".repeat(300)))
+            .collect::<String>()
+    );
+    let mut registry = outline_registry(&skill);
+    let hash = registry.reference().sha256;
+    let helper = uuid::Uuid::new_v4().to_string();
+    let at = |version: &str| {
+        vec![json!({"guid": helper, "name": "helper", "version": version, "skillHash": hash})]
+    };
+    registry.closure = at("1.9");
+    let before = preview(&registry, ID, "1.0").await.unwrap();
+    let first = preview_with_outline(&before, Some(0), None).unwrap();
+    let next = first["next_offset"].as_u64().expect("more than one page") as usize;
+    let print = first["outline_fingerprint"].as_str().unwrap().to_owned();
+    assert!(first["content"].as_str().unwrap().contains("version 1.9"));
+    // Same resolution: the continuation is served.
+    let same = preview_with_outline(&before, Some(next), Some(&print)).unwrap();
+    assert!(same.get("content").is_some());
+    // The tag moved between calls: the continuation is refused, not spliced.
+    registry.closure = at("1.10");
+    let after = preview(&registry, ID, "1.0").await.unwrap();
+    let moved = preview_with_outline(&after, Some(next), Some(&print)).unwrap();
+    assert_eq!(moved["outline_changed"], true);
+    assert!(moved.get("content").is_none());
+    // A continuation without the fingerprint is refused too.
+    assert_eq!(
+        preview_with_outline(&before, Some(next), None).unwrap()["outline_changed"],
+        true
+    );
+    // A deferred first page fetched with the preview's fingerprint is checked
+    // too, so it can't describe different pins than that preview.
+    let deferred = preview_with_outline(&after, Some(0), Some(&print)).unwrap();
+    assert_eq!(deferred["outline_changed"], true);
+    assert!(deferred.get("content").is_none());
+    // Starting again without a fingerprint reads the new resolution.
+    let restart = preview_with_outline(&after, Some(0), None).unwrap();
+    assert!(
+        restart["content"]
+            .as_str()
+            .unwrap()
+            .contains("version 1.10")
+    );
+}
+
+#[tokio::test]
+async fn catalog_preview_adds_the_outline_and_author_only_when_asked() {
+    let skill =
+        "## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n   Asks you\n";
+    let registry = Registry {
+        meta: json!({"createdBy": "publisher-1", "createdByDisplayName": "Ada", "isSystemSkill": false}),
+        ..outline_registry(skill)
+    };
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    // The plain preview (flag off) is unchanged: no outline, no author.
+    let plain = json!(verified);
+    let mut keys: Vec<_> = plain.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["description", "reference", "size_bytes"]);
+
+    let person = catalog_preview(&verified, Some(PublisherKind::Person));
+    assert_eq!(person["outline"]["steps"][0]["title"], "Prepare");
+    assert_eq!(person["outline"]["steps"][0]["asks_you"], true);
+    assert_eq!(person["author"], json!({"kind": "person", "name": "Ada"}));
+    assert_eq!(person["reference"], plain["reference"]);
+    let organization = catalog_preview(&verified, Some(PublisherKind::Organization));
+    assert_eq!(
+        organization["author"],
+        json!({"kind": "organization", "name": "Ada"})
+    );
+    // A service account publishes for the platform; it is not a system skill.
+    let platform = catalog_preview(&verified, Some(PublisherKind::ServiceAccount));
+    assert_eq!(
+        platform["author"],
+        json!({"kind": "platform", "name": "Ada", "service": null, "system_skill": false})
+    );
+    // An account NyxID doesn't know shows no author rather than a guess.
+    assert_eq!(catalog_preview(&verified, None)["author"], Value::Null);
+
+    // A system skill belongs to the platform, whoever published it.
+    let system = Registry {
+        meta: json!({"createdBy": "publisher-1", "createdByDisplayName": "Ada", "isSystemSkill": true, "nyxidServiceSlug": "cma"}),
+        ..outline_registry(skill)
+    };
+    let system = catalog_preview(&preview(&system, ID, "1.0").await.unwrap(), None);
+    assert_eq!(
+        system["author"],
+        json!({"kind": "platform", "name": "Ada", "service": "cma", "system_skill": true})
+    );
+
+    // No publisher name, no author; a skill without the template, no outline.
+    let plain_skill = catalog_preview(
+        &preview(&Registry::new(), ID, "1.0").await.unwrap(),
+        Some(PublisherKind::Person),
+    );
+    assert_eq!(plain_skill["author"], Value::Null);
+    assert_eq!(plain_skill["outline"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_publisher_kind_comes_from_nyxid_accounts() {
+    let f = fixture("agent_skill_publisher_kind").await;
+    let db = &f.state.db;
+    db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+        .insert_many([
+            mongodb::bson::doc! {"_id": "org-publisher", "user_type": "org"},
+            mongodb::bson::doc! {"_id": "person-publisher", "user_type": "person"},
+            mongodb::bson::doc! {"_id": "legacy-publisher"},
+        ])
+        .await
+        .unwrap();
+    db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
+        .insert_one(mongodb::bson::doc! {"_id": "platform-publisher", "name": "Skills"})
+        .await
+        .unwrap();
+    let skill = "## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n";
+    for (case, expected) in [
+        ("org-publisher", Some(PublisherKind::Organization)),
+        ("person-publisher", Some(PublisherKind::Person)),
+        ("legacy-publisher", Some(PublisherKind::Person)),
+        ("platform-publisher", Some(PublisherKind::ServiceAccount)),
+        ("unknown-publisher", None),
+    ] {
+        let registry = Registry {
+            meta: json!({"createdBy": case, "createdByDisplayName": "Publisher"}),
+            ..outline_registry(skill)
+        };
+        let verified = preview(&registry, ID, "1.0").await.unwrap();
+        assert_eq!(publisher_kind(db, &verified).await, expected, "{case}");
+    }
+    // Without a publisher there is nothing to look up.
+    let anonymous = preview(&outline_registry(skill), ID, "1.0").await.unwrap();
+    assert_eq!(publisher_kind(db, &anonymous).await, None);
     f.state.db.drop().await.unwrap();
 }

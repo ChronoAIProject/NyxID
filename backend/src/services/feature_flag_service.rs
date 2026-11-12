@@ -201,6 +201,13 @@ const SKILL_PIN_DISABLE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const SKILL_RUNS_FLAG_KEY: &str = "assistant:skill-runs";
+const SKILL_RUNS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SKILL_RUNS_FLAG_KEY,
+    description: "NYX skill template: skill outlines in NyxBot's skill tools and guidance. Off by default; pilot with personal overrides after every replica is upgraded.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_MODEL_CONTROLS_FLAG_KEY: &str = "assistant:model-controls";
 const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_MODEL_CONTROLS_FLAG_KEY,
@@ -467,6 +474,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
     SKILL_PIN_DISABLE_FLAG,
+    SKILL_RUNS_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
@@ -529,6 +537,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
     SKILL_PIN_DISABLE_FLAG,
+    SKILL_RUNS_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
@@ -3163,6 +3172,7 @@ mod tests {
                 "assistant:workspace-preview",
                 "assistant:cma-sandboxes",
                 "assistant:skill-pin-disable",
+                "assistant:skill-runs",
                 "nyxbot:thread-follow",
                 "nyxbot:relay-response-recovery",
                 "channel:discord-gateway",
