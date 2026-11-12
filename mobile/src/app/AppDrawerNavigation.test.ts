@@ -55,6 +55,12 @@ import {
   workspaceContentAnimation,
   workspaceSidebarLayout,
 } from "../components/workspace/workspacePushState";
+import {
+  deferred,
+  hookHarness,
+} from "../features/assistant/assistantHookTestHarness";
+import { createSessionCoordinator } from "../lib/auth/sessionCoordinator";
+import { decodeJwtSub } from "../lib/auth/jwt";
 
 /** Extract actual declarations so App's splash/network/push startup effects never execute. */
 function shellSource() {
@@ -79,13 +85,17 @@ function shellSource() {
   );
 }
 
-function setup(deferFade = false, initialWidth = 390) {
+function setup(
+  deferFade = false,
+  initialWidth = 390,
+  initiallyAuthenticated = true,
+) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
   let timerId = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let rootState = fixture();
-  let authenticated = true;
+  let authenticated = initiallyAuthenticated;
   let width = initialWidth;
   let navigationBlocked = false;
   let authEpoch = 0;
@@ -367,6 +377,142 @@ function setup(deferFade = false, initialWidth = 390) {
     },
     hasDrawer: () =>
       elements(rendered).some((item) => item.type === "WorkspaceDrawer"),
+  };
+}
+
+/**
+ * Run the actual login and push activation effects, holding only native/API I/O.
+ * This verifies JS navigation liveness, not OS modal dismissal or native touch.
+ */
+function postLoginSession(env: ReturnType<typeof setup>) {
+  type AuthValue = ReturnType<
+    typeof import("../features/auth/AuthSessionContext").useAuthSession
+  >;
+  type Provider =
+    typeof import("../features/auth/AuthSessionContext").AuthSessionProvider;
+  const permission = deferred<{ status: "granted" | "denied" }>();
+  const registration = deferred<void>();
+  const refresh = deferred<boolean>();
+  const stored = new Map<string, string>();
+  const storage = {
+    getItemAsync: async (key: string) => stored.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => {
+      stored.set(key, value);
+    },
+    deleteItemAsync: async (key: string) => {
+      stored.delete(key);
+    },
+  };
+  const session = createSessionCoordinator(storage, () => {});
+  let accountId: string | null = null;
+  let permissionRequests = 0;
+  let registrationRequests = 0;
+  let refreshRequests = 0;
+  const h = hookHarness<AuthValue>(
+    {
+      "react-native": {
+        Platform: { OS: "ios" },
+        AppState: {
+          currentState: "active",
+          addEventListener: () => ({ remove() {} }),
+        },
+      },
+      "@tanstack/react-query": {
+        useQueryClient: () => ({
+          cancelQueries: async () => {},
+          clear() {},
+        }),
+      },
+      "../../lib/auth/authEpoch": { advanceAuthEpoch() {} },
+      "../../lib/auth/authAccount": {
+        getAuthAccountId: () => accountId,
+        setAuthAccountId: (next: string | null) => {
+          accountId = next;
+        },
+      },
+      "../../lib/auth/sessionStore": {
+        loadStoredAuthSession: session.load,
+        persistAuthSession: session.persist,
+        clearStoredAuthSession: session.clear,
+        authSessionGeneration: session.generation,
+      },
+      "../../lib/api/http": {
+        setSessionInvalidationListener() {},
+        refreshAccessTokenIfNeeded: () => {
+          refreshRequests++;
+          return refresh.promise;
+        },
+      },
+      "../../lib/env": { ALLOWED_EMAILS: [] },
+      "../../lib/telemetry": {
+        identify() {},
+        shutdownTelemetry() {},
+      },
+      "../../lib/auth/jwt": { decodeJwtSub },
+      "../../lib/consent": {
+        useMobileConsent: () => ({
+          enabled: false,
+          isHydrated: true,
+          accountId: null,
+        }),
+      },
+      "../../lib/notifications/approvalRefreshSignal": {},
+      "./notificationDestination": {},
+      "../env": {},
+      "expo-notifications": {
+        getPermissionsAsync: async () => ({ status: "undetermined" }),
+        requestPermissionsAsync: () => {
+          permissionRequests++;
+          return permission.promise;
+        },
+        getDevicePushTokenAsync: async () => ({
+          type: "ios",
+          data: "test-device-push-token",
+        }),
+      },
+      "expo-secure-store": storage,
+      "expo-task-manager": {},
+      "../api/mobileApi": {
+        mobileApi: {
+          registerPushToken: () => {
+            registrationRequests++;
+            return registration.promise;
+          },
+        },
+      },
+      "./approvalRefreshSignal": {},
+    },
+    { __DEV__: false },
+  );
+  h.mock(
+    "../../lib/notifications/pushNotifications",
+    h.load(
+      fileURLToPath(
+        new URL("../lib/notifications/pushNotifications.ts", import.meta.url),
+      ),
+    ),
+  );
+  const { AuthSessionProvider } = h.load(
+    fileURLToPath(
+      new URL("../features/auth/AuthSessionContext.tsx", import.meta.url),
+    ),
+  ) as { AuthSessionProvider: Provider };
+  h.mount(() => {
+    const value = AuthSessionProvider({ children: null }).props
+      .value as AuthValue;
+    env.authenticate(value.isAuthenticated);
+    return value;
+  });
+  return {
+    h,
+    permission,
+    registration,
+    refresh,
+    counts: () => ({
+      permissionRequests,
+      registrationRequests,
+      refreshRequests,
+    }),
   };
 }
 
@@ -963,3 +1109,97 @@ test("critical writes block persistent sidebar Settings and QR/terminal sheet sh
   x.drawer().props.onNavigate("AccountSettings");
   assert.equal(x.dispatched.length, 1);
 });
+
+for (const outcome of [
+  "granted",
+  "denied",
+  "permission-error",
+  "registration-error",
+] as const) {
+  test(`first login keeps drawer navigation usable during pending notification activation (${outcome})`, async (t) => {
+    const env = setup(false, 390, false);
+    const login = postLoginSession(env);
+    t.after(() => {
+      login.permission.resolve({ status: "denied" });
+      login.registration.resolve();
+      login.refresh.resolve(false);
+      login.h.unmount();
+    });
+    await login.h.settle();
+    assert.equal(login.h.value().isRestoring, false);
+    assert.equal(env.hasDrawer(), false);
+    let completed = false;
+    const signingIn = login.h
+      .value()
+      .signInWithSession({
+        accessToken: `test.${Buffer.from(
+          JSON.stringify({ sub: "newly-signed-in-user" }),
+        ).toString("base64url")}.test`,
+      })
+      .then(() => {
+        completed = true;
+      });
+    await login.h.settle();
+    assert.equal(login.h.value().isAuthenticated, true);
+    assert.equal(completed, false, "notification activation remains pending");
+    assert.deepEqual(login.counts(), {
+      permissionRequests: 1,
+      registrationRequests: 0,
+      refreshRequests: 1,
+    });
+    env.readyNavigation();
+
+    const useDrawer = (route: "Machines" | "Automations" | "Activity") => {
+      const before = env.dispatched.length;
+      env.open();
+      assert.equal(env.shell().props.visible, true);
+      assert.equal(env.shell().props.presented, true);
+      env.drawer().props.onNavigate(route);
+      assert.equal(env.dispatched.length, before + 1);
+      env.commitLast();
+      assert.equal(env.shell().props.visible, false);
+      env.drawer().props.onDismiss();
+      env.flush();
+      assert.equal(env.shell().props.presented, false);
+      env.open();
+      assert.equal(env.shell().props.visible, true);
+      // Same close callback used by the actual shell's exposed-page Pressable.
+      env.shell().props.onOpenChange(false);
+      env.flush();
+      env.drawer().props.onDismiss();
+      env.flush();
+      assert.equal(env.shell().props.presented, false);
+    };
+
+    useDrawer("Machines");
+    if (outcome === "permission-error") {
+      login.permission.reject(new Error("native permission unavailable"));
+    } else {
+      login.permission.resolve({
+        status: outcome === "denied" ? "denied" : "granted",
+      });
+    }
+    await login.h.settle();
+    if (outcome === "granted" || outcome === "registration-error") {
+      assert.equal(login.counts().registrationRequests, 1);
+      assert.equal(
+        completed,
+        false,
+        "backend push registration remains pending",
+      );
+      useDrawer("Automations");
+      if (outcome === "registration-error") {
+        login.registration.reject(new Error("push registration offline"));
+      } else login.registration.resolve();
+    } else assert.equal(login.counts().registrationRequests, 0);
+    await signingIn;
+    await login.h.settle();
+    assert.equal(completed, true);
+    assert.equal(login.h.value().isAuthenticated, true);
+    useDrawer("Activity");
+    login.refresh.resolve(false);
+    await login.h.settle();
+    assert.equal(env.shell().props.visible, false);
+    assert.equal(env.shell().props.presented, false);
+  });
+}
