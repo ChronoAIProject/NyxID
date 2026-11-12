@@ -59,6 +59,7 @@ function setup(
   listing = false,
   options: {
     initialCreate?: boolean;
+    createError?: string;
     online?: boolean;
     maxLiveSubagents?: number;
     listedAgents?: contracts.AssistantAgent[];
@@ -136,19 +137,19 @@ function setup(
                     max_live_subagents: options.maxLiveSubagents ?? 10,
                   },
                 }
-              : queryKey[2] === "connections"
+              : queryKey[2] === "grant-services"
                 ? [
                     {
                       id: "connection-github",
                       slug: "github",
                       label: "GitHub",
-                      is_active: true,
+                      executable: true,
                     },
                     {
                       id: "connection-docs",
                       slug: "documents",
                       label: "Documents",
-                      is_active: true,
+                      executable: true,
                     },
                   ]
                 : [],
@@ -188,6 +189,7 @@ function setup(
         },
         create: async (...args: unknown[]) => {
           calls.push({ method: "create", args: plain(args) });
+          if (options.createError) throw new Error(options.createError);
           return { id: agent.id };
         },
       },
@@ -222,7 +224,7 @@ function setup(
       agentProfileFieldTitle: (field: string, nyxbot?: boolean) =>
         field === "description" ? (nyxbot ? "Notes" : "Purpose") : field,
     },
-  });
+  }, { Error });
   const { AgentsScreen } = harness.load(
     fileURLToPath(new URL("./AgentsScreen.tsx", import.meta.url)),
   ) as {
@@ -646,4 +648,22 @@ test("destroy and forget remain behind explicit confirmations", async () => {
     method: "forget",
     args: [agent.id, "note-1"],
   });
+});
+
+
+test("a refused starting grant keeps the create draft and exits saving without a partial agent", async () => {
+  const created: string[] = [];
+  const reason = "Validation error: Unknown service or no access: revoked-service";
+  const state = setup(false, false, {initialCreate: true, createError: reason, onCreated: id => created.push(id)});
+  await state.field().props.onSave({services:["revoked-service"],account_read:false,guest_access:{}});
+  state.harness.flush();
+  state.one(row => typeof row.type === "function" && row.type.name === "ProfileFields")
+    .props.onChange({name:"researcher",description:"Keep this draft"});
+  state.harness.flush();
+  state.action("Create agent").props.onPress();
+  await state.harness.settle();
+  assert.deepEqual(created, []);
+  assert.deepEqual(plain(state.field().props.value).services, ["revoked-service"]);
+  assert.equal(state.action("Create agent").props.disabled, false);
+  assert.ok(elements(state.harness.value()).some(row => row.props.message === reason));
 });

@@ -529,3 +529,19 @@ Execution discovery remains executable-only. An explicitly invoked, granted
 operation reports the unavailable credential or offline node (named only with
 node-read permission); it never falls back to direct HTTP around a pinned node.
 An online configured fallback remains usable, and reconnecting needs no regrant.
+
+Web and mobile grant selectors use the human-only
+`GET /api/v1/assistant/nyxagent/grant-services` (optional `?org=<id-or-slug>`),
+not general connection-management inventory. Its metadata comes from the same
+live authorization catalog as create, PUT grants and NyxBot's grant tools.
+Optional `catalog_slug` and `icon_url` preserve catalog glyphs and connection
+icons; a custom connection icon takes precedence over its catalog icon. This
+presentation metadata is loaded in one ID-bounded batch on the inventory GET only.
+Authorized HTTP connections remain grantable with zero published MCP operations,
+including ordinary public platform-key inference connections. This does not
+publish new tools or grant private model infrastructure or the NyxAgent engine.
+Public auto-connections are personal-only; org specialists require accessible
+same-org connections (including explicit public and restricted auto bindings).
+Inventory is a snapshot: save and execution still recheck live ACLs. HTTP create
+and PUT grants remain atomic on refusal; only NyxBot's partial grant/revoke
+responses use `not_granted`/`not_revoked`.

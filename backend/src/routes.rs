@@ -2833,6 +2833,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             patch(handlers::assistant_nyxagent::change_access_mode),
         )
         .route(
+            "/nyxagent/grant-services",
+            get(handlers::assistant_team::grant_services),
+        )
+        .route(
             "/nyxagent/agents",
             get(handlers::assistant_team::list_agents).post(handlers::assistant_team::create_agent),
         )
