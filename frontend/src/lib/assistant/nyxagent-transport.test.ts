@@ -1,4 +1,5 @@
 import retryHistory from "./__fixtures__/retry-duplicate-history.json";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { fireEvent } from "@testing-library/react";
 import { HISTORY_UNAVAILABLE } from "@/schemas/assistant-history-compat";
 import { createElement } from "react";
@@ -827,6 +828,8 @@ describe("NyxAgent server-backed transport", () => {
   });
 
   it("renames and deletes through HTTP and evicts deleted transcript state", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", id);
     globalThis.__nyxidAssistantHttpMock = ({ init }) => {
       if (init.method === "DELETE") return new Response(null, { status: 204 });
       if (init.method === "PATCH")
@@ -838,8 +841,18 @@ describe("NyxAgent server-backed transport", () => {
     await transport.rename(id, "Renamed");
     expect(transport.session(id).title).toBe("Renamed");
     await transport.delete(id);
+    expect(useAssistantPinsStore.getState().ids).not.toContain(id);
     expect(transport.getHistory(id)).toBeUndefined();
     expect(transport.getConversations()).toEqual([]);
+  });
+
+  it("retains the conversation pin when its DELETE fails", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", id);
+    globalThis.__nyxidAssistantHttpMock = () => new Response(null, { status: 503 });
+    await expect(new NyxAgentTransport().delete(id)).rejects.toThrow();
+    expect(useAssistantPinsStore.getState().ids).toContain(id);
+    useAssistantPinsStore.getState().bindAccount(null);
   });
 
   it("rejects malformed SSE and never automatically retries a submitted message", async () => {

@@ -12077,5 +12077,10 @@
   "By {{name}}": "By {{name}}",
   "Drafted by {{name}}": "Drafted by {{name}}",
   "System skill": "System skill",
-  "System skill for {{service}}": "System skill for {{service}}"
+  "System skill for {{service}}": "System skill for {{service}}",
+  "Pin chat": "Pin chat",
+  "Unpin chat": "Unpin chat",
+  "Pinned chat": "Pinned chat",
+  "Could not load pinned chats in this browser. Try reloading the page.": "Could not load pinned chats in this browser. Try reloading the page.",
+  "Could not save pinned chats in this browser. Please try again.": "Could not save pinned chats in this browser. Please try again."
 }

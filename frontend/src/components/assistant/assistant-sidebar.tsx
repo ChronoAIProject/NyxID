@@ -39,6 +39,8 @@ import {
   MoreHorizontal,
   MessageSquare,
   PencilLine,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Settings2,
@@ -83,6 +85,8 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { usePinnedConversationIds } from "@/hooks/use-conversation-pins";
+import { pinnedConversationsFirst, useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import type { Conversation } from "@/types/assistant";
 
 /**
@@ -94,6 +98,11 @@ import type { Conversation } from "@/types/assistant";
  */
 const TITLE_FADE =
   "[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]";
+
+function PinnedChatMarker() {
+  useUiTranslation();
+  return <Pin role="img" aria-label={translateUi("Pinned chat")} className="h-3 w-3 shrink-0 text-text-tertiary" />;
+}
 
 function GroupLabel({ children }: { readonly children: string }) {
   useUiTranslation();
@@ -166,6 +175,8 @@ function ConversationRow({
   onSelect,
   onRequestDelete,
   onRequestRename,
+  pinned,
+  onTogglePin,
 }: {
   readonly conversation: Conversation;
   readonly active: boolean;
@@ -173,9 +184,13 @@ function ConversationRow({
   readonly onSelect: () => void;
   readonly onRequestDelete: () => void;
   readonly onRequestRename?: () => void;
+  readonly pinned: boolean;
+  readonly onTogglePin?: () => void;
 }) {
   useUiTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const optionsTrigger = useRef<HTMLButtonElement>(null);
+  const rowList = useRef<HTMLElement | null>(null);
   const draft = useAssistantDraftStore((state) =>
     ownerUserId && state.ownerUserId === ownerUserId
       ? (state.drafts[`conv:${conversation.id}`]?.text ?? "")
@@ -198,6 +213,7 @@ function ConversationRow({
         type="button"
         onClick={onSelect}
         aria-label={shownTitle}
+        aria-current={active ? "page" : undefined}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
           "w-full overflow-hidden px-2 py-1 text-left transition-colors",
@@ -210,6 +226,7 @@ function ConversationRow({
         )}
       >
         <span className="flex min-w-0 items-center gap-1.5">
+          {pinned ? <PinnedChatMarker /> : null}
           <ChatKindIcon
             kind={conversation.channel?.chat_kind}
             className="h-3 w-3 shrink-0 text-text-tertiary"
@@ -228,9 +245,14 @@ function ConversationRow({
           </span>
         )}
       </button>
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+      <DropdownMenu open={menuOpen} onOpenChange={(open) => {
+        if (open) rowList.current = optionsTrigger.current?.closest("nav") ?? null;
+        setMenuOpen(open);
+      }}>
         <DropdownMenuTrigger asChild>
           <button
+            ref={optionsTrigger}
+            data-conversation-options={conversation.id}
             type="button"
             aria-label={translateUi("Options for {{value1}}", { value1: shownTitle })}
             data-icon-button=""
@@ -248,7 +270,29 @@ function ConversationRow({
           </button>
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
-        <DropdownMenuContent align="end" className="min-w-[160px]">
+        <DropdownMenuContent
+          align="end"
+          className="min-w-[160px]"
+          onCloseAutoFocus={(event) => {
+            // A channel pin moves between groups. Search the same sidebar instance:
+            // the hidden desktop sidebar also stays mounted beside the mobile drawer.
+            const channelKey = conversation.channel
+              ? conversation.channel.channel_agent_id ?? `platform:${conversation.channel.platform}`
+              : undefined;
+            const trigger = rowList.current?.querySelector<HTMLElement>(`[data-conversation-options="${CSS.escape(conversation.id)}"]`)
+              ?? (channelKey ? rowList.current?.querySelector<HTMLElement>(`[data-channel-group="${CSS.escape(channelKey)}"]`) : null);
+            if (trigger?.isConnected) {
+              event.preventDefault();
+              trigger.focus();
+            }
+          }}
+        >
+          {onTogglePin ? (
+            <DropdownMenuItem onSelect={onTogglePin}>
+              {pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
+              {pinned ? translateUi("Unpin chat") : translateUi("Pin chat")}
+            </DropdownMenuItem>
+          ) : null}
           {onRequestRename ? (
             <DropdownMenuItem
               onSelect={onRequestRename}
@@ -355,6 +399,7 @@ function ChannelThreadsGroup({
       <button
         type="button"
         aria-expanded={open}
+        data-channel-group={group.key}
         aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", { label: group.label, platform, count, status: running ? translateUi(", working") : "" })}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
@@ -432,7 +477,11 @@ function AgentRow({
   const [folded, setFolded] = useState<{ active: string | undefined }>();
   const expanded = selected && !(folded && folded.active === activeThreadId);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
-  const threads = expanded ? splitChannelThreads(model.threads) : { own: [], bots: [] };
+  const pinnedIds = usePinnedConversationIds();
+  const pinnedThreads = expanded ? model.threads.filter((thread) => pinnedIds.has(thread.id)) : [];
+  const threads = expanded
+    ? splitChannelThreads(model.threads.filter((thread) => !pinnedIds.has(thread.id)))
+    : { own: [], bots: [] };
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
   const handle = agentHandle(agent);
@@ -592,7 +641,7 @@ function AgentRow({
           aria-label={translateUi("Threads with {{value1}}", { value1: name })}
           className="mb-1 ml-[22px] mt-0.5 space-y-px border-l border-border/60 pl-1"
         >
-          {threads.own.map((conversation) => renderThread(conversation))}
+          {[...pinnedThreads, ...threads.own].map(renderThread)}
           {model.threadsLoading && !model.threads.length ? (
             <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading threads...")}</p>
           ) : null}
@@ -862,6 +911,10 @@ export function AssistantSidebar({
   const { current: accountPanel } = useAccountPanel();
   const rail = useContext(SidebarRailContext);
   const user = useAuthStore((state) => state.user);
+  const pinnedIds = usePinnedConversationIds();
+  const pinError = useAssistantPinsStore((state) =>
+    state.ownerUserId === user?.id ? state.error : null,
+  );
   const counts = useAssistantWorkspaceCounts();
   const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
   const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
@@ -916,6 +969,8 @@ export function AssistantSidebar({
         conversation={conversation}
         active={conversation.id === activeConversationId}
         ownerUserId={user?.id ?? null}
+        pinned={pinnedIds.has(conversation.id)}
+        onTogglePin={user ? () => useAssistantPinsStore.getState().toggle(user.id, conversation.id) : undefined}
         onSelect={() => onSelect(conversation.id)}
         onRequestDelete={() => setDeleteTarget(conversation)}
         onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
@@ -1088,6 +1143,13 @@ export function AssistantSidebar({
         </p>
       ) : null}
       <nav aria-label={translateUi("Agents and conversations")} className="@container px-2 pb-3">
+        {pinError ? (
+          <p role="alert" className="px-2 py-1 type-secondary text-destructive">
+            {pinError === "load"
+              ? translateUi("Could not load pinned chats in this browser. Try reloading the page.")
+              : translateUi("Could not save pinned chats in this browser. Please try again.")}
+          </p>
+        ) : null}
         {agents ? (
           <>
             <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} />
@@ -1105,7 +1167,7 @@ export function AssistantSidebar({
             <div className="-mx-2">
               <GroupLabel>{translateUi("Chats")}</GroupLabel>
             </div>
-            <div className="shell-nav-stack">{conversations.map(renderRow)}</div>
+            <div className="shell-nav-stack">{pinnedConversationsFirst(conversations, pinnedIds).map(renderRow)}</div>
           </>
         ) : null}
       </nav>
@@ -1384,6 +1446,7 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
   readonly onSelect: (conversationId: string) => void;
 }) {
   useUiTranslation();
+  const pinnedIds = usePinnedConversationIds();
   const [open, setOpen] = useState(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -1393,9 +1456,12 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
       <PopoverContent side="right" align="start" className="w-72 p-2">
         <p className="px-2 py-1 type-row-title">{translateUi("Previous chats")}</p>
         <ul aria-label={translateUi("Previous chats")} className="max-h-80 shell-nav-stack overflow-y-auto">
-          {conversations.map((chat) => (
+          {pinnedConversationsFirst(conversations, pinnedIds).map((chat) => (
             <li key={chat.id}>
-              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
+              <button type="button" aria-label={chat.title} aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">
+                {pinnedIds.has(chat.id) ? <PinnedChatMarker /> : null}
+                <span className="min-w-0 truncate">{chat.title}</span>
+              </button>
             </li>
           ))}
         </ul>
@@ -1488,6 +1554,7 @@ function RailAgentChats({
   readonly onAll: () => void;
 }) {
   useUiTranslation();
+  const pinnedIds = usePinnedConversationIds();
   const userId = useAuthStore((state) => state.user?.id);
   const selected = agent.id === model.selectedAgentId;
   // The open agent's threads are already loaded; others load (and cache) on hover.
@@ -1496,7 +1563,7 @@ function RailAgentChats({
     queryFn: () => nyxAgentTransport.list(agent.id),
     enabled: !selected && Boolean(userId),
   });
-  const chats = selected ? model.threads : (threads.data ?? []);
+  const chats = pinnedConversationsFirst(selected ? model.threads : (threads.data ?? []), pinnedIds);
   const loading = selected ? Boolean(model.threadsLoading) : threads.isPending;
   return (
     <div className="space-y-1 text-14">
@@ -1521,13 +1588,15 @@ function RailAgentChats({
               <button
                 type="button"
                 onClick={() => onPick(chat.id)}
+                aria-label={chat.title || translateUi("New conversation")}
                 aria-current={chat.id === activeConversationId ? "page" : undefined}
                 className={cn(
-                  "w-full truncate rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
+                  "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
                   chat.id === activeConversationId ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
                 )}
               >
-                {chat.title || translateUi("New conversation")}
+                {pinnedIds.has(chat.id) ? <PinnedChatMarker /> : null}
+                <span className="min-w-0 truncate">{chat.title || translateUi("New conversation")}</span>
               </button>
             </li>
           ))}

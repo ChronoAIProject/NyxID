@@ -1,4 +1,5 @@
 import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { settledInterruptedTurn } from "./interrupted-turn";
 import { assistantTitleLanguage } from "@/lib/assistant/title-language";
 import { formatCapacityWait } from "./capacity-wait";
@@ -579,6 +580,7 @@ export class NyxAgentTransport {
     const generation = this.identity();
     await assistantJson(path(id), { method: "DELETE" });
     this.current(generation);
+    if (this.owner) useAssistantPinsStore.getState().remove(this.owner, id);
     this.mutationRevision += 1;
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
     this.index.delete(id);

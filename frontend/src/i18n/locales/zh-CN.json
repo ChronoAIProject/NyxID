@@ -12077,5 +12077,10 @@
   "By {{name}}": "作者：{{name}}",
   "Drafted by {{name}}": "由 {{name}} 起草",
   "System skill": "系统技能",
-  "System skill for {{service}}": "{{service}} 的系统技能"
+  "System skill for {{service}}": "{{service}} 的系统技能",
+  "Pin chat": "置顶会话",
+  "Unpin chat": "取消置顶",
+  "Pinned chat": "已置顶会话",
+  "Could not load pinned chats in this browser. Try reloading the page.": "无法读取此浏览器中的置顶会话，请尝试刷新页面。",
+  "Could not save pinned chats in this browser. Please try again.": "无法在此浏览器中保存置顶会话，请重试。"
 }
