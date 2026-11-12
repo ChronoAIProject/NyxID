@@ -1,3 +1,5 @@
+import { CredentialCheck } from "@/components/assistant/credential-check";
+import { credentialVerificationMeta } from "@/lib/credential-verification";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -102,7 +104,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
-import type { CatalogEntry } from "@/types/keys";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import {
   credentialStatusMeta,
   isReconnectableStatus,
@@ -650,6 +652,7 @@ function RecommendedSkillsSection({
 
 function ApiKeySection({
   apiKeyId,
+  connection,
   credentialType,
   status,
   expiresAt,
@@ -658,6 +661,7 @@ function ApiKeySection({
   readOnly = false,
 }: {
   readonly apiKeyId: string;
+  readonly connection: KeyInfo;
   readonly credentialType: string;
   readonly status: string;
   readonly expiresAt: string | null;
@@ -724,13 +728,14 @@ function ApiKeySection({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <Badge variant={credentialStatusMeta(status).variant}>
-            {credentialStatusMeta(status).label}
+          <Badge variant={credentialStatusMeta(status, connection).variant}>
+            {translateUi(credentialStatusMeta(status, connection).label)}
           </Badge>
           <span className="text-13 text-muted-foreground">{translateUi("Type: ")}{credentialType}
           </span>
         </div>
 
+        <CredentialCheck connection={connection} canManage={!readOnly} />
         {errorMessage && (
           <p className="text-13 text-destructive">{errorMessage}</p>
         )}
@@ -784,6 +789,7 @@ function ApiKeySection({
 
 function ServiceSection({
   slug,
+  connection,
   authMethod,
   authKeyName,
   isActive,
@@ -796,6 +802,7 @@ function ServiceSection({
   readOnly = false,
 }: {
   readonly slug: string;
+  readonly connection: KeyInfo;
   readonly authMethod: string;
   readonly authKeyName: string;
   readonly isActive: boolean;
@@ -879,6 +886,12 @@ function ServiceSection({
       badgeVariant = "success";
       badgeLabel = "Active";
     }
+  }
+
+  const verification = credentialVerificationMeta(connection);
+  if (isActive && !isNodeBound && !credentialBlocked && verification) {
+    badgeLabel = verification.label;
+    badgeVariant = verification.variant === "success" ? "success" : verification.variant === "destructive" ? "destructive" : "secondary";
   }
 
   function toggleActive() {
@@ -2746,6 +2759,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               />
               {keyInfo.api_key_id && (
                 <ApiKeySection
+                  connection={keyInfo}
                   apiKeyId={keyInfo.api_key_id}
                   credentialType={keyInfo.credential_type}
                   status={keyInfo.status}
@@ -2756,6 +2770,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                 />
               )}
               <ServiceSection
+                connection={keyInfo}
                 slug={keyInfo.slug}
                 authMethod={keyInfo.auth_method}
                 authKeyName={keyInfo.auth_key_name}

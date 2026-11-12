@@ -166,6 +166,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
         updated_at: now,
         state_version: 1,
         rotation_predecessor_id: None,
+        credential_verification: None,
     };
     crate::services::service_history::collection::<UserEndpoint>(db, ENDPOINTS)
         .insert_one(&endpoint)
@@ -1557,6 +1558,8 @@ async fn create_key_inner(
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -5471,6 +5474,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         }
     }
 
@@ -5628,6 +5632,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

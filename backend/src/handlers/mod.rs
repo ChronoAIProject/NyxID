@@ -63,6 +63,7 @@ pub mod connect_links;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;
+pub mod credential_verification;
 pub mod delegation;
 pub mod demo;
 pub mod developer_apps;

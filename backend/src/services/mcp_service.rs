@@ -8074,6 +8074,7 @@ pub async fn connect_service(
         "status": "connected",
         "service_name": result.service_name,
         "connected_at": result.connected_at.to_rfc3339(),
+        "credential_verification": if has_credential {Some(crate::services::credential_verification::VerificationView::unverified("legacy_connection_check_unavailable",false))}else{None},
     }))
 }
 
@@ -15734,6 +15735,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
