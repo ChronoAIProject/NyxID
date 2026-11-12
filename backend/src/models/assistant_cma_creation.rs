@@ -37,6 +37,8 @@ pub struct AssistantCmaCreation {
     pub first_dispatched_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub request_ciphertext: Option<Vec<u8>>,
+    #[serde(default)]
+    /// Absent/null selects legacy encryption; 3 selects contextual encryption.
     pub request_context_version: Option<i32>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,

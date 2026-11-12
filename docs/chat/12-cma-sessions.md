@@ -345,3 +345,32 @@ During a rolling upgrade, repaired rows work on old replicas too: old provisioni
 skips existing connections and does not revert their URLs. Until reconciliation
 visits a row, an old replica can still return the original conflict. The existing
 CMA safety check remains enforced throughout rollout.
+
+### Creation request encryption and writer cutover
+
+CMA sandbox/agent creation does not require `CONTEXTUAL_RECORD_WRITES=true`.
+Retained requests use the shared encrypted-field writer: legacy envelope encryption
+with the default setting off, contextual encryption with it on. The existing
+optional `request_context_version` on both creation and sandbox rows selects the
+reader: absent/null means legacy and `3` means contextual. Unknown or mismatched
+formats fail closed; readers never guess from ciphertext or retry another format.
+Existing contextual rows remain readable with writes off. No plaintext request is
+stored, and IDs, generations, idempotency keys and deployment fingerprints retain
+their existing meaning. Same-key pending retries preserve the saved ciphertext;
+only a proven-not-created retry replaces it and its marker together.
+
+During a mixed deployment, an old replica refuses a new legacy-format sandbox
+replay before any send: its marker check returns `cma_creation_recovery_unavailable`,
+and its contextual decoder cannot decrypt legacy ciphertext. This leaves the
+retained row and occupied slot intact for an upgraded replica. Receipt-only
+reconciliation remains valid; it clears recovery material only on the existing
+authoritative terminal evidence. Rolling back restores the creation/replay outage,
+not a plaintext fallback or automatic deletion. Account purge still deletes both
+owner-scoped record collections, while chat/watch cleanup does not discard an
+unresolved creation.
+
+This release does not enable writer cutover or disable legacy reads. CMA creation
+collections are not in the generic operator rewrap inventory; retain legacy reads
+until legacy pending requests have completed/been purged or a CMA migration adapter
+has been deployed and verified. An inventory pass alone does not establish that
+these CMA rows have been converted.
