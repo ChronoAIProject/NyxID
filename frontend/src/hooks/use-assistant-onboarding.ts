@@ -30,21 +30,37 @@ export function useSaveOnboarding() {
   });
 }
 
-/** Hides the home's suggestions until the intro is retaken. */
-export function useHideSuggestions() {
+function useSuggestionsVisibility(hidden: boolean) {
   const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   const key = nyxBotQueryKeys.onboarding(userId);
   return useMutation({
-    mutationFn: () => nyxBotApi.hideSuggestions(),
-    onMutate: () => {
+    scope: { id: `assistant-onboarding-suggestions:${userId}` },
+    mutationFn: () => hidden ? nyxBotApi.hideSuggestions() : nyxBotApi.showSuggestions(),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<AssistantOnboarding>(key);
       queryClient.setQueryData<AssistantOnboarding>(key, (state) =>
-        state ? { ...state, suggestions_hidden: true } : state,
+        state ? { ...state, suggestions_hidden: hidden } : state,
       );
+      return { previous };
     },
     onSuccess: (state) => queryClient.setQueryData(key, state),
-    onError: () => queryClient.invalidateQueries({ queryKey: key }),
+    onError: (_error, _variables, context) => {
+      if (context?.previous) queryClient.setQueryData(key, context.previous);
+      return queryClient.invalidateQueries({ queryKey: key });
+    },
   });
+}
+
+/** Hides the home's suggestions until restored or the intro is retaken. */
+export function useHideSuggestions() {
+  return useSuggestionsVisibility(true);
+}
+
+/** Restores suggestions without changing the intro answers or memory. */
+export function useShowSuggestions() {
+  return useSuggestionsVisibility(false);
 }
 
 /**

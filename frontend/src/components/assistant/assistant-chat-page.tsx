@@ -90,6 +90,7 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import {
   useAssistantOnboarding,
   useHideSuggestions,
+  useShowSuggestions,
   useIntroReplay,
 } from "@/hooks/use-assistant-onboarding";
 import { FirstRunIntro } from "./onboarding/first-run-intro";
@@ -891,6 +892,7 @@ function NyxAgentThreadPage() {
   // home, so a step started elsewhere returns home first.
   const onboarding = useAssistantOnboarding(onChatRoute && !search.mock);
   const hideSuggestions = useHideSuggestions();
+  const showSuggestions = useShowSuggestions();
   const replayPending = useIntroReplay((state) => state.pending);
   const consumeReplay = useIntroReplay((state) => state.consume);
   const [intro, setIntro] = useState<"first_run" | "account_menu">();
@@ -1175,9 +1177,19 @@ function NyxAgentThreadPage() {
               const nyxbot = nyxBotOf(agents.data?.agents);
               if (nyxbot) setDetailsAgentId(nyxbot.id);
             }}
-            nextSteps={onboarding.data?.suggestions_hidden ? undefined : onboarding.data?.recommendations}
+            nextSteps={onboarding.data?.recommendations}
+            suggestionsHidden={onboarding.data?.suggestions_hidden}
+            suggestionsPending={hideSuggestions.isPending || showSuggestions.isPending}
+            suggestionsError={hideSuggestions.isError ? "hide" : showSuggestions.isError ? "show" : undefined}
             onStartNextStep={startNextStep}
-            onHideNextSteps={() => hideSuggestions.mutate()}
+            onHideNextSteps={() => {
+              showSuggestions.reset();
+              hideSuggestions.mutate();
+            }}
+            onShowNextSteps={() => {
+              hideSuggestions.reset();
+              showSuggestions.mutate();
+            }}
             onReplayIntro={() => setIntro("account_menu")}
           />
         ) : chat.isLoading && !chat.session.messages.length ? (

@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { MessageSquare, NotebookPen, Plus } from "lucide-react";
 import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
@@ -20,6 +20,7 @@ import type { NextStep } from "@/schemas/assistant-onboarding";
 import { NextStepCards } from "./onboarding/next-step-cards";
 
 const MEMORY_PREVIEW = 3;
+const SUGGESTION_FOCUS_CLASS = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-input-focus focus-visible:outline-offset-2";
 
 
 function Section({
@@ -360,8 +361,12 @@ export function NyxBotHome({
   onNewAgent,
   onManageMemory,
   nextSteps,
+  suggestionsHidden = false,
+  suggestionsPending = false,
+  suggestionsError,
   onStartNextStep,
   onHideNextSteps,
+  onShowNextSteps,
   onReplayIntro,
 }: {
   readonly userName: string | undefined;
@@ -377,13 +382,47 @@ export function NyxBotHome({
   readonly onManageMemory: () => void;
   /** Suggested next steps; the section is hidden when there are none. */
   readonly nextSteps?: readonly NextStep[];
+  readonly suggestionsHidden?: boolean;
+  readonly suggestionsPending?: boolean;
+  readonly suggestionsError?: "hide" | "show";
   readonly onStartNextStep?: (step: NextStep) => void;
-  /** Hides the whole section until the intro is retaken. */
+  /** Hides the whole section, leaving a direct restore control. */
   readonly onHideNextSteps?: () => void;
+  readonly onShowNextSteps?: () => void;
   readonly onReplayIntro?: () => void;
 }) {
   useUiTranslation();
   const [now] = useState(() => new Date());
+  const [hiddenThisSession, setHiddenThisSession] = useState(false);
+  const [restoreRequested, setRestoreRequested] = useState(false);
+  const restoreButton = useRef<HTMLButtonElement>(null);
+  const hideButton = useRef<HTMLButtonElement>(null);
+  const restoreRow = useRef<HTMLDivElement>(null);
+  const focusSuggestions = useRef(false);
+  const hideSuggestions = () => {
+    setHiddenThisSession(true);
+    setRestoreRequested(false);
+    focusSuggestions.current = true;
+    onHideNextSteps?.();
+  };
+  const showSuggestions = () => {
+    setRestoreRequested(true);
+    focusSuggestions.current = true;
+    onShowNextSteps?.();
+  };
+  useEffect(() => {
+    if (!focusSuggestions.current) return;
+    // Keep focus in the replacement row while its native button is disabled.
+    if (suggestionsPending) {
+      if (suggestionsHidden) restoreRow.current?.focus();
+      return;
+    }
+    const target = suggestionsHidden ? restoreButton.current : hideButton.current;
+    if (target) {
+      target.focus();
+      focusSuggestions.current = false;
+    }
+  }, [suggestionsHidden, suggestionsPending]);
   const firstName = userName?.trim().split(/\s+/)[0];
   const nyxbot = nyxBotOf(agents);
   const roster = agents
@@ -409,7 +448,23 @@ export function NyxBotHome({
           </div>
         </header>
 
-        {nextSteps?.length && onStartNextStep ? (
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {nextSteps?.length && !suggestionsPending && !suggestionsError
+            ? suggestionsHidden
+              ? hiddenThisSession ? translateUi("Suggestions hidden.") : null
+              : restoreRequested ? translateUi("Suggestions shown.") : null
+            : null}
+        </div>
+        {nextSteps?.length && suggestionsHidden && onShowNextSteps ? (
+          <div ref={restoreRow} tabIndex={-1} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground outline-none">
+            <p className="type-secondary">
+              {hiddenThisSession ? translateUi("Suggestions hidden.") : translateUi("Suggestions are hidden.")}
+            </p>
+            <Button ref={restoreButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} disabled={suggestionsPending} onClick={showSuggestions}>
+              {hiddenThisSession ? translateUi("Undo") : translateUi("Show suggestions")}
+            </Button>
+          </div>
+        ) : nextSteps?.length && !suggestionsHidden && onStartNextStep ? (
           <Section
             id="nyxbot-home-next-steps"
             title={translateUi("Suggested for you")}
@@ -419,7 +474,7 @@ export function NyxBotHome({
                   <Button size="sm" variant="ghost" onClick={onReplayIntro}>{translateUi("Replay intro")}</Button>
                 ) : null}
                 {onHideNextSteps ? (
-                  <Button size="sm" variant="ghost" onClick={onHideNextSteps}>{translateUi("Hide")}</Button>
+                  <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
                 ) : null}
               </div>
             }
@@ -430,6 +485,14 @@ export function NyxBotHome({
               className="sm:grid-cols-2"
             />
           </Section>
+        ) : null}
+        {nextSteps?.length && suggestionsError ? (
+          <div role="alert" className="flex flex-wrap items-center gap-2 type-secondary text-destructive">
+            <p>{suggestionsError === "hide" ? translateUi("Couldn't hide suggestions. Try again.") : translateUi("Couldn't show suggestions. Try again.")}</p>
+            <Button size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} disabled={suggestionsPending} onClick={suggestionsError === "hide" ? hideSuggestions : showSuggestions}>
+              {translateUi("Retry")}
+            </Button>
+          </div>
         ) : null}
 
         <Section id="nyxbot-home-away" title={translateUi("While you were away")}>

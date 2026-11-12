@@ -137,10 +137,16 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/onboarding`, { method: "PUT", body: answers }),
     );
   },
-  /** Hides the home's suggestions until the intro is retaken. */
+  /** Hides the home's suggestions until restored or the intro is retaken. */
   async hideSuggestions() {
     return assistantOnboardingSchema.parse(
       await assistantJson(`${ROOT}/onboarding/suggestions/hide`, { method: "POST" }),
+    );
+  },
+  /** Restores the home's suggestions without changing the intro answers. */
+  async showSuggestions() {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding/suggestions/show`, { method: "POST" }),
     );
   },
   async channels() {
