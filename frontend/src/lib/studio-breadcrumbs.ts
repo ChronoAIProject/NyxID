@@ -158,6 +158,7 @@ const PAGE_LABELS: Record<string, string> = {
   get "/admin/upload-retention"() { return translateUi("Upload retention"); },
   get "/admin/nodes"() { return translateUi("Nodes"); },
   get "/admin/ownership"() { return translateUi("Ownership transfers"); },
+  get "/admin/assistant/system-skills"() { return translateUi("Built-in skills"); },
 };
 
 const DETAIL_LABELS: Record<string, string> = {

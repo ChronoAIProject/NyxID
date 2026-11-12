@@ -357,6 +357,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: crate::commands::models::AdminModelCommands,
     },
+    /// Configure assistant defaults
+    Assistant {
+        #[command(subcommand)]
+        command: AdminAssistantCommands,
+    },
     /// Configure billing, exact rates and ledger integrity
     Billing {
         #[command(subcommand)]
@@ -398,6 +403,33 @@ pub enum AdminCommands {
     Catalog {
         #[command(subcommand)]
         command: AdminCatalogCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminAssistantCommands {
+    /// Admin-selected public built-in skills for every agent
+    SystemSkills {
+        #[command(subcommand)]
+        command: SystemSkillsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SystemSkillsCommands {
+    /// Show the current exact pins and revision
+    Show {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Replace the built-in set with exact Ornn versions
+    Set {
+        #[arg(long, required_unless_present = "clear", conflicts_with = "clear", value_parser = crate::commands::admin_assistant::parse_skill)]
+        skill: Vec<String>,
+        #[arg(long)]
+        clear: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
     },
 }
 

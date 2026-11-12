@@ -613,6 +613,7 @@ function AgentDetailsContent({
                         id={SKILLS_SECTION_ID}
                         agentId={agent.id}
                         readOnly={readOnly || Boolean(agent.share_role)}
+                        kind={agent.kind}
                       />
                       {!agent.share_role ? (
                         <AgentLearningReview

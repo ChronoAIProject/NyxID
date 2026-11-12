@@ -165,6 +165,8 @@ export function useUpdateNyxBotSettings() {
     mutationFn: (update: NyxAgentSettingsUpdate) => nyxBotApi.updateSettings(update),
     onSuccess: (settings) => {
       queryClient.setQueryData(nyxBotQueryKeys.settings(userId), settings);
+      void queryClient.invalidateQueries({ queryKey: ["agent-skills", userId] });
+      void queryClient.invalidateQueries({ queryKey: ["attached-skill-preview", userId] });
     },
   });
 }

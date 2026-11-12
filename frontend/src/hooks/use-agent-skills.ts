@@ -224,3 +224,36 @@ export function useImproveAgentSkill(agentId: string) {
       }),
   });
 }
+
+export function useToggleSystemSkill(agentId: string) {
+  const client = useQueryClient();
+  const owner = useAuthStore((s) => s.user?.id);
+  return useMutation({
+    mutationFn: ({
+      skillId,
+      enabled,
+    }: {
+      skillId: string;
+      enabled: boolean | null;
+    }) =>
+      assistantJson(
+        `${base}/agents/${encodeURIComponent(agentId)}/system-skills/${encodeURIComponent(skillId)}`,
+        {
+          method: "PUT",
+          body: { enabled },
+        },
+      ),
+    onSuccess: () =>
+      Promise.all([
+        client.invalidateQueries({
+          queryKey: ["agent-skills", owner],
+        }),
+        client.invalidateQueries({
+          queryKey: ["agent-skill-history", owner, agentId],
+        }),
+        client.invalidateQueries({
+          queryKey: ["attached-skill-preview", owner],
+        }),
+      ]),
+  });
+}

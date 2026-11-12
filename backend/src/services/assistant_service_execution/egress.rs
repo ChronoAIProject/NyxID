@@ -4,8 +4,18 @@ use super::*;
 /// Credential preparation can await external services; it does not admit egress.
 pub(crate) struct HttpEgressGuard<'a> {
     attachment: Option<AttachmentEgress<'a>>,
+    skill_read: Option<SkillReadEgress<'a>>,
     model_request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
     authority: EgressAuthority<'a>,
+}
+
+struct SkillReadEgress<'a> {
+    db: &'a Database,
+    auth: &'a crate::mw::auth::AuthUser,
+    binding: &'a crate::services::agent_skill_service::OrnnSkillRead,
+    connection: Option<&'a str>,
+    method: &'a str,
+    path: &'a str,
 }
 
 struct AttachmentEgress<'a> {
@@ -23,6 +33,7 @@ enum EgressAuthority<'a> {
         phase: crate::models::lark_base_write::WriteState,
     },
     AttachmentOnly,
+    SkillReadOnly,
     ModelObservationOnly,
     Managed(
         &'a OwnedHttpEgressGuard,
@@ -134,6 +145,7 @@ impl OwnedHttpEgressGuard {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            skill_read: None,
             model_request: None,
             authority: EgressAuthority::Managed(self, target),
         }
@@ -245,6 +257,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::ExternalJob { job, declared }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        skill_read: None,
                         model_request: None,
                         authority: EgressAuthority::ExternalJob {
                             db: &self.db,
@@ -256,6 +269,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::AssistantCatalogJob { job, catalog }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        skill_read: None,
                         model_request: None,
                         authority: EgressAuthority::AssistantCatalogJob {
                             db: &self.db,
@@ -284,6 +298,7 @@ impl Admission {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            skill_read: None,
             model_request: None,
             authority: EgressAuthority::Assistant(AssistantEgressGuard {
                 admission: self,
@@ -315,6 +330,7 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Self {
         Self {
             attachment: None,
+            skill_read: None,
             model_request: None,
             authority: EgressAuthority::Lark { guard, row, phase },
         }
@@ -332,6 +348,7 @@ impl<'a> HttpEgressGuard<'a> {
         let mut guard = base.unwrap_or(Self {
             authority: EgressAuthority::AttachmentOnly,
             attachment: None,
+            skill_read: None,
             model_request: None,
         });
         guard.attachment = Some(AttachmentEgress {
@@ -359,6 +376,7 @@ impl<'a> HttpEgressGuard<'a> {
         if let Some(job) = ingress.assistant_job_id() {
             return Some(Self {
                 attachment: None,
+                skill_read: None,
                 model_request: None,
                 authority: EgressAuthority::AssistantCatalogJob {
                     db,
@@ -369,6 +387,7 @@ impl<'a> HttpEgressGuard<'a> {
         }
         Some(Self {
             attachment: None,
+            skill_read: None,
             model_request: None,
             authority: EgressAuthority::ExternalJob {
                 db,
@@ -376,6 +395,37 @@ impl<'a> HttpEgressGuard<'a> {
                 declared: &ingress.declared_id,
             },
         })
+    }
+
+    /// The final dispatch fence must also exist for catalog-only bound reads,
+    /// which have no connection admission. Retain it on every transport attempt.
+    pub(crate) fn with_skill_read(
+        base: Option<Self>,
+        db: &'a Database,
+        auth: &'a crate::mw::auth::AuthUser,
+        projection: &'a HttpProjection,
+        connection: Option<&'a str>,
+        method: &'a str,
+        path: &'a str,
+    ) -> Option<Self> {
+        let Some(binding) = projection.skill_read.as_ref() else {
+            return base;
+        };
+        let mut guard = base.unwrap_or(Self {
+            attachment: None,
+            skill_read: None,
+            model_request: None,
+            authority: EgressAuthority::SkillReadOnly,
+        });
+        guard.skill_read = Some(SkillReadEgress {
+            db,
+            auth,
+            binding,
+            connection,
+            method,
+            path,
+        });
+        Some(guard)
     }
 
     /// Catalog model routes can have no saved connection/admission guard.
@@ -386,6 +436,7 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Option<Self> {
         Some(Self {
             attachment: None,
+            skill_read: None,
             model_request: Some(request?),
             authority: EgressAuthority::ModelObservationOnly,
         })
@@ -421,7 +472,9 @@ impl<'a> HttpEgressGuard<'a> {
                 EgressAuthority::Lark { guard, row, phase } => {
                     guard.revalidate_effect(row, *phase).await
                 }
-                EgressAuthority::AttachmentOnly | EgressAuthority::ModelObservationOnly => Ok(()),
+                EgressAuthority::AttachmentOnly
+                | EgressAuthority::SkillReadOnly
+                | EgressAuthority::ModelObservationOnly => Ok(()),
                 EgressAuthority::Managed(guard, target) => guard.revalidate(target).await,
                 EgressAuthority::Assistant(guard) => guard.revalidate_inner().await,
                 EgressAuthority::ExternalJob { db, job, declared } => {
@@ -435,6 +488,19 @@ impl<'a> HttpEgressGuard<'a> {
                         .await
                 }
             }?;
+            if let Some(skill) = &self.skill_read {
+                skill
+                    .binding
+                    .revalidate(
+                        skill.db,
+                        &skill.auth.user_id.to_string(),
+                        skill.auth.assistant_chat.as_deref(),
+                        skill.connection,
+                        skill.method,
+                        skill.path,
+                    )
+                    .await?;
+            }
             if let Some(attachment) = &self.attachment {
                 if let Some(binding) = attachment.binding {
                     crate::services::lark_attachment_tool::validate_binding(

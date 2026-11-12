@@ -194,6 +194,13 @@ const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const SYSTEM_SKILLS_FLAG_KEY: &str = "assistant:system-skills";
+const SYSTEM_SKILLS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SYSTEM_SKILLS_FLAG_KEY,
+    description: "Admin-selected public built-in skills with NyxBot defaults/override and per-agent choices. Upgrade all replicas before enabling to avoid repeated session resets.",
+    default_enabled: false,
+};
+
 pub const SKILL_PIN_DISABLE_FLAG_KEY: &str = "assistant:skill-pin-disable";
 const SKILL_PIN_DISABLE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: SKILL_PIN_DISABLE_FLAG_KEY,
@@ -475,6 +482,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_CMA_SANDBOXES_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     SKILL_RUNS_FLAG,
+    SYSTEM_SKILLS_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
@@ -538,6 +546,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_CMA_SANDBOXES_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     SKILL_RUNS_FLAG,
+    SYSTEM_SKILLS_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
@@ -1297,6 +1306,95 @@ pub async fn flag_enabled_people(
         }
     }
     Ok(Some(people))
+}
+
+/// Share one bounded rollout read across code-declared, default-off flags.
+/// Join active memberships before returning only applicable requested overrides.
+pub(crate) fn personal_flags_enabled<'a>(
+    db: &'a mongodb::Database,
+    person: &'a str,
+    keys: &'a [&'a str],
+) -> futures::future::BoxFuture<'a, AppResult<Vec<String>>> {
+    // Keep the targeted-resolution future behind one shared boundary in
+    // the large native-tool and runtime async state machines.
+    Box::pin(personal_flags_enabled_inner(db, person, keys))
+}
+
+async fn personal_flags_enabled_inner(
+    db: &mongodb::Database,
+    person: &str,
+    keys: &[&str],
+) -> AppResult<Vec<String>> {
+    for key in keys {
+        if find_flag(key).is_none_or(|definition| definition.default_enabled) {
+            return Err(AppError::Internal("Expected default-off code flags".into()));
+        }
+    }
+    #[derive(serde::Deserialize)]
+    struct ScopedOverride {
+        #[serde(flatten)]
+        row: FeatureFlagOverride,
+        membership_role: Option<OrgRole>,
+    }
+    // Exclude unrelated orgs and people before cursor batching. The indexed
+    // membership join stays inside this command, including for flag-off people.
+    // Explicit disables can override a global or organization enable.
+    let rows: Vec<ScopedOverride> = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .aggregate(vec![
+            doc! {"$match": {
+                "flag_key":{"$in":keys}, "definition_id":null,
+                "$or":[
+                    {"org_user_id":{"$ne":null},"$or":[
+                        {"target_kind":{"$in":["org","role"]}},
+                        {"target_kind":"user","target_key":person},
+                    ]},
+                    {"org_user_id":null,"target_kind":"global","target_key":null},
+                    {"org_user_id":null,"target_kind":"user","target_key":person},
+                ],
+            }},
+            doc! {"$lookup": {
+                "from": crate::models::org_membership::COLLECTION_NAME,
+                "localField":"org_user_id", "foreignField":"org_user_id",
+                "pipeline":[
+                    {"$match":{"member_user_id":person,"revoked_at":null}},
+                    {"$project":{"_id":0,"role":1}},
+                ],
+                "as":"membership",
+            }},
+            doc! {"$set":{
+                "membership_role":{"$arrayElemAt":["$membership.role",0]},
+            }},
+            doc! {"$match":{"$or":[
+                {"org_user_id":null},
+                {"membership_role":{"$exists":true},"$expr":{"$or":[
+                    {"$ne":["$target_kind","role"]},
+                    {"$eq":["$target_key","$membership_role"]},
+                ]}},
+            ]}},
+            doc! {"$unset":"membership"},
+        ])
+        .with_type::<ScopedOverride>()
+        .await?
+        .try_collect()
+        .await?;
+    let memberships: Vec<_> = rows
+        .iter()
+        .filter_map(|row| Some((row.row.org_user_id.clone()?, row.membership_role?)))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let (org_rows, platform): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .map(|row| row.row)
+        .partition(|row| row.org_user_id.is_some());
+    Ok(resolve_personal_definitions(
+        keys.iter().map(|key| (*key, false, None)),
+        &platform,
+        &org_rows,
+        &memberships,
+        person,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3320,6 +3418,7 @@ mod tests {
                 "assistant:cma-sandboxes",
                 "assistant:skill-pin-disable",
                 "assistant:skill-runs",
+                "assistant:system-skills",
                 "nyxbot:thread-follow",
                 "nyxbot:relay-response-recovery",
                 "channel:discord-gateway",
@@ -4051,5 +4150,227 @@ mod tests {
             let flag = FEATURE_FLAGS.iter().find(|flag| flag.key == key).unwrap();
             assert!(!flag.default_enabled);
         }
+    }
+
+    #[tokio::test]
+    async fn targeted_personal_flags_bound_commands_for_unrelated_org_and_personal_disable() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+        let commands = Arc::new(Mutex::new(Vec::<bson::Document>::new()));
+        let recorded = commands.clone();
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "feature_flag_targeted_counts",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    recorded.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let person = Uuid::new_v4().to_string();
+        let keys = [AGENT_LEARNING_FLAG_KEY, SYSTEM_SKILLS_FLAG_KEY];
+        let overrides = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
+        for rows in [
+            vec![],
+            vec![override_row(
+                Some("unrelated-org"),
+                keys[1],
+                FlagTargetKind::Org,
+                None,
+                true,
+            )],
+            (0..1500)
+                .map(|i| {
+                    override_row(
+                        Some(&format!("unrelated-org-{i}")),
+                        keys[1],
+                        FlagTargetKind::Role,
+                        Some("member"),
+                        true,
+                    )
+                })
+                .collect(),
+            vec![
+                override_row(None, keys[1], FlagTargetKind::Global, None, true),
+                override_row(None, keys[1], FlagTargetKind::User, Some(&person), false),
+            ],
+        ] {
+            overrides.delete_many(doc! {}).await.unwrap();
+            if !rows.is_empty() {
+                overrides.insert_many(rows).await.unwrap();
+            }
+            commands.lock().unwrap().clear();
+            assert!(
+                personal_flags_enabled(&db, &person, &keys)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let observed = commands.lock().unwrap().clone();
+            assert_eq!(
+                observed.len(),
+                1,
+                "no membership read or getMore: {observed:?}"
+            );
+            assert_eq!(observed[0].get_str("aggregate"), Ok(COLLECTION_NAME));
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_personal_flags_match_live_personal_precedence() {
+        use crate::models::org_membership::{
+            COLLECTION_NAME as MEMBERSHIPS, MemberScopeSource, OrgMembership,
+        };
+        let db = connect_test_database("feature_flag_shared_personal")
+            .await
+            .unwrap();
+        let person = Uuid::new_v4().to_string();
+        let outsider = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(OrgMembership {
+                id: Uuid::new_v4().to_string(),
+                org_user_id: org.clone(),
+                member_user_id: person.clone(),
+                role: OrgRole::Member,
+                scope_source: MemberScopeSource::Inherit,
+                allowed_service_ids: None,
+                created_at: Utc::now(),
+                revoked_at: None,
+            })
+            .await
+            .unwrap();
+        // A revoked membership must behave exactly like a non-member, even
+        // for role-targeted overrides in an otherwise matching organization.
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(OrgMembership {
+                id: Uuid::new_v4().to_string(),
+                org_user_id: org.clone(),
+                member_user_id: outsider.clone(),
+                role: OrgRole::Admin,
+                scope_source: MemberScopeSource::Inherit,
+                allowed_service_ids: None,
+                created_at: Utc::now(),
+                revoked_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+        let keys = [AGENT_LEARNING_FLAG_KEY, SYSTEM_SKILLS_FLAG_KEY];
+        let overrides = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
+        for rows in [
+            vec![],
+            vec![
+                override_row(None, keys[0], FlagTargetKind::User, Some(&person), true),
+                override_row(None, keys[1], FlagTargetKind::User, Some(&outsider), true),
+            ],
+            vec![
+                override_row(None, keys[0], FlagTargetKind::Global, None, true),
+                override_row(None, keys[0], FlagTargetKind::User, Some(&person), false),
+            ],
+            vec![
+                override_row(Some(&org), keys[1], FlagTargetKind::Org, None, true),
+                override_row(None, keys[1], FlagTargetKind::User, Some(&person), false),
+            ],
+            vec![
+                override_row(None, keys[1], FlagTargetKind::Global, None, true),
+                override_row(Some(&org), keys[1], FlagTargetKind::Org, None, false),
+            ],
+            vec![override_row(
+                Some(&org),
+                keys[1],
+                FlagTargetKind::Role,
+                Some("admin"),
+                true,
+            )],
+            vec![
+                override_row(
+                    Some(&org),
+                    keys[1],
+                    FlagTargetKind::Role,
+                    Some("member"),
+                    true,
+                ),
+                override_row(
+                    Some(&org),
+                    keys[1],
+                    FlagTargetKind::Role,
+                    Some("admin"),
+                    false,
+                ),
+            ],
+        ] {
+            overrides.delete_many(doc! {}).await.unwrap();
+            if !rows.is_empty() {
+                overrides.insert_many(rows).await.unwrap();
+            }
+            for actor in [&person, &outsider] {
+                let mut shared = personal_flags_enabled(&db, actor, &keys).await.unwrap();
+                let mut full: Vec<_> = resolve_personal_features(&db, actor)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|key| keys.contains(&key.as_str()))
+                    .collect();
+                shared.sort();
+                full.sort();
+                assert_eq!(shared, full);
+            }
+        }
+        // Every absent/on/off combination at each precedence level, with an
+        // unrelated org enable and another person's override always present.
+        for shape in 0_u32..3_u32.pow(5) {
+            let mut rows = vec![
+                override_row(Some("other-org"), keys[1], FlagTargetKind::Org, None, true),
+                override_row(None, keys[1], FlagTargetKind::User, Some(&outsider), true),
+            ];
+            for (level, (scope, kind, target)) in [
+                (None, FlagTargetKind::Global, None),
+                (Some(org.as_str()), FlagTargetKind::Org, None),
+                (Some(org.as_str()), FlagTargetKind::Role, Some("member")),
+                (
+                    Some(org.as_str()),
+                    FlagTargetKind::User,
+                    Some(person.as_str()),
+                ),
+                (None, FlagTargetKind::User, Some(person.as_str())),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let state = (shape / 3_u32.pow(level as u32)) % 3;
+                if state != 0 {
+                    rows.push(override_row(scope, keys[1], kind, target, state == 1));
+                }
+            }
+            overrides.delete_many(doc! {}).await.unwrap();
+            overrides.insert_many(rows).await.unwrap();
+            for actor in [&person, &outsider] {
+                let targeted = personal_flags_enabled(&db, actor, &keys).await.unwrap();
+                let full: Vec<_> = resolve_personal_features(&db, actor)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|key| keys.contains(&key.as_str()))
+                    .collect();
+                assert_eq!(targeted, full, "shape {shape}, actor {actor}");
+            }
+        }
+        assert!(
+            personal_flags_enabled(&db, &person, &["unknown"])
+                .await
+                .is_err()
+        );
+        assert!(
+            personal_flags_enabled(&db, &person, &[INVITATION_CODE_FLAG_KEY])
+                .await
+                .is_err()
+        );
+        db.drop().await.unwrap();
     }
 }

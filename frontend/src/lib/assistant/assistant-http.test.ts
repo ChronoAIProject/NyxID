@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { capture, identify, initTelemetry, reset as resetTelemetry } from "@/lib/telemetry";
 import { useConsentStore } from "@/stores/consent-store";
 import {
@@ -543,5 +543,45 @@ describe("assistant transport authority", () => {
     await rejected;
     expect(setUser).not.toHaveBeenCalled();
     expect(useAuthStore.getState().user?.id).toBe("owner-two");
+  });
+});
+
+describe("development mock bootstrap", () => {
+  let previousUrl: string;
+  beforeEach(() => {
+    previousUrl = window.location.href;
+    window.history.replaceState(null, "", "/admin/assistant/system-skills?mock=1");
+    sessionStorage.clear();
+    globalThis.__nyxidAssistantHttpMock = undefined;
+    globalThis.__nyxidAssistantHttpFixtureWorld = undefined;
+    useAssistantWireLogStore.setState({ featureEnabled: false, captureEnabled: false });
+  });
+  afterEach(() => {
+    window.history.replaceState(null, "", previousUrl);
+    globalThis.__nyxidAssistantHttpMock = undefined;
+    globalThis.__nyxidAssistantHttpFixtureWorld = undefined;
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    sessionStorage.clear();
+  });
+
+  it("boots the existing fixture for admin search before an assistant page mounts", async () => {
+    vi.stubEnv("DEV", true);
+    const network = vi.fn();
+    vi.stubGlobal("fetch", network);
+    expect(await assistantJson("/assistant/nyxagent/skills/catalog?q=nyxbot"))
+      .toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ name: "nyxbot" })]) });
+    expect(await assistantJson("/assistant/nyxagent/settings"))
+      .toMatchObject({ system_skills_for_specialists: "default" });
+    expect(network).not.toHaveBeenCalled();
+  });
+
+  it("does not install development fixtures with DEV disabled", async () => {
+    vi.stubEnv("DEV", false);
+    const network = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", network);
+    await assistantHttp("/assistant/nyxagent/skills/catalog?q=nyxbot");
+    expect(network).toHaveBeenCalledOnce();
+    expect(globalThis.__nyxidAssistantHttpMock).toBeUndefined();
   });
 });

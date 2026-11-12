@@ -59,6 +59,7 @@ export const FEATURE_FLAG = {
   CHANNEL_GUEST_MEDIA: "assistant:channel-guest-media",
   ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
+  SYSTEM_SKILLS: "assistant:system-skills",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
   // NYX skill template outlines; off by default, piloted per person.
   SKILL_RUNS: "assistant:skill-runs",
