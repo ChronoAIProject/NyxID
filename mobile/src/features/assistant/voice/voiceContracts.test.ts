@@ -230,6 +230,63 @@ test("snapshots use authoritative cumulative captions and retain task result ref
   );
 });
 
+test("task outcomes distinguish failed work from an explicit Stop", () => {
+  const task = {
+    id: connectionId,
+    turn_id: "turn-1",
+    state: "cancelled",
+    pending_acknowledgement_ids: [],
+    result_message_id: "message-1",
+  };
+  for (const outcome of ["failed", "cancelled", null, undefined]) {
+    const result = voiceSnapshotSchema.parse({
+      type: "snapshot",
+      session,
+      captions: [],
+      tasks: [{ ...task, ...(outcome === undefined ? {} : { outcome }) }],
+    });
+    assert.equal(result.tasks[0]?.outcome, outcome);
+    assert.equal(result.tasks[0]?.state, "cancelled");
+    assert.equal(result.tasks[0]?.result_message_id, "message-1");
+  }
+});
+
+test("unknown task outcomes keep a valid snapshot without implying success", () => {
+  for (const outcome of [
+    "completed",
+    "future_outcome",
+    1,
+    { status: "done" },
+  ]) {
+    const result = voiceSnapshotSchema.parse({
+      type: "snapshot",
+      session,
+      captions: [
+        {
+          id: "caption-1",
+          speaker: "user",
+          text: "查看消息",
+          sealed: true,
+          complete: true,
+        },
+      ],
+      tasks: [
+        {
+          id: connectionId,
+          turn_id: "turn-1",
+          state: "cancelled",
+          outcome,
+          pending_acknowledgement_ids: [],
+        },
+      ],
+    });
+    assert.equal(result.tasks[0]?.outcome, undefined);
+    assert.equal(result.tasks[0]?.state, "cancelled");
+    assert.equal(result.session.state, "active");
+    assert.equal(result.captions[0]?.text, "查看消息");
+  }
+});
+
 test("start admits empty Grok SDP and bounded WebRTC SDP, never secret-bearing fields", () => {
   const request = { client_request_id: id, preferences, sdp_offer: "" };
   assert.equal(voiceStartRequestSchema.parse(request).sdp_offer, "");

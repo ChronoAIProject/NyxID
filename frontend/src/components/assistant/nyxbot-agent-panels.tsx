@@ -44,10 +44,10 @@ export function AgentStatusDot({
 }
 
 /** NyxBot is the identity (accent); specialists are neutral. */
-export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind }) {
+export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind | "unknown" }) {
   useUiTranslation();
   return (
-    <Badge variant={kind === "nyxbot" ? "accent" : "secondary"}>{AGENT_KIND_LABEL[kind]}</Badge>
+    <Badge variant={kind === "nyxbot" ? "accent" : "secondary"}>{kind === "unknown" ? translateUi("Agent") : AGENT_KIND_LABEL[kind]}</Badge>
   );
 }
 
@@ -142,7 +142,7 @@ export function ThreadHeader({
   readonly name: string;
   /** "@handle", shown when a display name hides it. */
   readonly handle?: string;
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "unknown";
   readonly loading?: boolean;
   /** Picks the specialist's avatar tint. */
   readonly agentId?: string;

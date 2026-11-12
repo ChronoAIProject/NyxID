@@ -1,3 +1,4 @@
+import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -428,7 +429,8 @@ export function useNyxAgentAssistantChat({
     isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
     interruption: nyxAgentTransport.getInterruption(viewId),
-    error: history.error?.message ?? threads.threadsError?.message ?? agents.error?.message,
+    error: historyErrorMessage(history.error ?? threads.threadsError ?? agents.error)
+      ?? (nyxAgentTransport.getHistory(selectedConversationId)?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
     send,
     retry: (id: string, messageId: string) =>
       nyxAgentTransport.retry(id, messageId, onConversationAdopted),
@@ -436,7 +438,7 @@ export function useNyxAgentAssistantChat({
       nyxAgentTransport.checkRecovery(id, messageId),
     /** Reload the selected thread's transcript (after a context reset). */
     refreshHistory: async () => {
-      if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);
+      if (selectedConversationId) await history.refetch();
     },
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],

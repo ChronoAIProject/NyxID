@@ -1,3 +1,12 @@
+import {
+  ChatComposerDock,
+  ChatIconButton as IconButton,
+  ChatMessageTurn,
+  ChatTranscriptSeparator,
+  chatSurfaceStyles,
+} from "./ChatSurface";
+import { TranscriptViewport } from "./TranscriptViewport";
+import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import {
   AssistantApprovalCard,
@@ -40,15 +49,15 @@ import {
   FlatList,
   findNodeHandle,
   Keyboard,
+  LayoutAnimation,
   Modal,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
@@ -75,8 +84,8 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
-import { chatBubbleColors, userBubbleCorners } from "../../theme/chatAppearance";
-import { fonts, radius } from "../../theme/designTokens";
+import { chatBubbleColors } from "../../theme/chatAppearance";
+import { fonts } from "../../theme/designTokens";
 import { useAssistant } from "./useAssistant";
 import { NyxBotHome } from "./NyxBotHome";
 import { showNyxBotHome } from "./nyxBotHomeModel";
@@ -102,19 +111,11 @@ import { isReported } from "../../lib/api/replyReportTransport";
 import { AssistantMessageFooter } from "./AssistantMessageFooter";
 import { AssistantAttachmentView } from "./AssistantAttachmentView";
 import { AssistantPendingUploads } from "./AssistantPendingUploads";
-import {
-  ChatComposerFrame,
-  ChatComposerRow,
-  ComposerAttachButton,
-  ComposerSubmitButton,
-} from "./ChatComposer";
+import { ComposerSubmitButton } from "./ChatComposer";
+import { ComposerDictationFrame } from "./ComposerDictation";
 import { AssistantMentionInput } from "./AssistantMentionInput";
 import { useAssistantUploads } from "./useAssistantUploads";
 import { appendDictation, useComposerDictation } from "./useComposerDictation";
-import {
-  ComposerDictationButton,
-  ComposerDictationReview,
-} from "./ComposerDictation";
 import { AssistantCmaOperation } from "./AssistantCmaOperation";
 import { AssistantAcknowledgementCard } from "./AssistantAcknowledgementCard";
 import { AssistantTurnStatus } from "./AssistantTurnStatus";
@@ -129,6 +130,14 @@ import { getFrontendUrl, firstPartyFrontendUrls } from "../../lib/env";
 import { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 import { AssistantVoiceConversation } from "./voice/AssistantVoiceConversation";
 import {
+  mergeVoiceTranscript,
+  retainVoiceSnapshot,
+  voiceTranscriptLabel,
+  withoutLiveUserSpeech,
+  type VoiceTranscriptMessage,
+} from "./voice/voiceTranscript";
+import type { VoiceSnapshot } from "./voice/voiceContracts";
+import {
   NATIVE_VOICE_ENTRY_ENABLED,
   composerTrailingControl,
 } from "./voice/voiceSelection";
@@ -137,10 +146,7 @@ import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { safeAssistantLinkUrl } from "./assistantMarkdown";
 import { retryInput } from "./assistantState";
-import type {
-  AssistantAcknowledgement,
-  AssistantMessage,
-} from "./assistantTypes";
+import type { AssistantAcknowledgement } from "./assistantTypes";
 
 type AssistantScreenProps = {
   contextual?: boolean;
@@ -154,6 +160,7 @@ export function AssistantScreen({
   contextual = false,
 }: AssistantScreenProps) {
   const navigation = useNavigation<WorkspaceNavigationProp>();
+  const focused = useIsFocused();
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
   const bubble = chatBubbleColors(mode, bubblePalette);
@@ -197,11 +204,24 @@ export function AssistantScreen({
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
+  const [voiceMinimized, setVoiceMinimized] = useState(false);
+  function changeVoiceSize(minimized: boolean) {
+    if (minimized === voiceMinimized) return;
+    if (!reducedMotion)
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setVoiceMinimized(minimized);
+  }
+  const [voicePreferencesOpen, setVoicePreferencesOpen] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState<{
+    thread: string;
+    epoch: number;
+    snapshot: VoiceSnapshot;
+  }>();
   const [openingVoice, setOpeningVoice] = useState(false);
   const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
   const [stopProtected, setStopProtected] = useState(false);
-  const transcript = useRef<FlatList<AssistantMessage>>(null);
+  const transcript = useRef<FlatList<VoiceTranscriptMessage>>(null);
   const transcriptViewport = useRef<View>(null);
   const transcriptOffset = useRef(0);
   useEffect(() => {
@@ -211,7 +231,12 @@ export function AssistantScreen({
   const transcriptScroll = useTranscriptScrollFollow(
     transcript,
     assistant.conversationId,
-    { reducedMotion },
+    {
+      reducedMotion,
+      focused,
+      loading: assistant.loading,
+      historyError: !!assistant.error,
+    },
   );
   const conversation = assistant.history?.conversation;
   const currentAgent = assistant.agent ?? conversation?.agent;
@@ -284,15 +309,69 @@ export function AssistantScreen({
       (message) =>
         message.turn_id === assistant.live?.turnId && message.role === "user",
     );
-  const messages = assistant.history?.messages ?? [];
+  const historyMessages = assistant.history?.messages;
+  const voiceEpoch = getAuthEpoch();
+  const voiceSurfaceToken = useMemo(() => ({}), [voiceThread, voiceEpoch]);
+  const currentVoiceSurface = useRef(voiceSurfaceToken);
+  currentVoiceSurface.current = voiceSurfaceToken;
+  const voiceSnapshot =
+    voiceTranscript &&
+    voiceTranscript.thread === assistant.conversationId &&
+    voiceTranscript.epoch === voiceEpoch
+      ? voiceTranscript.snapshot
+      : undefined;
+  // While the voice composer is open it alone shows the user's unsent words;
+  // once it closes, the chat keeps them as a partial transcript.
+  const voiceComposerOpen =
+    !!voiceThread && voiceThread === assistant.conversationId;
+  const messages = useMemo(
+    () =>
+      mergeVoiceTranscript(
+        historyMessages ?? [],
+        voiceComposerOpen
+          ? withoutLiveUserSpeech(voiceSnapshot)
+          : voiceSnapshot,
+      ),
+    [historyMessages, voiceSnapshot, voiceComposerOpen],
+  );
+  const voiceHistory = useRef(historyMessages);
+  voiceHistory.current = historyMessages;
+  const receiveVoiceSnapshot = useCallback(
+    (snapshot: VoiceSnapshot | undefined) => {
+      // Unmounting the controls must not erase captions before history catches up.
+      if (
+        !snapshot ||
+        !voiceThread ||
+        getAuthEpoch() !== voiceEpoch ||
+        currentVoiceSurface.current !== voiceSurfaceToken
+      )
+        return;
+      if (voiceContext.current.conversationId !== voiceThread) return;
+      setVoiceTranscript((previous) => ({
+        thread: voiceThread,
+        epoch: voiceEpoch,
+        snapshot: retainVoiceSnapshot(
+          previous &&
+            previous.thread === voiceThread &&
+            previous.epoch === voiceEpoch
+            ? previous.snapshot
+            : undefined,
+          snapshot,
+          voiceHistory.current ?? [],
+        ),
+      }));
+    },
+    [voiceThread, voiceEpoch, voiceSurfaceToken],
+  );
   const stableTranscript =
     messages.length > 0 &&
     !running &&
     !assistant.inputText &&
     !assistant.inputAttachments.length;
-  const hasHistoryGap = messages.some(
+  const hasHistoryGap = (historyMessages ?? []).some(
     (item, index) =>
-      index > 0 && item.seq > (messages[index - 1]?.seq ?? item.seq) + 1,
+      index > 0 &&
+      item.seq > (historyMessages?.[index - 1]?.seq ?? item.seq) + 1,
   );
   const canCompose =
     !running &&
@@ -436,6 +515,16 @@ export function AssistantScreen({
     if (voiceThread && voiceThread !== assistant.conversationId)
       setVoiceThread(undefined);
   }, [voiceThread, assistant.conversationId]);
+  useEffect(() => {
+    setVoicePreferencesOpen(false);
+    setVoiceTranscript((previous) =>
+      previous &&
+      previous.thread === assistant.conversationId &&
+      previous.epoch === voiceEpoch
+        ? previous
+        : undefined,
+    );
+  }, [assistant.conversationId, voiceEpoch]);
 
   async function openVoice() {
     if (!canCompose || !voiceAvailable || voiceOpening.current) return;
@@ -472,6 +561,7 @@ export function AssistantScreen({
           openLatest: false,
         });
       }
+      setVoiceMinimized(false);
       setVoiceThread(id);
     } catch (cause) {
       if (current())
@@ -627,8 +717,31 @@ export function AssistantScreen({
     );
   }
 
-  const headerHandlers = useRef({ newChat, openDetails });
-  headerHandlers.current = { newChat, openDetails };
+  function openChatOptions() {
+    if (!voiceThread || voiceThread !== assistant.conversationId)
+      return openDetails();
+    const current = () =>
+      getAuthEpoch() === voiceEpoch &&
+      currentVoiceSurface.current === voiceSurfaceToken &&
+      voiceContext.current.conversationId === voiceThread;
+    Alert.alert("Chat options", undefined, [
+      {
+        text: "Voice preferences",
+        onPress: () => {
+          if (current()) setVoicePreferencesOpen(true);
+        },
+      },
+      {
+        text: "Chat details",
+        onPress: () => {
+          if (current()) openDetails();
+        },
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }
+  const headerHandlers = useRef({ newChat, openDetails: openChatOptions });
+  headerHandlers.current = { newChat, openDetails: openChatOptions };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const actions = () => (
       <WorkspaceHeaderVisibility>
@@ -733,10 +846,14 @@ export function AssistantScreen({
     item,
     index,
   }: {
-    item: AssistantMessage;
+    item: VoiceTranscriptMessage;
     index: number;
   }) {
     const isUser = item.role === "user";
+    const voiceLabel = voiceTranscriptLabel(
+      item,
+      voiceThread ? voiceSnapshot : undefined,
+    );
     const resetAt = Date.parse(conversation?.context_reset_at ?? "");
     const resetHere =
       Number.isFinite(resetAt) &&
@@ -774,7 +891,10 @@ export function AssistantScreen({
     // Notes about the transcript itself, never inside anyone's bubble.
     const notes = (
       <>
-        {index > 0 && item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
+        {index > 0 &&
+        !item.voiceTransient &&
+        !messages[index - 1]?.voiceTransient &&
+        item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
           <Notice message="Messages between these pages haven't loaded yet. Load missing messages to restore them." />
         ) : null}
         {resetHere ? (
@@ -787,7 +907,13 @@ export function AssistantScreen({
     const body = (
       <>
         {attribution ? (
-          <Label muted style={[styles.messageLabel, isUser && { color: bubble.foreground }]}>
+          <Label
+            muted
+            style={[
+              styles.messageLabel,
+              isUser && { color: bubble.foreground },
+            ]}
+          >
             {attribution}
           </Label>
         ) : null}
@@ -798,12 +924,12 @@ export function AssistantScreen({
           </Label>
         ) : null}
         {isUser ? (
-          item.text ? (
+          item.text || voiceLabel ? (
             <Text
               selectable
               style={[styles.messageText, { color: bubble.foreground }]}
             >
-              {item.text}
+              {item.text || "Transcribing…"}
             </Text>
           ) : null
         ) : (
@@ -834,7 +960,7 @@ export function AssistantScreen({
                         ? "Stopped"
                         : item.status === "failed"
                           ? "Turn failed"
-                          : "Completed"
+                          : item.status === "completed" ? "Completed" : "Status unavailable"
                     }
                     turnFailed={
                       item.status === "failed" &&
@@ -887,6 +1013,17 @@ export function AssistantScreen({
             }
           />
         )}
+        {voiceLabel && item.text ? (
+          <Label
+            muted
+            style={[
+              styles.messageLabel,
+              isUser && { color: bubble.foreground, opacity: 0.7 },
+            ]}
+          >
+            {voiceLabel}
+          </Label>
+        ) : null}
         {item.attachments
           .filter(
             (attachment) =>
@@ -929,7 +1066,9 @@ export function AssistantScreen({
             {item.status === "failed" && item.error_code !== "cancelled" ? (
               <QuietButton
                 label="Check retry availability"
-                disabled={running || !assistant.online || assistant.loadingOlder}
+                disabled={
+                  running || !assistant.online || assistant.loadingOlder
+                }
                 onPress={() =>
                   void perform(() => assistant.checkRecovery(item.id))
                 }
@@ -941,7 +1080,8 @@ export function AssistantScreen({
     );
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
-    const footer = (
+    const footer =
+      !item.voiceTransient && !voiceLabel ? (
         <AssistantMessageFooter
           key={`${assistant.conversationId}:${item.id}`}
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
@@ -960,31 +1100,11 @@ export function AssistantScreen({
               : undefined
           }
         />
-    );
-    if (isUser)
-      return (
-        <View style={styles.userTurn}>
-          {notes}
-          <View style={styles.userRow}>
-          <View
-            style={[
-              styles.message,
-              styles.userMessage,
-              { backgroundColor: bubble.background },
-            ]}
-          >
-            {body}
-          </View>
-          {footer}
-          </View>
-        </View>
-      );
+      ) : null;
     return (
-      <View style={styles.message}>
-        {notes}
+      <ChatMessageTurn user={isUser} notes={notes} footer={footer}>
         {body}
-        {footer}
-      </View>
+      </ChatMessageTurn>
     );
   }
 
@@ -1078,11 +1198,13 @@ export function AssistantScreen({
           <Notice message={`Opening ${agentName}'s latest chat…`} />
         </View>
       ) : null}
-      <View
+      <TranscriptViewport
         key="transcript-column"
-        ref={transcriptViewport}
-        collapsable={false}
-        style={styles.fill}
+        ready={homeVisible || transcriptScroll.ready}
+        onTouchStart={() => {
+          if (voiceThread) changeVoiceSize(true);
+        }}
+        viewportRef={transcriptViewport}
       >
         {homeVisible ? (
           <NyxBotHome
@@ -1122,7 +1244,9 @@ export function AssistantScreen({
             }}
             onStartNextStep={(step) => {
               if (newChatDisabled || running || uploads.session.sending) {
-                setLocalError("NyxBot is busy. Start this step once it finishes.");
+                setLocalError(
+                  "NyxBot is busy. Start this step once it finishes.",
+                );
                 return;
               }
               void perform(() => assistant.send(step.prompt));
@@ -1145,7 +1269,7 @@ export function AssistantScreen({
             data={messages}
             keyExtractor={(item) => item.id}
             renderItem={renderMessage}
-            ItemSeparatorComponent={TranscriptSeparator}
+            ItemSeparatorComponent={ChatTranscriptSeparator}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
             contentContainerStyle={[
@@ -1207,7 +1331,7 @@ export function AssistantScreen({
                   icon={false}
                   accessibilityLabel="Loading messages"
                 />
-              ) : !assistant.sending ? (
+              ) : !assistant.sending && !voiceThread ? (
                 <View style={styles.welcome}>
                   <Text
                     style={[styles.welcomeTitle, { color: colors.textPrimary }]}
@@ -1251,7 +1375,12 @@ export function AssistantScreen({
                       },
                     ]}
                   >
-                    <Label style={[styles.messageLabel, { color: bubble.foreground }]}>
+                    <Label
+                      style={[
+                        styles.messageLabel,
+                        { color: bubble.foreground },
+                      ]}
+                    >
                       Sending…
                     </Label>
                     {assistant.inputText ? (
@@ -1420,85 +1549,93 @@ export function AssistantScreen({
           onPress={transcriptScroll.follow}
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
-      </View>
-      <View style={styles.composerInset}>
+      </TranscriptViewport>
+      <ChatComposerDock>
         {/* Voice mode slides up in place of the composer; the chat above stays
             on screen, so its cards and links work during the call. */}
         {voiceThread && voiceThread === assistant.conversationId ? (
-          <View style={[styles.composer, chatColumn]}>
-            <AssistantVoiceConversation
-              key={`voice:${voiceThread}`}
-              thread={voiceThread}
-              agentName={agentName}
-              onClose={() => setVoiceThread(undefined)}
-              onUpdate={() => void assistant.recover()}
-              onReview={(acknowledgementId) => {
-                assistant.openConversation(voiceThread, acknowledgementId);
-                navigation.setParams({
-                  conversationId: voiceThread,
-                  acknowledgementId,
-                  openLatest: false,
-                });
-              }}
-            />
-          </View>
-        ) : (
-        <ChatComposerFrame style={[styles.composer, chatColumn]}>
-          {guidance.canSteer ? (
-            <Label muted style={styles.composerHint}>
-              Still replying. What you send now steers this reply; Stop ends it.
-            </Label>
-          ) : null}
-          {guidance.notice ? (
-            <View style={{ gap: 4, paddingHorizontal: 8 }}>
-              <Label
-                muted
-                accessibilityLiveRegion="polite"
-                style={{ fontSize: 12 }}
-              >
-                {steeringNotice(guidance.notice.code, guidance.notice.outcome)}
-              </Label>
-              {guidance.notice.code === "no_active_turn" &&
-              guidance.notice.text ? (
-                <ActionButton
-                  label="Send as new message"
-                  compact
-                  variant="secondary"
-                  disabled={running || guidance.submitting || !canCompose}
-                  onPress={() =>
-                    void guidance.sendAsMessage((text) => assistant.send(text))
-                  }
-                />
-              ) : null}
-            </View>
-          ) : null}
-          <ComposerConnectionPicker state={connection} />
-          <AssistantPendingUploads
-            files={uploads.files}
-            remove={uploads.remove}
-            disabled={running || uploads.session.sending}
-            showMentionHandles={false}
+          <AssistantVoiceConversation
+            key={`voice:${voiceThread}`}
+            thread={voiceThread}
+            agentName={agentName}
+            minimized={voiceMinimized}
+            onExpand={() => changeVoiceSize(false)}
+            onClose={() => {
+              if (
+                getAuthEpoch() !== voiceEpoch ||
+                currentVoiceSurface.current !== voiceSurfaceToken
+              )
+                return;
+              setVoiceThread(undefined);
+              setVoicePreferencesOpen(false);
+            }}
+            onSnapshot={receiveVoiceSnapshot}
+            preferencesOpen={voicePreferencesOpen}
+            onPreferencesClose={() => setVoicePreferencesOpen(false)}
+            onUpdate={() => void assistant.recover()}
+            onReview={(acknowledgementId) => {
+              assistant.openConversation(voiceThread, acknowledgementId);
+              navigation.setParams({
+                conversationId: voiceThread,
+                acknowledgementId,
+                openLatest: false,
+              });
+            }}
           />
-          {uploads.error || uploads.notice ? (
-            <Label
-              style={{
-                color: uploads.error ? colors.danger : colors.textSecondary,
-              }}
-            >
-              {uploads.error ?? uploads.notice}
-            </Label>
-          ) : null}
-          <ComposerDictationReview dictation={dictation} draft={draft} />
-          {/* Collapsed rather than unmounted: a held microphone press must still
-              receive its release while dictation takes the field's place. */}
-          <View
-            style={dictation.active ? styles.dictationHidden : undefined}
-            accessibilityElementsHidden={dictation.active}
-            importantForAccessibility={
-              dictation.active ? "no-hide-descendants" : "auto"
-            }
-          >
-            <AssistantMentionInput
+        ) : (
+          <ComposerDictationFrame dictation={dictation}>
+            {guidance.canSteer ? (
+              <Label muted style={styles.composerHint}>
+                Still replying. What you send now steers this reply; Stop ends
+                it.
+              </Label>
+            ) : null}
+            {guidance.notice ? (
+              <View style={{ gap: 4, paddingHorizontal: 8 }}>
+                <Label
+                  muted
+                  accessibilityLiveRegion="polite"
+                  style={{ fontSize: 12 }}
+                >
+                  {steeringNotice(
+                    guidance.notice.code,
+                    guidance.notice.outcome,
+                  )}
+                </Label>
+                {guidance.notice.code === "no_active_turn" &&
+                guidance.notice.text ? (
+                  <ActionButton
+                    label="Send as new message"
+                    compact
+                    variant="secondary"
+                    disabled={running || guidance.submitting || !canCompose}
+                    onPress={() =>
+                      void guidance.sendAsMessage((text) =>
+                        assistant.send(text),
+                      )
+                    }
+                  />
+                ) : null}
+              </View>
+            ) : null}
+            <ComposerConnectionPicker state={connection} />
+            <AssistantPendingUploads
+              files={uploads.files}
+              remove={uploads.remove}
+              disabled={running || uploads.session.sending}
+              showMentionHandles={false}
+            />
+            {uploads.error || uploads.notice ? (
+              <Label
+                style={{
+                  color: uploads.error ? colors.danger : colors.textSecondary,
+                }}
+              >
+                {uploads.error ?? uploads.notice}
+              </Label>
+            ) : null}
+            <ChatComposerInput
+              dictation={dictation}
               value={draft}
               onChangeText={updateDraft}
               generation={`${draftKey}:${composerGeneration}`}
@@ -1515,54 +1652,55 @@ export function AssistantScreen({
                   : `Message ${agentName}`
               }
               renderActions={(mentionAction) => (
-                <ChatComposerRow>
-                  <ComposerAttachButton
-                    label="Attach photos or files, or take a photo"
-                    busy={uploads.picking}
-                    disabled={
+                <ChatComposerToolbar
+                  dictation={dictation}
+                  dictationDisabled={
+                    !canCompose ||
+                    uploads.picking ||
+                    uploads.session.sending ||
+                    openingVoice ||
+                    !!voiceThread
+                  }
+                  attach={{
+                    label: "Attach photos or files, or take a photo",
+                    busy: uploads.picking,
+                    disabled:
                       !canCompose ||
                       dictation.active ||
                       uploads.picking ||
                       uploads.session.sending ||
-                      uploads.files.length >= 10
-                    }
-                    onPress={() =>
+                      uploads.files.length >= 10,
+                    onPress: () =>
                       uploads.choose([
-                        { label: "Use a connection", onPress: connection.choose },
-                      ])
-                    }
-                  />
-                  {mentionAction}
-                  <AssistantComposerSettings
-                    scope={`${getAuthEpoch()}:${draftKey}`}
-                    agentOverride={assistant.agent?.access_mode_override}
-                    activeTurn={permissionsLocked}
-                    disabled={
-                      !assistant.online ||
-                      !assistant.agent ||
-                      !!destroyed ||
-                      assistant.loading ||
-                      assistant.recoveryRequired ||
-                      uploads.picking ||
-                      openingVoice ||
-                      !!voiceThread
-                    }
-                    visible={sheet === "permissions"}
-                    onOpenChange={(open) =>
-                      setSheet(open ? "permissions" : undefined)
-                    }
-                  />
-                  <View style={{ flex: 1 }} />
-                  <ComposerDictationButton
-                    dictation={dictation}
-                    disabled={
-                      !canCompose ||
-                      uploads.picking ||
-                      uploads.session.sending ||
-                      openingVoice ||
-                      !!voiceThread
-                    }
-                  />
+                        {
+                          label: "Use a connection",
+                          onPress: connection.choose,
+                        },
+                      ]),
+                  }}
+                  mention={mentionAction}
+                  settings={
+                    <AssistantComposerSettings
+                      scope={`${getAuthEpoch()}:${draftKey}`}
+                      agentOverride={assistant.agent?.access_mode_override}
+                      activeTurn={permissionsLocked}
+                      disabled={
+                        !assistant.online ||
+                        !assistant.agent ||
+                        !!destroyed ||
+                        assistant.loading ||
+                        assistant.recoveryRequired ||
+                        uploads.picking ||
+                        openingVoice ||
+                        !!voiceThread
+                      }
+                      visible={sheet === "permissions"}
+                      onOpenChange={(open) =>
+                        setSheet(open ? "permissions" : undefined)
+                      }
+                    />
+                  }
+                >
                   {guidance.canSteer && draft.trim() ? (
                     <ActionButton
                       label="Steer"
@@ -1592,28 +1730,27 @@ export function AssistantScreen({
                       }
                     }}
                   />
-                </ChatComposerRow>
+                </ChatComposerToolbar>
               )}
             />
-          </View>
-          {assistant.recoveryRequired || uploads.blocked ? (
-            <Label muted style={styles.composerHint}>
-              {assistant.recoveryRequired
-                ? "Open the saved chat before continuing."
-                : "Wait for uploads or remove failed files."}
-            </Label>
-          ) : null}
-          {[...draft].length >
-          (guidance.canSteer ? guidance.maxChars : 32768) ? (
-            <Label style={{ color: colors.danger }}>
-              {guidance.canSteer
-                ? `Guidance must be text only and at most ${guidance.maxChars.toLocaleString()} characters.`
-                : "Keep the message under 32,768 characters."}
-            </Label>
-          ) : null}
-        </ChatComposerFrame>
+            {assistant.recoveryRequired || uploads.blocked ? (
+              <Label muted style={styles.composerHint}>
+                {assistant.recoveryRequired
+                  ? "Open the saved chat before continuing."
+                  : "Wait for uploads or remove failed files."}
+              </Label>
+            ) : null}
+            {[...draft].length >
+            (guidance.canSteer ? guidance.maxChars : 32768) ? (
+              <Label style={{ color: colors.danger }}>
+                {guidance.canSteer
+                  ? `Guidance must be text only and at most ${guidance.maxChars.toLocaleString()} characters.`
+                  : "Keep the message under 32,768 characters."}
+              </Label>
+            ) : null}
+          </ComposerDictationFrame>
         )}
-      </View>
+      </ChatComposerDock>
 
       <Sheet
         visible={!!sheet && sheet !== "permissions"}
@@ -1723,38 +1860,6 @@ export function AssistantScreen({
   );
 }
 
-function TranscriptSeparator() {
-  return <View style={styles.transcriptSeparator} />;
-}
-
-function IconButton({
-  children,
-  label,
-  onPress,
-  disabled,
-}: {
-  children: React.ReactNode;
-  label: string;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.iconButton,
-        { opacity: disabled ? 0.4 : pressed ? 0.65 : 1 },
-      ]}
-    >
-      {children}
-    </Pressable>
-  );
-}
-
 function Sheet({
   visible,
   title,
@@ -1818,71 +1923,39 @@ function formatDate(value: string) {
         minute: "2-digit",
       });
 }
-const styles = StyleSheet.create({
-  fill: { flex: 1 },
-  row: { flexDirection: "row", alignItems: "center", gap: 8 },
-  headerActions: { flexDirection: "row", alignItems: "center" },
-  iconButton: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.md,
-  },
-  transcript: { paddingVertical: 8, flexGrow: 1 },
-  transcriptHeader: { marginBottom: 20 },
-  transcriptSeparator: { height: 20 },
-  message: { gap: 8, paddingVertical: 10 },
-  userTurn: { gap: 8 },
-  turnActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  userRow: {
-    alignSelf: "flex-end",
-    alignItems: "flex-end",
-    marginLeft: 38,
-    gap: 2,
-    paddingVertical: 6,
-  },
-  userMessage: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    ...userBubbleCorners,
-  },
-  messageLabel: { fontSize: 11, fontFamily: fonts.bodySemi },
-  messageText: { fontFamily: fonts.bodyRegular, fontSize: 14, lineHeight: 23 },
-  metadata: { fontSize: 11 },
-  runningActivity: { flexShrink: 1, fontSize: 11 },
-  footer: { gap: 16, paddingTop: 20 },
-  welcome: { alignItems: "center", paddingVertical: 100 },
-  welcomeTitle: {
-    fontFamily: fonts.displaySemi,
-    fontSize: 24,
-    lineHeight: 32,
-    textAlign: "center",
-  },
-  welcomeBody: {
-    fontFamily: fonts.bodyRegular,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    maxWidth: 300,
-    marginTop: 10,
-  },
-  thinking: { alignSelf: "flex-start", marginVertical: 10 },
-  composerInset: { paddingHorizontal: 12 },
-  chatPage: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 4, gap: 8 },
-  composer: { marginBottom: 0 },
-  composerHint: { fontSize: 11, lineHeight: 16, paddingHorizontal: 12 },
-  dictationHidden: { height: 0, overflow: "hidden", opacity: 0 },
-  errorRow: { gap: 8, marginHorizontal: 12 },
-  sheet: { flex: 1, paddingTop: 20 },
-  sheetHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    gap: 16,
-  },
-  sheetSection: { fontFamily: fonts.bodySemi, fontSize: 13 },
-  sheetTitle: { fontFamily: fonts.displaySemi, fontSize: 22, lineHeight: 30 },
-  sheetContent: { padding: 20, paddingBottom: 40, gap: 14 },
-});
+const styles = {
+  ...chatSurfaceStyles,
+  ...StyleSheet.create({
+    headerActions: { flexDirection: "row", alignItems: "center" },
+    turnActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+    metadata: { fontSize: 11 },
+    runningActivity: { flexShrink: 1, fontSize: 11 },
+    welcome: { alignItems: "center", paddingVertical: 100 },
+    welcomeTitle: {
+      fontFamily: fonts.displaySemi,
+      fontSize: 24,
+      lineHeight: 32,
+      textAlign: "center",
+    },
+    welcomeBody: {
+      fontFamily: fonts.bodyRegular,
+      fontSize: 15,
+      lineHeight: 22,
+      textAlign: "center",
+      maxWidth: 300,
+      marginTop: 10,
+    },
+    thinking: { alignSelf: "flex-start", marginVertical: 10 },
+    sheet: { flex: 1, paddingTop: 20 },
+    sheetHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      gap: 16,
+    },
+    sheetSection: { fontFamily: fonts.bodySemi, fontSize: 13 },
+    sheetTitle: { fontFamily: fonts.displaySemi, fontSize: 22, lineHeight: 30 },
+    sheetContent: { padding: 20, paddingBottom: 40, gap: 14 },
+  }),
+};

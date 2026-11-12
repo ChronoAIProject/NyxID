@@ -921,6 +921,11 @@ pub fn events_text(events: &[AgentEvent]) -> String {
             "NyxID events (authored by NyxID; only a quoted owner message is a request from the user; continuation lines are indented):"
         },
     );
+    if let Some(notice) = super::execution_permission_dispatch::proposals::delivery_notice(events) {
+        text.push_str("\n- ");
+        text.push_str(&notice);
+        return text;
+    }
     for event in events {
         text.push_str("\n- ");
         text.push_str(&event_notice_text(event));
@@ -1198,6 +1203,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::async_service_operation::ensure_indexes(db).await?;
     super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
+    super::assistant_tool_result_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
     // Retire legacy per-person keys before lifting the unique owner index.
@@ -6380,6 +6386,7 @@ pub(crate) async fn delete_in_session(
             super::assistant_service_execution::COLLECTION,
             crate::models::assistant_attachment::COLLECTION_NAME,
             crate::models::assistant_resource::COLLECTION_NAME,
+            crate::models::assistant_tool_result::COLLECTION_NAME,
             crate::models::nyxbot_gateway_response::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,

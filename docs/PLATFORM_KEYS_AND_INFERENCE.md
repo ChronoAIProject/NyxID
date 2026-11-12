@@ -410,8 +410,16 @@ xAI measures duration on the server and records `response.done` tokens separatel
 
 Existing inference blocks receive a separate null-guarded update of only
 `inference.voice`; every seed/backfill checks `inference_admin_modified`.
-Admin null clears survive restart. No unknown-field denial was added, so old
-replicas ignore voice metadata. The compatibility `realtime` response is true
+Admin null clears survive restart. Seeded voice lists are append-only: a voice
+ID once seeded is never removed, because call admission, live revalidation,
+recovery and dictation all recheck the saved voice against the live catalog.
+Startup therefore appends new seeded choices (currently `shida`) only to an
+`llm-openai` row whose voice list still exactly equals the original 32-choice
+seed (IDs, labels and order) and whose `inference_admin_modified` is
+absent/false; the atomic predicate leaves admin-edited, reordered or custom
+lists and all sibling metadata untouched, and reruns are no-ops. Retiring a
+voice is an explicit admin catalog edit. No unknown-field denial was added, so
+old replicas ignore voice metadata. The compatibility `realtime` response is true
 when voice exists. Response-only `supports_realtime_voice` uses the same voice
 presence and is never independently persisted. Unrecognized future voice
 protocols remain readable but cannot execute.

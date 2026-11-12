@@ -294,7 +294,7 @@ export function workingLabel(names: readonly string[]): string {
 }
 
 interface NamedAgent {
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "unknown";
   /** The @handle ("NyxBot" for NyxBot). */
   readonly name: string;
   readonly display_name?: string | null;

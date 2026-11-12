@@ -18,7 +18,7 @@ import { StatusBar } from "expo-status-bar";
 import { Camera, ChevronLeft } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { PrimaryButton } from "../../components/PrimaryButton";
+import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import {
@@ -203,7 +203,7 @@ export function DeviceCodeScanner({
             ) : null}
           </View>
           <View style={styles.permissionActions}>
-            <PrimaryButton
+            <AuthSubmitButton loading={permissionPending}
               label={
                 canRequest
                   ? permissionPending

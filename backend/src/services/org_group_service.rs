@@ -767,6 +767,7 @@ async fn delete_threads_in_session(
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             crate::models::assistant_message::COLLECTION_NAME,
             crate::models::assistant_attachment::COLLECTION_NAME,
+            crate::models::assistant_tool_result::COLLECTION_NAME,
             crate::models::assistant_upload_retention::TOMBSTONES,
         ] {
             db.collection::<bson::Document>(collection)

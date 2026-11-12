@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { historySchema } from "./assistantTypes";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -38,6 +40,8 @@ function setup(file: string, name: string, props: Record<string, any>) {
     },
     "lucide-react-native": {
       Check: "Check",
+      CircleAlert: "CircleAlert",
+      Minus: "Minus",
       ShieldCheck: "ShieldCheck",
       X: "X",
       ChevronDown: "ChevronDown",
@@ -290,3 +294,37 @@ for (const [state, label, count] of [
     x.h.unmount();
   });
 }
+
+test("2345 completed duplicate and future activity render neutrally, with no success or failure claim", () => {
+  for (const [kind, copy] of [
+    ["retry_duplicate_action", "Already done in the previous attempt; skipped this time."],
+    ["future_kind", "Activity details unavailable in this app version."],
+  ]) {
+    const activity = activitySchema.parse({ id: "tool", label: "api-lark-2__bitable_record_create", status: "completed", started_at: at, failure: { kind } });
+    const x = setup("./AssistantActivityDisclosure.tsx", "AssistantActivityDisclosure", { activities: [activity], onToggle: () => {} });
+    x.press("Turn details: Completed · 1 action");
+    assert.ok(x.text().includes(copy!));
+    const row = x.nodes().find((node) => node.props.accessibilityRole === "text");
+    assert.ok(row);
+    assert.doesNotMatch(row.props.accessibilityLabel, /Succeeded|Failed|Running/);
+    assert.doesNotMatch(x.text(), /failed step|1 failed/);
+    x.h.unmount();
+  }
+});
+
+test("2345 the reported active-turn fragment renders among all 13 actions", () => {
+  const wire = JSON.parse(readFileSync(new URL("../../../../frontend/src/lib/assistant/__fixtures__/retry-duplicate-history.json", import.meta.url), "utf8"));
+  const page = historySchema.parse(wire);
+  const x = setup("./AssistantActivityDisclosure.tsx", "AssistantActivityDisclosure", { activities: page.conversation.active_turn!.activities, onToggle: () => {} });
+  x.press("Turn details: Working… · 13 actions");
+  assert.match(x.text(), /Already done in the previous attempt; skipped this time/);
+  assert.equal(x.nodes().filter((node) => node.props.accessibilityRole === "text").length, 13);
+  x.h.unmount();
+});
+
+test("2345 unknown CMA kind stays generic instead of claiming an agent is ready", () => {
+  const x = setup("./AssistantCmaOperation.tsx", "AssistantCmaOperation", { operation: { kind: "future_kind", status: "ready", reason: "completed" } });
+  assert.match(x.text(), /Activity details unavailable in this app version/);
+  assert.doesNotMatch(x.text(), /Agent ready|Result ready/);
+  x.h.unmount();
+});

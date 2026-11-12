@@ -2988,7 +2988,7 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
-        "nyxid__task_status" => (true, false, false),
+        "nyxid__task_status" | "nyxid__read_tool_result" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
@@ -3016,6 +3016,11 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
             }
         }
     };
+    if name == "nyxid__read_tool_result" {
+        return Some(
+            serde_json::json!({"title":tool_title(name, services)?,"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true}),
+        );
+    }
     Some(serde_json::json!({
         "title": tool_title(name, services)?,
         "readOnlyHint": read_only,
@@ -3034,6 +3039,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
         "nyxid__task_status" => "Read task execution status",
+        "nyxid__read_tool_result" => "Read a retained tool result",
         "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
@@ -12087,8 +12093,8 @@ mod tests {
         let db = connect_test_database("mcp_connect_scopes").await.unwrap();
         let now = mongodb::bson::DateTime::now();
         let provider: ProviderConfig = mongodb::bson::from_document(doc! {
-            "_id": uuid::Uuid::new_v4().to_string(), "slug": "scope-provider",
-            "name": "Scope Provider", "provider_type": "oauth2", "is_active": true,
+            "_id": uuid::Uuid::new_v4().to_string(), "slug": "github",
+            "name": "GitHub", "provider_type": "oauth2", "is_active": true,
             "created_by": "test", "created_at": now, "updated_at": now,
         })
         .unwrap();
@@ -12105,7 +12111,7 @@ mod tests {
             .unwrap();
         let actor = uuid::Uuid::new_v4().to_string();
         let scopes = parse_connect_scopes(Some(&serde_json::json!(
-            "public_repo, read:org public_repo"
+            "public_repo, read:org read:project project public_repo"
         )))
         .unwrap();
         let result = connect_service(
@@ -12125,7 +12131,7 @@ mod tests {
         assert_eq!(result["status"], "pending_connection");
         assert_eq!(
             result["scopes"],
-            serde_json::json!(["public_repo", "read:org"])
+            serde_json::json!(["public_repo", "read:org", "read:project", "project"])
         );
         let view = connect_link_service::get_for_actor(
             &db,
@@ -12134,7 +12140,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(view.link.scopes, ["public_repo", "read:org"]);
+        assert_eq!(
+            view.link.scopes,
+            ["public_repo", "read:org", "read:project", "project"]
+        );
         let error = connect_service(
             &db,
             &test_encryption_keys(),
