@@ -1656,21 +1656,31 @@ async fn execute_turn_inner(
     );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
-    let guidance = if !row.guest_model_setup
+    let authoring = !row.guest_model_setup
         && !row.guest_turn
         && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
             .await
-            .unwrap_or(false)
-    {
-        if row.is_subagent() {
-            crate::services::assistant_skill_authoring::SPECIALIST_GUIDANCE
-        } else {
-            crate::services::assistant_skill_authoring::GUIDANCE
-        }
-    } else {
+            .unwrap_or(false);
+    let guidance = if !authoring {
         ""
+    } else if row.is_subagent() {
+        crate::services::assistant_skill_authoring::SPECIALIST_GUIDANCE
+    } else {
+        crate::services::assistant_skill_authoring::GUIDANCE
     };
     let mut guidance = guidance.to_owned();
+    // NYX template outlines (`assistant:skill-runs`, default off): owner turns only.
+    let outlines = !row.guest_model_setup
+        && !row.guest_turn
+        && Box::pin(crate::services::skill_outline::enabled(
+            &state.db,
+            &row.user_id,
+        ))
+        .await
+        .unwrap_or(false);
+    guidance.push_str(&crate::services::skill_outline::instructions(
+        outlines, authoring,
+    ));
     if !row.guest_model_setup
         && !row.guest_turn
         && row.group_id.is_none()

@@ -2184,34 +2184,6 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     ))
     .await;
     assert!(error);
-    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
-        .await
-        .unwrap()
-        .unwrap();
-    for (tool, arguments) in [
-        ("nyxid__get_agent_skills", json!({"agent": agent.name})),
-        (
-            "nyxid__get_agent_operations",
-            json!({"subagent": agent.name}),
-        ),
-    ] {
-        let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
-            &f.state, &chat, tool, &arguments,
-        ))
-        .await;
-        assert!(!error, "a specialist can read its own settings by name");
-    }
-    let (content, error) = Box::pin(crate::handlers::agent_skills::dispatch(
-        &f.state,
-        &chat,
-        "skill_read",
-        &json!({"skill": id}),
-    ))
-    .await
-    .unwrap();
-    assert!(!error);
-    assert_eq!(content["content"], "Pinned team guidance");
-    assert!(content["untrusted_guidance"].as_bool().unwrap());
     // The same signed pin must work through an ungranted concrete organization
     // connection, with a real live thread/key and current organization access.
     let endpoint = Uuid::new_v4().to_string();
@@ -2261,6 +2233,34 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     )
     .await
     .unwrap();
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for (tool, arguments) in [
+        ("nyxid__get_agent_skills", json!({"agent": agent.name})),
+        (
+            "nyxid__get_agent_operations",
+            json!({"subagent": agent.name}),
+        ),
+    ] {
+        let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
+            &f.state, &chat, tool, &arguments,
+        ))
+        .await;
+        assert!(!error, "a specialist can read its own settings by name");
+    }
+    let (content, error) = Box::pin(crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &chat,
+        "skill_read",
+        &json!({"skill": id}),
+    ))
+    .await
+    .unwrap();
+    assert!(!error);
+    assert_eq!(content["content"], "Pinned team guidance");
+    assert!(content["untrusted_guidance"].as_bool().unwrap());
     let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
         .await
         .unwrap()

@@ -213,6 +213,13 @@ pub struct DraftInput {
     base_skill: Option<BaseInput>,
     scope: DraftScope,
 }
+
+impl DraftInput {
+    pub fn skill_md(&self) -> &str {
+        &self.skill_md
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BaseInput {

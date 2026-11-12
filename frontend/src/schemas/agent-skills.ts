@@ -82,10 +82,40 @@ export const skillVersionsSchema = z.object({
     })
     .array(),
 });
+/** A NYX template outline as NyxID parses it from the verified package. */
+export const skillOutlineSchema = z.object({
+  overview: z.string(),
+  steps: z
+    .object({
+      id: z.string(),
+      title: z.string(),
+      text: z.string(),
+      uses: pinSchema.nullish(),
+      asks_you: z.boolean().default(false),
+    })
+    .array(),
+  needs: z.string().nullish(),
+  produces: z.string().nullish(),
+});
+export const skillAuthorSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("platform"),
+    name: z.string(),
+    service: z.string().nullish(),
+    system_skill: z.boolean().default(false),
+  }),
+  z.object({ kind: z.literal("organization"), name: z.string() }),
+  z.object({ kind: z.literal("person"), name: z.string() }),
+]);
 export const skillPreviewSchema = z.object({
   reference: agentSkillSchema,
   description: z.string(),
   size_bytes: z.number(),
+  // Present only with `assistant:skill-runs`: `undefined` means the server did
+  // not send outlines, `null` means this skill has none.
+  outline: skillOutlineSchema.nullish(),
+  // An unknown author kind from a newer server shows no author line.
+  author: skillAuthorSchema.nullish().catch(null),
 });
 
 export const authoredSkillPreviewSchema = z.object({

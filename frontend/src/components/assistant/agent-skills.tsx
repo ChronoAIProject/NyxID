@@ -40,6 +40,7 @@ import { ProposalDraftEditor } from "./learning-draft-editor";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { SkillPreloadSettings } from "./skill-preload-settings";
+import { SkillTemplateCard } from "./skill-template-card";
 
 const HISTORY_LABELS: Record<string, string> = {
   get assistant_skills_updated() { return translateUi("Attached skills changed"); },
@@ -684,6 +685,18 @@ export function AgentSkills({
                 </button>
               </GroupedRow>
             </GroupedList>
+            {/* Sent only with assistant:skill-runs: the skill's own outline,
+                read from the verified Ornn package, as its own section. */}
+            {preview.data && preview.data.outline !== undefined ? (
+              <SkillTemplateCard
+                name={preview.data.reference.name}
+                version={preview.data.reference.version}
+                kind="skill"
+                outline={preview.data.outline}
+                author={preview.data.author ?? null}
+                actions={false}
+              />
+            ) : null}
           </GroupedDetail>
         </>
       ) : null}
