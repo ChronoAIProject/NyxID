@@ -144,7 +144,6 @@ function setup(
     selected: VoiceOption | undefined;
   }[] = [];
   const snapshots: (VoiceSnapshot | undefined)[] = [];
-  const captures: { listening: boolean; inputActive: boolean }[] = [];
   const listeners = new Set<(event: VoiceMediaEvent) => void>();
   const environment = {
     origin: "https://nyx.example",
@@ -277,8 +276,6 @@ function setup(
     },
     preferencesOpen: input.preferencesOpen ?? false,
     onSnapshot: (value: VoiceSnapshot | undefined) => snapshots.push(value),
-    onCaptureState: (value: { listening: boolean; inputActive: boolean }) =>
-      captures.push({ ...value }),
     onPreferencesClose: () => {
       props.preferencesOpen = false;
     },
@@ -529,7 +526,6 @@ function setup(
     savedPreferences,
     startContext,
     snapshots,
-    captures,
     voicePicker: () =>
       all().find((row) => row.type === "WorkspaceSelectionSheet"),
     notices: () =>
@@ -830,7 +826,6 @@ test("snapshots go to the one main timeline and are cleared on unmount", () => {
   assert.doesNotMatch(f.text(), /authoritative words/);
   f.harness.unmount();
   assert.equal(f.snapshots.at(-1), undefined);
-  assert.deepEqual(f.captures.at(-1), { listening: false, inputActive: false });
 });
 
 test("Listening follows actual input permission, Speaking follows playback, and captions do not invent audio activity", () => {
@@ -928,20 +923,27 @@ test("a terminal session supersedes its own pending cleanup without dismissing a
   f.harness.unmount();
 });
 
-test("the capture placeholder follows real input levels and clears immediately on mute", () => {
+test("microphone levels do not invent transcription and mute keeps its input action", async () => {
   const f = setup({ active: true });
-  assert.deepEqual(f.captures.at(-1), { listening: true, inputActive: false });
+  const delivered = [...f.snapshots];
   f.emit({ type: "level", input: 0.5, output: 0 });
-  assert.deepEqual(f.captures.at(-1), { listening: true, inputActive: true });
-  f.voice.inputEnabled = false;
+  assert.deepEqual(f.snapshots, delivered);
+  assert.deepEqual(f.voice.snapshot?.captions, []);
+  assert.doesNotMatch(f.text(), /Transcribing/);
+  await f.button("Mute microphone").props.onPress();
+  assert.deepEqual(f.events, [["mute", true]]);
+  assert.equal(f.voice.inputEnabled, false);
   f.voice.snapshot = {
     ...snapshot,
     session: { ...snapshot.session, muted: true },
   };
   f.harness.render();
-  assert.deepEqual(f.captures.at(-1), { listening: false, inputActive: false });
+  f.emit({ type: "level", input: 0.8, output: 0.3 });
   assert.match(f.text(), /Microphone off/);
   assert.ok(f.button("Unmute microphone"));
+  assert.equal(f.snapshots.at(-1), f.voice.snapshot);
+  assert.deepEqual(f.voice.snapshot.captions, []);
+  assert.doesNotMatch(f.text(), /Transcribing/);
   f.harness.unmount();
 });
 
@@ -2522,28 +2524,54 @@ test("connecting displays a placeholder and the active call starts at 00:00 rega
   f.harness.unmount();
 });
 
-test("continuous silent native levels release the real capture placeholder without postponing its deadline", (context) => {
+test("continuous input, silence, and playback leave completed captions unchanged", (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = setup({ active: true });
-  f.emit({ type: "level", input: 0.5, output: 0 });
-  assert.deepEqual(f.captures.at(-1), { listening: true, inputActive: true });
-  context.mock.timers.tick(200);
-  f.emit({ type: "level", input: 0, output: 0 });
-  context.mock.timers.tick(200);
-  f.emit({ type: "level", input: 0, output: 0 });
-  context.mock.timers.tick(50);
-  f.harness.flush();
-  assert.deepEqual(f.captures.at(-1), { listening: true, inputActive: false });
-  for (let sample = 0; sample < 5; sample++) {
-    context.mock.timers.tick(200);
-    f.emit({ type: "level", input: 0, output: 0.3 });
-    assert.deepEqual(f.captures.at(-1), {
-      listening: true,
-      inputActive: false,
-    });
+  const completed: VoiceSnapshot = {
+    ...snapshot,
+    captions: [
+      {
+        id: "user-complete",
+        speaker: "user",
+        text: "What is two plus four?",
+        sealed: true,
+        complete: true,
+      },
+      {
+        id: "assistant-complete",
+        speaker: "assistant",
+        text: "Six.",
+        sealed: true,
+        complete: true,
+      },
+    ],
+  };
+  const f = setup({ active: true, snapshot: completed });
+  const delivered = [...f.snapshots];
+  for (const level of [
+    { input: 0.8, output: 0 },
+    { input: 0.8, output: 0.3 },
+    { input: 0, output: 0.3 },
+    { input: 0, output: 0 },
+  ]) {
+    for (let sample = 0; sample < 5; sample++) {
+      f.emit({ type: "level", ...level });
+      context.mock.timers.tick(200);
+      f.harness.flush();
+    }
+    assert.equal(f.voice.snapshot, completed);
+    assert.deepEqual(f.snapshots, delivered);
+    assert.doesNotMatch(f.text(), /Transcribing/);
   }
+  f.levels.speaking = true;
+  f.harness.render();
+  assert.match(f.text(), /Assistant is speaking/);
+  assert.deepEqual(f.snapshots, delivered);
+  f.levels.speaking = false;
+  f.harness.render();
+  assert.match(f.text(), /Listening/);
+  assert.deepEqual(f.snapshots, delivered);
   f.harness.unmount();
-  assert.deepEqual(f.captures.at(-1), { listening: false, inputActive: false });
+  assert.equal(f.snapshots.at(-1), undefined);
 });
 
 test("the newly bounded query error renders through the selected app language", () => {

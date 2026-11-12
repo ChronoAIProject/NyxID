@@ -21,7 +21,7 @@
 
 | 阶段                                           | 源码/证据                                                                                                                                                      | 可支持的结论                                                                                                                                                                                                                                                                                               |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 用户认可的 iPad 设计                           | `codex/ipad-adaptation` / `f507b95e1`                                                                                                                          | 固定底部窄波形条；实时和完成字幕均在主聊天；真正采音而字幕未到时显示 Transcribing 占位；More → Voice preferences；模式/voice 改动用于下一次通话。                                                                                                                                                          |
+| 用户认可的 iPad 设计                           | `codex/ipad-adaptation` / `f507b95e1`                                                                                                                          | 固定底部窄波形条；实时和完成字幕均在主聊天；无真实 ASR 片段时不创建消息；真实空且未完成的片段才在同一行显示 Transcribing 占位；More → Voice preferences；模式/voice 改动用于下一次通话。                                                                                                                                                          |
 | 同日较早运行                                   | 合并 main 的 `ef3f50d69` 所带旧大卡片设计，加本轮 Connecting 修复；`271–298` 的较早界面/音频，以及 `305–343` 的 Connecting 修复冻结证据                        | 保留该阶段输入、转写、音频能量、End 和恢复观察。大卡片的折叠/展开、Help 与 composer 字幕不是当前认可交互。                                                                                                                                                                                                 |
 | 键盘修复后的过渡观察                           | Android `346–350`                                                                                                                                              | 曾观察入口 spinner 后返回文字且未见错误；这组样本发生在认可设计完整恢复前，不能据此判新版本入口或键盘交接通过。                                                                                                                                                                                            |
 | 认可设计恢复后、Home draft deadline 前         | Android `356–365`                                                                                                                                              | `356` 键盘隐藏；`357` 处理 retained 旧通话后 `358` 为正确窄条 Listening；`359/360` 英文答复、`361/362` 中文完整转写/四十二和输出音频；`363` idle warning/quiet receipt、`365` 回文字。未执行成功的 mute 点击不计通过。                                                                                     |
@@ -101,7 +101,7 @@ PTT 中断的已确认故障在宿主 Android Emulator 的 `qemu` 音频转发�
 | ---- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A-01 | Hands-free → 输入英文 `17 + 25` 算术句 → 停顿   | 英文用户转写完整，助手回答 `42`，捕获对应非静默输出。                                                                                  | `PASS`           | Android 最终冻结阶段 `369-final-en-transcript.png` 完整英文问题和 `42`；`368-final-en-output.wav` `11.619s` / RMS `19.975` / peak `386`。只判本次转写/答复和非静默输出，人工听感归 A-05。                 |
 | A-02 | Hands-free → 输入中文算术短句 → 停顿            | 用户转写保留问题含义，助手回答“四十二”，捕获对应非静默输出。                                                                           | `PASS`           | Android 最终冻结阶段 `376-final-zh-result.png` 完整“十七加二十五…”与“四十二”；`375-final-zh-output.wav` `11.753s` / RMS `19.053` / peak `408`。人工听感归 A-05，不从本行外推。                            |
-| A-03 | 实际说话 → 主聊天观察占位和 partial 字幕 → 停顿 | 只有主聊天展示字幕；listening 且真实 inputActive、字幕未到时显示 Transcribing；partial 原位增长，sealed 与历史去重；底部条无字幕预览。 | `PARTIAL`        | 最终 Android `369/376` 已见主聊天唯一完成字幕、底部条无第二份；实时 partial 原位增长和 Transcribing→字幕的连续观察未完整记录，保留待测。                                                                  |
+| A-03 | 实际说话 → 主聊天观察占位和 partial 字幕 → 停顿 | 只有主聊天展示真实字幕；首字前由 Listening/波形反馈采音，不按音量合成消息；真实空且未完成片段可显示 Transcribing，partial 原位增长，sealed 与历史去重；底部条无字幕预览。 | `PARTIAL`        | 最终 Android `369/376` 已见主聊天唯一完成字幕、底部条无第二份；实时 partial 原位增长和 Transcribing→字幕的连续观察未完整记录，保留待测。                                                                  |
 | A-04 | 回复期间观察 Speaking → 结束后 Listening        | Speaking 对应实际播放；完成后恢复监听；最终助手文本和音频回答一致。                                                                    | `PARTIAL`        | 冻结中文轮次有正确文本和非静默输出；状态切换时间、逐字音频一致性需补观察。                                                                                                                                |
 | A-05 | 人工试听中文/英文回答                           | 无明显静音、截断、重复、爆音或音量异常，回答内容可辨认。                                                                               | `NOT RUN`        | 录音测量不替代人工听感确认。                                                                                                                                                                              |
 | A-06 | 连续两个算术轮次；第二轮换语言                  | 每轮各有一份转写和回复；保留上下文；不丢第二轮、不重建通话。                                                                           | `PASS`           | Android 最终阶段 `367–378` 同一通话先英文 `17+25→42`，静音 gate 测试后恢复，再中文“十七加二十五…→四十二”；主聊天保留两轮各一份内容，最终 receipt `4:40`。仅判本次连续换语言两轮，不包含更长或复杂上下文。 |
@@ -300,7 +300,7 @@ pnpm exec tsx --test src/features/assistant/AssistantScreen.voice.test.ts
 
 ## 恢复认可设计后的 Screen 代码验证（Home draft deadline 前）
 
-在现有聊天滚动、composer、身份 epoch、焦点、取消和键盘交接保护上，只恢复 Screen 的认可语音接线：删除触摸聊天自动折叠与 minimized/onExpand；主聊天接收完整实时 snapshot；同 thread/epoch/surface 的真实采音事件才显示转写占位；旧通话回调不能污染新通话。voice 和模式偏好由右上角 More 打开。新增的打开语音错误通过现有 `useAppLanguage().t` 翻译。
+在现有聊天滚动、composer、身份 epoch、焦点、取消和键盘交接保护上，只恢复 Screen 的认可语音接线：删除触摸聊天自动折叠与 minimized/onExpand；主聊天接收完整实时 snapshot；当时使用同 thread/epoch/surface 的采音事件显示额外转写占位；该音量推断后来被本页追加的 Transcribing 修复替换为真实 caption 身份。旧通话回调不能污染新通话。voice 和模式偏好由右上角 More 打开。新增的打开语音错误通过现有 `useAppLanguage().t` 翻译。
 
 同一精确 `AssistantScreen.voice.test.ts` 命令在接线改动后通过 **61/61**，日志 `/tmp/nyxid-ipad-chat-wiring-focused-tests.log`；错误翻译的最终增量再次通过 **61/61**，日志 `/tmp/nyxid-ipad-chat-wiring-localized-tests.log`，包含键盘超时实际展示中文错误、重试清除提示。独立 reviewer 已审查接线和旧 surface 隔离，未发现确认问题；翻译增量也已独立复核通过，无新确认问题。上述为同一文件不同阶段的运行，不能相加；也不能替代 A-03/V-05/V-06 的设备验收。新阶段设备证据由主执行 agent 追加。
 
@@ -428,3 +428,42 @@ pnpm exec tsx --test \
 | Android active时iPad尝试/415后检查 | iPad/Android R-11               | 同一账户，最终冻结源码                       | 实际single-call冲突；Android415已End/receipt3:44后，iPad一次Check call status经checking回文字/Openvoice，不自动reconnect或新开采音。                          | 本次冲突/只读恢复限定`PASS`；完整接管`PARTIAL`                    |
 | `415 → 416`                        | Android R-12                    | Android，最终冻结源码                        | 实际输入Reply with7only.、Send一次，完整回复7及Openvoice恢复。                                                                                                | 本次实际文字输入/发送/回复限定`PASS`                              |
 | 本轮收尾                           | 三端状态/音频前置               | Android/iPhone/iPad                          | 三端无activecall；Android官方Emulator gRPC确认realAudioEnabled=true；用户Google登录保留，本轮不再进入新通话。本机控件对比图不提交。                           | 状态已确认，不外推未测声学与完整矩阵                              |
+
+
+## Transcribing 残留修复与增量验证（2026-11-12，基于 `563fc4e68`）
+
+用户报告在已完成语音问答后，底部仍有 `Transcribing…` 气泡，且被窄语音条部分遮挡。确认根因在移动端：原始麦克风音量超过阈值就触发额外 footer；上一句 caption sealed 后，条件再次满足，噪声或播放回声可一直重置其计时。该 footer 没有真实 ASR segment ID，不能据此声称后端仍在转写。
+
+本次删除这条音量推断链路及其专用 state/callback/subscription/timer。波形仍由真实媒体音量驱动；消息只由真实 caption ID 创建，保留 empty-unsealed → partial → sealed → 历史接管和下一句。真实片段尚未完成时，其原消息仍可显示 `Transcribing…`，完成即移除。首个 ASR 片段到来前使用 Listening/波形反馈采音。协议允许空 caption，但当前 OpenAI adapter 会忽略空 delta，因此不承诺每句首字之前都有文字占位。此次仅改共享移动端，iPhone/iPad/Android 使用同一逻辑。
+
+### 本次实际 Android 路径
+
+设备为 `NyxID_QA_API34` / Pixel 7 / Android 14 API 34。所有证据位于本机 `/tmp/nyxid-android-runtime/`，不向 PR 上传私人聊天截图或原始音频。
+
+| 路径 | 证据及结果 | 验证边界 |
+| --- | --- | --- |
+| Listening、尚无真实字幕时输入非语音声音 | `transcribing-noise-0` 至 `-4`：官方 emulator 输入 10 秒非语音 tone/noise，聊天区没有合成的 Transcribing 气泡。输入 RMS 4771.866、peak 11101；录制输出近底噪。 | 只验证本次片段和观察帧，不外推 ASR 对所有噪声永不误识别。 |
+| 恢复后首个 ASR 片段前 | `transcribing-acoustic-ready`：窄条 Listening，主聊天无空气泡。 | Google 登录保留；本轮使用宿主麦克风路径。 |
+| 连续长句、partial 增长、完成和回复 | `transcribing-acoustic-00` 至 `-15`：电脑播放受控长句，经宿主麦克风进入模拟器。`-03` 主聊天已有短 partial；`-08` 同一位置增长为更长文本；`-12` 为完整 `17 + 25` 问句与 Forty-two，Transcribing 已消失。 | 直接观察多帧 partial → final/答复，无额外底部转写气泡；不声明物理设备或真人听感通过。 |
+| 回复后再次出现非语音声音、停顿 | `transcribing-after-reply-noise-0` 至 `-5`：在同一通话播放约 10 秒非语音音频，观察帧中已有回复稳定，无额外 Transcribing footer。 | 宿主麦克风开放，不能将环境中后续出现的真实 ASR 短片段解释为合成 footer，也不据此保证 provider 不误识别。 |
+| 同一通话下一句话 | `transcribing-next-utterance-0` 至 `-5`：`5 + 6` 的真实新字幕和 `11` 回答出现；完成后没有残留 Transcribing 气泡。 | 与长句位于同一通话，未通过重建 call 清状态。 |
+| 收尾与控制复验边界 | `transcribing-confirmed-muted` 实际显示 Call ended / quiet receipt `5:43`，不是文件名所暗示的静音成功；随后 Return to chat 关闭语音表面。 | 首次静音 UIAutomator 点击失败；稍后再检查时已 idle 结束，本次不声称新的静音 gate 或 explicit End 复验通过。 |
+
+长句的首次 gRPC 注入尝试使 Android Emulator 37.2.12 的 `qemu` 在 `audio_forwarder_enable` 中 SIGSEGV，报告 `qemu-system-aarch64-2026-11-12-170000.ips`。这次环境中断不计通过，也不是已确认的 NyxID App crash。恢复原 AVD、保留账号后，改用 `afplay` → 宿主麦克风 → 模拟器原生媒体路径，取得上表连续字幕和下一轮问答证据。没有擦除 userdata、重新登录或复制登录凭据。
+
+### 本次聚焦代码验证
+
+以下 4 个相关测试文件 **160/160 PASS，0 failed / cancelled / skipped**；独立 reviewer 也运行同一选择集并通过，不将两次运行相加：
+
+```bash
+# mobile/
+pnpm exec tsx --test \
+  src/features/assistant/AssistantScreen.voice.test.ts \
+  src/features/assistant/voice/AssistantVoiceConversation.test.ts \
+  src/features/assistant/voice/voiceTranscript.test.ts \
+  src/features/assistant/voice/useVoiceLevels.test.ts
+```
+
+覆盖真实空片段、同 ID partial 更新、sealed 后无多余 footer、下一句话、关闭保留合法 partial、迟到旧 surface/chat/account 回调隔离，以及持续输入/静音/播放能量不会改写权威字幕。独立代码审查无确认 finding。
+
+Changed-file 静态检查命令：`node /tmp/nyxid-transcribing-static.cjs`，只检查本次 4 个 TS/TSX 文件的语法和本次 5 文件 diff whitespace，均通过；这不是项目 typecheck。缓存 Prettier 对这 4 文件执行 `--check`，Conversation 两文件通过，Screen 两文件报告已有格式差异。`python3 /tmp/nyxid-transcribing-format-baseline.py` 对比 `563fc4e68`，Screen/Screen test 的既有格式组分别为 3/8，新增均为 0。没有可靠的仓库原生 affected typecheck，按个人策略交给 GitHub CI；完整 suite、lint、typecheck 和 production build 未在本地运行。本次测试不改写此前 48 用例矩阵的状态与统计。

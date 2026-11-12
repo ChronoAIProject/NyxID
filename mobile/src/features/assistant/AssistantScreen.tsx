@@ -270,12 +270,6 @@ export function AssistantScreen({
     epoch: number;
     snapshot: VoiceSnapshot;
   }>();
-  const [voiceCapture, setVoiceCapture] = useState<{
-    thread: string;
-    epoch: number;
-    listening: boolean;
-    inputActive: boolean;
-  }>();
   const [openingVoice, setOpeningVoice] = useState(false);
   const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
@@ -379,6 +373,8 @@ export function AssistantScreen({
     voiceTranscript.epoch === voiceEpoch
       ? voiceTranscript.snapshot
       : undefined;
+  // Caption IDs own voice messages. Microphone energy also includes noise and
+  // playback, so it must not create a separate transcription placeholder.
   const messages = useMemo(
     () => mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot),
     [historyMessages, voiceSnapshot],
@@ -412,29 +408,6 @@ export function AssistantScreen({
     },
     [voiceThread, voiceEpoch, voiceSurfaceToken],
   );
-  const receiveVoiceCapture = useCallback(
-    (capture: { listening: boolean; inputActive: boolean }) => {
-      if (
-        !voiceThread ||
-        getAuthEpoch() !== voiceEpoch ||
-        voiceContext.current.conversationId !== voiceThread ||
-        currentVoiceSurface.current !== voiceSurfaceToken
-      )
-        return;
-      setVoiceCapture({ thread: voiceThread, epoch: voiceEpoch, ...capture });
-    },
-    [voiceThread, voiceEpoch, voiceSurfaceToken],
-  );
-  const awaitingVoiceText =
-    !!voiceThread &&
-    voiceThread === assistant.conversationId &&
-    voiceCapture?.thread === voiceThread &&
-    voiceCapture.epoch === voiceEpoch &&
-    voiceCapture.listening &&
-    voiceCapture.inputActive &&
-    !voiceSnapshot?.captions.some(
-      (row) => row.speaker === "user" && !row.sealed,
-    );
   const stableTranscript =
     messages.length > 0 &&
     !running &&
@@ -597,7 +570,6 @@ export function AssistantScreen({
       setVoiceThread(undefined);
   }, [voiceThread, assistant.conversationId]);
   useEffect(() => {
-    setVoiceCapture(undefined);
     setVoicePreferencesOpen(false);
     setVoiceTranscript((previous) =>
       previous &&
@@ -1437,16 +1409,6 @@ export function AssistantScreen({
             }
             ListFooterComponent={
               <View style={styles.footer}>
-                {awaitingVoiceText ? (
-                  <ChatMessageTurn user>
-                    <Text
-                      accessibilityLabel="Your speech is being transcribed"
-                      style={[styles.messageText, { color: bubble.foreground }]}
-                    >
-                      Transcribing…
-                    </Text>
-                  </ChatMessageTurn>
-                ) : null}
                 {conversation?.context_reset_at &&
                 (!messages.length ||
                   Date.parse(messages.at(-1)!.created_at) <=
@@ -1658,11 +1620,9 @@ export function AssistantScreen({
               )
                 return;
               setVoiceThread(undefined);
-              setVoiceCapture(undefined);
               setVoicePreferencesOpen(false);
             }}
             onSnapshot={receiveVoiceSnapshot}
-            onCaptureState={receiveVoiceCapture}
             preferencesOpen={voicePreferencesOpen}
             onPreferencesClose={() => setVoicePreferencesOpen(false)}
             onUpdate={() => void assistant.recover()}

@@ -687,44 +687,101 @@ test("live speech grows in the main chat and sealed history replaces it once", a
   x.harness.unmount();
 });
 
-test("real capture shows a transcription placeholder until the same-chat caption arrives", async () => {
+test("only a real caption creates a transcription row, which updates in place and never leaves an extra footer", async () => {
   const x = setup(A);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
-  const transcribing = () =>
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const footerTranscribing = () =>
+    elements(expand(list().props.ListFooterComponent)).some((node) =>
+      node.props.children.includes("Transcribing…"),
+    );
+  const renderedRow = (index = 0) =>
     elements(
       expand(
-        x.all().find((node) => node.type === "FlatList")!.props
-          .ListFooterComponent,
+        list().props.renderItem({ item: list().props.data[index], index }),
       ),
-    ).some(
-      (node) =>
-        node.props.accessibilityLabel === "Your speech is being transcribed",
     );
-  x.voice()!.props.onCaptureState({ listening: true, inputActive: false });
+  x.voice()!.props.onSnapshot({ ...liveVoice(""), captions: [] });
   x.harness.flush();
-  assert.equal(transcribing(), false);
-  x.voice()!.props.onCaptureState({ listening: false, inputActive: true });
+  assert.equal(list().props.data.length, 0);
+  assert.equal(footerTranscribing(), false);
+
+  x.voice()!.props.onSnapshot(liveVoice(""));
   x.harness.flush();
-  assert.equal(transcribing(), false);
-  x.voice()!.props.onCaptureState({ listening: true, inputActive: true });
-  x.harness.flush();
-  assert.equal(transcribing(), true);
-  x.voice()!.props.onSnapshot(liveVoice("正在说话"));
-  x.harness.flush();
-  assert.equal(transcribing(), false);
+  assert.equal(list().props.data.length, 1);
+  const captionId = list().props.data[0].id;
   assert.equal(
-    x.all().find((node) => node.type === "FlatList")!.props.data.length,
+    renderedRow().filter((node) =>
+      node.props.children.includes("Transcribing…"),
+    ).length,
     1,
   );
+  assert.equal(footerTranscribing(), false);
+
+  x.voice()!.props.onSnapshot(liveVoice("正在"));
+  x.harness.flush();
+  assert.equal(list().props.data[0].id, captionId);
+  assert.equal(list().props.data[0].text, "正在");
+  x.voice()!.props.onSnapshot(liveVoice("正在说话"));
+  x.harness.flush();
+  assert.equal(list().props.data.length, 1);
+  assert.equal(list().props.data[0].text, "正在说话");
+  assert.equal(footerTranscribing(), false);
+
+  const completed = liveVoice("正在说话。", true);
+  completed.captions.push({
+    id: "live-assistant",
+    speaker: "assistant",
+    text: "听到了。",
+    sealed: true,
+    complete: true,
+  });
+  for (let repeat = 0; repeat < 3; repeat++) {
+    x.voice()!.props.onSnapshot(completed);
+    x.harness.flush();
+    assert.equal(list().props.data.length, 2);
+    assert.equal(list().props.data[0].id, captionId);
+    assert.equal(footerTranscribing(), false);
+    assert.equal(
+      renderedRow().some((node) =>
+        node.props.children.includes("Transcribing…"),
+      ),
+      false,
+    );
+  }
+
+  const next = {
+    ...completed,
+    captions: [
+      ...completed.captions,
+      { ...liveVoice("").captions[0], id: "next-user" },
+    ],
+  };
+  x.voice()!.props.onSnapshot(next);
+  x.harness.flush();
+  assert.equal(list().props.data.length, 3);
+  assert.equal(
+    renderedRow(2).filter((node) =>
+      node.props.children.includes("Transcribing…"),
+    ).length,
+    1,
+  );
+  x.voice()!.props.onSnapshot({
+    ...next,
+    captions: next.captions.map((caption) =>
+      caption.id === "next-user" ? { ...caption, text: "下一句" } : caption,
+    ),
+  });
+  x.harness.flush();
+  assert.equal(list().props.data.length, 3);
+  assert.equal(list().props.data[2].id, "next-user");
+  assert.equal(list().props.data[2].text, "下一句");
   x.voice()!.props.onClose();
   x.harness.flush();
-  assert.equal(transcribing(), false);
-  const list = x.all().find((node) => node.type === "FlatList")!;
-  assert.equal(list.props.data[0].text, "正在说话");
-  const retained = elements(
-    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
-  );
+  assert.equal(footerTranscribing(), false);
+  assert.equal(list().props.data[2].text, "下一句");
+  const retained = renderedRow(2);
   assert.ok(
     retained.some((node) => node.props.children.includes("Partial transcript")),
   );
@@ -745,7 +802,6 @@ test("old voice callbacks cannot populate a different chat or account", async ()
     else x.assistant.openConversation(B);
     x.harness.render();
     stale.onSnapshot(liveVoice("old account words"));
-    stale.onCaptureState({ listening: true, inputActive: true });
     x.harness.flush();
     assert.equal(
       x.all().find((node) => node.type === "FlatList")!.props.data.length,
@@ -799,9 +855,8 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
   x.harness.flush();
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
-  x.voice()!.props.onCaptureState({ listening: true, inputActive: true });
+  x.voice()!.props.onSnapshot(liveVoice("current call"));
   stale.onSnapshot(liveVoice("old call"));
-  stale.onCaptureState({ listening: false, inputActive: false });
   stale.onClose();
   oldMenu[0]!.onPress!();
   oldMenu[1]!.onPress!();
@@ -810,7 +865,12 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
   assert.equal(x.voice()!.props.preferencesOpen, false);
   assert.equal(
     x.all().find((node) => node.type === "FlatList")!.props.data.length,
-    0,
+    1,
+  );
+  assert.equal(
+    x.all().find((node) => node.type === "FlatList")!.props.data[0].text,
+    "current call",
+    "a closed surface cannot replace the reopened call's live transcript",
   );
   assert.equal(
     x.events.some((event) => event[0] === "push"),
@@ -827,8 +887,7 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
       (node) =>
         node.props.accessibilityLabel === "Your speech is being transcribed",
     ),
-    true,
-    "a closed surface cannot clear the reopened call's live capture",
+    false,
   );
   x.harness.unmount();
 });

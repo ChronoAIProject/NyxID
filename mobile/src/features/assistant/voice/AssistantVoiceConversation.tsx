@@ -47,7 +47,6 @@ import type {
   VoiceSnapshot,
 } from "./voiceContracts";
 
-type CaptureState = { listening: boolean; inputActive: boolean };
 type Props = {
   thread: string;
   agentName: string;
@@ -57,7 +56,6 @@ type Props = {
   onReview?: (acknowledgementId?: string) => void;
   /** The main chat is the only transcript surface. */
   onSnapshot?: (snapshot: VoiceSnapshot | undefined) => void;
-  onCaptureState?: (state: CaptureState) => void;
   /** Controlled by the main chat's top-right Voice preferences action. */
   preferencesOpen?: boolean;
   onPreferencesClose?: () => void;
@@ -143,7 +141,6 @@ function VoiceConversation({
   onUpdate,
   onReview,
   onSnapshot,
-  onCaptureState,
   preferencesOpen,
   onPreferencesClose,
   environment,
@@ -178,7 +175,6 @@ function VoiceConversation({
   const [endRequested, setEndRequested] = useState(false);
   const [endingLocal, setEndingLocal] = useState(false);
   const [checkingLocal, setCheckingLocal] = useState(false);
-  const [inputActive, setInputActive] = useState(false);
   type Restart = {
     scope: string;
     sessionId: string;
@@ -196,8 +192,8 @@ function VoiceConversation({
   const endBusy = useRef(false);
   const checkBusy = useRef(false);
   const saveBusy = useRef(false);
-  const callbacks = useRef({ onSnapshot, onCaptureState });
-  callbacks.current = { onSnapshot, onCaptureState };
+  const callbacks = useRef({ onSnapshot });
+  callbacks.current = { onSnapshot };
   if (
     entry.current.thread !== thread ||
     entry.current.epoch !== environment.epoch
@@ -424,51 +420,11 @@ function VoiceConversation({
     return () => {
       mounted.current = false;
       callbacks.current.onSnapshot?.(undefined);
-      callbacks.current.onCaptureState?.({
-        listening: false,
-        inputActive: false,
-      });
     };
   }, [thread, environment]);
   useEffect(() => {
     callbacks.current.onSnapshot?.(voice.snapshot ?? undefined);
   }, [voice.snapshot]);
-  useEffect(() => {
-    callbacks.current.onCaptureState?.({
-      listening,
-      inputActive: listening && inputActive,
-    });
-  }, [listening, inputActive]);
-  useEffect(() => {
-    setInputActive(false);
-    if (!listening || !voice.media) return;
-    let release: ReturnType<typeof setTimeout> | undefined;
-    let current = true;
-    let quiet = false;
-    const releaseInput = () => {
-      release = undefined;
-      if (current) setInputActive(false);
-    };
-    const unsubscribe = voice.media.subscribe((event) => {
-      if (!current || event.type !== "level") return;
-      if (event.input >= 0.08) {
-        quiet = false;
-        clearTimeout(release);
-        setInputActive(true);
-        release = setTimeout(releaseInput, 750);
-      } else if (!quiet) {
-        // Frequent silent native samples must not postpone the first release.
-        quiet = true;
-        clearTimeout(release);
-        release = setTimeout(releaseInput, 250);
-      }
-    });
-    return () => {
-      current = false;
-      unsubscribe();
-      clearTimeout(release);
-    };
-  }, [voice.media, listening]);
   useEffect(() => {
     if (!active && !confirmingEnd) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
