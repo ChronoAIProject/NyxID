@@ -398,7 +398,10 @@ not silently replace upstream keys. This contract was checked against CMA commit
 An affected account needs no deletion or reconnection. A new slot-allocating CMA
 creation first re-observes its one occupied unknown sandbox request, using the
 retained original bytes and key through the existing guarded replay. An explicit
-recovery does the same. A proven refusal settles recovery as complete and permits
+recovery does the same. Automatic proxy-admission recovery does not require the
+optional NyxBot CMA sandbox-management feature. Explicit management recovery still
+requires that feature at entry and immediately before replay, plus the existing
+first-party-human handler check. A proven refusal settles recovery as complete and permits
 the new creation; a real receipt preserves the original sandbox and its slot.
 Ambiguous replies, changed authority, unavailable dependencies or identifier-bearing
 problems never release capacity. No pending, never-dispatched request or unknown
@@ -406,8 +409,13 @@ lifecycle Agent request is automatically resent.
 
 All original owner, catalog deployment, request, parent generation and erasure
 fences apply. Generic sandbox replay is limited to 23 hours from first dispatch,
-inside CMA's 24-hour idempotency retention; outside that window NyxID returns
-`cma_creation_replay_expired` without sending. Such older uncertain requests require
+inside CMA's 24-hour idempotency retention. Explicit recovery outside that window
+returns `cma_creation_replay_expired` without sending. During automatic recovery,
+lookup or replay failures after finding the occupied slot instead return
+`cma_sandbox_account_slot_occupied`, explaining that the earlier creation is not
+confirmed absent and can be rechecked later. The new request is not dispatched.
+The initial slot lookup's database errors and the incoming request's own validation
+and authorization errors retain their usual responses. Such older uncertain requests require
 authoritative CMA investigation, not a new identity or a local force-unlock.
 A rolling old replica may still leave a refusal unknown; an upgraded replica can
 recover it within that window. No schema or writer-cutover change is required.

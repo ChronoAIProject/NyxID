@@ -1321,7 +1321,7 @@ pub async fn record_creation_observation(
 /// A new slot-allocating create may first settle one stranded sandbox request.
 /// Never infer absence from a list, replay a pending (not dispatched) request,
 /// or automatically replay a lifecycle Agent creation. All original replay
-/// fences, including the generic cache lifetime, remain in recover_creation.
+/// fences, including the generic cache lifetime, remain in recover_creation_core.
 fn recover_occupied_sandbox<'a>(
     db: &'a Database,
     keys: &'a EncryptionKeys,
@@ -1365,12 +1365,37 @@ fn recover_occupied_sandbox<'a>(
                 "operation_id":bson::Bson::Null,"cma_agent_id":bson::Bson::Null,
                 "cma_sandbox_id":bson::Bson::Null},
             )
-            .await?;
+            .await
+            .map_err(|_| recovery_slot_occupied())?;
         if recoverable.is_some() {
-            recover_creation(db, keys, gateway, owner, &parent.id, parent.generation).await?;
+            recover_creation_core(
+                db,
+                keys,
+                gateway,
+                owner,
+                &parent.id,
+                parent.generation,
+                CreationRecoveryAccess::Admission,
+            )
+            .await
+            .map_err(|_| recovery_slot_occupied())?;
         }
         Ok(())
     })
+}
+
+fn recovery_slot_occupied() -> AppError {
+    AppError::Conflict(
+        "cma_sandbox_account_slot_occupied: the earlier creation is not confirmed absent; retry later to recheck its original request; do not delete or reconnect".into(),
+    )
+}
+
+/// Only management recovery requires the optional NyxBot management feature.
+/// Admission recovery can only re-observe a previously dispatched owner intent.
+#[derive(Clone, Copy)]
+pub(super) enum CreationRecoveryAccess {
+    Management,
+    Admission,
 }
 
 /// Explicit owner recovery of the original Sandbox creation. The local identity
@@ -1383,10 +1408,32 @@ pub async fn recover_creation(
     id: &str,
     generation: i64,
 ) -> AppResult<sandboxes::SandboxCommandDto> {
+    let db = &super::transaction_service::durable_database(db);
+    super::assistant_cma_agent_service::require_enabled(db, owner).await?;
+    recover_creation_core(
+        db,
+        keys,
+        gateway,
+        owner,
+        id,
+        generation,
+        CreationRecoveryAccess::Management,
+    )
+    .await
+}
+
+async fn recover_creation_core(
+    db: &Database,
+    keys: &EncryptionKeys,
+    gateway: &CatalogCmaGateway,
+    owner: &str,
+    id: &str,
+    generation: i64,
+    access: CreationRecoveryAccess,
+) -> AppResult<sandboxes::SandboxCommandDto> {
     // Absence is terminal evidence, including after an indeterminate replay
     // response. Read the transaction's outcome from the primary with majority.
     let db = &super::transaction_service::durable_database(db);
-    super::assistant_cma_agent_service::require_enabled(db, owner).await?;
     let parent = sandboxes::get_owned(db, owner, id).await?;
     sandboxes::require_generation(&parent, generation)?;
     let creation = db
@@ -1425,7 +1472,10 @@ pub async fn recover_creation(
             if sandboxes::prepare_creation_request(&body)?.hash != creation.request_hash {
                 return Err(drift());
             }
-            if let Err(error) = gateway.replay_creation(keys, &creation, &body).await {
+            if let Err(error) = gateway
+                .replay_creation(keys, &creation, &body, access)
+                .await
+            {
                 // A cached refusal is an HTTP error but can have committed the
                 // exact NoResource proof. Only that durable state settles it;
                 // unavailable/ambiguous responses must retain the reservation.
