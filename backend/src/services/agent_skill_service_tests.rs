@@ -1210,8 +1210,14 @@ async fn outline_reads_only_attached_pins_and_resolves_uses_in_the_root_closure(
     );
     // Disabled pins and tampered packages are refused like ordinary reads.
     let tampered = outline_registry("changed after pinning");
+    // The mismatch is typed since #2385; clients still see a validation error naming SHA-256.
+    let refused = read_outline(&tampered, &agent, ID, None, 0, None)
+        .await
+        .unwrap_err();
+    let body = refused.response_body();
     assert!(
-        matches!(read_outline(&tampered, &agent, ID, None, 0, None).await, Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
+        body.error == "validation_error" && body.message.contains("SHA-256"),
+        "{refused:?}"
     );
     agent.skills[0].disabled = true;
     assert!(

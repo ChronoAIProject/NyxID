@@ -851,7 +851,8 @@ pub async fn admit(
             .map(|row| row.id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let context = RecordContext::new(COLLECTION_NAME, &id, owner, &["request_ciphertext"])?;
-        let request_ciphertext = keys.encrypt_record(body, &context).await?;
+        let request_ciphertext =
+            super::record_field_service::encrypt_context(keys, &context, body).await?;
         let expected_workspace_id = match &operation {
             Operation::CreateAgent { workspace, .. } => workspace.clone(),
             Operation::WorkspaceAgent { id } => Some(id.clone()),
@@ -881,7 +882,7 @@ pub async fn admit(
             recovery_checked_at: None,
             first_dispatched_at: None,
             request_ciphertext: Some(request_ciphertext),
-            request_context_version: Some(3),
+            request_context_version: keys.contextual_record_writes().then_some(3),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1414,6 +1415,11 @@ mod tests {
     mod fingerprint_regressions {
         use super::*;
         include!("assistant_cma_admission_fingerprint_tests.rs");
+
+        mod writer_cutover {
+            use super::*;
+            include!("assistant_cma_writer_cutover_tests.rs");
+        }
     }
 
     #[test]
