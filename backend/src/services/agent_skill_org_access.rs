@@ -171,6 +171,31 @@ pub(crate) async fn lookup(state: &AppState, token: &str) -> AppResult<Membershi
     if claims.exp <= now || claims.iat > now || claims.exp.checked_sub(claims.iat) != Some(60) {
         return Err(denied());
     }
+    // This purpose has no OAuth consent/delegation row. Its authority is the
+    // live membership/agent/connection (plus runtime key/turn) checked below.
+    // Share the existing retryable authority-outage response; a database or
+    // dependency failure is never proof that the person lost membership.
+    let membership = tokio::time::timeout(
+        super::oauth_token_authority_service::AUTHORITY_READ_BUDGET
+            + std::time::Duration::from_millis(250),
+        lookup_current(state, &claims),
+    )
+    .await
+    .map_err(|_| AppError::OAuthAuthorityUnavailable)?
+    .map_err(|error| {
+        if error.status_code().is_server_error() {
+            AppError::OAuthAuthorityUnavailable
+        } else {
+            error
+        }
+    })?;
+    if claims.exp <= Utc::now().timestamp() {
+        return Err(denied());
+    }
+    Ok(membership)
+}
+
+async fn lookup_current(state: &AppState, claims: &Claims) -> AppResult<Membership> {
     let actor = state
         .db
         .collection::<crate::models::user::User>("users")
@@ -211,7 +236,7 @@ pub(crate) async fn lookup(state: &AppState, token: &str) -> AppResult<Membershi
             .find_one(doc! {"_id":connection.catalog_service_id.as_deref().unwrap_or_default(),"slug":"ornn-api","is_active":true})
             .await?.is_none()
     { return Err(denied()); }
-    if let Some(turn) = claims.turn {
+    if let Some(turn) = &claims.turn {
         let key = super::key_service::get_api_key(&state.db, &actor.id, &turn.key).await?;
         if !key.is_active || key.expires_at.is_some_and(|at| at <= Utc::now()) {
             return Err(denied());
@@ -344,7 +369,116 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        // Generate strong test keys before starting the capability's 60s lifetime.
+        let (old_keys, rotated_keys) = crate::crypto::jwt::test_rotation_keys();
         let token = issue(&f.state, &f.admin, &agent, &connection, Some(&chat)).unwrap();
+        assert_eq!(lookup(&f.state, &token).await.unwrap().id, f.org);
+        // Real distinct keys: overlap accepts only the retained exact kid;
+        // retirement refuses it rather than probing the active verification key.
+        let mut old_state = f.state.clone();
+        old_state.jwt_keys = old_keys;
+        let old_token = issue(&old_state, &f.admin, &agent, &connection, Some(&chat)).unwrap();
+        let mut rotated = f.state.clone();
+        rotated.jwt_keys = rotated_keys;
+        assert_eq!(lookup(&rotated, &old_token).await.unwrap().id, f.org);
+        rotated.jwt_keys.retained.clear();
+        assert!(matches!(
+            lookup(&rotated, &old_token).await,
+            Err(AppError::Unauthorized(_))
+        ));
+        let new_token = issue(&rotated, &f.admin, &agent, &connection, Some(&chat)).unwrap();
+        assert_eq!(lookup(&rotated, &new_token).await.unwrap().id, f.org);
+        // Both a real Mongo selection error and an outer live-read timeout
+        // must remain retryable 503s, never a successful empty org list or 403.
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        for selection_timeout in [
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(30),
+        ] {
+            let mut options = mongodb::options::ClientOptions::parse(format!(
+                "mongodb://{}/?directConnection=true",
+                unavailable.local_addr().unwrap()
+            ))
+            .await
+            .unwrap();
+            options.server_selection_timeout = Some(selection_timeout);
+            options.connect_timeout = Some(selection_timeout);
+            let client = mongodb::Client::with_options(options).unwrap();
+            let mut outage = f.state.clone();
+            outage.db = client.database("org_skill_lookup_unavailable");
+            let callback = axum::Router::new()
+                .route(
+                    "/api/v1/orgs",
+                    axum::routing::get(crate::handlers::agent_skills::org_membership_lookup),
+                )
+                .with_state(outage);
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                callback.oneshot(
+                    Request::builder()
+                        .uri("/api/v1/orgs")
+                        .header("authorization", format!("Bearer {}", token.as_str()))
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["retry-after"], "1");
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["error"], "oauth_authority_unavailable");
+            assert_eq!(body["error_code"], 12900);
+            assert!(body.get("orgs").is_none());
+            assert!(!body.to_string().contains("mongodb"));
+            // No server session was established. Drop this failure-injection
+            // client; awaiting topology shutdown can stall without a server.
+            drop(client);
+        }
+        // Recovery retries the same capability against live authority; no
+        // negative membership result is cached by NyxID.
+        assert_eq!(lookup(&f.state, &token).await.unwrap().id, f.org);
+        // The nested API-key authenticator must not mask a database decoding
+        // failure during its live conversation lookup as invalid credentials.
+        let conversations = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_conversations");
+        let original_row = conversations
+            .find_one(doc! {"_id":&chat.conversation_id})
+            .await
+            .unwrap()
+            .unwrap();
+        conversations
+            .update_one(
+                doc! {"_id":&chat.conversation_id},
+                doc! {"$set":{"title":{"invalid":"stored-title"}}},
+            )
+            .await
+            .unwrap();
+        let key = f.key(&thread).await;
+        assert!(matches!(
+            Box::pin(crate::mw::auth::api_key_auth_user(
+                &f.state.db,
+                &key,
+                None,
+                None,
+                None
+            ))
+            .await,
+            Err(AppError::OAuthAuthorityUnavailable)
+        ));
+        assert!(matches!(
+            lookup(&f.state, &token).await,
+            Err(AppError::OAuthAuthorityUnavailable)
+        ));
+        conversations
+            .replace_one(doc! {"_id":&chat.conversation_id}, original_row)
+            .await
+            .unwrap();
         assert_eq!(lookup(&f.state, &token).await.unwrap().id, f.org);
         // Ordinary JWT/access/MCP authentication cannot parse this purpose and
         // audience, and it has no generic account-read or execution scope.
@@ -413,6 +547,10 @@ mod tests {
         let header = jsonwebtoken::decode_header(&token).unwrap();
         for (field, value) in [
             ("exp", json!(Utc::now().timestamp() - 1)),
+            ("exp", json!(Utc::now().timestamp())),
+            ("exp", json!(original["iat"].as_i64().unwrap() + 61)),
+            ("iat", json!(Utc::now().timestamp() + 60)),
+            ("iss", json!("different-issuer")),
             ("aud", json!("different-audience")),
             ("org", json!(f.outsider)),
             ("pins", json!("changed-pins")),
@@ -422,6 +560,27 @@ mod tests {
             let bad = encode(&header, &claims, &f.state.jwt_keys.encoding).unwrap();
             assert!(lookup(&f.state, &bad).await.is_err());
         }
+        for kid in [None, Some("unknown-kid".into())] {
+            let mut wrong_header = header.clone();
+            wrong_header.kid = kid;
+            let bad = encode(&wrong_header, &original, &f.state.jwt_keys.encoding).unwrap();
+            assert!(matches!(
+                lookup(&f.state, &bad).await,
+                Err(AppError::Unauthorized(_))
+            ));
+        }
+        let mut wrong_header = header.clone();
+        wrong_header.alg = Algorithm::HS256;
+        let bad = encode(
+            &wrong_header,
+            &original,
+            &jsonwebtoken::EncodingKey::from_secret(b"test-only"),
+        )
+        .unwrap();
+        assert!(matches!(
+            lookup(&f.state, &bad).await,
+            Err(AppError::Unauthorized(_))
+        ));
         let mut bad = token.to_string();
         bad.push('x');
         assert!(lookup(&f.state, &bad).await.is_err());

@@ -1315,6 +1315,8 @@ pub(crate) async fn org_membership_lookup(
         .get(http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
+    // Untrusted dispatch hint only: lookup verifies signature, purpose and
+    // live authority before this branch can return any membership.
     if let Some(token) = token.filter(|token| {
         jsonwebtoken::decode_header(token)
             .ok()

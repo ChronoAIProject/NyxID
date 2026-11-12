@@ -990,7 +990,16 @@ async fn api_key_auth_user_inner(
             org_agent_access.as_ref(),
         )
         .await
-        .map_err(|_| AppError::Unauthorized("Invalid authentication credentials".to_string()))?
+        .map_err(|error| {
+            // An unavailable live turn lookup is not credential revocation.
+            // Preserve the retryable authority distinction for every caller,
+            // including Ornn's purpose-limited membership callback.
+            if error.status_code().is_server_error() {
+                AppError::OAuthAuthorityUnavailable
+            } else {
+                AppError::Unauthorized("Invalid authentication credentials".to_string())
+            }
+        })?
         .map(std::sync::Arc::new)
     } else {
         None

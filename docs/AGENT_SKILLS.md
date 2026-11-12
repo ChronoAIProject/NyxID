@@ -56,6 +56,15 @@ headers) are incompatible with this callback and fail with `owner_connection_una
 and connections configured to inject a general delegation token remain unavailable. Upgrade all API replicas serving callbacks before relying on
 this path; old replicas reject the new purpose and fail closed.
 
+Callback live-authority database/dependency failures and the bounded lookup
+timeout return the existing `oauth_authority_unavailable` response (503,
+`Retry-After: 1`), never a successful empty membership list. Key selection uses
+only the exact active/retained `kid`; missing or unknown keys refuse, with no
+fallback. Ornn currently collapses all callback HTTP/network errors into an
+unresolved empty list for reads, memoized only within that request. Preserving
+503 end to end on Ornn reads requires an Ornn change; the NyxID callback's 503
+must not be interpreted as a confirmed membership revocation.
+
 Attached read failures add `details.reason`: `skill_not_bound`,
 `owner_connection_unavailable`, `ornn_principal_denied` (Ornn 401/403/404), or
 `pinned_version_mismatch`. Access failures retain forbidden/1002; integrity
