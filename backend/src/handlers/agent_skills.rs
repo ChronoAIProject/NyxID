@@ -505,7 +505,20 @@ pub async fn catalog(
         chat: None,
     };
     let value = match (query.skill, query.version) {
-        (Some(id), Some(version)) => json!(skills::preview(&reader, &id, &version).await?),
+        (Some(id), Some(version)) => {
+            let preview = skills::preview(&reader, &id, &version).await?;
+            // `assistant:skill-runs` adds the parsed outline and the author; a
+            // failed flag lookup keeps today's response.
+            if Box::pin(crate::services::skill_outline::enabled(&state.db, &owner))
+                .await
+                .unwrap_or(false)
+            {
+                let publisher = Box::pin(skills::publisher_kind(&state.db, &preview)).await;
+                skills::catalog_preview(&preview, publisher)
+            } else {
+                json!(preview)
+            }
+        }
         (Some(id), None) => skills::versions(&reader, &id, query.page).await?,
         (None, _) => skills::search(&reader, &query.q, query.page).await?,
     };
@@ -781,6 +794,37 @@ fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args[key].as_str().unwrap_or_default()
 }
 
+/// `skill_read` of a file, or of the NYX template outline when `outline`.
+async fn read_attached(
+    reader: &impl skills::OrnnReader,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    args: &Value,
+    outline: bool,
+) -> AppResult<Value> {
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    if outline {
+        skills::read_outline(
+            reader,
+            agent,
+            arg(args, "skill"),
+            args["dependency"].as_str(),
+            offset,
+            args["outline_fingerprint"].as_str(),
+        )
+        .await
+    } else {
+        skills::read(
+            reader,
+            agent,
+            arg(args, "skill"),
+            args["dependency"].as_str(),
+            args["path"].as_str().unwrap_or("SKILL.md"),
+            offset,
+        )
+        .await
+    }
+}
+
 pub(crate) async fn dispatch(
     state: &AppState,
     chat: &ChatAuthority,
@@ -811,10 +855,25 @@ pub(crate) async fn dispatch(
             chat: Some(std::sync::Arc::new(chat.clone())),
         };
         let input = authoring::parse_input(args)?;
+        // Template advice only; it never refuses or changes the draft.
+        let warnings = if Box::pin(crate::services::skill_outline::enabled(
+            &state.db,
+            &chat.user_id,
+        ))
+        .await
+        .unwrap_or(false)
+        {
+            crate::services::skill_outline::template_warnings(input.skill_md())
+        } else {
+            Vec::new()
+        };
         // The pre-review format check is the agent's own Ornn request, so it
         // keeps the thread key's approval policy, turn fence and attribution.
-        let result = Box::pin(authoring::create(state, chat, input, &reader, &reader)).await?;
+        let mut result = Box::pin(authoring::create(state, chat, input, &reader, &reader)).await?;
         let asks = result["error"] == "acknowledgement_required";
+        if !warnings.is_empty() && result.is_object() {
+            result["outline_warnings"] = json!(warnings);
+        }
         return Ok((result, asks));
     }
     // Ornn reads run as the thread key, so they keep its agent's operation scopes.
@@ -878,7 +937,22 @@ pub(crate) async fn dispatch(
             .await?
         }
         "preview_agent_skill" => {
-            json!(skills::preview(&reader, arg(args, "skill"), arg(args, "version")).await?)
+            let preview =
+                skills::preview(&reader, arg(args, "skill"), arg(args, "version")).await?;
+            if Box::pin(crate::services::skill_outline::enabled(db, &chat.user_id))
+                .await
+                .unwrap_or(false)
+            {
+                skills::preview_with_outline(
+                    &preview,
+                    args["outline_offset"]
+                        .as_u64()
+                        .map(|offset| offset as usize),
+                    args["outline_fingerprint"].as_str(),
+                )?
+            } else {
+                json!(preview)
+            }
         }
         "skill_read" => {
             let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
@@ -902,26 +976,29 @@ pub(crate) async fn dispatch(
                         })
                     })
             });
+            let outline = match args["section"].as_str() {
+                None => false,
+                Some("outline") => {
+                    if !Box::pin(crate::services::skill_outline::enabled(db, &chat.user_id)).await?
+                    {
+                        return Err(AppError::Forbidden("Skill outlines are not enabled".into()));
+                    }
+                    true
+                }
+                Some(_) => {
+                    return Err(AppError::ValidationError("section must be outline".into()));
+                }
+            };
             if !bound {
                 audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
-                skills::read(
-                    &reader,
-                    &agent,
-                    arg(args, "skill"),
-                    args["dependency"].as_str(),
-                    args["path"].as_str().unwrap_or("SKILL.md"),
-                    args["offset"].as_u64().unwrap_or(0) as usize,
-                )
-                .await
+                Box::pin(read_attached(&reader, &agent, args, outline)).await
             } else {
-                skills::read(
+                Box::pin(read_attached(
                     &reader.bound_skill(&agent),
                     &agent,
-                    arg(args, "skill"),
-                    args["dependency"].as_str(),
-                    args["path"].as_str().unwrap_or("SKILL.md"),
-                    args["offset"].as_u64().unwrap_or(0) as usize,
-                )
+                    args,
+                    outline,
+                ))
                 .await
             }?
         }
