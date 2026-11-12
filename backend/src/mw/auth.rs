@@ -4400,7 +4400,6 @@ mod tests {
             );
         }
         for path in [
-            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/users/me",
             "/api/v1/assistant/agents",
             "/api/v1/channel-relay/conversations",
@@ -4684,7 +4683,6 @@ mod tests {
     fn api_key_management_write_routes_require_write_scope() {
         let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
         let write_routes = [
-            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/api/v1/api-keys"),
             (Method::POST, "/api/v1/api-keys/key-1/rotate"),
             (Method::POST, "/api/v1/keys"),

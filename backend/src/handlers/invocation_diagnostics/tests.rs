@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     services::{
         billing::{BillingIngress, route_inventory::BillingRoutePolicy},
-        invocation_diagnostic_service::tests::{fixture, legacy_handle},
+        invocation_diagnostic_service::tests::fixture,
     },
     test_utils::{set_test_approval_preference, test_auth_user},
 };

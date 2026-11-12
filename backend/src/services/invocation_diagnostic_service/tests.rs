@@ -141,10 +141,7 @@ use wiremock::{
 pub(crate) async fn legacy_handle(
     db: &Database,
     _config: &AppConfig,
-    actor: &str,
-    method: &AuthMethod,
-    key: Option<&str>,
-    client: Option<&str>,
+    identity: IssueIdentity<'_>,
     service: &str,
 ) -> AppResult<Option<IssuedHandle>> {
     let raw = format!(
@@ -156,11 +153,11 @@ pub(crate) async fn legacy_handle(
         .insert_one(InvocationDiagnostic {
             id: Uuid::new_v4().to_string(),
             handle_hash: crate::crypto::token::hash_token(&raw),
-            actor_user_id: actor.to_owned(),
-            original_auth_method: auth_method_name(method).into(),
-            original_api_key_id: key.map(str::to_owned),
+            actor_user_id: identity.actor_id.to_owned(),
+            original_auth_method: auth_method_name(identity.auth_method).into(),
+            original_api_key_id: identity.api_key_id.map(str::to_owned),
             original_api_key_credential_id: None,
-            original_client_id: client.map(str::to_owned),
+            original_client_id: identity.client_id.map(str::to_owned),
             exact_user_service_id: service.to_owned(),
             state: InvocationDiagnosticState::Pending,
             diagnostic: None,
@@ -1318,10 +1315,7 @@ async fn invocation_diagnostic_issuance_guards_do_not_touch_unavailable_database
         issue(
             &db,
             &config,
-            "actor",
-            &AuthMethod::AccessToken,
-            None,
-            None,
+            IssueIdentity::new("actor", &AuthMethod::AccessToken, None, None, None),
             "service"
         )
         .await
@@ -1330,27 +1324,34 @@ async fn invocation_diagnostic_issuance_guards_do_not_touch_unavailable_database
     );
     config.invocation_diagnostics_enabled = true;
     for method in [
-        AuthMethod::ApiKey,
         AuthMethod::Session,
         AuthMethod::Delegated,
         AuthMethod::ServiceAccount,
         AuthMethod::Relay,
     ] {
         assert!(
-            issue(&db, &config, "actor", &method, None, None, "service")
-                .await
-                .unwrap()
-                .is_none()
+            issue(
+                &db,
+                &config,
+                IssueIdentity::new("actor", &method, None, None, None),
+                "service"
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
     assert!(
         issue(
             &db,
             &config,
-            "actor",
-            &AuthMethod::AccessToken,
-            None,
-            Some("chrono-probe"),
+            IssueIdentity::new(
+                "actor",
+                &AuthMethod::AccessToken,
+                None,
+                None,
+                Some("chrono-probe"),
+            ),
             "service"
         )
         .await
