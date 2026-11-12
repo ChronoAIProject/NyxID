@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
 import {
   COMPOSER_ACCESS_DESCRIPTION,
@@ -105,8 +105,12 @@ test("long permission descriptions use available space so all three choices fit"
     .all()
     .filter((node) => node.props.accessibilityRole === "menuitem");
   assert.equal(items.length, 3);
-  assert.ok(items[2].props.accessibilityLabel.startsWith("Ask every time."));
-  items[2].props.onPress();
+  const askEveryTime = items[2];
+  assert.ok(askEveryTime, "the third permission choice is rendered");
+  assert.ok(
+    askEveryTime.props.accessibilityLabel.startsWith("Ask every time."),
+  );
+  askEveryTime.props.onPress();
   x.h.flush();
   assert.deepEqual(x.changes, ["ask_every_time"]);
   assert.equal(x.h.value().isOpen, false);

@@ -739,7 +739,12 @@ test("an abandoned conversation render cannot strand the committed chat behind i
   };
 
   assert.equal(render("first").ready, false);
-  const obsoleteDeadline = [...timers.values()][0].callback;
+  const firstDeadline = [...timers.values()][0];
+  assert.ok(
+    firstDeadline,
+    "the committed render installs a readiness deadline",
+  );
+  const obsoleteDeadline = firstDeadline.callback;
   const firstTimer = timerId;
   render("abandoned", false);
   assert.equal(
