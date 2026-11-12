@@ -1,11 +1,15 @@
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
+import { appI18n } from "@/i18n";
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  await appI18n.changeLanguage("en");
+});
 
 function message(role: string, content: string): ChatMessage {
   return { id: "m", role, content, timestamp: 0, status: "complete" };
@@ -16,6 +20,27 @@ const HEADER =
   "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
 const REPLY =
   'Specialist researcher replied. Reply excerpt: "Found 3 urgent issues." Read more with nyxid__read_subagent.';
+
+it("updates mounted event summaries on language switches and keeps expanded server details", async () => {
+  const user = userEvent.setup();
+  const source = message("event", `${HEADER}\n- ${REPLY}\n- Specialist researcher requests service github (request_id r). Owner asked in English.\n- The user finished connecting github.`);
+  render(<NyxBotEventNotice message={source} />);
+  const notes = screen.getAllByRole("note");
+  expect(notes.map((note) => note.textContent)).toEqual(["researcher replied", "researcher asks to use github", "Finished connecting github"]);
+  await user.click(within(notes[0]!).getByRole("button"));
+  for (const [language, reply, request, connection] of [
+    ["zh-CN", "researcher 已回复", "researcher 请求使用 github", "已完成连接 github"],
+    ["zh-TW", "researcher 已回覆", "researcher 請求使用 github", "已完成連線 github"],
+    ["en", "researcher replied", "researcher asks to use github", "Finished connecting github"],
+  ]) {
+    await act(async () => { await appI18n.changeLanguage(language); });
+    expect(notes[0]).toHaveTextContent(reply!);
+    expect(notes[1]).toHaveTextContent(request!);
+    expect(notes[2]).toHaveTextContent(connection!);
+    expect(within(notes[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    expect(notes[0]).toHaveTextContent("Found 3 urgent issues.");
+  }
+});
 
 it("renders each notice as a compact activity card, not a user bubble", () => {
   render(

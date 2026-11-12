@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AuthoredSkillCard, SAVED_EDIT_NOTICE } from "./authored-skill-card";
+import { appI18n } from "@/i18n";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 // Exercises the real request path (assistantJson -> fetch); only fetch is stubbed.
@@ -29,9 +30,10 @@ beforeEach(() => {
   ));
   vi.stubGlobal("fetch", fetchMock);
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   vi.unstubAllGlobals();
+  await appI18n.changeLanguage("en");
 });
 
 function show() {
@@ -161,6 +163,10 @@ it("edits the draft before publishing and re-reads the card after saving", async
   // The saved revision gets a fresh card (the server raises it); this one says where to go.
   expect(await screen.findByText(SAVED_EDIT_NOTICE)).toBeVisible();
   expect(screen.queryByRole("textbox", { name: "Skill draft" })).not.toBeInTheDocument();
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByText("草稿已保存。此版本的新审核卡片已发布到本对话中；请在新卡片上确认。")).toBeVisible();
+  await act(async () => { await appI18n.changeLanguage("zh-TW"); });
+  expect(screen.getByText("草稿已儲存。此版本的新審核卡片已張貼至本對話中；請在新卡片上確認。")).toBeVisible();
 });
 
 it("offers no editing once the draft is no longer editable", async () => {

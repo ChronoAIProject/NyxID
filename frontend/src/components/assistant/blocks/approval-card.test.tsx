@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ApprovalCardContentBlock } from "@/types/assistant";
 import { ApprovalCard } from "./approval-card";
+import { appI18n } from "@/i18n";
 
 const NOW = Date.parse("2026-07-16T04:00:00.000Z");
 
@@ -29,8 +30,10 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  cleanup();
   vi.useRealTimers();
+  await appI18n.changeLanguage("en");
 });
 
 describe("ApprovalCard", () => {
@@ -151,4 +154,43 @@ it("2072 shows local expiry, a working review link and a real fresh-request acti
 it("2072 never offers an inert retry when no consumer supports it", () => {
   render(<ApprovalCard block={approval("expired")} onDecide={vi.fn()} />);
   expect(screen.queryByRole("button")).toBeNull();
+});
+
+it.each([
+  ["approved", "Approved", "已批准", "已核准"],
+  ["denied", "Request denied", "请求被拒绝", "請求被拒絕"],
+  ["expired", "Request expired", "请求已过期", "請求已過期"],
+  ["cancelled", "Request cancelled", "请求已取消", "請求已取消"],
+] as const)("translates a mounted %s title without changing the server body", async (decision, english, simplified, traditional) => {
+  render(<ApprovalCard block={approval(decision)} onDecide={vi.fn()} />);
+  expect(screen.getByText(english)).toBeVisible();
+  for (const [language, title] of [["zh-CN", simplified], ["zh-TW", traditional], ["en", english]]) {
+    await act(async () => { await appI18n.changeLanguage(language); });
+    expect(screen.getByText(title!)).toBeVisible();
+    expect(screen.getByText(approval().body)).toBeVisible();
+  }
+});
+
+it.each([
+  [1800, "30 min", "30 分钟"],
+  [3600, "1 h", "1 小时"],
+  [86400, "1 d", "1 天"],
+] as const)("translates the countdown and %s-second grant explanation", async (seconds, english, chinese) => {
+  render(<ApprovalCard block={{ ...approval(), approval_mode: "grant", grant_duration_sec: seconds }} onDecide={vi.fn()} />);
+  expect(screen.getByText(`grant · ${english}`)).toBeVisible();
+  expect(screen.getByText("expires in 14 min")).toBeVisible();
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByText(`授权 · ${chinese}`)).toBeVisible();
+  expect(screen.getByText("14 分钟后过期")).toBeVisible();
+  expect(screen.getByText(`批准后，接下来的 ${chinese} 内可重复向 lark-bot 写入，无需再次询问。`)).toBeVisible();
+});
+
+it.each([
+  ["approved", "Waiting for the committed approved decision.", "正在等待批准决定提交完成。"],
+  ["denied", "Waiting for the committed denied decision.", "正在等待拒绝决定提交完成。"],
+] as const)("translates a submitted %s decision as a whole phrase", async (decision_submission, english, chinese) => {
+  render(<ApprovalCard block={{ ...approval(), decision_submission }} onDecide={vi.fn()} />);
+  expect(screen.getByText(english)).toBeVisible();
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByText(chinese)).toBeVisible();
 });
