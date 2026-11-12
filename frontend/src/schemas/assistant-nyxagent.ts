@@ -420,6 +420,7 @@ export const nyxAgentSettingsSchema = z.object({
   specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
   /** Additive: per-kind push switches for the Notifications feed; absent on older servers. */
   notifications: notificationSettingsSchema.optional(),
+  system_skills_for_specialists: z.enum(["default", "override"]).optional(),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
@@ -439,6 +440,7 @@ export type NyxAgentSettingsUpdate = Partial<
     | "max_group_handoffs_per_hour"
     | "specialist_access_requests"
     | "notifications"
+    | "system_skills_for_specialists"
   >
 >;
 
@@ -463,6 +465,7 @@ export function nyxAgentSettingsFormSchema(limits: {
     max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
     max_group_handoffs_per_hour: whole(0, limits.max_group_handoffs_per_hour_limit),
     specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]),
+    system_skills_for_specialists: z.enum(["default", "override"]),
   });
 }
 export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFormSchema>>;

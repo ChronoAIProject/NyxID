@@ -1432,6 +1432,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/usage", get(handlers::admin_usage::get_usage))
         .route(
+            "/assistant/system-skills",
+            get(handlers::assistant_system_skills::get).put(handlers::assistant_system_skills::set),
+        )
+        .route(
+            "/assistant/system-skills/search",
+            get(handlers::assistant_system_skills::search),
+        )
+        .route(
+            "/assistant/system-skills/{id}/versions",
+            get(handlers::assistant_system_skills::versions),
+        )
+        .route(
+            "/assistant/system-skills/{id}/versions/{version}/preview",
+            get(handlers::assistant_system_skills::preview),
+        )
+        .route(
             "/assistant/profile-routes",
             get(handlers::assistant_team::get_profile_routes)
                 .put(handlers::assistant_team::put_profile_routes),
@@ -2876,6 +2892,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/agents/{id}/shared-memory",
             get(handlers::assistant_sharing::memory)
                 .put(handlers::assistant_sharing::update_memory),
+        )
+        .route(
+            "/nyxagent/agents/{id}/system-skills/{skill_id}",
+            put(handlers::assistant_system_skills::toggle),
         )
         .route(
             "/nyxagent/agents/{id}/skills",

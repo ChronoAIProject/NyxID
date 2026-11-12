@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AgentSkills } from "./agent-skills";
@@ -14,14 +14,24 @@ function signIn(features: string[] = []) {
 const mocks = vi.hoisted(() => ({
   current: vi.fn(),
   save: vi.fn(),
+  toggle: vi.fn(),
   search: vi.fn(),
   versions: vi.fn(),
   preview: vi.fn(),
   attachedPreview: vi.fn(),
   history: vi.fn(),
+  openPanel: vi.fn(),
+}));
+vi.mock("@/hooks/use-account-panel", () => ({
+  useAccountPanel: () => ({ open: mocks.openPanel }),
 }));
 vi.mock("@/hooks/use-agent-skills", () => ({
   useAgentSkills: mocks.current,
+  useToggleSystemSkill: () => ({
+    mutate: mocks.toggle,
+    isPending: false,
+    error: null,
+  }),
   useSetSkillPreload: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useSetAgentSkills: () => ({ mutate: mocks.save, isPending: false }),
   useSkillSearch: mocks.search,
@@ -74,6 +84,39 @@ it("shows pinned metadata, revision and an explicit update action without re-pin
     screen.getByRole("button", { name: "Newer version available: 2.0" }),
   ).toBeInTheDocument();
   expect(mocks.save).not.toHaveBeenCalled();
+});
+it("shows built-in choices in history without labelling other skill events as inherited", () => {
+  mocks.history.mockReturnValue({
+    data: {
+      items: [
+        ["assistant_system_skill_toggled", "built-in-inherit", null],
+        ["assistant_system_skill_toggled", "built-in-on", true],
+        ["assistant_system_skill_toggled", "built-in-off", false],
+        ["assistant_skill_preload_updated", "preloaded-skill", null],
+        ["assistant_learning_skill_pinned", "published-skill", null],
+      ].map(([event_type, skill_id, enabled], index) => ({
+        id: String(index),
+        event_type,
+        skill_id,
+        enabled,
+        created_at: "2026-11-10T00:00:00Z",
+        revision: null,
+        skills: [],
+      })),
+    },
+  });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  const items = within(
+    screen.getByRole("list", { name: "Skill history" }),
+  ).getAllByRole("listitem");
+  expect(items[0]).toHaveTextContent("built-in-inherit · inherited");
+  expect(items[1]).toHaveTextContent("built-in-on · enabled");
+  expect(items[2]).toHaveTextContent("built-in-off · disabled");
+  expect(items[3]).toHaveTextContent("Skill preload settings changed");
+  expect(items[3]).not.toHaveTextContent("inherited");
+  expect(items[4]).toHaveTextContent("Published skill attached");
+  expect(items[4]).not.toHaveTextContent("inherited");
 });
 it("removes immediately with the observed revision", () => {
   render(<AgentSkills agentId="agent" />);
@@ -267,4 +310,198 @@ it("shows a history request failure on the pushed history page", () => {
   expect(screen.getByRole("heading", { name: "Skill history" })).toHaveFocus();
   expect(screen.getByRole("alert")).toHaveTextContent("History request failed");
   expect(screen.queryByText("No skill activity yet.")).toBeNull();
+});
+
+it("shows built-ins, toggles through the owner endpoint and tests enabled skills", () => {
+  mocks.current.mockReturnValue({
+    data: {
+      revision: 4,
+      skills: [],
+      metadata: {},
+      system_skills: [
+        {
+          skill_id: "builtin",
+          name: "NyxBot guide",
+          version: "1.0",
+          description: "Built-in guide",
+          enabled: true,
+          effective: true,
+          override: null,
+          source: "nyxbot_default",
+          shadowed_by_pin: false,
+        },
+      ],
+    },
+  });
+  render(<AgentSkills agentId="agent" />);
+  expect(screen.getByText("Built-in guide")).toBeInTheDocument();
+  fireEvent.click(
+    screen.getByRole("switch", { name: "Use built-in NyxBot guide" }),
+  );
+  expect(mocks.toggle).toHaveBeenCalledWith({
+    skillId: "builtin",
+    enabled: false,
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Test built-in NyxBot guide" }),
+  );
+  expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "builtin");
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+it("makes built-ins read-only for viewers and explains pin precedence", () => {
+  mocks.current.mockReturnValue({
+    data: {
+      revision: 4,
+      skills: [],
+      metadata: {},
+      system_skills: [
+        {
+          skill_id: "builtin",
+          name: "NyxBot guide",
+          version: "1.0",
+          description: "Built-in guide",
+          enabled: true,
+          effective: false,
+          override: null,
+          source: "pin",
+          shadowed_by_pin: true,
+        },
+      ],
+    },
+  });
+  render(<AgentSkills agentId="agent" readOnly />);
+  expect(
+    screen.getByRole("switch", { name: "Use built-in NyxBot guide" }),
+  ).toBeDisabled();
+  expect(
+    screen.getByText(/Your attached pin takes precedence/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Test built-in NyxBot guide" }),
+  ).not.toBeInTheDocument();
+});
+it("does not offer Test for an opted-out built-in", () => {
+  mocks.current.mockReturnValue({
+    data: {
+      revision: 4,
+      skills: [],
+      metadata: {},
+      system_skills: [
+        {
+          skill_id: "builtin",
+          name: "NyxBot guide",
+          version: "1.0",
+          description: "Built-in guide",
+          enabled: false,
+          effective: false,
+          override: false,
+          source: "agent",
+          shadowed_by_pin: false,
+        },
+      ],
+    },
+  });
+  render(<AgentSkills agentId="agent" />);
+  expect(
+    screen.getByRole("switch", { name: "Use built-in NyxBot guide" }),
+  ).not.toBeChecked();
+  expect(
+    screen.queryByRole("button", { name: "Test built-in NyxBot guide" }),
+  ).not.toBeInTheDocument();
+});
+
+it.each([
+  {
+    mode: "default",
+    own: null,
+    source: "nyxbot_default",
+    label: "Inherited from NyxBot",
+    locked: false,
+  },
+  {
+    mode: "default",
+    own: false,
+    source: "agent",
+    label: "Your choice for this agent",
+    locked: false,
+  },
+  {
+    mode: "override",
+    own: true,
+    source: "nyxbot_override",
+    label: "Set by NyxBot for all specialists",
+    locked: true,
+  },
+])(
+  "shows specialist inheritance: $label",
+  ({ mode, own, source, label, locked }) => {
+    mocks.current.mockReturnValue({
+      data: {
+        revision: 4,
+        skills: [],
+        metadata: {},
+        system_skills_for_specialists: mode,
+        system_skills: [
+          {
+            skill_id: "builtin",
+            name: "Guide",
+            version: "1.0",
+            description: "Guide content",
+            enabled: false,
+            effective: false,
+            override: own,
+            source,
+            shadowed_by_pin: false,
+          },
+        ],
+      },
+    });
+    render(<AgentSkills agentId="agent" kind="specialist" />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    const toggle = screen.getByRole("switch", { name: "Use built-in Guide" });
+    if (locked) expect(toggle).toBeDisabled();
+    else expect(toggle).toBeEnabled();
+    const reset = screen.queryByRole("button", { name: "Use NyxBot’s choice" });
+    if (own !== null && !locked) {
+      fireEvent.click(reset!);
+      expect(mocks.toggle).toHaveBeenCalledWith({
+        skillId: "builtin",
+        enabled: null,
+      });
+    } else expect(reset).not.toBeInTheDocument();
+  },
+);
+
+it("shows NyxBot’s specialist mode and settings link without locking NyxBot", () => {
+  mocks.current.mockReturnValue({
+    data: {
+      revision: 4,
+      skills: [],
+      metadata: {},
+      system_skills_for_specialists: "override",
+      system_skills: [
+        {
+          skill_id: "builtin",
+          name: "Guide",
+          version: "1.0",
+          description: "Guide content",
+          enabled: true,
+          effective: true,
+          override: null,
+          source: "platform",
+          shadowed_by_pin: false,
+        },
+      ],
+    },
+  });
+  render(<AgentSkills agentId="agent" kind="nyxbot" />);
+  expect(
+    screen.getByText("NyxBot’s choices apply to all your specialists."),
+  ).toBeInTheDocument();
+  const settings = screen.getByRole("button", { name: "NyxBot settings" });
+  fireEvent.click(settings);
+  expect(mocks.openPanel).toHaveBeenCalledWith("nyxbot", {}, settings);
+  expect(
+    screen.getByRole("switch", { name: "Use built-in Guide" }),
+  ).toBeEnabled();
 });

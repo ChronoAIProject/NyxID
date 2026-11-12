@@ -9726,3 +9726,78 @@ CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
 list and publish immutable effective-dated resource prices. See
 [CMA billing](CMA_BILLING.md#enablement-and-runtime-rate-configuration) for
 exact decimal payloads, validation, audit and activation semantics.
+
+### Assistant built-in skills
+
+Platform administrators manage the ordered public Ornn default skill set. These
+configuration endpoints follow the admin-only profile-routes posture and are
+independent of the rollout flag. Mutations require a first-party human session;
+API keys, service accounts, delegated/relay tokens and OAuth-client tokens are
+refused.
+
+- `GET /api/v1/admin/assistant/system-skills` returns
+  `{revision, skills, updated_by, updated_at}`. An absent document returns revision
+  `0`, `skills: []` and null update fields. Each skill contains `skill_id`, `name`,
+  `version`, `sha256`, `dependencies`, `description` and `size_bytes`.
+- Admin catalog reads use `GET /api/v1/admin/assistant/system-skills/search?q=...&page=1`,
+  `GET /api/v1/admin/assistant/system-skills/{skill_id}/versions?page=1`, and
+  `GET /api/v1/admin/assistant/system-skills/{skill_id}/versions/{version}/preview`.
+  They require a first-party human admin and use that admin's own signed Ornn
+  identity, independently of the personal NyxAgent engine flag. OAuth-client
+  tokens are refused even when the person is an admin. Packages are fetched
+  only through GET requests.
+- `PUT /api/v1/admin/assistant/system-skills` accepts exactly
+  `{"expected_revision":0,"skills":[{"skill":"nyxbot","version":"1.0"}]}`.
+  Up to eight entries, exact GUIDs or unambiguous exact names, literal Ornn
+  major.minor versions; `skills: []` clears the set. Hashes, descriptions and
+  dependency pins are resolved and checked server-side, including public
+  visibility of every dependency. Unknown fields are rejected. Duplicate
+  resolved IDs/names or unconfirmed public visibility return 400; stale revision
+  returns 409 (`System skills changed; reload the current revision`). A save
+  increments the revision and returns the same shape as GET.
+- `PUT /api/v1/assistant/nyxagent/agents/{id}/system-skills/{skill_id}` accepts
+  exactly `{"enabled":true|false|null}` and returns the agent skills response.
+  Requires a first-party human who maintains the agent and whose personal
+  `assistant:system-skills` flag is enabled (403 otherwise). Unknown agent or
+  unavailable membership returns 404. Destroyed agents are refused. A non-null
+  choice requires a configured skill ID; null clears even a stale ID and means
+  inherit. Atomic map-key updates retain at most 32 explicit choices. A specialist
+  write in the acting person's override mode returns 409 with
+  `Built-in skills for specialists are managed by NyxBot settings`.
+- `GET` / `PUT /api/v1/assistant/nyxagent/settings` include
+  `system_skills_for_specialists`, `"default"` (the default) or `"override"`,
+  only when the acting person’s rollout flag is enabled. Agent-list `limits`
+  and native settings-update responses use the same omission rule.
+  Writing this field requires `assistant:system-skills` for the acting person
+  (403 otherwise); other settings remain writable with the flag off.
+  Human settings updates audit the previous and new values. The native
+  `nyxid__update_settings` tool cannot change this field.
+
+With the flag on and a nonempty admin set, GET and PUT
+`/assistant/nyxagent/agents/{id}/skills` and `nyxid__get_agent_skills` add
+`system_skills`, an array of
+`{skill_id,name,version,description,enabled,shadowed_by_pin,override,effective,source}`.
+`override` is this agent's stored boolean or null. `enabled` is the resolved
+choice before pin shadowing; `effective` also excludes shadowed skills and destroyed
+agents. `source` is `agent`, `nyxbot_default`, `nyxbot_override`, `platform`, or
+`pin`. Responses also carry the acting person's `system_skills_for_specialists`
+mode. These fields are omitted when the set is empty or the requester's flag is off.
+NyxBot inherits enabled from the platform. Specialists inherit the acting person's
+NyxBot choice; their own explicit choice wins in default mode and is retained
+but ignored in override mode. Org specialists use the acting member's mode and
+NyxBot. Own pins, including disabled pins, shadow by ID or name. The existing
+skill preview GET and `nyxid__skill_read` share the bound-skill reader, whose
+allowed set adds effective built-ins to enabled attached pins/dependencies.
+It revalidates that live set before dispatch and never follows redirects.
+Org specialists retain the owning-org connection and purpose-limited membership
+callback, with the acting person's signed identity; specialist reads issue no
+resource-request proof. Own-pin write, preload and improve contracts are unchanged.
+Effective built-in guidance changes reset affected sessions once on their next
+turn. Legacy sessions without an instruction fingerprint reset when adopting
+non-empty built-in guidance; authoring and preloaded guidance retain their
+existing legacy-session behavior.
+`assistant_system_skills_updated` audits revision/count/IDs;
+`assistant_system_skill_toggled` audits agent ID/skill ID/enabled (null when cleared) and is included
+in the agent's Skills history. Neither audit contains skill content.
+See [NyxBot built-in skills](chat/09-nyxbot-orchestrator.md#built-in-system-skills)
+for session reset and rollout requirements.

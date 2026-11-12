@@ -1,5 +1,6 @@
 import { mockSetupResponse } from "@/lib/assistant/mock-setup-journeys";
 import { ApiError } from "@/lib/api-client";
+import { mockSystemSkillsConfig, updateMockSystemSkills, mockSkillCatalog } from "@/lib/assistant/mock-system-skills";
 
 // Keep the manually selected demo engine across chat navigation and reloads.
 const MOCK_MODEL_CONTROLS_STORAGE = "nyxid.mock-model-controls";
@@ -40,6 +41,7 @@ const MOCK_USER = {
     billing_available: true,
     enabled_features: [
       "experimental:ai-assistant",
+      "assistant:system-skills",
       ...(mockModelControlsEnabled ? ["assistant:model-controls"] : []),
       ...(mockNyxbotEnabled ? ["assistant:nyxagent-engine"] : []),
       ...(globalThis.__nyxidAssistantHttpFaults?.voiceEnabled ? ["assistant:voice"] : []),
@@ -3172,6 +3174,22 @@ export function getMockResponse(
 ): unknown | undefined {
   const [path = endpoint, query = ""] = endpoint.split("?", 2);
   const params = new URLSearchParams(query);
+  if (path === "/admin/assistant/system-skills") {
+    if (method === "GET") return mockSystemSkillsConfig();
+    if (method === "PUT") return updateMockSystemSkills(body, MOCK_USER.id);
+  }
+  if (method === "GET" && path.startsWith("/admin/assistant/system-skills/")) {
+    const match = /^\/admin\/assistant\/system-skills\/([^/]+)\/versions(?:\/([^/]+)\/preview)?$/.exec(path);
+    if (match) {
+      params.set("skill", decodeURIComponent(match[1]!));
+      if (match[2]) params.set("version", decodeURIComponent(match[2]));
+    }
+    if (match || path === "/admin/assistant/system-skills/search") {
+      const catalog = mockSkillCatalog(params);
+      if (catalog !== undefined) return catalog;
+      throw new ApiError(404, { error: "not_found", error_code: 1003, message: "Public skill version not found" });
+    }
+  }
   if (path === "/users/me/preferences/analytics") {
     if (method === "GET") return { ...mockAnalyticsConsent };
     if (method === "PUT") {

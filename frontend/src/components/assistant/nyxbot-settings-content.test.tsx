@@ -844,3 +844,40 @@ it("keeps the posting switch unchanged and exposes a save failure", async () => 
   );
   expect(toggle).not.toBeChecked();
 });
+
+it("gates built-in specialist settings and saves only the selected mode", async () => {
+  const user = renderPage();
+  await screen.findByRole("combobox", { name: "Access mode" });
+  expect(
+    screen.queryByRole("combobox", { name: "Built-in skills for specialists" }),
+  ).not.toBeInTheDocument();
+  act(() =>
+    useAuthStore.getState().setUser({
+      ...useAuthStore.getState().user!,
+      capabilities: { enabled_features: [FEATURE_FLAG.SYSTEM_SKILLS] },
+    }),
+  );
+  const choice = await screen.findByRole("combobox", {
+    name: "Built-in skills for specialists",
+  });
+  expect(choice).toHaveTextContent("Use NyxBot’s choices as the default");
+  await user.click(choice);
+  await user.click(
+    await screen.findByRole("option", {
+      name: "Apply NyxBot’s choices to all specialists",
+    }),
+  );
+  const save = screen.getByRole("button", { name: "Save changes" });
+  expect(save).toBeEnabled();
+  await user.click(save);
+  await confirmChanges();
+  await waitFor(() =>
+    expect(
+      writes.some(
+        (write) =>
+          JSON.stringify(write.body) ===
+          JSON.stringify({ system_skills_for_specialists: "override" }),
+      ),
+    ).toBe(true),
+  );
+});

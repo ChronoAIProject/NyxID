@@ -8,7 +8,7 @@ use crate::{
             self as skills, OrnnCode, OrnnLocalRefusal, OrnnOutcome, OrnnReader,
         },
         assistant_acknowledgement_service::{self as acks, ChatAuthority},
-        assistant_team_service as team,
+        assistant_system_skills_service as system, assistant_team_service as team,
     },
 };
 
@@ -22,8 +22,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Clone)]
-pub(crate) struct OrnnSkillRead;
+pub(crate) use crate::services::agent_skill_service::OrnnSkillRead;
+
 /// Identity assertion for catalog/search/authoring reads. It retains the
 /// historical signed-person requirement without granting the bound-pin
 /// connection exception carried by `OrnnSkillRead`.
@@ -96,7 +96,7 @@ struct OrnnFetch<'a> {
     chat: Option<std::sync::Arc<ChatAuthority>>,
     method: http::Method,
     body: Body,
-    bound_skill_read: bool,
+    bound_skill_read: Option<OrnnSkillRead>,
     owner_access: Option<(
         std::sync::Arc<crate::services::org_agent_service::RequestAccess>,
         crate::models::assistant_agent::AssistantAgent,
@@ -105,19 +105,19 @@ struct OrnnFetch<'a> {
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
-        self.classified_request(http::Method::GET, path, Vec::new(), false, None)
+        self.classified_request(http::Method::GET, path, Vec::new(), None, None)
             .await
             .into_app_result()
     }
 
     async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
-        self.classified_request(method, path, body, false, None)
+        self.classified_request(method, path, body, None, None)
             .await
             .into_app_result()
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
-        self.classified_request(method, path, body, false, None)
+        self.classified_request(method, path, body, None, None)
             .await
     }
 
@@ -134,7 +134,7 @@ impl skills::OrnnReader for Reader<'_> {
             scopes: None,
             chat: None,
         }
-        .classified_request(method, path, body, false, None)
+        .classified_request(method, path, body, None, None)
         .await
     }
 }
@@ -155,7 +155,7 @@ impl Reader<'_> {
         method: http::Method,
         path: &str,
         body: Vec<u8>,
-        bound_skill_read: bool,
+        bound_skill_read: Option<OrnnSkillRead>,
         owner_access: Option<(
             std::sync::Arc<crate::services::org_agent_service::RequestAccess>,
             crate::models::assistant_agent::AssistantAgent,
@@ -196,6 +196,7 @@ impl Reader<'_> {
 /// scope. The actor remains the signed Ornn principal; an organization is never
 /// substituted as the JWT subject and personal/shared readers keep their lane.
 struct AgentOwnerReader<'a> {
+    bound_downloads: bool,
     reader: &'a Reader<'a>,
     agent: &'a crate::models::assistant_agent::AssistantAgent,
 }
@@ -206,7 +207,7 @@ impl AgentOwnerReader<'_> {
         method: http::Method,
         path: &str,
         body: Vec<u8>,
-        bound: bool,
+        bound: Option<OrnnSkillRead>,
     ) -> OrnnOutcome {
         let access = match crate::services::org_agent_service::resolve_agent_access(
             &self.reader.state.db,
@@ -243,7 +244,15 @@ impl AgentOwnerReader<'_> {
 #[async_trait::async_trait]
 impl OrnnReader for AgentOwnerReader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
-        self.fetch(http::Method::GET, path, Vec::new(), false)
+        if self.bound_downloads && path.ends_with("/download") {
+            return BoundSkillReader {
+                reader: self.reader,
+                agent: self.agent,
+            }
+            .get(path)
+            .await;
+        }
+        self.fetch(http::Method::GET, path, Vec::new(), None)
             .await
             .into_skill_read_result()
     }
@@ -273,33 +282,36 @@ impl skills::OrnnReader for BoundSkillReader<'_> {
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
-        let bound = method == http::Method::GET
-            && body.is_empty()
-            && self
-                .agent
-                .skills
-                .iter()
-                .filter(|pin| !pin.disabled)
-                .any(|pin| {
-                    path == format!(
-                        "/api/v1/skills/{}/versions/{}/download",
-                        pin.skill_id, pin.version
-                    ) || pin.dependencies.iter().any(|dep| {
-                        path == format!(
-                            "/api/v1/skills/{}/versions/{}/download",
-                            dep.skill_id, dep.version
-                        )
-                    })
-                });
-        if !bound {
-            audit_skill_read_refusal(self.reader.state, self.reader.person, "skill_not_bound");
+        if method != http::Method::GET || !body.is_empty() {
             return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
         }
+        let root = if let Some(root) = system::download_root(self.agent, path) {
+            root.clone()
+        } else {
+            let system = match system::for_person(
+                &self.reader.state.db,
+                self.reader.person,
+                self.reader.chat.as_ref().is_some_and(|chat| chat.guest),
+            )
+            .await
+            {
+                Ok(system) => system,
+                Err(error) => return OrnnOutcome::LocalError(error),
+            };
+            let view = system::read_view(self.agent, system.as_ref());
+            let Some(root) = system::download_root(&view, path) else {
+                audit_skill_read_refusal(self.reader.state, self.reader.person, "skill_not_bound");
+                return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
+            };
+            root.clone()
+        };
+        let binding = OrnnSkillRead::new(&self.agent.id, root);
         AgentOwnerReader {
+            bound_downloads: true,
             reader: self.reader,
             agent: self.agent,
         }
-        .fetch(method, path, body, true)
+        .fetch(method, path, body, Some(binding))
         .await
     }
 
@@ -326,6 +338,8 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         bound_skill_read,
         owner_access,
     } = request;
+    let skill_binding = bound_skill_read;
+    let bound_skill_read = skill_binding.is_some();
     let publication = method != http::Method::GET;
     if !ornn_operation_allowed(&method, path, publication) {
         if bound_skill_read {
@@ -433,8 +447,8 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         .extensions_mut()
         .insert(super::assistant_nyxagent::SERVER_TURN_POLICY);
     request.extensions_mut().insert(OrnnIdentityRead);
-    if bound_skill_read {
-        request.extensions_mut().insert(OrnnSkillRead);
+    if let Some(binding) = skill_binding {
+        request.extensions_mut().insert(binding);
     }
     if publication {
         request.extensions_mut().insert(OrnnSkillPublication);
@@ -663,7 +677,14 @@ pub async fn get(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
-    Ok(Json(team::agent(&state.db, &owner, &id).await?.into()))
+    Ok(Json(
+        system::response(
+            &state.db,
+            &owner,
+            team::agent(&state.db, &owner, &id).await?,
+        )
+        .await?,
+    ))
 }
 pub async fn set(
     State(state): State<AppState>,
@@ -798,35 +819,6 @@ pub struct SkillTestResponse {
 
 const TEST_EXCERPT_CHARS: usize = 2_000;
 
-fn same_pinned_content(
-    current: &crate::models::catalog_skill_revision::SkillReference,
-    pinned: &crate::models::catalog_skill_revision::SkillReference,
-) -> bool {
-    fn dependencies(
-        pin: &crate::models::catalog_skill_revision::SkillReference,
-    ) -> Vec<(&str, &str, &str, &str)> {
-        let mut identities: Vec<_> = pin
-            .dependencies
-            .iter()
-            .map(|dep| {
-                (
-                    dep.source.as_str(),
-                    dep.skill_id.as_str(),
-                    dep.version.as_str(),
-                    dep.sha256.as_str(),
-                )
-            })
-            .collect();
-        identities.sort_unstable();
-        identities
-    }
-    current.source == pinned.source
-        && current.skill_id == pinned.skill_id
-        && current.version == pinned.version
-        && current.sha256 == pinned.sha256
-        && dependencies(current) == dependencies(pinned)
-}
-
 /// Test an attached skill: verify the exact pinned version in Ornn, then read
 /// its SKILL.md through the same reader the agent's `nyxid__skill_read` uses.
 pub async fn preview_attached(
@@ -838,10 +830,16 @@ pub async fn preview_attached(
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
+    let system = if agent.skills.iter().any(|pin| pin.skill_id == skill_id) {
+        None
+    } else {
+        system::for_person(&state.db, &owner, false).await?
+    };
     let pin = agent
         .skills
         .iter()
         .find(|s| s.skill_id == skill_id)
+        .or_else(|| system::resolve(&agent, system.as_ref(), &skill_id))
         .cloned()
         .ok_or_else(|| AppError::NotFound("Attached skill not found".into()))?;
     let reader = Reader {
@@ -851,26 +849,21 @@ pub async fn preview_attached(
         scopes: None,
         chat: None,
     };
-    let preview = skills::preview(
+    let preview = skills::preview_pinned(
         &AgentOwnerReader {
+            bound_downloads: !pin.disabled,
             reader: &reader,
             agent: &agent,
         },
-        &pin.skill_id,
-        &pin.version,
+        &pin,
     )
     .await?;
-    // Ornn's detail response uses the current display names even for an old
-    // version. Compare package identities, not names or dependency ordering.
-    if !same_pinned_content(&preview.reference, &pin) {
-        return Err(AppError::SkillRead(SkillReadReason::PinnedVersionMismatch));
-    }
     let (readable, excerpt) = if pin.disabled {
         (false, String::new())
     } else {
         let page = skills::read(
             &reader.bound_skill(&agent),
-            &agent,
+            &system::read_view(&agent, system.as_ref()),
             &pin.skill_id,
             None,
             "SKILL.md",
@@ -1135,15 +1128,13 @@ pub(crate) async fn dispatch(
                 scopes: Some(&agent.operation_scopes),
                 chat: Some(std::sync::Arc::new(chat.clone())),
             };
-            let bound = agent.skills.iter().any(|pin| {
-                !pin.disabled
-                    && (pin.skill_id == arg(args, "skill") || pin.name == arg(args, "skill"))
-                    && args["dependency"].as_str().is_none_or(|dependency| {
-                        pin.dependencies.iter().any(|candidate| {
-                            candidate.skill_id == dependency || candidate.name == dependency
-                        })
-                    })
-            });
+            let system = if system::resolve(&agent, None, arg(args, "skill")).is_some() {
+                None
+            } else {
+                system::for_person(db, &chat.user_id, chat.guest).await?
+            };
+            let view = system::read_view(&agent, system.as_ref());
+            let bound = system::resolve(&agent, system.as_ref(), arg(args, "skill")).is_some();
             let outline = match args["section"].as_str() {
                 None => false,
                 Some("outline") => {
@@ -1159,11 +1150,11 @@ pub(crate) async fn dispatch(
             };
             if !bound {
                 audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
-                Box::pin(read_attached(&reader, &agent, args, outline)).await
+                Box::pin(read_attached(&reader, &view, args, outline)).await
             } else {
                 Box::pin(read_attached(
                     &reader.bound_skill(&agent),
-                    &agent,
+                    &view,
                     args,
                     outline,
                 ))
@@ -1182,7 +1173,10 @@ pub(crate) async fn dispatch(
                 return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
             }
             if name == "get_agent_skills" {
-                return Ok((json!(skills::SkillsResponse::from(agent)), false));
+                return Ok((
+                    json!(system::response(db, &chat.user_id, agent).await?),
+                    false,
+                ));
             }
             if name == "set_agent_skills" && target != agent.id {
                 return Err(AppError::ValidationError(
@@ -1204,6 +1198,12 @@ pub(crate) async fn dispatch(
                 return Err(AppError::ValidationError(
                     "Request a skill or a pinned selection, not both".into(),
                 ));
+            }
+            if name == "request_agent_skills"
+                && let Some(system) = system::for_person(db, &chat.user_id, chat.guest).await?
+                && let Some(result) = system::already_available(&agent, &system, args)
+            {
+                return Ok((result, false));
             }
             if name == "request_agent_skills" && !chat.involved() {
                 return missing_skill(db, chat, &agent, args).await;

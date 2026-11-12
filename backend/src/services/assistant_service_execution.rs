@@ -73,7 +73,9 @@ pub use resolution::resolve_implicit_for_request;
 use selection::owner_selector;
 use selection::scope;
 pub use selection::{bind_owner_selection, live_authority};
-pub(crate) use selection::{personal_authority, require_catalog_only_selection};
+pub(crate) use selection::{
+    bound_skill_authority, personal_authority, require_catalog_only_selection,
+};
 
 /// Either projection marks a shared request; losing the other never downgrades it.
 pub(crate) fn is_shared_auth(auth: &crate::mw::auth::AuthUser) -> bool {

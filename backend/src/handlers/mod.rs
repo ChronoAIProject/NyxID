@@ -242,5 +242,6 @@ pub mod org_specialist_channels;
 pub(crate) mod execution_permission_resume;
 pub(crate) mod invocation_diagnostics;
 
+pub mod assistant_system_skills;
 mod platform_model_gateway;
 pub mod platform_models;
