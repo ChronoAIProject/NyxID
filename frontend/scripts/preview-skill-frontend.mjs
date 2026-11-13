@@ -7,6 +7,7 @@ const backend = process.env.BACKEND_URL || "https://nyxid.ai";
 const origin = process.env.FRONTEND_URL || "https://nyxid.ai";
 
 console.info(`NyxID frontend: http://127.0.0.1:${port}/assistant`);
+console.info(`Sample skill loadout (no sign-in): http://127.0.0.1:${port}/skill-preview.html`);
 console.info(`API backend: ${new URL(backend).origin}`);
 
 const child = spawn(

@@ -3,6 +3,15 @@
 Branch: `preview/skill-template-loadout`, based on `feat/nyx-skill-template`.
 This runs the actual NyxID frontend with the production API and account data.
 
+For immediate visual inspection without signing in, open
+<http://127.0.0.1:4321/skill-preview.html>. This development entry renders the
+real `SkillTemplateCard` component with historical example outlines: the
+`phone-front-desk-sg` sample loadout and 19 reusable skills. Choose any member
+to see its outline; the `skill` query parameter preserves a direct link to it.
+These are sample excerpts, not backend-verified catalog results or skills
+attached to your account. The page does not run skills or change account data.
+The normal production build does not include this HTML entry.
+
 From `frontend/`:
 
 ```sh

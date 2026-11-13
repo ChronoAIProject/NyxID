@@ -1,0 +1,910 @@
+[
+  {
+    "name": "answer-from-knowledge",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Answer questions only from the business's own facts (hours, rules, FAQ, catalog), in your own words, and never guess: log a follow-up with the exact question when something isn't there.",
+    "members": [],
+    "outline": {
+      "overview": "I answer questions only from the business's own facts: hours, rules, FAQ and\ncatalog. When something isn't there I never guess; I say so and arrange a\nfollow-up with the question.\n\nIt suits any agent that speaks for a business. It is not for general advice.\n\nIt needs a facts pack for the business. It only saves something when a\nfollow-up is needed.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Find it in the facts",
+          "text": "I look in the business's rules, FAQ and catalog.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Answer in my own words",
+          "text": "Only the part that answers the question, never read word for word.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Suggest, don't list",
+          "text": "Two or three options at most, then I ask what they prefer.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Don't guess the rest",
+          "text": "If it isn't there, I say so and offer a follow-up with their question.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a business facts pack with rules, FAQ and catalog.",
+      "produces": "answers grounded in the business's facts, or one logged follow-up."
+    }
+  },
+  {
+    "name": "booking-with-availability",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Take a booking or appointment during a conversation: work out the exact date, check real availability in the records, read back once, save, and send a confirmation.",
+    "members": [],
+    "outline": {
+      "overview": "I take a booking or appointment: I work out the exact date, check real\navailability, read it back once, save it, and send a confirmation.\n\nIt suits restaurants, salons, clinics and anyone with slots. Groups above the\nbusiness's limit get a follow-up instead of a booking.\n\nIt needs a records skill with availability and bookings, and a messaging skill\nfor the confirmation.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Work out the date and time",
+          "text": "I turn \"tomorrow\" or \"Saturday\" into a calendar date from today's date.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Check availability",
+          "text": "I check the exact slot in the records before reading anything back.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Collect the rest",
+          "text": "Party size or service, and a name.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Read it back once",
+          "text": "Date, time, size and name in one line.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-5",
+          "title": "Save and confirm",
+          "text": "I save the booking, then send the confirmation with its reference.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-6",
+          "title": "Handle changes",
+          "text": "A change after saving becomes a change request, never a second booking.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a records skill with availability and bookings, a messaging skill, and the business's booking rules.",
+      "produces": "a saved booking with its reference, and a confirmation sent."
+    }
+  },
+  {
+    "name": "caller-details-readback",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Collect the details a booking, order or message needs without echoing each one, then read everything back once before saving, offering the caller's own number by its last four digits.",
+    "members": [],
+    "outline": {
+      "overview": "I collect the details a booking, order or message needs without repeating each\none back, then read everything back once, in one quick line, before anything is\nsaved.\n\nIt suits any phone flow that saves something for the caller, who hears their\ndetails once and can correct them before it counts.\n\nIt needs the caller ID. It changes nothing by itself.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Ask for what's missing",
+          "text": "One question at a time, a short \"okay\" after each answer, and no echo.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Offer the caller's own number",
+          "text": "From the caller ID, by its last four digits, inside the read-back.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Read back once",
+          "text": "One line with the key details and the number question, then I wait for yes.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-4",
+          "title": "Act on yes",
+          "text": "When the caller says yes, the next step saves it straight away.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "the caller ID, and which numbers count as mobiles in your region.",
+      "produces": "details the caller has confirmed, ready to save."
+    }
+  },
+  {
+    "name": "confirm-from-tool-result",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Only tell a person that something is booked, saved, sent or paid when the tool that did it returned success in this conversation; otherwise say it didn't work and fall back once.",
+    "members": [],
+    "outline": {
+      "overview": "I only say something is booked, saved, sent or paid when the tool that did it\nreturned success in this conversation. If it fails, I say so plainly and fall\nback once.\n\nIt suits every agent that changes things for people. Saying it's done when\nnothing happened is the most damaging mistake an agent can make.\n\nIt needs nothing connected; each capability skill says what its success looks\nlike.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Act before claiming",
+          "text": "I never say booked, saved, sent or paid before the tool has run.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Check the result",
+          "text": "It only counts when the result matches that capability's success signal.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Say what really happened",
+          "text": "Done if it succeeded; otherwise, that it didn't work.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Fall back once",
+          "text": "On failure I take a way to follow up and log one follow-up, then stop retrying.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "the success signal from each capability skill in use.",
+      "produces": "confirmations that always match what really happened."
+    }
+  },
+  {
+    "name": "docs-google-docs",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Create and update Google Docs through NyxID, for written records such as summaries, notes and confirmations.",
+    "members": [],
+    "outline": {
+      "overview": "I create a Google Doc or add to an existing one, for written records such as\ncall summaries, notes or confirmations.\n\nIt suits records people read rather than filter. For rows of data, use a sheet\nor a database instead.\n\nIt needs a Google Workspace connection in NyxID.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Find or create the doc",
+          "text": "I reuse the doc you name, or create a new one with a clear title.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Write the content",
+          "text": "Plain headings and short paragraphs.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Confirm it saved",
+          "text": "I read the document back and give you its link.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Google Workspace connection in NyxID.",
+      "produces": "a Google Doc id and link with the new content."
+    }
+  },
+  {
+    "name": "files-google-drive",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Store, copy and find files in Google Drive through NyxID, for receipts, exports and shared templates.",
+    "members": [],
+    "outline": {
+      "overview": "I store, copy and find files in Google Drive, such as receipts, exports and\nshared templates.\n\nIt suits keeping files where the team already looks. It is not a backup system.\n\nIt needs a Google Workspace connection in NyxID with access to the folder.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Find the folder",
+          "text": "I look up the folder you name before saving anything.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Save or copy the file",
+          "text": "Upload a new file, or copy a template to start from.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Confirm and share the link",
+          "text": "I read the file back and give you its link.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Google Workspace connection in NyxID with access to the folder.",
+      "produces": "a Drive file id and link."
+    }
+  },
+  {
+    "name": "human-follow-up",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "When a person needs something only staff can do, log one follow-up or escalation with a short factual summary and say plainly what happens next, without promising refunds, compensation or outcomes.",
+    "members": [],
+    "outline": {
+      "overview": "When someone needs something only staff can do, I log one follow-up with a\nshort factual summary and say plainly what happens next.\n\nI never promise refunds, compensation or outcomes only staff can decide, even\nwhen the person says they don't need a call back.\n\nIt needs a place to log follow-ups, provided by a records skill.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Decide which it is",
+          "text": "A follow-up when staff owe an answer; an escalation when a manager must handle a problem.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Get the facts",
+          "text": "What they need, their name and a way to reach them.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Log it once",
+          "text": "One record with a short summary and the details.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Say what happens next",
+          "text": "Only what's true, for example \"the manager decides on any refund\".",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a records skill to log follow-ups and escalations.",
+      "produces": "one follow-up or escalation record per request."
+    }
+  },
+  {
+    "name": "order-with-payment-link",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Take an order from the business's catalog, save it, give the exact total the records calculate, and send a payment link; the order is confirmed once paid.",
+    "members": [],
+    "outline": {
+      "overview": "I take an order from the business's catalog, save it, give the exact total the\nrecords calculate, and send a payment link. The order is confirmed once paid.\n\nIt suits takeaway, pickup and simple product orders. I never make up prices or\npromise a pickup before payment.\n\nIt needs a records skill, a payment-link skill and a messaging skill.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Help them choose",
+          "text": "Only catalog items with a price that aren't sold out.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Collect pickup and contact",
+          "text": "A pickup time and a mobile number for the payment link.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Read the order back once",
+          "text": "The items, pickup time and name in one line.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-4",
+          "title": "Save the order",
+          "text": "I save it and read the total from the saved record.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-5",
+          "title": "Send the payment link",
+          "text": "I create the link for that exact total and text it.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-6",
+          "title": "Confirm what happens next",
+          "text": "The total, and that the order is confirmed once they pay.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a records skill with the catalog and orders, a payment-link skill, a messaging skill, and the business's order rules.",
+      "produces": "a saved order with its total, and a payment link sent by SMS."
+    }
+  },
+  {
+    "name": "payment-link-stripe",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Create a Stripe payment link or checkout session for one exact amount through NyxID, check whether it was paid, and expire it when an order is cancelled.",
+    "members": [],
+    "outline": {
+      "overview": "I create a Stripe payment page for one exact amount, give you the link to send,\nand later check whether it was paid or expire it if the order is cancelled.\n\nIt suits paying for one order, deposit or invoice by link. It is not for\nsubscriptions or saving cards.\n\nIt needs a Stripe connection in NyxID that can create prices and links; the\nshared Stripe catalog entry is read-only today. Stripe charges its usual fees.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Set the amount",
+          "text": "I take the exact amount and currency from the saved order, never my own arithmetic.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Create the payment page",
+          "text": "A one-off price, then a payment link or checkout session for it.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Hand over the link",
+          "text": "I return the URL for you or a messaging skill to send.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Check or cancel",
+          "text": "I check whether it was paid, or expire it when the order is cancelled.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Stripe connection in NyxID with write access to prices, payment links and checkout sessions.",
+      "produces": "a payment URL with its Stripe id, and later a paid, unpaid or expired status."
+    }
+  },
+  {
+    "name": "phone-call-closing",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "End phone calls cleanly: a short goodbye out loud first, hang up only afterwards, and never while the caller is talking or has asked to stay on.",
+    "members": [],
+    "outline": {
+      "overview": "I end calls the way a person would: a short, warm goodbye first, and only then\nI hang up. I never cut someone off.\n\nIt suits any voice agent that can end calls itself. Silence timeouts in the\nphone platform still need their own settings.\n\nIt needs a hang-up tool and changes nothing else.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Check they're done",
+          "text": "I only close once the caller has said goodbye or agreed we're finished.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Say goodbye out loud",
+          "text": "One short line, such as \"Okay, see you Saturday! Bye bye.\"",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Hang up after the goodbye",
+          "text": "I call hang-up only in the step after the goodbye has been said.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Stay on when asked",
+          "text": "If they ask me not to hang up, I wait and keep listening.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "the phone platform's hang-up tool.",
+      "produces": "calls that end only when the caller is done."
+    }
+  },
+  {
+    "name": "phone-conversation",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "How a voice agent talks on the phone: one language per call, short spoken replies, numbers said aloud, interruptions handled, and no written formatting.",
+    "members": [],
+    "outline": {
+      "overview": "I talk with callers the way a friendly, relaxed front-desk person would: short\nspoken replies, in one language, said the way people say them.\n\nIt suits any voice agent whose words are read aloud. It is not for chat or\nemail, where written formatting is fine.\n\nIt needs nothing connected and changes nothing.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Pick the language",
+          "text": "The caller's first real reply decides the language for the whole call.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Keep it spoken",
+          "text": "One idea per reply, usually under twenty words, then I let them talk.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Say things the way people say them",
+          "text": "Dates, times, prices and phone numbers come out as a person says them.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Handle interruptions",
+          "text": "If they talk over me, I let them finish and answer what they just said.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a voice that reads replies aloud, and the languages the business supports.",
+      "produces": "replies that sound natural on the phone."
+    }
+  },
+  {
+    "name": "phone-front-desk-sg",
+    "kind": "skillset",
+    "version": "1.0",
+    "description": "Skillset for one use case: an AI phone front desk for a small business in Singapore that answers calls, takes bookings and paid orders, texts confirmations and logs follow-ups. Built from reusable NyxID capability skills.",
+    "members": [
+      "phone-number-sg-telnyx",
+      "voice-agent-telnyx",
+      "voice-agent-elevenlabs",
+      "records-notion",
+      "sms-send-twilio",
+      "payment-link-stripe",
+      "phone-conversation",
+      "phone-call-closing",
+      "caller-details-readback",
+      "confirm-from-tool-result",
+      "answer-from-knowledge",
+      "human-follow-up",
+      "booking-with-availability",
+      "order-with-payment-link"
+    ],
+    "outline": {
+      "overview": "This skillset is for one use case: an AI front desk that answers a small\nbusiness's phone in Singapore when the team can't pick up. It answers questions,\ntakes bookings and paid takeaway orders, texts confirmations and logs anything\nstaff must handle.\n\nIt suits restaurants, salons and clinics with one line and a short menu or\nservice list. It is not a call centre, cannot transfer calls to a person, and\ndoes not include the business's own facts.\n\nYou need a Telnyx line, ElevenLabs for the voice, Notion for records, Twilio for\ntexts, Stripe for payments, and a facts pack for the business.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Get a Singapore number",
+          "text": "A +65 line on Telnyx, with the documents Singapore requires.",
+          "uses": {
+            "name": "phone-number-sg-telnyx",
+            "version": "1.0"
+          },
+          "asks_you": true
+        },
+        {
+          "id": "step-2",
+          "title": "Create the voice agent",
+          "text": "The Telnyx assistant that answers every call.",
+          "uses": {
+            "name": "voice-agent-telnyx",
+            "version": "1.0"
+          },
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Choose the voice",
+          "text": "A natural ElevenLabs voice for your callers' languages.",
+          "uses": {
+            "name": "voice-agent-elevenlabs",
+            "version": "1.0"
+          },
+          "asks_you": true
+        },
+        {
+          "id": "step-4",
+          "title": "Set up the records",
+          "text": "Notion databases for bookings, orders, follow-ups and availability.",
+          "uses": {
+            "name": "records-notion",
+            "version": "1.0"
+          },
+          "asks_you": false
+        },
+        {
+          "id": "step-5",
+          "title": "Turn on text confirmations",
+          "text": "Booking confirmations and payment links by SMS.",
+          "uses": {
+            "name": "sms-send-twilio",
+            "version": "1.0"
+          },
+          "asks_you": false
+        },
+        {
+          "id": "step-6",
+          "title": "Turn on payment links",
+          "text": "Stripe links for takeaway orders, confirmed once paid.",
+          "uses": {
+            "name": "payment-link-stripe",
+            "version": "1.0"
+          },
+          "asks_you": false
+        },
+        {
+          "id": "step-7",
+          "title": "Run test calls",
+          "text": "You call the line and we check every flow end to end before going live.",
+          "uses": null,
+          "asks_you": true
+        }
+      ],
+      "needs": "Telnyx, ElevenLabs, Notion, Twilio and Stripe connections in NyxID, plus a business facts pack.",
+      "produces": "a live +65 phone front desk, with every booking, order and follow-up saved in Notion."
+    }
+  },
+  {
+    "name": "phone-number-sg-telnyx",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Get a Singapore phone number on Telnyx for a voice agent and SMS, including Singapore's requirement documents, then verify it through NyxID.",
+    "members": [],
+    "outline": {
+      "overview": "I walk you through getting a Singapore phone number on Telnyx and connect it to\nyour Telnyx voice agent once it's active.\n\nIt suits a +65 line answered by a Telnyx AI assistant. It is not instant:\nSingapore numbers need approved requirement documents first.\n\nIt needs a Telnyx account with billing. Ordering happens in the Telnyx portal;\nNyxID cannot order numbers today.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Prepare the documents",
+          "text": "Telnyx asks for Singapore requirements, usually business registration and a local address.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-2",
+          "title": "Order the number",
+          "text": "You search and order a +65 number in the Telnyx portal with those documents.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-3",
+          "title": "Connect it to the agent",
+          "text": "Assign the number to the voice agent's call-control or TeXML application.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Test it",
+          "text": "You place a test call and I check the agent answered.",
+          "uses": null,
+          "asks_you": true
+        }
+      ],
+      "needs": "a Telnyx account with billing, and your business registration and address documents.",
+      "produces": "an active +65 Telnyx number connected to your voice agent."
+    }
+  },
+  {
+    "name": "phone-number-sg-twilio",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Get a Singapore phone number on Twilio for voice and SMS, including the regulatory documents Singapore requires, then verify it works through NyxID.",
+    "members": [],
+    "outline": {
+      "overview": "I walk you through getting a Singapore phone number on Twilio and check it works\nfor calls and texts once it's active.\n\nIt suits a business that wants a local +65 line for a voice agent or SMS. It is\nnot instant: Singapore numbers need approved business documents first.\n\nIt needs a Twilio account with billing. Buying the number happens in Twilio's\nconsole; NyxID cannot order numbers today.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Prepare the documents",
+          "text": "Singapore requires a regulatory bundle, usually the business registration and a local address.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-2",
+          "title": "Request the number",
+          "text": "You choose a mobile or local number in Twilio's console and submit the bundle.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-3",
+          "title": "Point it at the agent",
+          "text": "Once approved, set the voice and messaging webhooks to your voice agent and SMS setup.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Test it",
+          "text": "I send a test text and you place a test call to confirm both directions work.",
+          "uses": null,
+          "asks_you": true
+        }
+      ],
+      "needs": "a Twilio account with billing, and your business registration and address documents.",
+      "produces": "an active +65 number configured for voice and SMS."
+    }
+  },
+  {
+    "name": "records-google-sheets",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Keep simple business records in a Google Sheet through NyxID: read rows, append new rows and update cells, confirming saves from the Sheets response.",
+    "members": [],
+    "outline": {
+      "overview": "I keep simple records in a Google Sheet. I read rows, add new ones at the end\nand update cells, and I only say something is saved when Sheets confirms it.\n\nIt suits a shared sheet the team already watches. It is not for many writers at\nonce or for calculations you need exact.\n\nIt needs a Google Workspace connection in NyxID with access to the sheet.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Read the header",
+          "text": "I read the first row so every value lands in the right column.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Look before writing",
+          "text": "I search existing rows to avoid duplicates.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Append or update",
+          "text": "New records go at the end; changes go to the exact row.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Confirm from Sheets",
+          "text": "Saved only when the response reports the updated range.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Google Workspace connection in NyxID with access to the spreadsheet.",
+      "produces": "an appended or updated row, with the range Sheets reports."
+    }
+  },
+  {
+    "name": "records-notion",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Keep business records in Notion databases through NyxID: look up, create and update rows, and confirm a save only from Notion's own response.",
+    "members": [],
+    "outline": {
+      "overview": "I keep records such as bookings, orders and follow-ups in Notion databases. I\nlook rows up, add new ones and update them, and I only say something is saved\nwhen Notion returns the saved page.\n\nIt suits small teams who already work in Notion. It is not for large data or\nreporting.\n\nIt needs a Notion connection in NyxID shared with the databases. Each save adds\nor changes one row.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Learn the database",
+          "text": "I read its properties and types before writing anything.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Look before writing",
+          "text": "I search for an existing row first, so I update instead of duplicating.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Save the row",
+          "text": "I create or update exactly the fields that changed.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Confirm from Notion",
+          "text": "I treat it as saved only when Notion returns the page and its id.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Notion connection in NyxID with access to the database.",
+      "produces": "a created or updated Notion page, with its id and any formula values."
+    }
+  },
+  {
+    "name": "sms-send-telnyx",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Send an SMS through a Telnyx connection in NyxID and check its delivery status. Use for confirmations, reminders and links when the number is on Telnyx.",
+    "members": [],
+    "outline": {
+      "overview": "I send a text message from your Telnyx number to one phone number, then check\nits delivery status.\n\nIt suits confirmations, reminders and links when your number lives on Telnyx.\nIt is not for bulk campaigns.\n\nIt needs a Telnyx connection in NyxID and a messaging-enabled Telnyx number.\nEach message is billed by Telnyx.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Check the number",
+          "text": "I make sure the recipient is a mobile number in international format.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Write the text",
+          "text": "One short message with only what the person needs.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Send it",
+          "text": "I send it from your messaging-enabled Telnyx number.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Check delivery",
+          "text": "I read the message status and report sent, delivered or failed.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Telnyx connection in NyxID and a messaging-enabled Telnyx number.",
+      "produces": "one SMS, with its Telnyx message id and delivery status."
+    }
+  },
+  {
+    "name": "sms-send-twilio",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Send an SMS through a Twilio connection in NyxID and check whether it was delivered. Use for confirmations, reminders and payment or booking links.",
+    "members": [],
+    "outline": {
+      "overview": "I send a text message from your Twilio number to one phone number, then check\nwhether Twilio accepted and delivered it.\n\nIt suits confirmations, reminders and links sent after a call or an order. It\nis not for marketing blasts or two-way chat threads.\n\nIt needs a Twilio connection in NyxID and a Twilio number or messaging service.\nEach message is billed by Twilio.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Check the number",
+          "text": "I make sure the recipient is a mobile number in international format.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Write the text",
+          "text": "One short message with only what the person needs, under 160 characters when possible.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Send it",
+          "text": "I send it from your Twilio number or messaging service.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-4",
+          "title": "Check delivery",
+          "text": "I read the message status and report sent, delivered or failed.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Twilio connection in NyxID, the Account SID, and a sending number or messaging service.",
+      "produces": "one SMS, with its Twilio message SID and delivery status."
+    }
+  },
+  {
+    "name": "voice-agent-elevenlabs",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Choose voices and create ElevenLabs conversational agents through NyxID, for heavily customised voices and web or phone voice agents.",
+    "members": [],
+    "outline": {
+      "overview": "I help you pick an ElevenLabs voice and create an ElevenLabs conversational\nagent with its prompt, first message and voice. I play voice samples, and you\ntry the agent from its page in the ElevenLabs dashboard.\n\nIt suits heavily customised voices and agents. Changing an existing agent is not\navailable through NyxID yet; that happens in the ElevenLabs dashboard.\n\nIt needs an ElevenLabs connection in NyxID. Usage is billed by ElevenLabs.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Pick a voice",
+          "text": "I list voices that suit your languages and play a short sample.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-2",
+          "title": "Create the agent",
+          "text": "Its prompt, first message, language and chosen voice.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Try it",
+          "text": "You talk to the agent with the test button on its ElevenLabs dashboard page, then tell me what to change.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-4",
+          "title": "Hand it to the phone line",
+          "text": "I give the voice and agent ids to the phone provider setup.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "an ElevenLabs connection in NyxID.",
+      "produces": "a chosen voice id and an ElevenLabs agent id, tried in the dashboard."
+    }
+  },
+  {
+    "name": "voice-agent-telnyx",
+    "kind": "skill",
+    "version": "1.0",
+    "description": "Create and maintain a Telnyx AI voice assistant through NyxID: instructions, greeting, model and voice, answering calls on a Telnyx number.",
+    "members": [],
+    "outline": {
+      "overview": "I set up a Telnyx AI assistant that answers your phone line: its instructions,\ngreeting, model and voice. I can also update its instructions later.\n\nIt suits a phone agent that must answer real calls on a Telnyx number. Tools the\nagent calls during a call, such as bookings and orders, are wired in the Telnyx\nportal.\n\nIt needs a Telnyx connection in NyxID. Calls are billed by Telnyx.",
+      "steps": [
+        {
+          "id": "step-1",
+          "title": "Find or create the assistant",
+          "text": "I look for an existing assistant before creating one.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-2",
+          "title": "Write its instructions",
+          "text": "The behaviour and facts the agent follows on every call, plus its greeting.",
+          "uses": null,
+          "asks_you": false
+        },
+        {
+          "id": "step-3",
+          "title": "Choose model and voice",
+          "text": "A fast model and a voice that speaks your callers' languages.",
+          "uses": null,
+          "asks_you": true
+        },
+        {
+          "id": "step-4",
+          "title": "Check it",
+          "text": "I read the assistant back and confirm the instructions and voice took effect.",
+          "uses": null,
+          "asks_you": false
+        }
+      ],
+      "needs": "a Telnyx connection in NyxID; a Telnyx number for real calls.",
+      "produces": "a Telnyx assistant id with the agreed instructions, greeting and voice."
+    }
+  }
+]
