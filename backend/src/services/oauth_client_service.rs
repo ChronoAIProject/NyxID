@@ -245,23 +245,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
     if let Some(existing) = collection.find_one(doc! { "_id": MCP_CLIENT_ID }).await? {
-        if let Some(updated_scopes) = merge_missing_default_mcp_scopes(&existing.allowed_scopes)? {
-            apply_client_update(
-                db,
-                doc! { "_id": MCP_CLIENT_ID },
-                doc! { "allowed_scopes": &updated_scopes,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-                true,
-            )
-            .await?;
-
-            tracing::info!(
-                allowed_scopes = %updated_scopes,
-                "Upgraded default MCP OAuth client to include latest default scopes"
-            );
-        }
-
-        return Ok(());
+        return reconcile_default_client(db, &existing).await;
     }
 
     let now = Utc::now();
@@ -289,8 +273,38 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         updated_at: now,
     };
 
-    collection.insert_one(&client).await?;
+    #[cfg(test)]
+    super::startup_seed_tests::missing(db, "oauth", MCP_CLIENT_ID).await;
+    if let Some(existing) = super::startup_seed_service::insert_or_read(
+        &collection,
+        &client,
+        doc! {"_id": MCP_CLIENT_ID},
+    )
+    .await?
+    {
+        return reconcile_default_client(db, &existing).await;
+    }
     tracing::info!("Seeded default MCP OAuth client (id={MCP_CLIENT_ID})");
+
+    Ok(())
+}
+
+async fn reconcile_default_client(db: &mongodb::Database, existing: &OauthClient) -> AppResult<()> {
+    if let Some(updated_scopes) = merge_missing_default_mcp_scopes(&existing.allowed_scopes)? {
+        apply_client_update(
+            db,
+            doc! { "_id": MCP_CLIENT_ID },
+            doc! { "allowed_scopes": &updated_scopes,
+            "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            true,
+        )
+        .await?;
+
+        tracing::info!(
+            allowed_scopes = %updated_scopes,
+            "Upgraded default MCP OAuth client to include latest default scopes"
+        );
+    }
 
     Ok(())
 }

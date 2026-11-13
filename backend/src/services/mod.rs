@@ -263,6 +263,9 @@ pub mod social_token_exchange_service;
 pub mod sse_parser;
 pub(crate) mod ssh_ca_record_service;
 pub mod ssh_service;
+mod startup_seed_service;
+#[cfg(test)]
+mod startup_seed_tests;
 pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
