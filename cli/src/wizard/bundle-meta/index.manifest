@@ -192,6 +192,7 @@ frontend/src/lib/utils.ts
 frontend/src/lib/zod-csp.ts
 frontend/src/pages/cli-pair/reserve-action.ts
 frontend/src/schemas/api-keys.ts
+frontend/src/schemas/assistant-pins.ts
 frontend/src/schemas/assistant-wire-log.ts
 frontend/src/schemas/billing-metrics.ts
 frontend/src/schemas/cli-wizard.ts
@@ -202,6 +203,7 @@ frontend/src/schemas/runtime-config.ts
 frontend/src/schemas/service-accounts.ts
 frontend/src/stores/assistant-context-store.ts
 frontend/src/stores/assistant-draft-store.ts
+frontend/src/stores/assistant-pins-store.ts
 frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
 frontend/src/stores/consent-store.ts
