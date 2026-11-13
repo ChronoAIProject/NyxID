@@ -60,6 +60,33 @@ automation”; other calls retain metadata-only labels. Existing activity detail
 and permission/machine receipts remain available. Permission receipts authorize
 an effect; they alone do not prove completion.
 
+An assistant turn's own closed stateless catalog model call is its thinking,
+not a service action. A live conversation key using POST, without method override
+or pool, and passing the existing closed request contract skips actor-personal
+RequireApproval (explicit config/rule/default or global mode). Deny and org policy
+remain authoritative. Connection consent, guest/shared access, operation scopes,
+billing and rate limits are unchanged. Other callers and payloads keep approval
+policy. The exemption adds no database reads and records
+`approval_exempt: "assistant_model_transport"` only if a requirement was skipped.
+
+A denied model call settles once as `model_policy_denied`; unsatisfied org model
+approval settles as `model_org_approval_required`. A non-stateless model call
+requiring approval on a Crew/event/channel/background surface that cannot present
+it settles as `model_approval_required`. All use stage `model_approval` with a
+metadata-only `failure_reason`. Ordinary interactive non-stateless approval keeps
+its existing connected card/wait. Execution-permission failures cannot repeatedly
+create proposals for the same turn. Stop wins. The existing model-refusal record
+and stop poll implement this fence; no stored struct or enum format changes.
+
+Saved replies and Crew/channel notices carry fixed policy-specific guidance and
+an AssistantPage Approval settings link. Old clients can display the saved text.
+`service_request` records a closed denied/approval outcome and
+`model_egress_admitted`, so a cancelled approval wait is distinguishable from a
+provider stall. Known response status and genuine send-error diagnostics are
+metadata only. No header/body deadline or engine transport retry policy changes.
+Old replicas continue to gate personal model approvals during rollout; rollback
+restores that gate. No new environment setting is needed.
+
 A first-byte failure is not proof of no execution. NyxAgent sends lifecycle events
 before tools and keepalives every 15 seconds, but buffering or transport delays can
 hide them. Dropping its stream signals cancellation; completed remote effects are

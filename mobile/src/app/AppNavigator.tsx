@@ -68,6 +68,7 @@ import { MachinesScreen } from "../features/machines/MachinesScreen";
 import { WorkspacePageHeader } from "../components/workspace/WorkspacePageHeader";
 import { WorkspaceDrawerHeader } from "../components/workspace/WorkspaceDrawerHeader";
 import { ActivityScreen } from "../features/activity/ActivityScreen";
+import { NotificationsScreen } from "../features/notifications/NotificationsScreen";
 import { PluginSkillPage } from "../features/plugins/PluginSkills";
 import { AuthoredSkillPage } from "../features/plugins/NativeAuthoredSkillReview";
 import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnectionHistory";
@@ -422,6 +423,11 @@ function WorkspaceNavigator() {
           name="Activity"
           component={ActivityScreen}
           options={{ title: t("Activity") }}
+        />
+        <ContentStack.Screen
+          name="Notifications"
+          component={NotificationsScreen}
+          options={{ title: "Notifications" }}
         />
         <ContentStack.Screen
           name="WorkspaceSearch"

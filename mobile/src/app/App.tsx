@@ -103,6 +103,8 @@ import {
   WorkspaceDrawer,
   type WorkspaceRoute,
 } from "../components/workspace/WorkspaceDrawer";
+import { notificationsApi } from "../lib/api/notificationsApi";
+import { createNotificationPushController } from "../lib/notifications/notificationPushController";
 import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
 import { workspaceSidebarLayout } from "../components/workspace/workspacePushState";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
@@ -178,8 +180,20 @@ export default function App() {
   const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
 
+  const [pushController] = useState(() =>
+    createNotificationPushController({
+      api: notificationsApi,
+      queryClient,
+      isForeground: () => AppState.currentState === "active",
+      isOnline: () => onlineManager.isOnline(),
+    }),
+  );
   const { open: openNotification, flush: flushPendingNotificationNavigation } =
-    useNotificationNavigation(navigationRef, navigationGuardsRef);
+    useNotificationNavigation(
+      navigationRef,
+      navigationGuardsRef,
+      pushController.navigated,
+    );
 
   const onNavigationGuardChange = useCallback<WorkspaceNavigationGuardChange>(
     (id, blocked, critical = false) => {
@@ -320,13 +334,14 @@ export default function App() {
         } catch {
           // never break push pipeline on telemetry failure
         }
+        pushController.received(notification.request.content.data);
       },
     );
 
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [pushController]);
 
   const { toast: pushToast, toastKey: pushToastKey } =
     useForegroundNotificationToast(

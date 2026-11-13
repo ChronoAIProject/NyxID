@@ -898,6 +898,49 @@ pub(super) async fn native_flag(state: &AppState, enabled: bool) {
 }
 
 #[tokio::test]
+async fn activated_native_gateway_select_serves_overlap_and_rejects_unsupported() {
+    use crate::services::{
+        nyxbot_gateway_source as source, security_readiness_service as readiness,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let (mut state, _, upstream) = setup("native_roster_overlap").await;
+    let (row, _) = native_channel(&state).await;
+    let (_, gateway) = mock_gateway(
+        &mut state,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await;
+    let http = MockServer::start().await;
+    source::TEST_DISCORD_BASES
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), http.uri());
+    let _guard = NativeDiscordFixtureGuard(row.channel_bot_id.clone());
+    Mock::given(path("/users/@me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"100","bot":true})))
+        .expect(1)
+        .mount(&http)
+        .await;
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    readiness::ready_test_replica(&state.db).await;
+    let sibling = readiness::overlapping_test_replica(&state.db).await;
+    assert!(matches!(
+        source::select(&state, &row, &bot).await.unwrap(),
+        Some(GatewaySource::Discord { .. })
+    ));
+    readiness::remove_test_replica_capability(&state.db, &sibling, source::READINESS).await;
+    assert!(matches!(
+        source::select(&state, &row, &bot).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert_eq!(http.received_requests().await.unwrap().len(), 1);
+    gateway.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
 async fn native_enrollment_both_paths_gate_preparation_and_preserve_source_on_reconcile() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

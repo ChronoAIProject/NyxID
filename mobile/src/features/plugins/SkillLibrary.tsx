@@ -1,10 +1,5 @@
-import {
-  Keyboard,
-  Pressable,
-  StyleSheet,
-  TextInput,
-  View,
-} from "react-native";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { Keyboard, Pressable, StyleSheet, TextInput, View } from "react-native";
 import { BookOpen, Search, X } from "lucide-react-native";
 import {
   SettingsGroup,
@@ -53,6 +48,7 @@ export function SkillLibrary({
   totalPages,
   onPageChange,
   onOpenSkill,
+  offline = false,
 }: {
   agentName: string;
   query: string;
@@ -63,7 +59,9 @@ export function SkillLibrary({
   totalPages: number;
   onPageChange: (page: number) => void;
   onOpenSkill: (id: string, name: string, description?: string | null) => void;
+  offline?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const needle = searchable(query);
   const filtered = added.items.filter((skill) =>
@@ -108,10 +106,22 @@ export function SkillLibrary({
             <SettingsRow
               label="Reload skills"
               tone="action"
+              disabled={offline}
               onPress={added.onRetry}
             />
           </SettingsGroup>
         </>
+      )}
+      {offline && !added.known && (
+        <SettingsGroup
+          title={addedTitle}
+          footer={t("Reconnect to load this agent's skills.")}
+        >
+          <SettingsRow
+            icon={BookOpen}
+            label={t("Added skills unavailable offline")}
+          />
+        </SettingsGroup>
       )}
       {added.loading && (
         <SkeletonRows
@@ -147,7 +157,9 @@ export function SkillLibrary({
           >
             <SettingsRow
               icon={BookOpen}
-              label={needle ? "No matching added skills" : "No skills added yet"}
+              label={
+                needle ? "No matching added skills" : "No skills added yet"
+              }
             />
           </SettingsGroup>
         )
@@ -159,10 +171,22 @@ export function SkillLibrary({
             <SettingsRow
               label="Retry skill catalog"
               tone="action"
+              disabled={offline}
               onPress={catalog.onRetry}
             />
           </SettingsGroup>
         </>
+      )}
+      {offline && !catalog.known && (
+        <SettingsGroup
+          title="Discover"
+          footer={t("Reconnect to search the skill catalog.")}
+        >
+          <SettingsRow
+            icon={Search}
+            label={t("Skill catalog unavailable offline")}
+          />
+        </SettingsGroup>
       )}
       {catalog.items.length ? (
         <SettingsGroup
@@ -204,7 +228,7 @@ export function SkillLibrary({
             tone="action"
             accessibilityLabel="Previous"
             accessibilityHint="Shows the previous page of results"
-            disabled={catalog.loading || page <= 1}
+            disabled={offline || catalog.loading || page <= 1}
             onPress={() => onPageChange(page - 1)}
           />
           <SettingsRow
@@ -212,7 +236,7 @@ export function SkillLibrary({
             tone="action"
             accessibilityLabel="Next"
             accessibilityHint="Shows the next page of results"
-            disabled={catalog.loading || page >= totalPages}
+            disabled={offline || catalog.loading || page >= totalPages}
             onPress={() => onPageChange(page + 1)}
           />
         </SettingsGroup>

@@ -442,8 +442,9 @@ it must never select an owner's unshared inference connection. Actor-owned
 model credentials also require the applicable explicit connection consent;
 an eligible recipient-bound platform model bootstraps stateless inference
 without a personal-connection consent card, because it delegates no personal
-credential. Live platform ACL, exact connection, normal approvals and caller
-billing still apply. BYOK model calls require explicit connection consent in
+credential. Live platform ACL, exact connection, Deny, org approval policy and
+caller billing still apply. Personal approval requirements never gate the live
+turn’s own closed stateless model call; this does not waive connection consent. BYOK model calls require explicit connection consent in
 the existing bounded stateless-model scope; stateful provider actions and other
 service calls retain their exact consent requirements.
 

@@ -36,7 +36,10 @@ type Media = VoiceMediaAdapter & {
 
 function nativeMediaClass(defaultFactory?: () => VoiceMediaAdapter) {
   const harness = hookHarness<unknown>({
-    "react-native": { StyleSheet: { create: (value: unknown) => value } },
+    "react-native": {
+      Platform: { OS: "ios" },
+      StyleSheet: { create: (value: unknown) => value },
+    },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
     "./createNativeOpenAIMedia": {
@@ -430,6 +433,147 @@ function engine(
     },
   };
 }
+
+function remoteAudioTrack() {
+  return {
+    kind: "audio",
+    readyState: "live",
+    stopped: false,
+    listeners: new Map<string, () => void>(),
+    addEventListener(type: string, callback: () => void) {
+      this.listeners.set(type, callback);
+    },
+    removeEventListener(type: string) {
+      this.listeners.delete(type);
+    },
+    stop() {
+      this.stopped = true;
+      this.readyState = "ended";
+    },
+  };
+}
+
+for (const failure of [
+  "peer failed",
+  "peer closed",
+  "ICE failed",
+  "ICE closed",
+  "data channel closed",
+  "data channel error",
+  "remote track ended",
+] as const) {
+  test(`OpenAI WebView ends capture when ${failure}, matching native media`, async () => {
+    const e = engine({ analysers: true });
+    e.command({
+      type: "prepare",
+      protocol: "openai_live",
+      generation: 1,
+      requestId: 1,
+    });
+    await settle();
+    e.command({ type: "input", enabled: true, generation: 1 });
+    const peer = e.peers[0]!;
+    const remote = remoteAudioTrack();
+    peer.ontrack?.({ track: remote, streams: [e.stream] });
+    await settle();
+    if (failure.startsWith("peer ")) {
+      peer.connectionState = failure.endsWith("failed") ? "failed" : "closed";
+      peer.onconnectionstatechange?.();
+    } else if (failure.startsWith("ICE ")) {
+      peer.iceConnectionState = failure.endsWith("failed")
+        ? "failed"
+        : "closed";
+      peer.oniceconnectionstatechange?.();
+    } else if (failure === "data channel closed") {
+      peer.channel.readyState = "closed";
+      peer.channel.onclose();
+    } else if (failure === "data channel error") {
+      peer.channel.onerror();
+    } else {
+      remote.readyState = "ended";
+      remote.listeners.get("ended")?.();
+    }
+    assert.deepEqual(
+      e.messages
+        .filter((message) => message.type === "error")
+        .map((message) => message.message),
+      ["WebRTC negotiation failed."],
+    );
+    assert.equal(e.tracks[0]!.stopped, true);
+    assert.equal(remote.stopped, true);
+    assert.equal(remote.listeners.size, 0);
+    assert.equal(peer.closed, true);
+    assert.equal(e.audio.removed, true);
+    assert.equal(
+      [...e.intervals.values()].some(
+        ({ delay }) => delay === 50 || delay === 2000,
+      ),
+      false,
+    );
+  });
+}
+
+test("OpenAI temporary disconnects recover, while intentional close and stale terminal callbacks stay silent", async () => {
+  const nextTrack = { enabled: true, readyState: "live", stop() {} };
+  const nextStream = {
+    getTracks: () => [nextTrack],
+    getAudioTracks: () => [nextTrack],
+  };
+  let captures = 0;
+  const e = engine({
+    media: async () => (++captures === 1 ? e.stream : nextStream),
+  });
+  e.command({
+    type: "prepare",
+    protocol: "openai_live",
+    generation: 1,
+    requestId: 1,
+  });
+  await settle();
+  const oldPeer = e.peers[0]!;
+  const oldRemote = remoteAudioTrack();
+  oldPeer.ontrack?.({ track: oldRemote, streams: [e.stream] });
+  await settle();
+  oldPeer.connectionState = oldPeer.iceConnectionState = "disconnected";
+  oldPeer.onconnectionstatechange?.();
+  oldPeer.oniceconnectionstatechange?.();
+  assert.equal(oldPeer.closed, false);
+  oldPeer.connectionState = oldPeer.iceConnectionState = "connected";
+  oldPeer.onconnectionstatechange?.();
+  oldPeer.oniceconnectionstatechange?.();
+  const oldEnded = oldRemote.listeners.get("ended");
+  assert.equal(typeof oldEnded, "function");
+  e.command({ type: "close", generation: 1 });
+  oldPeer.connectionState = oldPeer.iceConnectionState = "closed";
+  oldPeer.onconnectionstatechange?.();
+  oldPeer.oniceconnectionstatechange?.();
+  oldPeer.channel.onclose();
+  oldPeer.channel.onerror();
+  oldEnded?.();
+  assert.equal(
+    e.messages.some((message) => message.type === "error"),
+    false,
+  );
+  e.command({
+    type: "prepare",
+    protocol: "openai_live",
+    generation: 2,
+    requestId: 2,
+  });
+  await settle();
+  const before = e.messages.length;
+  oldPeer.connectionState = oldPeer.iceConnectionState = "failed";
+  oldPeer.onconnectionstatechange?.();
+  oldPeer.oniceconnectionstatechange?.();
+  oldPeer.channel.onclose();
+  oldPeer.channel.onerror();
+  oldEnded?.();
+  await settle();
+  assert.equal(e.messages.length, before);
+  assert.equal(e.peers[1]!.closed, false);
+  assert.equal(nextTrack.enabled, false);
+  e.command({ type: "close", generation: 2 });
+});
 
 test("OpenAI delegates native media without a mounted or ready WebView", async () => {
   const native = nativeDelegate();
@@ -1837,7 +1981,10 @@ test("WebView failures cannot end native OpenAI media, but unmount still release
   type Element = { props: Record<string, any> };
   const native = nativeDelegate();
   const harness = hookHarness<Element>({
-    "react-native": { StyleSheet: { create: (value: unknown) => value } },
+    "react-native": {
+      Platform: { OS: "ios" },
+      StyleSheet: { create: (value: unknown) => value },
+    },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
     "./createNativeOpenAIMedia": {
@@ -1877,7 +2024,10 @@ test("WebView failures cannot end native OpenAI media, but unmount still release
 test("the WebView is inaccessible, blocks later navigation, and closes on unmount", () => {
   type Element = { props: Record<string, any> };
   const harness = hookHarness<Element>({
-    "react-native": { StyleSheet: { create: (value: unknown) => value } },
+    "react-native": {
+      Platform: { OS: "ios" },
+      StyleSheet: { create: (value: unknown) => value },
+    },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
     "./createNativeOpenAIMedia": { createNativeOpenAIMedia: () => undefined },
@@ -1930,6 +2080,43 @@ const levels = (messages: Record<string, any>[]) =>
     .filter((m) => m.type === "level")
     .map(({ input, output }) => ({ input, output }));
 
+for (const protocol of ["openai_live", "xai_realtime"] as const) {
+  test(`${protocol} WebView meters respect the shared microphone and speaker gates`, async () => {
+    const e = engine({ analysers: true });
+    e.command({ type: "prepare", protocol, generation: 1, requestId: 1 });
+    await settle();
+    if (protocol === "openai_live")
+      e.peers[0]!.ontrack?.({ track: remoteAudioTrack(), streams: [e.stream] });
+    await settle();
+    const [input, output] = e.analysers;
+    input.amplitude = 0.1;
+    output.amplitude = 0.01;
+    e.tickInterval(50);
+    assert.deepEqual(
+      levels(e.messages).at(-1),
+      { input: 0, output: 0.25 },
+      "disabled capture cannot animate as if listening",
+    );
+    e.command({ type: "input", enabled: true, generation: 1 });
+    e.tickInterval(50);
+    assert.deepEqual(levels(e.messages).at(-1), { input: 0.75, output: 0.25 });
+    e.command({ type: "speaker", muted: true, generation: 1 });
+    e.tickInterval(50);
+    assert.deepEqual(
+      levels(e.messages).at(-1),
+      { input: 0.75, output: 0 },
+      "muted playback cannot animate as if audible",
+    );
+    e.command({ type: "input", enabled: false, generation: 1 });
+    e.tickInterval(50);
+    assert.deepEqual(levels(e.messages).at(-1), { input: 0, output: 0 });
+    e.command({ type: "speaker", muted: false, generation: 1 });
+    e.tickInterval(50);
+    assert.deepEqual(levels(e.messages).at(-1), { input: 0, output: 0.25 });
+    e.command({ type: "close", generation: 1 });
+  });
+}
+
 test("OpenAI meters the microphone and remote audio in a silent context", async () => {
   const e = engine({ analysers: true });
   e.command({
@@ -1939,6 +2126,7 @@ test("OpenAI meters the microphone and remote audio in a silent context", async 
     requestId: 1,
   });
   await settle();
+  e.command({ type: "input", enabled: true, generation: 1 });
   assert.equal(e.contexts.length, 1);
   const [input] = e.analysers;
   assert.equal(input.inputs[0].stream, e.stream);
@@ -2014,6 +2202,7 @@ test("the native adapter forwards bounded loudness and drops malformed meters", 
   const e = engine({ analysers: true, receive: (raw) => media.receive(raw) });
   media.connect(e.command);
   await media.prepare("openai_live", new AbortController().signal);
+  media.setInput(true);
   e.analysers[0].amplitude = 0.1;
   e.tick();
   assert.deepEqual(
@@ -2036,3 +2225,60 @@ test("the native adapter forwards bounded loudness and drops malformed meters", 
   );
   media.close();
 });
+
+for (const platform of ["android", "ios"] as const) {
+  test(`${platform} explicitly starts media with native focus ordered before Android microphone access`, async () => {
+    type Element = { props: Record<string, any> };
+    const harness = hookHarness<Element>({
+      "react-native": {
+        Platform: { OS: platform },
+        StyleSheet: { create: (value: unknown) => value },
+      },
+      "react-native-webview": { WebView: "WebView" },
+      "./voiceMediaDocument": documentModule,
+      "./createNativeOpenAIMedia": { createNativeOpenAIMedia: () => undefined },
+    });
+    const module = harness.load(
+      fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
+    ) as {
+      NativeVoiceMedia: new () => Media;
+      VoiceMediaBridge(props: { media: Media; origin: string }): Element;
+    };
+    const media = new module.NativeVoiceMedia();
+    const bridge = harness.mount(() =>
+      module.VoiceMediaBridge({ media, origin: "https://app.example.test" }),
+    );
+    const calls: string[] = [];
+    bridge.props.ref.current = {
+      requestFocus: () => calls.push("native-focus"),
+      injectJavaScript: () => calls.push("media-command"),
+    };
+    media.receive(JSON.stringify({ type: "ready" }));
+    const prepared = media.prepare("openai_live", new AbortController().signal);
+    assert.deepEqual(
+      calls,
+      platform === "android"
+        ? ["native-focus", "media-command"]
+        : ["media-command"],
+    );
+    media.receive(
+      JSON.stringify({
+        type: "response",
+        generation: 1,
+        requestId: 1,
+        result: "offer",
+      }),
+    );
+    assert.equal(await prepared, "offer");
+    calls.length = 0;
+    media.setInput(true);
+    media.muteSpeaker(true);
+    media.close();
+    assert.deepEqual(
+      calls,
+      ["media-command", "media-command", "media-command"],
+      "ordinary audio controls and closing do not take focus",
+    );
+    harness.unmount();
+  });
+}

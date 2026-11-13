@@ -32,6 +32,30 @@ pub(super) fn legacy_model_generation(
             })
 }
 
+/// The single stateless model transport predicate shared by turn admission and
+/// personal approval policy. It grants no connection or account authority.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assistant_model_transport(
+    auth: &crate::mw::auth::AuthUser,
+    service: &crate::models::downstream_service::DownstreamService,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    pool: Option<&str>,
+) -> bool {
+    auth.assistant_chat.as_deref().is_some_and(|chat| {
+        chat.turn_live
+            && chat.turn_id.is_some()
+            && auth.api_key_id.as_deref() == Some(chat.api_key_id.as_str())
+    }) && service.inference.is_some()
+        && method == "POST"
+        && pool.is_none()
+        && !mcp_service::http_carries_method_override(method, headers, query, body)
+        && serde_json::from_slice(body).is_ok_and(|body| model_shape(path, &body).is_ok())
+}
+
 /// Only catalog-declared inference on a closed model generation endpoint is
 /// account-fungible. Stateful response/file handles retain account identity.
 pub fn http_operation(

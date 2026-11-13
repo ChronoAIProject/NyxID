@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { settledInterruptedTurn } from "./interrupted-turn";
@@ -146,6 +147,9 @@ export function storedError(code: string | null, capacityWaitMs?: number | null,
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
   if (code === "model_not_configured") return "This assistant profile is unavailable. Choose another model in the model selector.";
   if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
+  if (code === "model_policy_denied") return translateUi("An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.");
+  if (code === "model_org_approval_required") return translateUi("The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.");
+  if (code === "model_approval_required") return translateUi("This model request requires approval that this thread cannot present. Review Approval settings before retrying.");
   if (code === "model_interrupted") return "The model's response was interrupted. Some actions may already have completed — check them before retrying.";
   if (code === "session_busy") return "The assistant session is busy. Try again shortly.";
   if (code === "queue_timeout") return "Your other NyxBot replies were still running, so this message was not started. Send it again.";

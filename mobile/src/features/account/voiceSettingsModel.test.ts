@@ -55,7 +55,7 @@ test("Settings preserves the saved source, voice, mode and notice ahead of anoth
   assert.equal(view.holdOnly, false);
 });
 
-test("first use defaults to the first voice, Hold to talk and no notice", () => {
+test("first use matches iPad calls: first voice, hands-free and no notice", () => {
   const view = voiceSettingsView([option()], null)!;
   assert.deepEqual(
     [
@@ -64,7 +64,7 @@ test("first use defaults to the first voice, Hold to talk and no notice", () => 
       view.preferences.notify_on_completion,
       view.preferences.language,
     ],
-    ["alloy", "push_to_talk", false, null],
+    ["alloy", "automatic", false, null],
   );
   assert.equal(view.missingVoice, null);
 });

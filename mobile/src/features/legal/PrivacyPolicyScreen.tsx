@@ -10,6 +10,9 @@ export function PrivacyPolicyScreen({ navigation }: Props) {
       docKey="privacy"
       telemetryBackTarget="privacy_back"
       onBack={() => navigation.goBack()}
+      onOpenDocument={(docKey) => {
+        if (docKey === "terms") navigation.push("TermsOfService");
+      }}
     />
   );
 }

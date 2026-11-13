@@ -24,6 +24,12 @@ vi.mock("@/hooks/use-keys", () => ({
     ],
   }),
 }));
+vi.mock("@/hooks/use-agent-grant-services", () => ({
+  useAgentGrantServices: () => ({ isPending: false, data: [
+    { id: "github-key", slug: "github", label: "GitHub", executable: false },
+    { id: "slack-key", slug: "slack", label: "Slack", executable: true },
+  ] }),
+}));
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ isPending: false, error: null, refetch: vi.fn(), data: availableBots }),
 }));
@@ -225,7 +231,7 @@ it("replaces a specialist's grants with a dirty-gated save even when a granted n
     screen.queryByRole("region", { name: "Unsaved changes" }),
   ).not.toBeInTheDocument();
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeChecked();
-  expect(within(grants).getByText(/Currently not executable \(node home-server offline\)/)).toBeVisible();
+  expect(within(grants).getByText(/Currently not executable \(credential or node unavailable\)/)).toBeVisible();
   const guests = within(grants).getByRole("list", { name: "Guest access" });
   expect(within(guests).getByLabelText("github", { selector: '[role="combobox"]' })).toHaveTextContent(
     "Look things up only",
@@ -1428,4 +1434,23 @@ it("uses a leading search glyph and clears then closes search without losing its
   await waitFor(() => expect(screen.getByRole("button", { name: "Search researcher agent details" })).toHaveFocus());
   expect(role).toHaveValue("Retain this role");
   expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
+});
+
+
+it("a rejected grant save exits Saving and preserves the selected draft and server error", async () => {
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = request => {
+    if (request.endpoint.endsWith("/grants") && request.init.method === "PUT")
+      return new Response(JSON.stringify({error:"validation_error",message:"Unknown service or no access: slack"}), {status:400});
+    return original(request);
+  };
+  const {user} = renderSheet({tab:"grants"});
+  const grants = await screen.findByLabelText("Grants", {selector:"form"});
+  fireEvent.click(within(grants).getByRole("checkbox", {name:/Slack/}));
+  await user.click(screen.getByText("Save changes", {selector:"button"}));
+  await confirmChanges();
+  await screen.findByText("Unknown service or no access: slack");
+  expect(screen.queryByText("Saving…")).not.toBeInTheDocument();
+  expect(screen.getByRole("region", {name:"Unsaved changes"})).toBeInTheDocument();
+  expect(within(screen.getByRole("form", {name:"Grants"})).getByRole("checkbox", {name:/Slack/})).toBeChecked();
 });

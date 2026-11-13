@@ -1411,3 +1411,82 @@ mod legacy_publication_tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod lark_bot_path_repair_tests {
+    use super::*;
+    use crate::models::service_endpoint::{PublicationState, ServiceEndpoint};
+    use crate::services::lark_attachment_tool as attachment;
+
+    #[tokio::test]
+    async fn lark_bot_wire_repair_preserves_stored_contracts_generations_and_admin_publication() {
+        for publication in [
+            PublicationState::Published,
+            PublicationState::Draft,
+            PublicationState::Paused,
+        ] {
+            // Production has one catalog row per slug. Isolate each admin state.
+            let db =
+                crate::test_utils::connect_transaction_test_database("lark_bot_path_repair").await;
+            super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
+                [2; 32],
+            ));
+            let mut originals = Vec::new();
+            for slug in ["api-lark-bot", "api-feishu-bot"] {
+                let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+                catalog.id = uuid::Uuid::new_v4().to_string();
+                catalog.slug = slug.into();
+                catalog.created_by = "system".into();
+                db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                    .insert_one(&catalog)
+                    .await
+                    .unwrap();
+                for input in hosted_endpoint_inputs(&catalog).unwrap() {
+                    if ![attachment::FIELDS_OPERATION, attachment::UPLOAD_OPERATION]
+                        .contains(&input.name.as_str())
+                    {
+                        continue;
+                    }
+                    assert!(!input.path.starts_with("/open-apis/"));
+                    let row = super::super::service_endpoint_service::endpoint_from_input(
+                        &catalog.id,
+                        input,
+                        publication,
+                    );
+                    db.collection::<ServiceEndpoint>(
+                        crate::models::service_endpoint::COLLECTION_NAME,
+                    )
+                    .insert_one(&row)
+                    .await
+                    .unwrap();
+                    originals.push(row);
+                }
+            }
+            for _ in 0..2 {
+                sync_seeded_service_endpoints(&db).await.unwrap();
+                for original in &originals {
+                    let row = db
+                        .collection::<ServiceEndpoint>(
+                            crate::models::service_endpoint::COLLECTION_NAME,
+                        )
+                        .find_one(mongodb::bson::doc! {"_id":&original.id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(row.path, original.path);
+                    assert_eq!(row.operation_generation, original.operation_generation);
+                    let before =
+                        crate::services::mcp_service::service_endpoints_to_mcp(&[original]);
+                    let after = crate::services::mcp_service::service_endpoints_to_mcp(&[&row]);
+                    assert_eq!(
+                        crate::services::mcp_service::endpoint_contract_digest(&before[0]),
+                        crate::services::mcp_service::endpoint_contract_digest(&after[0])
+                    );
+                    assert_eq!(row.publication, original.publication);
+                    assert_eq!(row.is_active, original.is_active);
+                }
+            }
+            db.drop().await.unwrap();
+        }
+    }
+}

@@ -10,7 +10,7 @@ for (const challenge of [false, true]) {
     test(`foreground ${challenge ? "Review" : "Open"} and content expire on leaving A for ${next}`, () => {
       accounts.setAuthAccountId("a");
       let receive!: (n: ForegroundNotification) => void;
-      const opened: string[] = [];
+      const opened: { url: string; id?: string | null }[] = [];
       const h = hookHarness<any>({
         "../lib/auth/authAccount": accounts,
         "../lib/notifications/pushNotifications": {
@@ -25,8 +25,8 @@ for (const challenge of [false, true]) {
           new URL("./useForegroundNotificationToast.ts", import.meta.url),
         ),
       ) as any;
-      const open = (url: string) => {
-        opened.push(url);
+      const open = (url: string, id?: string | null) => {
+        opened.push({ url, id });
       };
       h.mount(() => useForegroundNotificationToast(open, open));
       const arrival = {
@@ -35,12 +35,15 @@ for (const challenge of [false, true]) {
         url: "nyxid://activity",
         challengeId: challenge ? "challenge-a" : null,
         type: null,
+        notificationId: "notification-a",
+        deeplink: "nyxid://activity",
       };
       receive(arrival);
       const before = h.flush();
       const stale = before.toast.action.onPress;
       stale();
       assert.equal(opened.length, 1);
+      assert.deepEqual(opened[0], challenge ? { url: "challenge-a", id: undefined } : { url: "nyxid://activity", id: "notification-a" });
       accounts.setAuthAccountId(null);
       accounts.setAuthAccountId(next);
       const after = h.flush();

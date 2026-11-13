@@ -225,7 +225,8 @@ pub async fn reserve_with_artifacts(
         && super::generated_artifacts::eligible(chat)
         && super::generated_artifacts::sandbox_contract(service, endpoint)
     {
-        super::security_readiness_service::require(db, "assistant:generated-artifacts").await?;
+        super::security_readiness_service::require_serving(db, "assistant:generated-artifacts")
+            .await?;
         super::generated_artifacts::trusted_sandbox_catalog(db, service, endpoint).await?
     } else {
         None

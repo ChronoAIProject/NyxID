@@ -1,11 +1,16 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from contextlib import redirect_stdout
+from pathlib import Path
 
-from cache_budget import plan, report
+from cache_budget import family, plan, report
 
-NOW = datetime(2026, 10, 28, tzinfo=timezone.utc)
+ONE_PATH_VERSION = "a625e3a14900daf5d70e679b2bd959ebc2ce876f8150b2f4098d8f7a77cede92"
+TWO_PATH_VERSION = "f98f77cfa579f3b146ee7fba8fc56f03acdd1be27fccb109484811818a8d1aa3"
+V1_CLI = "v1-rust-incremental-cli-cli-test-Linux-x64-3b8f8af3-ae3d9491"
+
+NOW = datetime(2026, 10, 30, tzinfo=timezone.utc)
 
 
 def cache(id, lane, ref='refs/heads/main', date='2026-10-27T00:00:00Z', size=100,
@@ -42,6 +47,22 @@ def coverage(id, sha, ref='refs/heads/main', date='2026-10-27T00:00:00Z'):
 
 
 class CacheBudgetTests(unittest.TestCase):
+    def test_new_graph_prefix_is_isolated_and_receives_branch_grace(self):
+        for old, new, expected_family in (
+            (incremental(1, 'backend-build')['key'],
+             incremental(1, 'backend-build')['key'].replace('v0-rust-incremental', 'v1-rust-graph'),
+             'rust-incremental'),
+        ):
+            branch = cache(1, 'backend-build', ref='refs/heads/test', date=(NOW - timedelta(hours=1)).isoformat())
+            branch['key'] = new
+            main = {**branch, 'id': 2, 'ref': 'refs/heads/main', 'key': old}
+            self.assertEqual(family(new), expected_family)
+            self.assertEqual(plan([branch, main], NOW), [])
+            main['key'] = new
+            self.assertEqual(plan([branch, main], NOW), [])
+            branch['createdAt'] = (NOW - timedelta(hours=49)).isoformat()
+            self.assertEqual([r['id'] for r in plan([branch, main], NOW)], [1])
+
     def test_dist_keeps_newest_per_target_and_prunes_non_main(self):
         rows = [
             dist(1, 'x86_64-unknown-linux-gnu', date='2026-10-20T00:00:00Z'),
@@ -134,6 +155,75 @@ class CacheBudgetTests(unittest.TestCase):
             report(rows, expected, 0.0000001)
         self.assertIn('::warning::Retained Actions cache total', output.getvalue())
         self.assertEqual(plan(rows, NOW), expected)
+
+    def test_v1_rust_incremental_prefix_requires_a_restorable_main_replacement(self):
+        self.assertEqual(family(V1_CLI), "rust-lane")
+        self.assertEqual(family(
+            "v1-rust-incremental-features-gcp-kms-rust-features-Linux-x64-3b8f8af3-ae3d9491"
+        ), "rust-lane")
+        actions_key = (
+            "v0-rust-incremental-cli-cli-test-Linux-X64-"
+            "04dadb45e7f3c5aa65544ab511001bb04d6f10334afde84633ff8d75fe9eab3d-"
+            "b7c67e96190afb257be66875deb0caf6b1cded3f"
+        )
+        self.assertEqual(family(actions_key), "rust-incremental")
+        branch = dict(id=1, key=V1_CLI, ref="refs/heads/feature",
+                      createdAt="2026-10-27T00:00:00Z", lastAccessedAt="2026-10-27T00:00:00Z",
+                      sizeInBytes=100)
+        self.assertEqual(plan([branch], NOW), [])
+        main = dict(branch, id=2, ref="refs/heads/main", createdAt="2026-10-28T00:00:00Z",
+                    key="v1-rust-incremental-cli-cli-test-Linux-x64-3b8f8af3-bbbbbbbb")
+        old_v0 = cache(3, "cli-cli-test", date="2026-10-20T00:00:00Z")
+        self.assertEqual(plan([branch, old_v0], NOW), [])
+        actions = incremental(4, "cli-cli-test")
+        actions["key"] = actions_key
+        removed = {row["id"] for row in plan([branch, main, old_v0, actions], NOW)}
+        self.assertEqual(removed, {1})
+        branch["version"] = "new-path-list"
+        main["version"] = "old-path-list"
+        self.assertEqual(plan([branch, main], NOW), [])
+
+    def test_one_path_main_does_not_replace_two_path_branch_incremental(self):
+        main_old = incremental(1, "features-gcp-kms-rust-features", date="2026-10-28T00:00:00Z")
+        main_old["version"] = ONE_PATH_VERSION
+        branch_new = incremental(2, "features-gcp-kms-rust-features", ref="refs/heads/feature")
+        branch_new["version"] = TWO_PATH_VERSION
+        self.assertEqual(plan([main_old, branch_new], NOW), [])
+        main_new = incremental(3, "features-gcp-kms-rust-features", date="2026-10-28T01:00:00Z")
+        main_new["version"] = TWO_PATH_VERSION
+        older_new = incremental(4, "features-gcp-kms-rust-features", date="2026-10-21T00:00:00Z")
+        older_new["version"] = TWO_PATH_VERSION
+        removed = [row["id"] for row in plan(
+            [main_old, branch_new, main_new, older_new], NOW)]
+        self.assertEqual(removed, [2, 4])
+
+    def test_missing_version_does_not_replace_a_versioned_incremental_cache(self):
+        unversioned_main = incremental(1, "backend-build")
+        versioned_branch = incremental(2, "backend-build", ref="refs/heads/feature")
+        versioned_branch["version"] = TWO_PATH_VERSION
+        self.assertEqual(plan([unversioned_main, versioned_branch], NOW), [])
+
+    def test_maintenance_inventory_requests_cache_version(self):
+        text = Path(".github/workflows/cache-maintenance.yml").read_text()
+        self.assertIn(
+            "--json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version",
+            text,
+        )
+
+    def test_manual_rust_caches_have_48_hours_even_with_main_replacement(self):
+        for factory in (cache, incremental):
+            for age in (timedelta(minutes=15), timedelta(hours=47, minutes=59),
+                        timedelta(hours=48), timedelta(hours=49)):
+                main = factory(1, 'backend-build')
+                branch = factory(2, 'backend-build', ref='refs/heads/measurement',
+                                 date=(NOW - age).isoformat())
+                with self.subTest(factory=factory.__name__, age=age):
+                    expected = [2] if age >= timedelta(hours=48) else []
+                    self.assertEqual([r['id'] for r in plan([main, branch], NOW)], expected)
+                    self.assertEqual(plan([branch], NOW), [])
+            for bad in ('invalid', None, (NOW + timedelta(days=1)).isoformat()):
+                branch = factory(2, 'backend-build', ref='refs/heads/measurement', date=bad)
+                self.assertEqual(plan([main, branch], NOW), [])
 
     def test_malformed_dates_are_retained_conservatively(self):
         rows = [coverage(i, 'a' * 40, date=f'2026-09-01T00:00:00Z') for i in range(1, 35)]

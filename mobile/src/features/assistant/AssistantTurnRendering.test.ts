@@ -328,3 +328,26 @@ test("2345 unknown CMA kind stays generic instead of claiming an agent is ready"
   assert.doesNotMatch(x.text(), /Agent ready|Result ready/);
   x.h.unmount();
 });
+
+
+test("model approval failure renders settings guidance rather than a generic failure", () => {
+  const message = messageSchema.parse({ id: "approval-refusal", seq: 2, turn_id: "turn", role: "assistant",
+    text: "Review Approval settings. https://example.test/approvals/settings", status: "failed",
+    error_code: "model_approval_required", created_at: at });
+  const x = setup("./AssistantMessageNotices.tsx", "AssistantMessageNotices", { message, onOpenBilling: () => {} });
+  assert.match(x.text(), /model request requires approval/);
+  assert.match(x.text(), /Review Approval settings/);
+  x.h.unmount();
+});
+
+for (const code of ["model_policy_denied", "model_org_approval_required"]) {
+  test(`${code} renders model policy guidance`, () => {
+    const message = messageSchema.parse({ id: code, seq: 2, turn_id: "turn", role: "assistant",
+      text: "Review Approval settings. https://example.test/approvals/settings", status: "failed",
+      error_code: code, created_at: at });
+    const x = setup("./AssistantMessageNotices.tsx", "AssistantMessageNotices", { message, onOpenBilling: () => {} });
+    assert.match(x.text(), /Approval settings/);
+    assert.match(x.text(), /policy|organization/);
+    x.h.unmount();
+  });
+}

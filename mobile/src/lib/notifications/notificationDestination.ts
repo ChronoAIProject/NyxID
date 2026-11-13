@@ -7,18 +7,20 @@ const string = (value: unknown) =>
 
 /** Normalize server browser destinations before passing them to the native router. */
 export function nativeNotificationUrl(
-  value: string,
+  value: string | null | undefined,
   config: NotificationLinkConfig,
 ): string | null {
+  if (!value) return null;
   let path: string;
   try {
     const url =
       value.startsWith("/") && config.trustedUrls[0]
         ? new URL(value, config.trustedUrls[0])
         : new URL(value);
-    if (url.username || url.password) return null;
+    if (url.username || url.password || url.hash) return null;
     if (url.protocol === `${config.scheme}:`) {
-      path = `${url.host ? `/${url.host}` : ""}${url.pathname.startsWith("/") ? url.pathname : `/${url.pathname}`}${url.search}`;
+      if (!url.host && (!url.pathname || url.pathname === "/")) return null;
+      path = `${url.host ? `/${url.host}` : ""}${url.pathname && !url.pathname.startsWith("/") ? "/" : ""}${url.pathname}${url.search}`;
     } else {
       if (
         !config.trustedUrls.some((base) => new URL(base).origin === url.origin)

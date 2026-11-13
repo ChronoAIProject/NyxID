@@ -250,8 +250,8 @@ impl RequestContext {
                 native.check(&drain.db, None).await?;
             }
             require_enrolled(&drain.db, &self.actor, None).await?;
-            super::security_readiness_service::require(&drain.db, READINESS).await?;
-            super::security_readiness_service::require(
+            super::security_readiness_service::require_serving(&drain.db, READINESS).await?;
+            super::security_readiness_service::require_serving(
                 &drain.db,
                 super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
             )
@@ -392,8 +392,8 @@ impl RequestContext {
         }
         self.snapshot.get_or_try_init(|| async {
             require_enrolled(db, &self.actor, None).await?;
-            super::security_readiness_service::require(db, READINESS).await?;
-            super::security_readiness_service::require(db, super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY).await?;
+            super::security_readiness_service::require_serving(db, READINESS).await?;
+            super::security_readiness_service::require_serving(db, super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY).await?;
             let rows: Vec<ApprovalGrant> = db.collection::<ApprovalGrant>("approval_grants")
                 .find(doc! {"execution.version":{"$exists":true},"execution.v1.subject.actor_user_id": &self.actor, "execution.v1.binding.connection_id":connection,
                     "execution.v1.subject.principal": bson::to_bson(&self.principal).map_err(encoding)?})
@@ -1027,6 +1027,8 @@ pub(crate) fn prepare<'a>(
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
         context.observation.stage(diagnostics::Stage::Proposal);
+        super::assistant_model_observer::before_approval_request(&state.config.frontend_url, false)
+            .await?;
         chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
             c.approval_options()
         })
@@ -1037,6 +1039,7 @@ pub(crate) fn prepare<'a>(
             && let Some(chat) = chat
             && let Some(request) = proposals::create(
                 db,
+                &state.config.frontend_url,
                 keys,
                 context,
                 chat,
@@ -1132,8 +1135,8 @@ impl Permit {
                 native.check(&self.db, None).await?;
             }
             require_enrolled(&self.db, &self.subject.actor_user_id, None).await?;
-            super::security_readiness_service::require(&self.db, READINESS).await?;
-            super::security_readiness_service::require(
+            super::security_readiness_service::require_serving(&self.db, READINESS).await?;
+            super::security_readiness_service::require_serving(
                 &self.db,
                 super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
             )
@@ -1920,6 +1923,11 @@ pub(crate) fn admit_http<'a>(
             native.check(&state.db, None).await?;
         }
         if floors.is_empty()
+            && super::assistant_model_observer::stateless_for(&actor, &target.service.id)
+        {
+            return Ok(());
+        }
+        if floors.is_empty()
             && !(context.authoring_allowed()
                 && auth
                     .assistant_chat
@@ -2052,6 +2060,14 @@ pub(crate) fn approval<'a>(
                 .await?
                 && super::approval_policy::mandatory_review(&config, descriptor)
             {
+                if let Some(model) = super::assistant_model_observer::current() {
+                    model
+                        .block_policy(
+                            "model_org_approval_required",
+                            &AppError::ApprovalUnsupported,
+                        )
+                        .await?;
+                }
                 return Err(AppError::Forbidden("Mandatory organization operation review cannot be satisfied by an execution permission".into()));
             }
         }

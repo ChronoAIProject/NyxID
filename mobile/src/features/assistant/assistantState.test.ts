@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   continuationText,
+  storedAssistantError,
   acknowledgementTitle,
   acknowledgementDecisionLabel,
   mergeAssistantHistory,
@@ -209,4 +210,10 @@ test("server-owned specialist, automation, and trigger confirmations never dupli
     continuationText(acknowledgement),
     /acknowledgement_id d9428888-122b-11e1-b85c-61cd3cbb3210/,
   );
+});
+
+
+test("model approval refusal has specific fallback copy for live turns", () => {
+  assert.match(storedAssistantError("model_approval_required"), /Review Approval settings/);
+  assert.match(storedAssistantError("unknown-future-code"), /could not complete/);
 });

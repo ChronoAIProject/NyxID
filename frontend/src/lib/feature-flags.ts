@@ -45,6 +45,8 @@ export const FEATURE_FLAG = {
   ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
   ORG_AGENTS: "assistant:org-agents",
   SHARED_AGENTS: "assistant:shared-agents",
+  // Default off: the Notifications bell, feed, sidebar unread markers and push switches.
+  ASSISTANT_NOTIFICATIONS: "assistant:notifications",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   ORG_INSTRUCTION: "assistant:org-instruction-v1",
   EXECUTION_PERMISSIONS: "permissions:execution-v1",

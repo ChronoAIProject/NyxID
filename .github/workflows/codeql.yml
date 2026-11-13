@@ -7,6 +7,7 @@ on:
     branches: [dev]
   schedule:
     - cron: "30 2 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,26 +19,87 @@ permissions:
   security-events: write
 
 jobs:
+  changes:
+    name: Detect CodeQL languages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      languages: ${{ steps.matrix.outputs.languages }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The merge commit and both parents normally supply the complete diff.
+          # paths-filter fetches the base SHA if it is not already available.
+          fetch-depth: 2
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request' && github.event.pull_request.base.sha != ''
+        continue-on-error: true
+        with:
+          # Git diff has neither workflow paths' 300-file limit nor the REST
+          # pull-request file listing's 3,000-file limit.
+          token: ''
+          base: ${{ github.event.pull_request.base.sha }}
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - '**/rust-toolchain*'
+              - '**/.cargo/**'
+              - '.github/workflows/codeql.yml'
+              - '.github/codeql/**'
+              - '.github/scripts/codeql*'
+              - '.github/scripts/test_codeql*'
+      - name: Select languages
+        id: matrix
+        if: always()
+        env:
+          CODEQL_EVENT: ${{ github.event_name }}
+          DETECTION_OUTCOME: ${{ steps.filter.outcome }}
+          RUST_CHANGED: ${{ steps.filter.outputs.rust }}
+        run: python3 .github/scripts/codeql_rust_scope.py matrix
+
   codeql:
     name: CodeQL (${{ matrix.language }})
+    needs: changes
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, javascript-typescript, python, rust]
+        # Missing output (including a failed detection job) analyzes all languages.
+        language: ${{ fromJSON(needs.changes.outputs.languages || '["actions","javascript-typescript","python","rust"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Prepare Rust scope
+        if: matrix.language == 'rust'
+        env:
+          CODEQL_EVENT: ${{ github.event_name }}
+        run: |
+          python3 .github/scripts/codeql_rust_scope.py config \
+            --event "$CODEQL_EVENT" --output target/codeql-rust.yml
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          config-file: ./.github/codeql/codeql-config.yml
+          config-file: ${{ matrix.language == 'rust' && './target/codeql-rust.yml' || './.github/codeql/codeql-config.yml' }}
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
-          
+
+      - name: Upload analysis scope
+        if: always() && matrix.language == 'rust'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-rust-scope
+          path: |
+            target/codeql-rust.yml
+            target/codeql-rust.excluded.txt

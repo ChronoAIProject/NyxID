@@ -105,8 +105,10 @@ notice).
   (fixed in 0.37.1). Its allowlist and MCP tools stay the grants. Every account write,
   including destructive tools, is NyxBot-only; NyxBot's destructive actions still
   show the owner a confirmation card unless the owner turned confirmations off.
-- Grants resolve through the owner's MCP catalog, so NyxBot can grant only what
-  it can reach. `nyxid__grant_subagent` resolves each service on its own: what
+- Grants and the web/mobile grant inventory share the owner's authorization
+  catalog, including authorized HTTP/inference connections without published MCP
+  tools. NyxBot can grant only what the owner can reach; execution/tool discovery
+  retain their live checks. `nyxid__grant_subagent` resolves each service on its own: what
   resolves is granted and the rest come back in `not_granted` (or `not_revoked`)
   with the reason, so one unusable service never blocks the others. NyxAgent's
   own service (`llm-nyx`) is never granted: every agent already runs on it.
@@ -175,6 +177,17 @@ editing scopes. A changed snapshot requires restarting without the cursor;
 never guess omitted IDs or widen to all operations to work around a partial
 result. Pages fit the assistant result budget without clipping policy fields.
 See [operation discovery pagination](../AGENT_OPERATION_SCOPES.md#native-discovery-pagination-2271).
+
+### Notifications and owner digests
+
+Behind the default-off `assistant:notifications` flag, NyxBot can call the
+read-only `nyxid__list_notifications` tool when the owner asks what they missed,
+or when an automation asks for a digest. It accepts `since`, `kinds`,
+`unread_only` (default true) and `limit` (at most 50). It returns authorized,
+bounded previews and canonical source links without marking them seen. NyxBot
+trigger turns may use it; specialists, guests, collaboration execution threads
+and external plugin clients may not. See [Notifications](12-notifications.md)
+for producers, coalescing, card resolution, retention, push and rollout.
 
 ## 8. Permission requests (specialist → NyxBot)
 
@@ -1980,7 +1993,9 @@ Rollout requires every executing replica to advertise
 `nyxbot:org-guest-grants-v1` via the existing readiness roster/drain system.
 Before ready, old and new binaries enforce the old cap/list; adoption is refused.
 Ready removes caps for everyone while preserving legacy service restrictions.
-If readiness is lost, retained legacy restrictions apply again. To roll back,
+Recorded active Grants execution tolerates roster warnings while every live
+generation supports it, including new binding/adoption.
+If serving readiness is lost to a hard blocker, retained legacy restrictions apply again. To roll back,
 disable guests and drain/settle on upgraded binaries before downgrading. Prior
 cap-free spending may exceed the retained old cap; do not erase it to restore
 admission. Review old lists/digests/caps before re-enabling on an old binary.

@@ -23,6 +23,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_management(true).await
+    }
+
+    async fn with_management(management_enabled: bool) -> Self {
         let db = crate::test_utils::connect_transaction_test_database("cma_fingerprint").await;
         let server = MockServer::start().await;
         let owner = uuid::Uuid::new_v4().to_string();
@@ -47,15 +51,17 @@ impl Fixture {
         connection.identity_include_name = true;
         let target = Self::connection_target(connection);
         crate::services::security_readiness_service::ready_test_replica(&db).await;
-        crate::services::feature_flag_service::set_platform_override(
-            &db,
-            crate::services::feature_flag_service::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
-            &crate::services::feature_flag_service::FlagTarget::User(owner.clone()),
-            true,
-            &owner,
-        )
-        .await
-        .unwrap();
+        if management_enabled {
+            crate::services::feature_flag_service::set_platform_override(
+                &db,
+                crate::services::feature_flag_service::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+                &crate::services::feature_flag_service::FlagTarget::User(owner.clone()),
+                true,
+                &owner,
+            )
+            .await
+            .unwrap();
+        }
         Self {
             db,
             server,
@@ -596,7 +602,7 @@ async fn catalog_endpoint_repair_never_rebinds_retained_pre_move_creation() {
     assert_eq!(resolution.target.base_url,next.uri());
     assert_eq!(resolution.user_service_id,connection.id);
     assert!(f.admit(&resolution.target,"/api/v1/sandboxes",key,body).await.is_err());
-    assert!(f.gateway().replay_creation(&f.keys,&row,body).await.is_err());
+    assert!(f.gateway().replay_creation(&f.keys,&row,body,CreationRecoveryAccess::Management).await.is_err());
     assert!(recover_creation(&f.db,&f.keys,&f.gateway(),&f.owner,&row.sandbox_ref_id,row.sandbox_generation).await.is_err());
     let retained = f.saved(&row.id).await;
     assert_eq!(retained.deployment_fingerprint,row.deployment_fingerprint);
