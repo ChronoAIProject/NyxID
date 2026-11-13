@@ -234,6 +234,20 @@ jobs:
           cache-to: type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }},mode=max,ignore-error=true
           provenance: false
 
+      # The production target does not reach the updater's test dependency
+      # stage. Export both compiler branches so PR E2E can reuse them too.
+      - name: Cache updater test build
+        if: matrix.component == 'nyxid-machine-updater'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: cli/Dockerfile.machine-updater
+          platforms: ${{ matrix.platform }}
+          target: build-inputs
+          outputs: type=cacheonly
+          cache-from: type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }}
+          cache-to: type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }},mode=max,ignore-error=true
+
       - name: Verify machine browser and desktop
         if: matrix.component == 'nyxid-node-machine'
         timeout-minutes: 10

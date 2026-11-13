@@ -98,6 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Test CI helpers
+        env:
+          NYXID_SKIP_RUST_FIXTURES: '1'
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Check private security-report routing
         run: |
@@ -139,6 +141,9 @@ jobs:
               - 'cli/src/commands/update_attestation/**'
               - 'machine/**'
               - 'machine-updater/**'
+              - 'scripts/docker-dependency-recipe.py'
+              - 'scripts/check-updater-docker-embeds.py'
+              - 'scripts/test_updater_docker_embeds.py'
               - 'cli/src/node/machine/**'
               - 'cli/resources/machine-browser/**'
               - 'cli/resources/machine-container/**'
@@ -167,6 +172,7 @@ jobs:
               - 'docs/AI_AGENT_PLAYBOOK.md'
               - '.dockerignore'
               - 'scripts/check-backend-docker-embeds.py'
+              - 'scripts/test_backend_docker_embeds.py'
               - 'scripts/check-rci-backend-boundary.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -262,6 +268,9 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/**'
               - '.github/scripts/**'
+              - 'scripts/test_git_build_scripts.py'
+              - 'scripts/rust_fixture.py'
+              - 'scripts/dist-build.sh'
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -453,8 +462,6 @@ jobs:
       CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -463,14 +470,27 @@ jobs:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: rust-clippy
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Check Clippy with resource samples
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
+      - name: Verify incremental cache and CodeQL Rust fixtures
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_incremental_cache.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_codeql_cfg_test_files.py'
+      - name: Verify Git build stamp freshness
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_git_build_scripts.py'
 
   # ---------------------------------------------------------------------------
   # Rust: backend tests
@@ -486,8 +506,8 @@ jobs:
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     uses: ./.github/workflows/backend-tests.yml
 
-  # Keep the production feature/profile and dep-info guard together while
-  # letting the full backend tests run on their own runner.
+  # Check production inputs with the release front end. Linked KMS feature
+  # builds and Backend Release Image / publish retain codegen and link checks.
   backend-image-inputs:
     name: Backend Image Inputs
     needs: changes
@@ -497,22 +517,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: backend-image-inputs-backend-image-inputs
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Check dependency recipe invariants
         run: python3 scripts/test-docker-dependency-recipe.py
-      - name: Build backend image binary
-        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
+      - name: Verify check and build input collection
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_backend_docker_embeds.py'
+      - name: Check backend release inputs
+        run: |
+          python3 .github/scripts/ci_resources.py backend-image-inputs \
+            bash -c 'cargo check --locked --release -p nyxid --bin nyxid-server --features gcp-kms --message-format=json-render-diagnostics > "$RUNNER_TEMP/backend-image-inputs.jsonl"'
       - name: Check backend Docker embedded assets
-        run: python3 scripts/check-backend-docker-embeds.py
+        run: python3 scripts/check-backend-docker-embeds.py --cargo-messages "$RUNNER_TEMP/backend-image-inputs.jsonl"
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-backend-image-inputs
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Exercise the image's compiler and release build when its infrastructure changes.
   backend-image-smoke:
@@ -576,6 +612,7 @@ jobs:
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "ref=ghcr.io/${owner}/nyxid/nyxid-node-machine:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
+          echo "updater=ghcr.io/${owner}/nyxid/nyxid-machine-updater:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
       - name: Build machine image
         uses: docker/build-push-action@v7
         with:
@@ -586,6 +623,37 @@ jobs:
           cache-from: |
             type=registry,ref=${{ steps.machine-cache.outputs.ref }}
           # Import only: registry publishing retains the full compiler layers.
+      - name: Build updater test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: cli/Dockerfile.machine-updater
+          target: e2e
+          load: true
+          tags: nyxid-machine-updater-e2e:local
+          cache-from: type=registry,ref=${{ steps.machine-cache.outputs.updater }}
+      - name: Build updater production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: cli/Dockerfile.machine-updater
+          target: production
+          load: true
+          tags: nyxid-machine-updater:production-test
+          cache-from: type=registry,ref=${{ steps.machine-cache.outputs.updater }}
+      - name: Export updater compiler inputs
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: cli/Dockerfile.machine-updater
+          target: build-inputs
+          outputs: type=local,dest=${{ runner.temp }}/updater-inputs
+      - name: Verify updater Docker input closure
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_updater_docker_embeds.py'
+          python3 scripts/check-updater-docker-embeds.py \
+            --dep-info "$RUNNER_TEMP/updater-inputs/production" \
+            --test-dep-info "$RUNNER_TEMP/updater-inputs/test"
       - name: Verify sandbox, isolation, saved logins, takeover and live desktop
         run: |
           docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
@@ -596,6 +664,7 @@ jobs:
         env:
           MACHINE_IMAGE: nyxid-node-machine:ci
           MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
+          UPDATER_E2E_IMAGE: nyxid-machine-updater-e2e:local
         run: sh cli/tests/machine_updater_e2e.sh
       - uses: actions/setup-node@v6
         with:
@@ -605,6 +674,7 @@ jobs:
       - name: Verify read-only production updater and rendered commands
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          UPDATER_PRODUCTION_IMAGE: nyxid-machine-updater:production-test
         run: node cli/tests/machine_updater_production.mjs
       - name: Remove test images and build cache
         if: always()
@@ -691,17 +761,18 @@ jobs:
         variant: [aws-kms, gcp-kms, aws-and-gcp-kms]
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Build feature set
         env:
           FEATURES: ${{ fromJSON('{"aws-kms":"aws-kms","gcp-kms":"gcp-kms","aws-and-gcp-kms":"aws-kms,gcp-kms"}')[matrix.variant] }}
