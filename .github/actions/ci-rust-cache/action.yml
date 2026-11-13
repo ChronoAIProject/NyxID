@@ -7,8 +7,8 @@ inputs:
   incremental:
     description: Keep workspace crates and a lane-scoped incremental target cache.
     default: 'false'
-  reclaim-disk:
-    description: Remove unused hosted Linux SDKs before restoring dependencies for jobs that allocate swap.
+  backend-reserve:
+    description: This job allocates the backend swap reserve; reclaim hosted SDK space and budget that allocation.
     default: 'false'
   save-if:
     description: Only CI Cache Warm opts in. Push still writes main only.
@@ -56,7 +56,7 @@ runs:
           fi
         done < <(rustup toolchain list --quiet)
     - name: Prepare disk before dependency restore
-      if: runner.os == 'Linux' && inputs.reclaim-disk == 'true'
+      if: runner.os == 'Linux' && inputs.backend-reserve == 'true'
       shell: bash
       run: python3 .github/scripts/backend_disk.py before-dependencies
     - uses: Swatinem/rust-cache@v2
@@ -114,7 +114,9 @@ runs:
       id: incremental-space
       if: inputs.incremental == 'true'
       shell: bash
-      run: python3 .github/scripts/backend_disk.py before-incremental
+      env:
+        BACKEND_RESERVE: ${{ inputs.backend-reserve }}
+      run: python3 .github/scripts/backend_disk.py before-incremental --backend-reserve "$BACKEND_RESERVE"
     - name: Restore incremental build cache
       id: incremental-restore
       if: inputs.incremental == 'true' && steps.incremental-space.outputs.allowed == 'true'
@@ -133,14 +135,29 @@ runs:
         REQUESTED: ${{ inputs.incremental }}
         PRODUCER: ${{ steps.save-policy.outputs.enabled }}
         RESTORED_KEY: ${{ steps.incremental-restore.outputs.cache-matched-key }}
+        RESTORE_ALLOWED: ${{ steps.incremental-space.outputs.allowed }}
       run: |
         set -euo pipefail
         incremental=0
-        if [[ "$REQUESTED" == "true" && ( "$PRODUCER" == "true" || -n "$RESTORED_KEY" ) ]]; then
+        reason=not-requested
+        if [[ "$REQUESTED" == "true" ]]; then
+          if [[ "$RESTORE_ALLOWED" != "true" ]]; then
+            reason=disk-guard
+          elif [[ -n "$RESTORED_KEY" ]]; then
+            reason=hit
+          else
+            reason=miss
+          fi
+        fi
+        if [[ "$REQUESTED" == "true" && "$reason" != disk-guard && ( "$PRODUCER" == "true" || -n "$RESTORED_KEY" ) ]]; then
           incremental=1
         fi
         echo "CARGO_INCREMENTAL=$incremental" >> "$GITHUB_ENV"
-        echo "[ci-incremental] enabled=$incremental producer=$PRODUCER restored=$RESTORED_KEY"
+        echo "[ci-incremental] enabled=$incremental producer=$PRODUCER restored=$RESTORED_KEY reason=$reason"
+        if [[ "$PRODUCER" == "true" && "$reason" == disk-guard ]]; then
+          echo '::error::Cache warm disk guard refused restore; inspect the [ci-disk] budget before retrying.'
+          exit 1
+        fi
         if [[ "$incremental" == 1 ]]; then
           python3 .github/scripts/incremental_cache.py mark
         fi

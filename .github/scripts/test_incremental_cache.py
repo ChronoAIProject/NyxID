@@ -143,7 +143,9 @@ class IncrementalTests(unittest.TestCase):
         self.assertEqual(backend_disk.reserve_bytes("SwapTotal: 3145724 kB"),
                          37 * 1024**3 + 2 * 1024**2)
         self.assertEqual(backend_disk.reserve_bytes("SwapTotal: 41943040 kB"), 0)
-        self.assertEqual(backend_disk.restore_required(swap), 89 * 1024**3 + 1024**2)
+        self.assertEqual(backend_disk.restore_required(swap, backend_reserve=True),
+                         89 * 1024**3 + 1024**2)
+        self.assertEqual(backend_disk.restore_required(swap), 48 * 1024**3)
         self.assertGreaterEqual(backend_disk.restore_required(0), 41 * 1024**3)
 
     def test_low_disk_skips_restore_and_refuses_save_before_archive(self):

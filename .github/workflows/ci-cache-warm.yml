@@ -70,7 +70,7 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: backend-build
           incremental: 'false'
@@ -118,7 +118,7 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: coverage-backend-build
           incremental: 'false'
@@ -166,7 +166,7 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: rust-clippy
           incremental: 'true'
@@ -216,7 +216,7 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
@@ -402,7 +402,7 @@ jobs:
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: backend-image-inputs-backend-image-inputs
       - name: Prepare backend memory reserve

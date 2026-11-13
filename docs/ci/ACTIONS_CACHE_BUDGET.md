@@ -211,11 +211,19 @@ Reader inventories only report diagnostics: filesystem/layout or `df` errors
 log warnings without changing the build's exit status. The restored-graph
 inventory is skipped when no graph is requested. Pruning and writer preflight
 retain strict validation. Only reserve-allocating jobs opt into hosted Linux
-SDK reclamation; deletion failures warn, and actual free space still controls
-restore admission.
+SDK reclamation through the `backend-reserve` action input; that same input
+controls the swap term in restore admission. Deletion failures warn, and actual
+free space still controls admission. Non-reserve lanes require 48 GiB free
+after dependency restore; reserve lanes require approximately 89 GiB with
+3 GiB of existing swap. Both retain the 16 GiB graph cap and room for its
+successor. Non-reserve lanes budget no swap allocation or test archive.
 
 Graph readers build with `CARGO_INCREMENTAL=0` on a miss or disk-guard skip.
-The seven graph producers keep it enabled on misses; the two archive jobs
+Policy logs include `reason=hit`, `miss`, `disk-guard` or `not-requested`.
+A disk-guard rejection fails a warm producer job before compilation, with an
+error annotation; warm jobs remain non-blocking for merges/releases. PR jobs
+continue without the graph. The seven graph producers keep incremental enabled
+on ordinary misses; the two archive jobs
 keep it disabled and do not produce unused graphs. A compiler OOM/kill or
 stale graph triggers one retry with the graphs removed and incremental off.
 See [the disk budget](../CI_PERFORMANCE.md#restore-disk-budget-and-graph-pruning)

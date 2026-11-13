@@ -220,12 +220,16 @@ class CacheWarmTests(unittest.TestCase):
         inventory = next(s for s in self.action['runs']['steps'] if s.get('name') == 'Record restored graph sizes')
         self.assertEqual(inventory['if'], "inputs.incremental == 'true'")
 
-    def test_only_reserve_jobs_opt_into_sdk_reclamation(self):
-        self.assertEqual(self.action['inputs']['reclaim-disk']['default'], 'false')
+    def test_reserve_input_controls_sdk_reclamation_and_disk_budget(self):
+        self.assertEqual(self.action['inputs']['backend-reserve']['default'], 'false')
         prepare = next(s for s in self.action['runs']['steps']
                        if s.get('name') == 'Prepare disk before dependency restore')
-        self.assertEqual(prepare['if'], "runner.os == 'Linux' && inputs.reclaim-disk == 'true'")
+        self.assertEqual(prepare['if'], "runner.os == 'Linux' && inputs.backend-reserve == 'true'")
         self.assertEqual(prepare['run'], 'python3 .github/scripts/backend_disk.py before-dependencies')
+        guard = next(s for s in self.action['runs']['steps'] if s.get('id') == 'incremental-space')
+        self.assertEqual(guard['env'], {'BACKEND_RESERVE': '${{ inputs.backend-reserve }}'})
+        self.assertEqual(guard['run'],
+                         'python3 .github/scripts/backend_disk.py before-incremental --backend-reserve "$BACKEND_RESERVE"')
         for path in Path('.github/workflows').glob('*.yml'):
             for job_id, job in load(str(path))['jobs'].items():
                 steps = job.get('steps', [])
@@ -234,8 +238,11 @@ class CacheWarmTests(unittest.TestCase):
                 for step in steps:
                     if step.get('uses') == CACHE_ACTION:
                         with self.subTest(workflow=path.name, job=job_id):
-                            self.assertEqual(step['with'].get('reclaim-disk', 'false'),
+                            self.assertEqual(step['with'].get('backend-reserve', 'false'),
                                              'true' if reserve else 'false')
+                            if not reserve:
+                                for command in steps:
+                                    self.assertNotRegex(command.get('run', ''), r'nextest(?:\s+archive|-archive)')
 
     def test_manual_dispatch_saves_branch_caches_and_push_saves_main_only(self):
         policy = next(step for step in self.action["runs"]["steps"] if step.get("id") == "save-policy")
@@ -289,7 +296,7 @@ class CacheWarmTests(unittest.TestCase):
         restore = next(s for s in steps if s.get('uses') == 'actions/cache/restore@v4')
         self.assertIn("steps.incremental-space.outputs.allowed == 'true'", restore['if'])
         guard = next(s for s in steps if s.get('id') == 'incremental-space')
-        self.assertEqual(guard['run'], 'python3 .github/scripts/backend_disk.py before-incremental')
+        self.assertIn('backend_disk.py before-incremental', guard['run'])
         self.assertLess(steps.index(guard), steps.index(restore))
         self.assertIn('incremental_cache.py prune', self.save['runs']['steps'][0]['run'])
         self.assertIn('backend_disk.py before-save', self.save['runs']['steps'][0]['run'])
@@ -300,11 +307,14 @@ class CacheWarmTests(unittest.TestCase):
             'REQUESTED': '${{ inputs.incremental }}',
             'PRODUCER': '${{ steps.save-policy.outputs.enabled }}',
             'RESTORED_KEY': '${{ steps.incremental-restore.outputs.cache-matched-key }}',
+            'RESTORE_ALLOWED': '${{ steps.incremental-space.outputs.allowed }}',
         })
         restore = next(s for s in self.action['runs']['steps'] if s.get('id') == 'incremental-restore')
         self.assertEqual(restore['uses'], 'actions/cache/restore@v4')
-        for requested, producer, matched in itertools.product(('true', 'false'), ('true', 'false'), ('', 'fallback-key')):
-            with self.subTest(requested=requested, producer=producer, matched=matched), tempfile.TemporaryDirectory() as tmp:
+        for requested, producer, allowed, matched in itertools.product(
+                ('true', 'false'), ('true', 'false'), ('true', 'false', ''), ('', 'fallback-key')):
+            with self.subTest(requested=requested, producer=producer, allowed=allowed, matched=matched), \
+                 tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 script = root / '.github/scripts/incremental_cache.py'
                 script.parent.mkdir(parents=True)
@@ -312,10 +322,17 @@ class CacheWarmTests(unittest.TestCase):
                 output = root / 'environment'
                 result = subprocess.run(['bash', '-c', step['run']], cwd=root, env={**os.environ,
                     'REQUESTED': requested, 'PRODUCER': producer, 'RESTORED_KEY': matched,
+                    'RESTORE_ALLOWED': allowed,
                     'GITHUB_ENV': str(output)}, text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                enabled = requested == 'true' and (producer == 'true' or bool(matched))
+                reason = ('not-requested' if requested != 'true' else 'disk-guard' if allowed != 'true'
+                          else 'hit' if matched else 'miss')
+                failed = producer == 'true' and reason == 'disk-guard'
+                self.assertEqual(result.returncode, int(failed), result.stderr)
+                self.assertEqual('::error::' in result.stdout, failed)
+                enabled = requested == 'true' and allowed == 'true' and (producer == 'true' or bool(matched))
                 self.assertEqual(output.read_text(), f'CARGO_INCREMENTAL={int(enabled)}\n')
+                self.assertIn(f'[ci-incremental] enabled={int(enabled)} producer={producer} restored={matched} reason={reason}',
+                              result.stdout)
                 self.assertEqual((root / 'marked').exists(), enabled)
         dependency = next(s for s in self.action['runs']['steps'] if s.get('uses') == 'Swatinem/rust-cache@v2')
         self.assertEqual(dependency['with']['prefix-key'],

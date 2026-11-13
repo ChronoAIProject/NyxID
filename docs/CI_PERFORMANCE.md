@@ -3,7 +3,7 @@
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses
 PR #2428 at `df20e4869`, its PR merge commit and the cold comparison at
-`c40a5d95c`.
+`c40a5d95c`, followed by validation at `40e6afb7`.
 Local compiler measurements used stable Rust 1.98.1, an 18-core/128 GiB Apple
 Silicon Mac and four Cargo jobs. This is a shared machine. These observations
 are not Linux runner benchmarks or confidence intervals. Peak RSS below is
@@ -13,6 +13,14 @@ are not Linux runner benchmarks or confidence intervals. Peak RSS below is
 
 These are observed standard-runner results, not projections. Read them with
 `gh run view <run> --json jobs` and `gh run view <run> --job <job> --log`.
+
+PR CI **43354139271** at `40e6afb7` passed; Detect Changes ran 219 helper
+tests in 5.250 s with four intentional skips, and the prepared jobs ran their
+strict Rust fixtures. Release Build Cache **43354139182** built all four
+targets. Warm run **43361115109** verified graph restoration and pruning in
+Clippy/KMS; its small lanes exposed the disk-budget defect corrected here.
+See the [lane budgets](#restore-disk-budget-and-graph-pruning) and
+[complete graph measurements](#branch-graph-validation-after-round-nine).
 
 The shipped configuration uses non-incremental backend archives and the
 existing disk swap reserve, with no compressed-swap setup. Cold run
@@ -262,18 +270,22 @@ protects the seven remaining incremental lanes; the archive jobs retain the
 swap allocation/build-space check and dependency restore diagnostics.
 
 Restoration now precedes swap allocation. Before dependency restore, only
-jobs that allocate the swap reserve opt into `ci-rust-cache`'s `reclaim-disk`
+jobs that allocate the swap reserve opt into `ci-rust-cache`'s `backend-reserve`
 input: backend archives, Clippy, KMS features and backend image inputs, including
-their warm jobs. The input defaults to false. On hosted Linux runners it
+their warm jobs. The input defaults to false and controls both SDK reclamation
+and whether the restore budget includes the future swap allocation. Workflow
+tests tie this input to the presence of `prepare-backend-runner.sh` and check
+that it reaches the disk guard. On hosted Linux runners it
 removes unused Android, .NET, GHC and ghcup SDK directories and logs `df`.
 Permissions, CLI tests, wizard freshness and CLI coverage skip this step;
 developer machines never have their SDKs removed. Removal or reader `df`
 failures log warnings and continue. The next check measures actual free bytes
 **after** dependency extraction, so runner
 image growth and the dependency target are charged to the budget rather than
-assumed constant. On a 145 GiB filesystem, restoring a graph requires the
+assumed constant. On a 145 GiB filesystem, reserve jobs require the
 image, checkout, tools and extracted dependencies together to occupy at most
-about **56 GiB** (145 minus 89). Their separate sizes vary with runner images;
+about **56 GiB** (145 minus 89); non-reserve jobs allow **97 GiB** (145 minus 48).
+Their separate sizes vary with runner images;
 there is no measured fixed image-baseline claim.
 
 The first completed job available from the cold comparison was permissions,
@@ -290,20 +302,26 @@ gh run view 43344390346 --job 131620090266 --log
 gh api --allow-escape-sequences repos/ChronoAIProject/NyxID/actions/jobs/131620090266/logs
 ```
 
-| Reserved use after dependency restore | GiB |
-| --- | ---: |
-| Extra disk swap above the runner's existing 3 GiB | 37, rounded up to MiB plus 1 MiB |
-| Extracted incremental graph, enforced at save | at most 16 |
-| Compressed download while extracting | at most 17 |
-| Build growth, including a successor graph and linked output | 24 |
-| Nextest archive | 4 |
-| Free-space floor | 8 |
+| Reserved use after dependency restore | Reserve jobs (GiB) | Non-reserve jobs (GiB) |
+| --- | ---: | ---: |
+| Extra disk swap above the runner's existing 3 GiB | 37, rounded up to MiB plus 1 MiB | 0 |
+| Extracted incremental graph, enforced at save | at most 16 | at most 16 |
+| Compressed download while extracting | at most 17 | at most 17 |
+| Build growth: capped successor graph (16) plus other objects/binaries (8) | 24 | 24 |
+| Archive allowance required by the reserve script | 4 | 0 |
+| Free-space floor | 8 | 8 |
 
 The download disappears before compilation, so it is not added to build
 usage. Required free space is the maximum of `16 + 17 + 8 = 41 GiB`
-for extraction and `37 + 16 + 24 + 4 + 8 = 89 GiB` for compilation (plus
-swap rounding to MiB and a 1 MiB margin). An insufficient budget **skips the optional incremental
-restore before download**, then builds normally. The reserve script separately
+for extraction and, for reserve jobs, `37 + 16 + 24 + 4 + 8 = 89 GiB` for compilation
+(plus swap rounding to MiB and a 1 MiB margin). Non-reserve jobs require
+`16 + 24 + 8 = 48 GiB` (**51,539,607,552 bytes**), without reading meminfo.
+The 24 GiB growth provision stays conservative for both classes because both
+accept the same 16 GiB saved-graph cap; today's smaller CLI/permissions graphs
+do not justify assuming that cap cannot be reached. No non-reserve consumer
+creates a nextest archive; a workflow-contract test checks this. Reserve jobs
+retain the extra 4 GiB to satisfy the unchanged reserve script's preflight,
+even for Clippy/features that do not create an archive. The reserve script separately
 requires swap plus 36 GiB remaining build/archive/floor capacity before
 allocating. It still establishes at least 40 GiB total swap or fails before
 compilation. After the reserve is released, a save needs 25 GiB for the
@@ -312,6 +330,35 @@ worst-case archive and free-space floor. These are enforced admission budgets;
 source growth. Opted-in cleanup, extraction admission and save preflight print
 `df`; resource samples include free bytes. The actual free-space guards remain
 authoritative even when optional cleanup or a reader diagnostic fails.
+
+PR CI **43354139271** passed, but its logs exposed the incorrect
+unconditional swap charge: all four non-reserve consumers rejected restore
+against **95,565,119,488 bytes**. The table applies the corrected budget to
+those measured free-space values; these margins are calculations, not new
+hosted measurements of this edit.
+
+| Lane | Hosted free bytes | Correct required bytes | Margin (GiB) |
+| --- | ---: | ---: | ---: |
+| CLI Test | 87,816,806,400 | 51,539,607,552 | 33.79 |
+| CLI coverage | 87,731,085,312 | 51,539,607,552 | 33.71 |
+| CLI Wizard Bundle Freshness | 87,243,276,288 | 51,539,607,552 | 33.25 |
+| Google Permissions | 90,830,295,040 | 51,539,607,552 | 36.59 |
+| Rust Clippy | 112,027,332,608 | 95,565,119,488 | 15.33 |
+| Rust Features (gcp-kms) | 111,149,535,232 | 95,565,119,488 | 14.51 |
+
+Reproduce the evidence with `gh run view 43354139271 --log` and search for
+`[ci-disk] free=`. Regression tests use the exact wizard/GCP values, accept
+each class at its requirement, and reject it one byte below. The non-reserve
+test also proves no meminfo read occurs.
+
+Every policy line now includes `reason=hit`, `miss`, `disk-guard` or
+`not-requested`, alongside enabled/producer/restored-key fields. An insufficient
+budget skips extraction before download. PR readers continue with incremental
+off; a warm producer emits an error and fails its job before compilation so a
+permanent disk rejection cannot masquerade as successful warming. Warm jobs
+remain non-blocking (`continue-on-error` at job scope), and ordinary cache
+misses still build and save graphs. Existing resource upload steps run on
+failure; a rejection before compilation has no compiler samples to upload.
 
 The new graph prefix is `v1-rust-graph`; it never restores old unbounded
 `v0-rust-incremental` archives. The dependency/artifact prefix remains
@@ -451,6 +498,79 @@ Subprocess fixtures exercise signals, exit codes, graph removal and the retry
 environment. This can recover a killed compiler while the job supervisor is
 alive; it cannot recover a terminated runner VM or a killed retry process.
 Job cancellation terminates the supervisor rather than launching more work.
+
+### Branch graph validation after round nine
+
+Warm run **43361115109**, on **40e6afb7**, completed all ten jobs successfully,
+including all seven graph jobs. It used the old disk guard. Clippy and all KMS lanes restored
+graphs from **b831d9642**; CLI test, CLI coverage and permissions skipped
+restore because of the erroneous swap/archive charge. Wizard freshness shares
+the CLI test graph and has no separate warm job.
+
+The two archive commands stayed non-incremental and exited zero: ordinary
+**2,179.19 s wall / 1,383.04 s CPU** (job 131674584350, exit line 944), coverage
+**2,274.56 s wall / 1,593.41 s CPU** (job 131674584775, exit line 972).
+Both jobs logged exact dependency-cache hits. These are additional hosted
+observations, not an isolated comparison with
+the earlier cold runs.
+
+Restored keys for the four reserve graph lanes are exactly:
+
+```text
+v1-rust-graph-<lane>-Linux-X64-345738a83c530750c445cfafa4d70f40639ba23e10db12b64eb5cc50e146ebdd-b831d9642734c174452dafc14605a42619b8d6ed
+```
+
+All seven saves use the same template with the final commit segment replaced
+by `40e6afb7e9c3cb1dac151343d9e59d9f5e6137a6`. Lane segments and source jobs:
+
+| Lane | Key lane segment | Job ID |
+| --- | --- | --- |
+| Clippy | `rust-clippy` | 131674584670 |
+| AWS | `features-aws-kms-rust-features` | 131674584535 |
+| GCP | `features-gcp-kms-rust-features` | 131674584842 |
+| AWS + GCP | `features-aws-and-gcp-kms-rust-features` | 131674584916 |
+| CLI test | `cli-cli-test` | 131674584606 |
+| CLI coverage | `coverage-cli-coverage-cli` | 131674584741 |
+| Permissions | `permissions-test` | 131674584894 |
+
+Inventories below are logical bytes including the conservative tar allowance.
+CPU is user plus system from the `ci_resources` exit line; all exits were zero.
+For CLI test and permissions, comma-separated entries follow their two build
+commands in order. Compressed bytes are the completed `Sent … of …` upload,
+followed by `Cache saved with key`, rather than a size inferred from the graph.
+
+| Lane | After restore | After build | After prune | Wall / CPU (seconds) | Uploaded bytes |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Clippy | 6,868,957,288 | 13,732,718,324 | 6,863,953,548 | 333.51 / 238.24 | 2,100,939,333 |
+| AWS | 5,220,913,728 | 10,349,370,241 | 5,128,485,185 | 76.44 / 66.67 | 1,387,780,898 |
+| GCP | 5,227,170,696 | 10,361,416,041 | 5,134,274,017 | 78.97 / 71.28 | 1,389,660,864 |
+| AWS + GCP | 5,229,334,745 | 10,365,892,126 | 5,136,586,053 | 82.20 / 79.80 | 1,390,985,830 |
+| CLI test | 0 | 582,217,297, 2,634,966,284 | 2,634,966,284 | 39.65 / 62.46, 82.16 / 243.34 | 840,420,578 |
+| CLI coverage | 0 | 1,840,773,781 | 1,840,773,781 | 135.65 / 227.09 | 574,521,512 |
+| Permissions | 0 | 44,425,125, 187,993,553 | 187,993,553 | 3.03 / 3.65, 4.93 / 14.39 | 69,064,388 |
+
+The restored and retained crate-directory sets match for all four hit lanes:
+47 Clippy crates and seven per KMS lane. CLI test retains 34 crates, CLI
+coverage 25, permissions 16. Every retained crate has exactly one finalized
+session after pruning. All seven graphs are below the 16 GiB cap. This validates
+reuse across the CI-only round-nine edit; backend-source-edit reuse remains a
+separate checklist item. It does not validate the round-ten non-reserve budget.
+
+Reproduce each job log, including these exact evidence lines, with:
+
+```sh
+gh api --allow-escape-sequences repos/ChronoAIProject/NyxID/actions/jobs/<job-id>/logs
+```
+
+| Lane | Policy line | Restore / build / pruned inventory totals | Resource exit lines | Successful save line |
+| --- | ---: | --- | --- | ---: |
+| Clippy | 881 | 853 / 1095 / 1431 | 950 | 1462 |
+| AWS | 800 | 772 / 883 / 979 | 858 | 1010 |
+| GCP | 797 | 769 / 880 / 976 | 855 | 1006 |
+| AWS + GCP | 805 | 777 / 888 / 984 | 863 | 1016 |
+| CLI test | 717 | 690 / 836 / 934 / 1106 | 818, 862 | 1133 |
+| CLI coverage | 1485 | 1458 / 3849 / 3985 | 3795 | 4013 |
+| Permissions | 597 | 570 / 637 / 696 / 796 | 617, 660 | 823 |
 
 ### Coverage graph transfer investigation
 
@@ -1228,6 +1348,7 @@ assertion still skips on Linux; all portable Git-stamp assertions are mandatory.
 | --- | ---: | --- |
 | Pre-PR hosted helper step: 43210236259 / 131155785727 | 8.18 s between log timestamps; Jobs API rounds to 9 s | 133 tests, 7.915 s, passed |
 | Failed hosted step: 43351448710 / 131643209637 | 58.31 s between log timestamps | 210 tests, 58.107 s, one failure / one skip |
+| Fixed hosted step: 43354139271 | — | 219 tests, 5.250 s, passed / four skips |
 | Local final step, empty Rust/Cargo homes and unreachable distribution server | 4.051 s | 219 tests, 3.980 s, passed / four skips |
 | Local final step, no Cargo/rustc/rustup on PATH | 3.990 s | 219 tests, 3.922 s, passed / four skips |
 | Local final step with all tools installed (same opt-out) | 4.039 s | 219 tests, 3.971 s, passed / four skips |
@@ -1238,7 +1359,9 @@ on 2026-11-12 (log lines 139 and 153); the failed interval is
 `02:20:28.5165378Z` to `02:21:26.8298802Z` on 2026-11-13. Reproduce the hosted
 read with `gh run view <run> --job <job> --log`. Local numbers are macOS
 measurements, not a claim that the hosted step will take four seconds. Its
-new hosted duration remains to be measured on the next push.
+fixed hosted result was subsequently confirmed in run 43354139271: 5.250 s
+inside unittest, with the four expected skips. The strict Clippy, image-input
+and coverage fixture steps also passed in that run.
 
 The three compiler tests were also invoked directly **without** the job
 opt-out in each stripped environment: all three skipped, with no downloads.
@@ -1386,7 +1509,7 @@ sentinel name. Formatting and `git diff --check` passed. Clippy was not repeated
 the only Rust change is the fallback expression and its comment, and the
 fixtures compile both actual build scripts with stable 1.98.1 and `-Dwarnings`.
 
-Rounds five through nine change only CI helpers, actions, workflows and documents;
+Rounds five through ten change only CI helpers, actions, workflows and documents;
 no Rust source or build script changes. The round-six verification
 results and replay above supersede the discarded wrapper experiment. The
 full MongoDB suites are not rerun locally; the new PR CI run must execute
@@ -1433,6 +1556,17 @@ were not repeated. The pinned Cargo/build-script/coverage fixtures still ran.
 The 92 MiB scratch directory containing verification tools and downloaded
 logs was removed; `target/` returned to 4 KiB. No Docker resources were started
 and no owned verification processes remain.
+
+Round ten passed **220 CI helper tests** (24.427 s) and **41 script helper
+tests** (34.997 s), both with mandatory Rust fixtures and no skips. The Detect
+Changes configuration passed the same 220 tests in **4.499 s** with its four
+expected skips. Actionlint **1.7.12**, all four reusable-workflow permission
+checks and `git diff --check` passed. No Rust source or build script changed;
+full-workspace Clippy and backend suites were not repeated. The real
+Cargo/build-script/coverage fixtures executed in the helper suites.
+The 111 MiB round-ten scratch tools, environments and logs were removed;
+`target/` returned to 4 KiB. No Docker resources or agents were started, and
+no owned verification or monitoring processes remain.
 
 Reproduce the real-workspace checks from the repository root:
 
@@ -1552,19 +1686,21 @@ conclusions. A green warm job alone does not prove a cache was saved.
 
 ### Before merge
 
-1. After committing/pushing the round-nine changes, dispatch **CI Cache Warm**
+1. After committing/pushing the round-ten changes, dispatch **CI Cache Warm**
    on the PR branch; it has no experiment inputs. Verify seven graph saves,
    `after-prune` sizes at most 16 GiB, and one finalized session per retained
    crate. The two archive jobs must log `enabled=0`, skip graph restore/save
    and still compile full archives. Check `df` before dependencies in reserve
    jobs, after graph restore in graph lanes, after swap allocation and after
    reserve release; graph lanes also check disk before extraction. Confirm SDK
-   cleanup is skipped in permissions and CLI jobs and restored-graph inventory
+   cleanup is skipped in permissions and CLI jobs and their restore budget is
+   48 GiB, with no added swap or test archive. Confirm restored-graph inventory
    is skipped in archive/image-input jobs. The cold scratch runs already prove
-   bounded publication; this run validates the final branch and the round-seven
-   conditional steps.
+   bounded publication; this run validates the corrected budget. A disk-guard
+   rejection must emit `reason=disk-guard` and fail the non-blocking warm job;
+   it must never masquerade as an ordinary miss.
 2. Dispatch **CI Cache Warm** again at the same commit. The seven graph lanes
-   must hit and pass extraction admission; a safe restore skip does not prove
+   must hit and pass extraction admission with `reason=hit`; a restore skip does not prove
    reuse. Inspect inventories for obsolete crates/sessions. Archive jobs stay
    non-incremental and should hit dependency caches only. Old main maintenance
    does not recognize the new graph prefix, but can still delete branch
@@ -1576,17 +1712,18 @@ conclusions. A green warm job alone does not prove a cache was saved.
    or the branch's old archive graphs.
 4. The new PR **CI** run must keep all ordinary/instrumented shards, inventory
    verification, 73% line gate, base/head comparison, linked KMS builds and
-   image proofs green. Run 43351448710 stopped in Detect Changes; confirm its
-   helper step now skips four expensive fixtures without compiling/downloading
-   Rust, and record its elapsed time. Rust Clippy must execute the incremental,
+   image proofs green. Run 43354139271 passed, including Detect Changes with
+   219 tests in 5.250 s and four skips. Keep the four expensive fixtures outside
+   Detect Changes. Rust Clippy must execute the incremental,
    CodeQL syntax/full-tree and portable Git-stamp fixtures; coverage and image
-   input jobs must execute their strict fixtures. The final PR policy still
-   needs a successful hosted run. Cold pruning/save and disk admission are verified
-   below the hosted timing table; restored-graph extraction and reuse remain
-   unverified. Require a graph miss or skipped restore to log `enabled=0` in
-   every PR cache consumer. **Release Build Cache**
+   input jobs must execute their strict fixtures. The round-ten budget/policy
+   change still needs a successful hosted run, particularly graph restoration
+   in the four non-reserve PR consumers. Require a graph miss or skipped restore
+   to log `enabled=0` and its reason in every PR cache consumer; a disk rejection
+   must not fail a PR reader. **Release Build Cache**
    must execute **Install dist**, **Install dependencies** and **Build artifacts**
-   for all four targets even on exact cache hits, with PR saves disabled.
+   for all four targets even on exact cache hits, with PR saves disabled;
+   run 43354139182 verified all four artifact builds.
    No manual release-cache dispatch is needed: this workflow edit triggers the
    PR matrix. A manual dispatch can still skip exact hits by design.
 5. CodeQL Rust's 28.3-minute PR and 65.9-minute full-scope branch results
@@ -1635,7 +1772,7 @@ Do not use **Publish Images** as a pre-merge dry run: it really publishes.
    branch build proves compilation/packaging; it does not prove tag-triggered
    publication permissions or artifact delivery.
 
-The engineer committed/rebased the reviewed work through b831d9642, opened
-PR #2428 and triggered the hosted runs above. Round-nine edits are left
-uncommitted on b831d9642; the agent did not push, dispatch workflows or delete
+The engineer committed/rebased the reviewed work through 40e6afb7, opened
+PR #2428 and triggered the hosted runs above. Round-ten edits are left
+uncommitted on 40e6afb7; the agent did not push, dispatch workflows or delete
 remote caches.

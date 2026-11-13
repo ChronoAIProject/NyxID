@@ -51,7 +51,7 @@ jobs:
           components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
       - uses: ./.github/actions/ci-rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: ${{ inputs.coverage && 'coverage-backend-build' || 'backend-build' }}
           incremental: 'false'

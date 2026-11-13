@@ -470,7 +470,7 @@ jobs:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: rust-clippy
           incremental: 'true'
@@ -523,7 +523,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: backend-image-inputs-backend-image-inputs
       - name: Prepare backend memory reserve
@@ -767,7 +767,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
-          reclaim-disk: 'true'
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
