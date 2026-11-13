@@ -121,7 +121,7 @@ models, audit payloads, or `Debug` output.
 The cluster module owns four small algorithms:
 
 - `LeaseStore`: fenced renewable ownership with explicit expiry, used for OAuth
-  refresh single-flight and the Telegram poller leader.
+  refresh single-flight, the Telegram poller leader, and billing maintenance.
 - `ReplayStore`: unique insert plus TTL, used for DPoP JTI and internal nonces.
 - `RateWindowStore`: atomic fixed-window admission using MongoDB server time and
   TTL cleanup. All production authentication, per-key, per-agent, channel,
@@ -130,6 +130,19 @@ The cluster module owns four small algorithms:
 - `SlotStore`: one expiring renewable document per occupied slot. It globally
   enforces WebSocket passthrough and per-user SSH concurrency. Loss of renewal
   cancels the associated session.
+
+Billing maintenance holds `billing:reconcile` across the complete periodic pass,
+renews with the shared lease runtime (30-second TTL / 10-second renewal by
+default), and releases the exact token. Contending startup/periodic ticks skip.
+Renewal loss stops new units while the current write protocol finishes; row
+fences and provider idempotency remain essential, especially for requests already
+in flight at expiry. Automatic and manual chain verification discard losing `Ok` scans, always log a local
+`Broken` at error level and retry its publication up to three times (on conflict,
+keeping the stored break at an earlier or equal sequence, or returning an error on
+exhaustion), so a late break after repair may restore an alarm that the next scan
+clears by rechecking its break cursor. Older binaries ignore
+both protections; complete the rollout before relying on fleet exclusion. See
+[BILLING_OPERATIONS.md](BILLING_OPERATIONS.md#reconcile-ownership-and-verification-status).
 
 Event dedup is a separate state machine because delivery failures must remain
 retryable. A unique-key claim has a short lease, success commits the full dedup

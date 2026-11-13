@@ -157,6 +157,9 @@ pub async fn reconcile(db: &Database) -> AppResult<u64> {
     }).sort(doc! {"deadline":1}).limit(100).await?.try_collect().await?;
     let mut count = 0;
     for row in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         finalize(db, &row.billing_request_id, true).await?;
         count += 1;
     }

@@ -1,4 +1,5 @@
 use crate::models::credits::Credits;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -12,10 +13,32 @@ use crate::errors::AppResult;
 use crate::models::billing_rate_cache::BillingRateCache;
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
 use crate::models::usage_meter::{COLLECTION_NAME as USAGE_METER, UsageMeterRow};
+use crate::services::coordination_service::{
+    ClusterLeaseRuntime, LeaseStore, cluster_lease_runtime,
+};
 
 use super::lago_client::{LagoApi, LagoError, LagoErrorKind, LagoEvent};
 use super::reservation;
 use super::webhook;
+
+const RECONCILE_LEASE: &str = "billing:reconcile";
+
+tokio::task_local! {
+    // Scoped to the supervisor future, never inherited by request tasks. Leaf
+    // callers outside a pass keep their existing behavior and row fences.
+    static CONTINUE_RECONCILE: Cell<bool>;
+}
+
+/// Check only BETWEEN recoverable units, never inside a financial write
+/// protocol. Once renewal fails, finish the current unit and admit no next one.
+pub(crate) fn continue_reconcile() -> bool {
+    CONTINUE_RECONCILE.try_with(Cell::get).unwrap_or(true)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static LEASE_LOSS_OBSERVED: std::sync::Arc<tokio::sync::Notify>;
+}
 
 const PUSH_GRACE_SECS: i64 = 30;
 const MAX_RECONCILE_PUSH_BATCH: i64 = 100;
@@ -91,12 +114,52 @@ impl BillingReconciler {
     }
 
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
+        self.run_once_with_runtime(cluster_lease_runtime()).await
+    }
+
+    async fn run_once_with_runtime(
+        &self,
+        runtime: &ClusterLeaseRuntime,
+    ) -> AppResult<ReconcileStats> {
+        let Some(token) = runtime.acquire(&self.db, RECONCILE_LEASE).await? else {
+            return Ok(ReconcileStats::default());
+        };
+        let result = CONTINUE_RECONCILE
+            .scope(Cell::new(true), async {
+                let pass = self.run_pass();
+                tokio::pin!(pass);
+                // Passing a borrow keeps the pass alive when the house renewal
+                // runner drops its operation on loss. Do not drop a multi-write
+                // settlement/release between its durable steps.
+                match runtime.run_while_renewed(&self.db, &token, &mut pass).await {
+                    Some(result) => result,
+                    None => {
+                        CONTINUE_RECONCILE.with(|running| running.set(false));
+                        #[cfg(test)]
+                        let _ = LEASE_LOSS_OBSERVED.try_with(|notify| notify.notify_one());
+                        tracing::warn!("Billing reconcile lease lost; finishing current unit");
+                        pass.await
+                    }
+                }
+            })
+            .await;
+        if let Err(error) = LeaseStore::release(&self.db, &token).await {
+            tracing::warn!(%error, "Billing reconcile lease release failed; waiting for expiry");
+        }
+        result
+    }
+
+    async fn run_pass(&self) -> AppResult<ReconcileStats> {
         if !super::exact_migration::ready(&self.db).await? {
             return Ok(ReconcileStats::default());
         }
+        let mut stats = ReconcileStats::default();
         // Benefit-only estimates can spill into wallet funding at settlement.
         // Refresh before recovery: pending component/voice recovery may return
         // early on a missing profile and must not starve its own refresh.
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         if self.config.billing_enabled
             && let Some(lago) = &self.lago
         {
@@ -107,19 +170,42 @@ impl BillingReconciler {
             )
             .await?;
         }
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         crate::services::platform_model_execution::recover(&self.db).await?;
-        let mut stats = ReconcileStats::default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
             Ok(count) => stats.abandoned += count,
             Err(error) => super::pool_attempt::record_recovery_error(&self.db, None, &error).await,
         }
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.recovered_settlements += super::voice::reconcile(&self.db).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.recovered_settlements +=
             crate::services::managed_execution_service::reconcile(&self.db).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.funding_releases_recovered +=
             super::funding::recover_terminal_releases(&self.db).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.grants_expired += super::grants::expire_due_grants(&self.db, Utc::now()).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         let schedule_stats = super::schedules::disburse_due(
             &self.db,
             Utc::now(),
@@ -131,15 +217,24 @@ impl BillingReconciler {
         stats.schedule_periods_completed += schedule_stats.periods_completed as u64;
         stats.schedule_periods_abandoned += schedule_stats.periods_abandoned as u64;
         stats.schedule_budget_exhausted = schedule_stats.budget_exhausted;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.grant_ledger_recoveries +=
             super::grants::recover_unledgered_events(&self.db, Utc::now()).await?;
         // Anchor the billing-ledger head into the audit chain whenever it
         // advanced, so tail truncation of the ledger is detectable. Best
         // effort: an anchor failure must not stall the sweep.
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         if let Err(error) = super::ledger::anchor_head(&self.db).await {
             tracing::warn!(error = %error, "billing ledger head anchoring failed");
         }
         if !self.config.billing_enabled {
+            return Ok(stats);
+        }
+        if !continue_reconcile() {
             return Ok(stats);
         }
         let settlement = reservation::recover_retryable_settlements(&self.db).await?;
@@ -151,16 +246,25 @@ impl BillingReconciler {
             return Ok(stats);
         };
 
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.topups_expired +=
             super::topup_expiry::expire_purchased_credits(&self.db, lago.as_ref(), Utc::now())
                 .await?;
 
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.service_price_syncs += super::pricing::retry_pending_service_prices(
             &self.db,
             lago.as_ref(),
             &self.config.lago_plan_code,
         )
         .await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         match super::model_tariffs::retry_pending(
             &self.db,
             lago.as_ref(),
@@ -179,6 +283,9 @@ impl BillingReconciler {
         // CMA configuration work must not prevent ordinary usage emission or
         // tax/balance refresh. Pending/failed cards remain durable retry work;
         // an ambiguous timeout retains the sync lease until its expiry.
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         match runtime_billing.retry_sandbox_rate_cards().await {
             Ok(synced) => stats.service_price_syncs += synced,
             Err(error) => tracing::warn!(
@@ -187,20 +294,38 @@ impl BillingReconciler {
                 "CMA rate synchronization failed; retaining retry work and continuing billing reconciliation"
             ),
         }
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
         // Price synchronization invalidates affected profiles. Refresh those
         // within this pass; admissions also refresh individually on demand.
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         super::taxes::reconcile(
             &self.db,
             lago.as_ref(),
             self.config.billing_rate_cache_ttl_secs,
         )
         .await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         self.push_unacked(lago.as_ref(), &mut stats).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         self.compare_finalized_usage(lago.as_ref(), &mut stats)
             .await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         self.refresh_wallet_balances(lago.as_ref(), &mut stats)
             .await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         self.refresh_rate_cache(lago.as_ref(), &mut stats).await?;
         Ok(stats)
     }
@@ -228,6 +353,9 @@ impl BillingReconciler {
                 return Ok(());
             }
         };
+        if !continue_reconcile() {
+            return Ok(());
+        }
         let rejected = plan.rejected;
         let diagnostics = self.db.collection::<Document>("billing_rate_diagnostics");
         diagnostics
@@ -283,6 +411,9 @@ impl BillingReconciler {
             .db
             .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
         for (metric_code, (credits_per_unit_micros, credits_per_unit_pico)) in by_code {
+            if !continue_reconcile() {
+                break;
+            }
             let row = BillingRateCache {
                 id: BillingRateCache::cache_id(&metric_code, None),
                 lago_metric_code: metric_code,
@@ -320,8 +451,15 @@ impl BillingReconciler {
             .await?;
 
         for wallet in wallets {
+            if !continue_reconcile() {
+                break;
+            }
             match webhook::provider_effective_balance(lago, &wallet).await {
                 Ok(balance_credits) => {
+                    // No write has begun; a lost pass can discard this read.
+                    if !continue_reconcile() {
+                        break;
+                    }
                     if webhook::refresh_wallet_balance(
                         &self.db,
                         &wallet.lago_customer_id,
@@ -376,6 +514,9 @@ impl BillingReconciler {
         // from the local wallet, memoized for the batch.
         let mut subscriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
         for row in rows {
+            if !continue_reconcile() {
+                break;
+            }
             if row.funding.as_ref().is_some_and(|funding| {
                 funding.settled && funding.lago_billable_quantity_micros.unwrap_or_default() <= 0
             }) {
@@ -457,6 +598,9 @@ impl BillingReconciler {
     ) -> AppResult<()> {
         let local = finalized_sums_by_owner_metric(&self.db).await?;
         for ((owner_id, metric_code), local_quantity) in local {
+            if !continue_reconcile() {
+                break;
+            }
             let Ok(usage) = lago.current_usage(&owner_id, "").await else {
                 continue;
             };

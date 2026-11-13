@@ -166,6 +166,9 @@ pub async fn recover_expired(db: &mongodb::Database, now: DateTime<Utc>) -> AppR
     let mut recovered = 0;
     let mut requests = std::collections::HashSet::new();
     for row in &rows {
+        if !super::reconcile::continue_reconcile() {
+            return Ok(recovered);
+        }
         if row.quantity.is_none() && requests.insert(&row.billing_request_id) {
             match Box::pin(release_unknown_request(
                 db,
@@ -181,6 +184,9 @@ pub async fn recover_expired(db: &mongodb::Database, now: DateTime<Utc>) -> AppR
                 }
             }
         }
+    }
+    if !super::reconcile::continue_reconcile() {
+        return Ok(recovered);
     }
     let last = rows.last();
     cursors.update_one(doc! { "name": "expired_attempts" }, doc! {

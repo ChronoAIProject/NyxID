@@ -156,7 +156,7 @@ u64 big-endian length-prefixed UTF-8 account, sequence and canonical balance.
 Rolling HMAC verification separately checks historical postings for edits or
 deletion.
 
-A billing-enabled runner leases the reconciliation job across replicas and checks
+A billing-enabled account-integrity runner leases its reconciliation job across replicas and checks
 up to 1,000 wallets and 1,000 grants in one bounded snapshot. It runs at the
 chain-verification cadence, holds the lease for the active pass, and releases it
 when the pass reaches both lexical cursors. Deployments with billing disabled or
@@ -167,6 +167,19 @@ incomplete journaling defer accounts; a deferred cycle never certifies a full
 pass. Mismatches retain the cursor and report account, stored balance and journal
 balance at error level. The one-second deferred-refresh worker uses a per-request
 lease before calling Lago, so replicas cannot duplicate a provider fetch.
+
+The separate periodic billing maintenance pass (settlement recovery, grant and
+purchase expiry, Lago price/usage/balance refresh) uses the renewable
+`billing:reconcile` cluster lease. It skips contending ticks and, on renewal loss,
+finishes the current write protocol before stopping at a row/component/chunk
+boundary. Financial row claims, locks and dedupe are unchanged; request-time
+writers do not acquire this supervisor lease. See
+[BILLING_OPERATIONS.md](BILLING_OPERATIONS.md#reconcile-ownership-and-verification-status)
+for timing, drain and mixed-version limits. Automatic and manual chain verification discard losing `Ok` scans, always log a local
+`Broken` at error level and retry its publication up to three times (on conflict,
+keeping the stored break at an earlier or equal sequence, or returning an error on
+exhaustion), so a late break after repair may restore an alarm that the next scan
+clears by rechecking its break cursor.
 
 For N accounts in either collection, a pass runs its
 `ceil(N/1000) + 1` bounded transactions back-to-back, then idles until the next

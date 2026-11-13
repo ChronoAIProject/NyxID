@@ -47,6 +47,9 @@ pub async fn expire_purchased_credits(
         .await?;
     let mut expired_transactions = 0;
     for wallet in wallets {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         // Rotate the bounded batch even when Lago is unavailable or this
         // wallet has no purchases, preventing the oldest 100 wallets from
         // starving every other billing owner.
@@ -56,6 +59,9 @@ pub async fn expire_purchased_credits(
                 doc! { "$set": { "topup_expiry_checked_at": bson::DateTime::from_chrono(now), } },
             )
             .await?;
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if let Some(operation) = wallet.active_topup_expiry.clone() {
             match acquire_expiry_operation(db, &wallet, operation, now).await? {
                 Some(operation) => {
@@ -115,7 +121,13 @@ pub async fn expire_purchased_credits(
         // Populate the paid/expiry timestamps well before credits become due,
         // so history surfaces remain truthful without waiting for the expiry
         // mutation itself.
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let sessions = backfill_session_expiry(db, &wallet.owner_id, &purchases, now).await?;
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let expired = prepare_expired_purchases(db, &wallet.owner_id, purchases, now).await?;
         let amount = expired
             .iter()
@@ -476,6 +488,9 @@ async fn backfill_session_expiry(
         .try_collect()
         .await?;
     for session in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let Some(purchase) = purchases.iter().find(|purchase| {
             session.lago_wallet_transaction_id.as_deref() == Some(purchase.transaction_id.as_str())
         }) else {

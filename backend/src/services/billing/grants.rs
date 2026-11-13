@@ -422,6 +422,9 @@ pub async fn finalize_pending_reclaims(db: &mongodb::Database) -> AppResult<u64>
         .await?;
     let mut count = 0;
     while let Some(grant) = cursor.try_next().await? {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         finalize_reclaim(db, &grant.id).await?;
         count += 1;
     }
@@ -458,6 +461,9 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
         examined += due.len();
         let short_batch = due.len() < batch_limit as usize;
         for grant in due {
+            if !super::reconcile::continue_reconcile() {
+                return Ok(expired);
+            }
             let result = db
                 .collection::<CreditGrant>(CREDIT_GRANTS)
                 .find_one_and_update(
@@ -539,6 +545,9 @@ pub async fn recover_unledgered_events(
         .await?;
     let mut recovered = 0;
     for grant in grants {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if grant.issued_ledgered_at.is_none()
             && super::ledger::record_grant_event(
                 db,

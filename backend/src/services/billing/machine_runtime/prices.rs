@@ -65,6 +65,9 @@ impl BillingService {
         }
         let mut synced = 0;
         for _ in 0..limit.min(16) {
+            if !crate::services::billing::reconcile::continue_reconcile() {
+                break;
+            }
             let now = Utc::now();
             let claim = Uuid::new_v4().to_string();
             let row=self.db.collection::<Document>(RATE_COLLECTION).find_one_and_update(doc!{

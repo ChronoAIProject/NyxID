@@ -565,6 +565,9 @@ pub(crate) async fn reconcile(db: &Database) -> AppResult<u64> {
         .sort(doc! {"next_reconcile_at":1,"_id":1}).limit(RECOVERY_BATCH).await?.try_collect().await?;
     let mut count = 0;
     for row in rows {
+        if !crate::services::billing::reconcile::continue_reconcile() {
+            break;
+        }
         let result = match row.state {
             State::Prepared|State::Funded if row.expires_at <= now => cancel(db,&row.id).await,
             State::Cancelling => cancel(db,&row.id).await,
