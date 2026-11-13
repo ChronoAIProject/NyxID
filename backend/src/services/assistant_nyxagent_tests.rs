@@ -8032,3 +8032,184 @@ async fn notification_write_failure_rolls_back_settlement_and_retry_commits_both
     assert_eq!(saved.get_i64("count").unwrap(), 1);
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn model_approval_settlement_is_durable_and_stop_wins() {
+    use crate::services::assistant_model_observer as observed;
+    let db = connect_transaction_test_database("model_approval_settlement").await;
+    let state = test_app_state(db.clone());
+    for stop in [false, true] {
+        let row = begin_turn(&db, "owner", &request(None, "test"), &state.encryption_keys)
+            .await
+            .unwrap();
+        let attempt = observed::ModelRequest::capture(
+            &db,
+            &row.id,
+            &row.credential_api_key_id,
+            &row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        attempt
+            .approval_refused(&AppError::ApprovalUnsupported, "https://example.test")
+            .await
+            .unwrap();
+        attempt.complete().await.unwrap();
+        if stop {
+            request_stop(&db, "owner", &row.id).await.unwrap();
+        }
+        // Even a late success/engine terminal cannot hide the recorded refusal;
+        // a committed Stop remains the higher-priority outcome.
+        settle(&db, &state.encryption_keys, "owner", &row, "", None).await;
+        let rows = messages(&db, "owner", &row.id, 10, None).await.unwrap();
+        let reply = rows.last().unwrap();
+        assert_eq!(
+            reply.error_code.as_deref(),
+            Some(if stop {
+                "cancelled"
+            } else {
+                "model_approval_required"
+            })
+        );
+        assert_eq!(reply.text.contains("/approvals/settings"), !stop);
+        if !stop {
+            let reason = reply
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_ref()
+                .unwrap();
+            assert_eq!(reason.stage, "model_approval");
+            assert_eq!(reason.nyxid_error_code, Some(12502));
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_approval_scope_fences_and_legacy_rows() {
+    use crate::services::assistant_model_observer as observed;
+    let db = connect_transaction_test_database("model_approval_scope").await;
+    for scope in [
+        "guest",
+        "shared",
+        "specialist",
+        "stopped",
+        "replaced",
+        "rotated",
+        "owner",
+    ] {
+        let mut row = stale_test_row(Utc::now());
+        row.active_turn.as_mut().unwrap().started_at = Utc::now();
+        row.guest_turn = scope == "guest";
+        row.shared_agent_thread = scope == "shared";
+        if scope == "specialist" {
+            row.role = AgentRole::Subagent;
+        }
+        let mut legacy = bson::to_document(&row).unwrap();
+        let active = legacy.get_document_mut("active_turn").unwrap();
+        active.remove("model_refusal");
+        let old: AssistantConversation = bson::from_document(legacy).unwrap();
+        assert!(old.active_turn.unwrap().model_refusal.is_none());
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let turn = &row.active_turn.as_ref().unwrap().turn_id;
+        assert!(
+            observed::ModelRequest::capture(&db, &row.id, "wrong-key", turn)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let attempt = observed::ModelRequest::capture(&db, &row.id, "key", turn)
+            .await
+            .unwrap()
+            .unwrap();
+        if scope == "stopped" {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.stop_requested":true}},
+                )
+                .await
+                .unwrap();
+        } else if scope == "rotated" {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"credential_api_key_id":"successor-key"}},
+                )
+                .await
+                .unwrap();
+        } else if scope == "replaced" {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.turn_id":"successor"}},
+                )
+                .await
+                .unwrap();
+        }
+        attempt
+            .approval_refused(&AppError::ApprovalUnsupported, "https://example.test")
+            .await
+            .unwrap();
+        attempt.complete().await.unwrap();
+        let saved = get(&db, "owner", &row.id).await.unwrap();
+        assert_eq!(
+            saved.active_turn.unwrap().model_refusal.is_some(),
+            matches!(scope, "owner" | "specialist")
+        );
+        if scope == "owner" {
+            assert!(matches!(
+                observed::ModelRequest::capture(&db, &row.id, "key", turn).await,
+                Err(AppError::ApprovalUnsupported)
+            ));
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_approval_proposal_claim_is_once_across_concurrent_attempts() {
+    use crate::services::assistant_model_observer as observed;
+    let db = connect_transaction_test_database("model_approval_claim").await;
+    let mut row = stale_test_row(Utc::now());
+    row.active_turn.as_mut().unwrap().started_at = Utc::now();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let turn = &row.active_turn.as_ref().unwrap().turn_id;
+    let first = observed::ModelRequest::capture(&db, &row.id, "key", turn)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = observed::ModelRequest::capture(&db, &row.id, "key", turn)
+        .await
+        .unwrap()
+        .unwrap();
+    let (a, b) = tokio::join!(
+        observed::CURRENT_MODEL.scope(
+            Some(first.clone()),
+            observed::before_approval_request("https://example.test", true)
+        ),
+        observed::CURRENT_MODEL.scope(
+            Some(second.clone()),
+            observed::before_approval_request("https://example.test", true)
+        )
+    );
+    assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1);
+    assert!(
+        matches!(a, Err(AppError::ApprovalUnsupported))
+            || matches!(b, Err(AppError::ApprovalUnsupported))
+    );
+    first.complete().await.unwrap();
+    second.complete().await.unwrap();
+    let saved = get(&db, "owner", &row.id).await.unwrap();
+    assert!(observed::approval_error(&saved.active_turn.unwrap()).is_some());
+    db.drop().await.unwrap();
+}

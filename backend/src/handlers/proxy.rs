@@ -3194,6 +3194,16 @@ async fn preflight_proxy_deny_before_resolution(
     .await?;
 
     if denied {
+        crate::services::assistant_model_observer::denied_before_resolution(
+            state,
+            auth_user,
+            &hint.service_id,
+            &hint.service_owner_id,
+            via_service,
+            method,
+            path,
+        )
+        .await?;
         return Err(AppError::Forbidden(
             "Operation denied by approval policy".to_string(),
         ));
@@ -3863,75 +3873,81 @@ fn execute_resolved_proxy<'a>(
         if let Some(model_request) = &model_request {
             request.extensions_mut().insert(model_request.clone());
         }
-        let result = async {
-            *resolved_slug = resolved.target.service.slug.clone();
-            let managed =
-                crate::services::telnyx_platform_service::contract(&resolved.target.service)
-                    .is_some();
-            let lease = crate::services::service_concurrency_service::acquire(
-                &state.db,
-                &resolved.target.service,
-                &auth_user.user_id.to_string(),
-            )
-            .await?;
-            let mut assistant_decision = None;
-            let mut assistant_approval = None;
-            let receipt_method = request.method().clone();
-            let preparation = execute_resolved_proxy_boxed(
-                state,
-                auth_user,
-                service_id,
-                path,
-                request,
-                extra_outbound_headers,
-                resolved_slug,
-                resolved,
-                lease.clone(),
-                &mut assistant_decision,
-                &mut assistant_approval,
-            );
-            // Finish preparation before polling forwarding, so their large debug
-            // poll frames never overlap. The lease guards both phases together.
-            let execution = async move {
-                match preparation.await? {
-                    ProxyExecutionPhase::Complete(response) => Ok(response),
-                    ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
+        let result = crate::services::assistant_model_observer::CURRENT_MODEL
+            .scope(model_request.clone(), async {
+                *resolved_slug = resolved.target.service.slug.clone();
+                let managed =
+                    crate::services::telnyx_platform_service::contract(&resolved.target.service)
+                        .is_some();
+                let lease = crate::services::service_concurrency_service::acquire(
+                    &state.db,
+                    &resolved.target.service,
+                    &auth_user.user_id.to_string(),
+                )
+                .await?;
+                let mut assistant_decision = None;
+                let mut assistant_approval = None;
+                let receipt_method = request.method().clone();
+                let preparation = execute_resolved_proxy_boxed(
+                    state,
+                    auth_user,
+                    service_id,
+                    path,
+                    request,
+                    extra_outbound_headers,
+                    resolved_slug,
+                    resolved,
+                    lease.clone(),
+                    &mut assistant_decision,
+                    &mut assistant_approval,
+                );
+                // Finish preparation before polling forwarding, so their large debug
+                // poll frames never overlap. The lease guards both phases together.
+                let execution = async move {
+                    match preparation.await? {
+                        ProxyExecutionPhase::Complete(response) => Ok(response),
+                        ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
+                    }
+                };
+                // The managed worker classifies lease loss after dispatch as pending.
+                // An outer cancellation would hide that identity behind a retryable 429.
+                let response = if managed {
+                    execution.await?
+                } else {
+                    match &lease {
+                        Some(lease) => lease.run(execution).await?,
+                        None => execution.await?,
+                    }
+                };
+                let response = match assistant_decision {
+                    Some(decision) => {
+                        decision
+                            .finish_http(
+                                response,
+                                state.db.clone(),
+                                auth_user.assistant_chat.as_deref().cloned(),
+                                receipt_method.as_str(),
+                                assistant_approval,
+                            )
+                            .await
+                    }
+                    None => response,
+                };
+                match lease {
+                    Some(lease) => Ok(lease.hold_response(response)),
+                    None => Ok(response),
                 }
-            };
-            // The managed worker classifies lease loss after dispatch as pending.
-            // An outer cancellation would hide that identity behind a retryable 429.
-            let response = if managed {
-                execution.await?
-            } else {
-                match &lease {
-                    Some(lease) => lease.run(execution).await?,
-                    None => execution.await?,
-                }
-            };
-            let response = match assistant_decision {
-                Some(decision) => {
-                    decision
-                        .finish_http(
-                            response,
-                            state.db.clone(),
-                            auth_user.assistant_chat.as_deref().cloned(),
-                            receipt_method.as_str(),
-                            assistant_approval,
-                        )
-                        .await
-                }
-                None => response,
-            };
-            match lease {
-                Some(lease) => Ok(lease.hold_response(response)),
-                None => Ok(response),
+            })
+            .await;
+        if let (Some(model_request), Err(error)) = (&model_request, &result) {
+            let approval_failed = model_request
+                .approval_refused(error, &state.config.frontend_url)
+                .await
+                .is_err();
+            let diagnostic_failed = model_request.rejected(error).await.is_err();
+            if approval_failed || diagnostic_failed {
+                tracing::warn!("Assistant model refusal diagnostics deferred");
             }
-        }
-        .await;
-        if let (Some(model_request), Err(error)) = (&model_request, &result)
-            && model_request.rejected(error).await.is_err()
-        {
-            tracing::warn!("Assistant model refusal diagnostics deferred");
         }
         result
     })
@@ -4366,6 +4382,7 @@ async fn execute_resolved_proxy_inner<'a>(
         &billing_request_id,
         credential_class,
     );
+    request_audit.observe_model(model_request.as_ref());
     request_audit.business_service(
         auth_user.assistant_chat.as_deref(),
         &target.service,
@@ -4757,6 +4774,22 @@ async fn execute_resolved_proxy_inner<'a>(
         );
     }
 
+    if let Some(model) = &model_request {
+        model.configure_policy(
+            auth_user,
+            &target.service,
+            &method_str,
+            path,
+            query.as_deref(),
+            &all_headers,
+            &body_bytes,
+            pool_authority
+                .as_ref()
+                .map(|p| p.pool_id.as_str())
+                .or(is_pool_attempt.then_some("pool")),
+        );
+    }
+
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
@@ -4813,7 +4846,8 @@ async fn execute_resolved_proxy_inner<'a>(
             is_auto_connected_for_approval,
             None,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.model_approval_error(error))?;
     }
 
     let assistant_ack = all_headers
@@ -5017,6 +5051,13 @@ async fn execute_resolved_proxy_inner<'a>(
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
+            request_audit.model_approval_required();
+            crate::services::assistant_model_observer::before_approval_request(
+                &state.config.frontend_url,
+                false,
+            )
+            .await
+            .inspect_err(|error| request_audit.model_approval_error(error))?;
             let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
                 &approval_owner_user_id,
@@ -7315,7 +7356,12 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
             }
             let downstream_response = match downstream_result {
-                Ok(Ok(response)) => response,
+                Ok(Ok(response)) => {
+                    if let Some(model) = &model_request {
+                        model.received_headers(response.status().as_u16());
+                    }
+                    response
+                }
                 Ok(Err(proxy_service::ForwardRequestError::PreDispatchRejected(error))) => {
                     if let Some(reservation) = durable_reservation.as_ref() {
                         durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
@@ -7332,6 +7378,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(error);
                 }
                 Ok(Err(error)) => {
+                    request_audit.model_send_failed("model_transport_error");
                     emit_preheader_diagnostics(
                         exchange_started_at,
                         target_admission_ms,
@@ -7360,6 +7407,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(error.into_app_error());
                 }
                 Err(_) => {
+                    request_audit.model_send_failed("model_transport_aborted");
                     emit_preheader_diagnostics(
                         exchange_started_at,
                         target_admission_ms,

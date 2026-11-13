@@ -4191,12 +4191,33 @@ async fn final_reply(
                         return if event["status"] == "completed" {
                             Ok(text)
                         } else if !text.trim().is_empty() {
+                            if crate::services::assistant_model_observer::is_policy_failure(
+                                event["error"]["code"].as_str().unwrap_or_default(),
+                            ) && let Some(message) = event["error"]["message"].as_str()
+                            {
+                                text.push_str("\n\n");
+                                text.push_str(message);
+                            }
                             Ok(late_delivery::answer(&text, true))
                         } else {
-                            Err(Box::new(engine::TurnError::new(event["error"]["code"]
-                            .as_str()
-                            .unwrap_or("assistant_unavailable"))
-                            .with_model_route_reason(event["turn_metadata"]["failure_reason"]["model_route"]["reason"].as_str())))
+                            let mut error = engine::TurnError::new(
+                                event["error"]["code"]
+                                    .as_str()
+                                    .unwrap_or("assistant_unavailable"),
+                            )
+                            .with_model_route_reason(
+                                event["turn_metadata"]["failure_reason"]["model_route"]["reason"]
+                                    .as_str(),
+                            );
+                            // This code's message is fixed by NyxID and includes its
+                            // AssistantPage URL, never upstream error prose.
+                            if crate::services::assistant_model_observer::is_policy_failure(
+                                error.code,
+                            ) && let Some(message) = event["error"]["message"].as_str()
+                            {
+                                error.message = message.to_owned();
+                            }
+                            Err(Box::new(error))
                         };
                     }
                     _ => {}
