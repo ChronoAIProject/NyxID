@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
@@ -180,6 +182,7 @@ function NavItem({
   readonly collapsed: boolean;
   readonly onClick?: () => void;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={item.to}
@@ -208,7 +211,7 @@ function NavItem({
           collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
-        {item.label}
+        {translateUi(item.label)}
       </span>
     </Link>
   );
@@ -223,6 +226,7 @@ export function AssistantNavEntry({
   readonly mobile?: boolean;
   readonly onClick?: () => void;
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AI_ASSISTANT);
 
   if (!enabled) return null;
@@ -231,7 +235,7 @@ export function AssistantNavEntry({
     <Link
       to="/assistant"
       onClick={onClick}
-      title={collapsed ? "Assistant" : undefined}
+      title={collapsed ? translateUi("Assistant") : undefined}
       data-nav-collapsed={collapsed}
       className={cn(
         "shell-nav-item group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
@@ -251,17 +255,13 @@ export function AssistantNavEntry({
           "min-w-0 flex-1 truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
           collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
-      >
-        Assistant
-      </span>
+      >{translateUi("Assistant")}</span>
       <span
         className={cn(
           "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 type-table-header text-nyx-secondary-400",
           collapsed && "hidden",
         )}
-      >
-        NEW
-      </span>
+      >{translateUi("NEW")}</span>
     </Link>
   );
 }
@@ -270,6 +270,7 @@ export function Sidebar({
   onNavigate,
   mobile = false,
 }: { readonly onNavigate?: () => void; readonly mobile?: boolean } = {}) {
+  useUiTranslation();
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
@@ -336,9 +337,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="shell-group-label">
-              Approvals
-            </span>
+            <span className="shell-group-label">{translateUi("Approvals")}</span>
           )}
         </div>
         <div className="shell-nav-stack">
@@ -357,9 +356,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="shell-group-label">
-              Developer
-            </span>
+            <span className="shell-group-label">{translateUi("Developer")}</span>
           )}
         </div>
         <div className="shell-nav-stack">
@@ -380,9 +377,7 @@ export function Sidebar({
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
-                <span className="shell-group-label">
-                  Admin
-                </span>
+                <span className="shell-group-label">{translateUi("Admin")}</span>
               )}
             </div>
             <div className="shell-nav-stack">
@@ -406,7 +401,7 @@ export function Sidebar({
             <PopoverTrigger asChild>
               <button
                 className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-hairline bg-overlay-strong text-text-tertiary transition-colors duration-200 hover:border-hairline-strong hover:text-foreground"
-                title="Sidebar control"
+                title={translateUi("Sidebar control")}
               >
                 {isCollapsed ? (
                   <PanelLeft className="h-[14px] w-[14px]" />
@@ -422,23 +417,21 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="type-card-title text-foreground">
-                  Sidebar control
-                </p>
+                <p className="type-card-title text-foreground">{translateUi("Sidebar control")}</p>
               </div>
               <div className="p-1.5">
                 <SidebarModeOption
-                  label="Expanded"
+                  label={translateUi("Expanded")}
                   active={mode === "expanded"}
                   onClick={() => changeMode("expanded")}
                 />
                 <SidebarModeOption
-                  label="Collapsed"
+                  label={translateUi("Collapsed")}
                   active={mode === "collapsed"}
                   onClick={() => changeMode("collapsed")}
                 />
                 <SidebarModeOption
-                  label="Expand on hover"
+                  label={translateUi("Expand on hover")}
                   active={mode === "hover"}
                   onClick={() => changeMode("hover")}
                 />
@@ -495,7 +488,7 @@ export function Sidebar({
       {mode === "expanded" && (
         <SidebarResizeHandle
           sidebar="dashboard"
-          label="Resize sidebar"
+          label={translateUi("Resize sidebar")}
           onPreview={setPreviewWidth}
         />
       )}
@@ -512,6 +505,7 @@ function SidebarModeOption({
   readonly active: boolean;
   readonly onClick: () => void;
 }) {
+  useUiTranslation();
   return (
     <button
       type="button"
@@ -531,7 +525,7 @@ function SidebarModeOption({
             : "fill-transparent text-muted-foreground/30",
         )}
       />
-      {label}
+      {translateUi(label)}
     </button>
   );
 }

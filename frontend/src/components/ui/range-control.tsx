@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useId, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { Button } from "./button";
@@ -27,6 +29,7 @@ export function RangeControl({
   readonly defaultValue: number;
   readonly commitOnRelease?: boolean;
 }) {
+  useUiTranslation();
   const id = useId();
   const [draft, setDraft] = useState<number | null>(null);
   const pointer = useRef<number | null>(null);
@@ -51,8 +54,8 @@ export function RangeControl({
         <Button
           size="icon"
           variant="ghost"
-          aria-label={`Reset ${label.toLowerCase()}`}
-          title={`Reset to ${formatValue(defaultValue)}`}
+          aria-label={translateUi("Reset {{value1}}", { value1: label.toLowerCase() })}
+          title={translateUi("Reset to {{value1}}", { value1: formatValue(defaultValue) })}
           disabled={saved === defaultValue && draft === null}
           onClick={() => {
             cancel();

@@ -38,12 +38,12 @@ async fn respond_impl(
     // CMA retries only this exact refusal as proven pre-admission. A generic
     // 503 is an uncertain submission and must never be used for preparation.
     if row.gateway_native_phase.as_deref() == Some("preparing") {
-        return (
+        return provider_refusal::coded((
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "1")],
             Json(json!({"error":{"type":"invalid_request_error","code":"conversation_not_ready"}})),
         )
-            .into_response();
+            .into_response(), "conversation_not_ready");
     }
     match Box::pin(accept(&state, &row, &request, &idempotency)).await {
         Ok(stored) => stream(state, row, headers, stored.response_id, None),
@@ -56,7 +56,7 @@ async fn respond_impl(
             let _=state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
                 doc! {"_id":&row.id,"binding_id":&row.binding_id,"gateway_source":bson::to_bson(&row.gateway_source).unwrap_or(bson::Bson::Null)},
                 doc! {"$set":{"gateway_native_delivery":code}}).await;
-            error.into_response()
+            provider_refusal::error(error)
         }
     }
 }
@@ -232,12 +232,26 @@ async fn accept(
     let result=session.start_transaction().and_run2(async move |session| {
         let row = &tx_row;
         let result:AppResult<()> = async {
+            let discord = matches!(&row.gateway_source, Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. }));
+            // Clear intake uncertainty atomically with the existing admission
+            // fence, never a genuine delivery error. This adds no DB operation.
+            let admission: mongodb::options::UpdateModifications = if discord {
+                let clear = doc! {"$and":[{"$eq":["$delivery_status","unconfirmed"]},
+                    {"$eq":["$delivery_error","discord_native_intake_unconfirmed"]}]};
+                vec![doc! {"$set":{
+                    "native_admission_revision":{"$add":[{"$ifNull":["$native_admission_revision",0_i64]},1_i64]},
+                    "delivery_status":{"$cond":[&clear,"unknown","$delivery_status"]},
+                    "delivery_error":{"$cond":[&clear,"$$REMOVE","$delivery_error"]}
+                }}].into()
+            } else {
+                doc! {"$inc":{"native_admission_revision":1_i64}}.into()
+            };
             // Contend with transport changes, binding revocation and erasure.
             let fenced=db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"transport":"gateway","status":"active",
                 "binding_id":&row.binding_id,"agent_api_key_id":&row.agent_api_key_id,"gateway_native_phase":"ready",
                 "gateway_channel_id":&row.gateway_channel_id,"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|AppError::OAuthAuthorityUnavailable)?,
                 "gateway_setup_release_id":bson::Bson::Null,"pending_agent_api_key_id":bson::Bson::Null},
-                doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
+                admission).session(&mut *session).await?;
             if fenced.matched_count!=1 {return Err(AppError::OAuthAuthorityUnavailable);}
             let owner=db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME).update_one(
                 doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
@@ -247,13 +261,34 @@ async fn accept(
             if let Some(crate::models::nyxbot_channel::GatewaySource::Discord { bot_id }) = &row.gateway_source {
                 bot_filter.extend(doc! {"platform":"discord","platform_bot_id":bot_id,"status":{"$in":["active","pending_webhook"]}});
             }
+            // Relay record_inbound already records this per message. Fold the
+            // native equivalent into the mandatory bot fence instead of adding
+            // another write or throttling the authoritative bot timestamp.
+            let mut bot_update = doc! {"$inc":{"native_admission_revision":1_i64}};
+            if discord {
+                bot_update.insert("$set", doc! {"diagnostics.last_inbound_at":bson::DateTime::now(),
+                    "diagnostics.last_inbound_source":"native_discord_gateway"});
+            }
             let bot=db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
-                bot_filter.clone(),
-                doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
+                bot_filter.clone(), bot_update).session(&mut *session).await?;
             if bot.matched_count!=1 {return Err(AppError::Forbidden("Bot unavailable".into()));}
-            if matches!(&row.gateway_source, Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. })) {
-                // The current provider key/binding, closed source identity and
-                // command metadata were verified before this admission transaction.
+            if discord {
+                // Only a first/current-hand-over or >60s-old observation writes
+                // the channel evidence. Filter live storage, not the caller's
+                // snapshot; concurrent admissions cannot undo newer evidence.
+                db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {
+                    "_id":&row.id,"binding_id":&row.binding_id,
+                    "$or":[
+                        {"gateway_intake.binding_id":{"$ne":&row.binding_id}},
+                        {"gateway_intake.last_inbound_at":bson::Bson::Null},
+                        {"gateway_intake.last_inbound_at":{"$lt":bson::DateTime::from_chrono(now-ChronoDuration::seconds(60))}},
+                        {"$expr":{"$lt":["$gateway_intake.last_inbound_at","$gateway_intake.handed_over_at"]}}
+                    ]}, vec![doc! {"$set":{"gateway_intake":{
+                        "binding_id":{"$literal":&row.binding_id},
+                        "handed_over_at":{"$cond":[{"$eq":["$gateway_intake.binding_id",{"$literal":&row.binding_id}]},
+                            {"$ifNull":["$gateway_intake.handed_over_at",bson::Bson::Null]},bson::Bson::Null]},
+                        "last_inbound_at":bson::DateTime::from_chrono(now)
+                    }}}]).session(&mut *session).await?;
                 bot_filter.insert("status", "pending_webhook");
                 db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                     bot_filter, doc! {"$set":{"status":"active","updated_at":bson::DateTime::now(),
@@ -436,12 +471,24 @@ pub async fn snapshot(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::ResponseGet,
+        snapshot_inner(State(state.clone()), Path(id), headers),
+    )
+    .await
+}
+async fn snapshot_inner(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(v) => v,
         Err(r) => return r,
     };
     if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
-        return error.into_response();
+        return provider_refusal::error(error);
     }
     match current(&state, &row, &id).await {
         Ok(Some((_, body, trace))) => {
@@ -452,10 +499,10 @@ pub async fn snapshot(
                 Ok(([("cache-control", "no-store")], Json(body.snapshot)).into_response())
             })
             .await
-            .unwrap_or_else(IntoResponse::into_response)
+            .unwrap_or_else(provider_refusal::error)
         }
         Ok(None) => problem(StatusCode::NOT_FOUND, "response_not_found"),
-        Err(e) => e.into_response(),
+        Err(e) => provider_refusal::error(e),
     }
 }
 pub async fn events(
@@ -464,16 +511,29 @@ pub async fn events(
     Query(query): Query<Cursor>,
     headers: HeaderMap,
 ) -> Response {
-    let after = match cursor(query.starting_after.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return e.into_response(),
-    };
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::Events,
+        events_inner(State(state.clone()), Path(id), Query(query), headers),
+    )
+    .await
+}
+async fn events_inner(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<Cursor>,
+    headers: HeaderMap,
+) -> Response {
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    let after = match cursor(query.starting_after.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return provider_refusal::error(e),
+    };
     if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
-        return error.into_response();
+        return provider_refusal::error(error);
     }
     match current(&state, &row, &id).await {
         Ok(Some((_, body, trace))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
@@ -484,7 +544,7 @@ pub async fn events(
         }
         Ok(Some(_)) => problem(StatusCode::BAD_REQUEST, "invalid_replay_cursor"),
         Ok(None) => problem(StatusCode::NOT_FOUND, "response_not_found"),
-        Err(e) => e.into_response(),
+        Err(e) => provider_refusal::error(e),
     }
 }
 async fn current(
@@ -512,6 +572,10 @@ async fn current(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&stored.event_key})
         .await?;
+    if let Some(event) = event.as_ref() {
+        provider_refusal::partition_known();
+        provider_refusal::event(&event.event_id);
+    }
     let trace = event
         .as_ref()
         .and_then(|event| event.turn_id.as_deref())

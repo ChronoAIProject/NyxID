@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import {
   changedFields,
   describeChanges,
@@ -105,6 +108,7 @@ const draftKey = (flag: string, type: ScopeType, id: string) =>
   `${flag}\u001f${type}\u001f${id}`;
 
 export function AdminFeatureFlagsPage() {
+  useUiTranslation();
   const { data, isLoading, error } = useAdminFeatureFlags();
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
@@ -245,9 +249,9 @@ export function AdminFeatureFlagsPage() {
         });
         if (failed.length)
           toast.error(
-            `Applied ${successful.length}; failed: ${failed.map(({ item, reason }) => `${item.flagKey} / ${item.type} ${item.id}${reason ? ` (${reason})` : ""}`).join(", ")}. Review remaining changes before retrying.`,
+            translateErrorMessage("Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.", { count: successful.length, details: failed.map(({ item, reason }) => `${item.flagKey} / ${item.type} ${item.id}${reason ? ` (${reason})` : ""}`).join(", ") }),
           );
-        else toast.success(`${successful.length} changes applied`);
+        else toast.success(translateUi("{{value1}} changes applied", { value1: successful.length }));
       } finally {
         setApplying(false);
       }
@@ -368,13 +372,13 @@ export function AdminFeatureFlagsPage() {
     <div className="space-y-6">
       {rolloutReview.dialog}
       <PageHeader
-        title="Feature Flags"
-        description="Organize rollouts, track every change, and keep finished work out of the way."
+        title={translateUi("Feature Flags")}
+        description={translateUi("Organize rollouts, track every change, and keep finished work out of the way.")}
         actions={
           canWrite && (
             <AddCtaButton
               id="create-feature-flag"
-              label="Create feature flag"
+              label={translateUi("Create feature flag")}
               variant="subtle"
               aria-expanded={createOpen}
               aria-controls="create-feature-flag-form"
@@ -399,7 +403,7 @@ export function AdminFeatureFlagsPage() {
               aria-hidden
               className="size-1.5 shrink-0 rounded-full bg-warning"
             />
-            {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
+            {pendingCount}{translateUi(" unsaved change")}{pendingCount === 1 ? "" : "s"}
           </span>
           <div className="flex items-center gap-2">
             <Button
@@ -407,17 +411,13 @@ export function AdminFeatureFlagsPage() {
               size="sm"
               disabled={applying}
               onClick={() => setDrafts({})}
-            >
-              Discard
-            </Button>
+            >{translateUi("Discard")}</Button>
             <Button
               variant="primary"
               size="sm"
               disabled={applying}
               onClick={applyChanges}
-            >
-              Apply changes
-            </Button>
+            >{translateUi("Apply changes")}</Button>
           </div>
         </div>
       )}
@@ -431,14 +431,14 @@ export function AdminFeatureFlagsPage() {
           }))
         }
       >
-        <TabsList aria-label="Flag lifecycle">
+        <TabsList aria-label={translateUi("Flag lifecycle")}>
           {(["active", "sunset", "all"] as const).map((view) => (
             <TabsTrigger key={view} value={view} className="gap-1.5">
               {view === "active"
-                ? "Active"
+                ? translateUi("Active")
                 : view === "sunset"
-                  ? "Sunset"
-                  : "All flags"}
+                  ? translateUi("Sunset")
+                  : translateUi("All flags")}
               <span className="text-13 tabular-nums text-text-tertiary">
                 {lifecycleCounts[view]}
               </span>
@@ -449,7 +449,7 @@ export function AdminFeatureFlagsPage() {
             hidden rows keep their drafts when the view changes. */}
         <TabsContent value={lifecycle} forceMount className="mt-4">
           <section
-            aria-label="Feature flags"
+            aria-label={translateUi("Feature flags")}
             className="overflow-hidden rounded-lg border border-border/60 bg-card"
           >
             <FlagBrowserControls
@@ -468,19 +468,14 @@ export function AdminFeatureFlagsPage() {
                 role="alert"
                 className="flex items-center gap-2 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-14 text-destructive"
               >
-                <AlertTriangle className="size-4 shrink-0" aria-hidden />
-                Unable to refresh feature flags. Your drafts are retained.
-              </p>
+                <AlertTriangle className="size-4 shrink-0" aria-hidden />{translateUi("Unable to refresh feature flags. Your drafts are retained.")}</p>
             )}
             {lifecycle === "sunset" && (
               <p className="flex items-start gap-2 border-b border-warning/30 bg-warning/5 px-3 py-2.5 text-14 text-muted-foreground">
                 <Sunset
                   className="mt-0.5 size-4 shrink-0 text-warning"
                   aria-hidden
-                />
-                Sunset flags are hidden from Active. Their defaults and
-                overrides still apply until the corresponding code is removed.
-              </p>
+                />{translateUi("Sunset flags are hidden from Active. Their defaults and overrides still apply until the corresponding code is removed.")}</p>
             )}
             {hiddenSunsetMatches > 0 && hasFilters && (
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-warning/30 bg-warning/5 px-3 py-1.5 text-14 text-muted-foreground">
@@ -489,10 +484,7 @@ export function AdminFeatureFlagsPage() {
                     className="size-4 shrink-0 text-warning"
                     aria-hidden
                   />
-                  {hiddenSunsetMatches} matching flag
-                  {hiddenSunsetMatches === 1 ? " is" : "s are"} marked for
-                  sunset.
-                </span>
+                  {hiddenSunsetMatches}{translateUi(" matching flag")}{hiddenSunsetMatches === 1 ? translateUi(" is") : translateUi("s are")}{translateUi(" marked for sunset.")}</span>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -502,9 +494,7 @@ export function AdminFeatureFlagsPage() {
                       lifecycle: "sunset",
                     }))
                   }
-                >
-                  View sunset matches
-                </Button>
+                >{translateUi("View sunset matches")}</Button>
               </div>
             )}
 
@@ -512,7 +502,7 @@ export function AdminFeatureFlagsPage() {
               <div
                 className="space-y-2 p-3"
                 role="status"
-                aria-label="Loading feature flags"
+                aria-label={translateUi("Loading feature flags")}
               >
                 {Array.from({ length: 4 }).map((_, index) => (
                   <Skeleton key={index} className="h-12 w-full" />
@@ -521,13 +511,13 @@ export function AdminFeatureFlagsPage() {
             ) : error && !data ? (
               <FlagsEmptyState
                 tone="error"
-                title="Failed to load feature flags"
-                subtitle="Please try again later."
+                title={translateUi("Failed to load feature flags")}
+                subtitle={translateUi("Please try again later.")}
               />
             ) : flags.length === 0 ? (
               <FlagsEmptyState
-                title="No feature flags"
-                subtitle="No feature flags are available to your account. Create a flag to get started."
+                title={translateUi("No feature flags")}
+                subtitle={translateUi("No feature flags are available to your account. Create a flag to get started.")}
               />
             ) : (
               <>
@@ -535,17 +525,17 @@ export function AdminFeatureFlagsPage() {
                   <FlagsEmptyState
                     title={
                       hasFilters
-                        ? "No matching flags"
+                        ? translateUi("No matching flags")
                         : lifecycle === "sunset"
-                          ? "No flags marked for sunset"
-                          : "No active flags"
+                          ? translateUi("No flags marked for sunset")
+                          : translateUi("No active flags")
                     }
                     subtitle={
                       hasFilters
-                        ? "Try another search or clear your filters."
+                        ? translateUi("Try another search or clear your filters.")
                         : lifecycle === "sunset"
-                          ? "Mark a flag for sunset in its organization settings when code cleanup is pending."
-                          : "Use All flags to see flags marked for sunset, or create a new flag."
+                          ? translateUi("Mark a flag for sunset in its organization settings when code cleanup is pending.")
+                          : translateUi("Use All flags to see flags marked for sunset, or create a new flag.")
                     }
                   />
                 )}
@@ -556,22 +546,14 @@ export function AdminFeatureFlagsPage() {
                 >
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Flag</TableHead>
-                      <TableHead className="w-[42%] md:w-56">Rollout</TableHead>
-                      <TableHead className="hidden w-24 md:table-cell">
-                        Default
-                      </TableHead>
-                      <TableHead className="hidden w-36 lg:table-cell">
-                        Group
-                      </TableHead>
-                      <TableHead className="hidden w-40 lg:table-cell">
-                        Owner
-                      </TableHead>
-                      <TableHead className="hidden w-48 xl:table-cell">
-                        Tags
-                      </TableHead>
+                      <TableHead>{translateUi("Flag")}</TableHead>
+                      <TableHead className="w-[42%] md:w-56">{translateUi("Rollout")}</TableHead>
+                      <TableHead className="hidden w-24 md:table-cell">{translateUi("Default")}</TableHead>
+                      <TableHead className="hidden w-36 lg:table-cell">{translateUi("Group")}</TableHead>
+                      <TableHead className="hidden w-40 lg:table-cell">{translateUi("Owner")}</TableHead>
+                      <TableHead className="hidden w-48 xl:table-cell">{translateUi("Tags")}</TableHead>
                       <TableHead className="w-10">
-                        <span className="sr-only">Details</span>
+                        <span className="sr-only">{translateUi("Details")}</span>
                       </TableHead>
                     </TableRow>
                   </TableHeader>
@@ -624,6 +606,7 @@ function CreateFlagForm({
   readonly open: boolean;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const create = useCreateFeatureFlag();
   const form = useAppForm({
     resolver: zodResolver(createFeatureFlagRequestSchema),
@@ -638,20 +621,20 @@ function CreateFlagForm({
         onSubmit={form.handleSubmit(async (body) => {
           try {
             await create.mutateAsync(body);
-            toast.success("Feature flag created");
+            toast.success(translateUi("Feature flag created"));
             form.reset();
             onClose();
           } catch (error) {
             toast.error(
-              error instanceof Error
+              translateErrorMessage(error instanceof Error
                 ? error.message
-                : "Failed to create feature flag",
+                : "Failed to create feature flag"),
             );
           }
         })}
       >
         <div>
-          <Label htmlFor="new-flag-key">Flag key</Label>
+          <Label htmlFor="new-flag-key">{translateUi("Flag key")}</Label>
           <Input
             id="new-flag-key"
             {...form.register("key")}
@@ -665,7 +648,7 @@ function CreateFlagForm({
           )}
         </div>
         <div>
-          <Label htmlFor="new-flag-description">Description</Label>
+          <Label htmlFor="new-flag-description">{translateUi("Description")}</Label>
           <Input
             id="new-flag-description"
             {...form.register("description")}
@@ -687,9 +670,7 @@ function CreateFlagForm({
             }
             disabled={create.isPending}
           />
-          <Label htmlFor="new-flag-default">
-            Enabled by default for everyone
-          </Label>
+          <Label htmlFor="new-flag-default">{translateUi("Enabled by default for everyone")}</Label>
         </div>
         <div className="flex gap-2">
           <Button
@@ -702,17 +683,13 @@ function CreateFlagForm({
               !form.watch("key").trim() ||
               !form.watch("description").trim()
             }
-          >
-            Create flag
-          </Button>
+          >{translateUi("Create flag")}</Button>
           <Button
             type="button"
             variant="ghost"
             disabled={create.isPending}
             onClick={onClose}
-          >
-            Close
-          </Button>
+          >{translateUi("Close")}</Button>
         </div>
       </form>
     </Card>
@@ -751,6 +728,7 @@ function FlagTableRows({
   readonly stagedUsers: readonly string[];
   readonly canWrite: boolean;
 }) {
+  useUiTranslation();
   const [panel, setPanel] = useState<"configuration" | "history">(
     "configuration",
   );
@@ -838,7 +816,7 @@ function FlagTableRows({
                 >
                   <BreakableKey value={flag.key} />
                 </button>
-                {flag.sunset && <Badge variant="warning">Sunset</Badge>}
+                {flag.sunset && <Badge variant="warning">{translateUi("Sunset")}</Badge>}
               </div>
               <p
                 className="line-clamp-1 break-words text-14 text-muted-foreground"
@@ -854,13 +832,13 @@ function FlagTableRows({
             <DataTableBadgeCell>
               <Badge
                 variant={globallyOn ? "success" : "secondary"}
-                title={`Global · ${word(globalState)}`}
+                title={translateUi("Global · {{value1}}", { value1: translateUi(word(globalState)) })}
               >
                 {globalState === "enabled"
-                  ? "On globally"
+                  ? translateUi("On globally")
                   : globalState === "disabled"
-                    ? "Off globally"
-                    : `Default · ${flag.defaultEnabled ? "on" : "off"}`}
+                    ? translateUi("Off globally")
+                    : translateUi("Default · {{value1}}", { value1: flag.defaultEnabled ? translateUi("on") : translateUi("off") })}
               </Badge>
               {targeted.length > 0 && (
                 <Badge
@@ -879,12 +857,12 @@ function FlagTableRows({
                     .join(" · ")}
                 </Badge>
               )}
-              {dirty && <Badge variant="warning">Unsaved</Badge>}
+              {dirty && <Badge variant="warning">{translateUi("Unsaved")}</Badge>}
             </DataTableBadgeCell>
           </DataTableCellShell>
         </TableCell>
         <TableCell className="hidden text-muted-foreground md:table-cell">
-          {flag.defaultEnabled ? "Enabled" : "Disabled"}
+          {flag.defaultEnabled ? translateUi("Enabled") : translateUi("Disabled")}
         </TableCell>
         <TableCell className="hidden lg:table-cell">
           <span className="line-clamp-2 break-words" title={groupLabel}>
@@ -944,15 +922,11 @@ function FlagTableRows({
             }
             className="px-4 pb-5 pt-2 sm:px-6"
           >
-            <TabsList aria-label={`${flag.key} details`}>
+            <TabsList aria-label={translateUi("{{value1}} details", { value1: flag.key })}>
               <TabsTrigger value="configuration" className="gap-1.5">
-                <SlidersHorizontal className="size-3.5" aria-hidden />
-                Configuration
-              </TabsTrigger>
+                <SlidersHorizontal className="size-3.5" aria-hidden />{translateUi("Configuration")}</TabsTrigger>
               <TabsTrigger value="history" className="gap-1.5">
-                <History className="size-3.5" aria-hidden />
-                History
-              </TabsTrigger>
+                <History className="size-3.5" aria-hidden />{translateUi("History")}</TabsTrigger>
             </TabsList>
             {/* Both panels stay mounted so editor drafts survive switching. */}
             <TabsContent
@@ -970,7 +944,7 @@ function FlagTableRows({
               forceMount
               className="mt-4 space-y-4 data-[state=inactive]:hidden"
             >
-              <Group label="Organization">
+              <Group label={translateUi("Organization")}>
                 <FlagOrganizationEditor
                   flagKey={flag.key}
                   current={{
@@ -982,28 +956,25 @@ function FlagTableRows({
                   groups={groups}
                 />
               </Group>
-              <Group label="Documentation">
+              <Group label={translateUi("Documentation")}>
                 <FlagMetadataEditor flag={flag} canWrite={canWrite} />
               </Group>
 
-              <Group label="Global">
+              <Group label={translateUi("Global")}>
                 <ScopeRow
-                  label="All users (rollout / killswitch)"
+                  label={translateUi("All users (rollout / killswitch)")}
                   state={stateFor("global", "")}
                   pending={isPending("global", "")}
                   disabled={!canWrite}
                   onChange={(s) => stage("global", "", s)}
                 />
                 {isUserOnlyFlag(flag.key) && (
-                  <p className="mt-2 type-secondary text-text-tertiary">
-                    Per-person only: global and organization enables are
-                    refused. Enable individual people under By user.
-                  </p>
+                  <p className="mt-2 type-secondary text-text-tertiary">{translateUi("Per-person only: global and organization enables are refused. Enable individual people under By user.")}</p>
                 )}
               </Group>
 
               {!isGlobalOnlyFlag(flag.key) && (
-                <Group label="By organization">
+                <Group label={translateUi("By organization")}>
                   {canWrite && !isUserOnlyFlag(flag.key) && (
                     <AccountSearchPicker
                       flagKey={flag.key}
@@ -1039,7 +1010,7 @@ function FlagTableRows({
               )}
 
               {!isGlobalOnlyFlag(flag.key) && (
-                <Group label="By user">
+                <Group label={translateUi("By user")}>
                   {canWrite && (
                     <AccountSearchPicker
                       flagKey={flag.key}
@@ -1099,6 +1070,7 @@ function FlagMetadataEditor({
   readonly flag: FlagRow;
   readonly canWrite: boolean;
 }) {
+  useUiTranslation();
   const update = useUpdateAdminFeatureFlagMetadata();
   const [description, setDescription] = useState(flag.customDescription ?? "");
   const [owner, setOwner] = useState(flag.owner ?? "");
@@ -1132,7 +1104,7 @@ function FlagMetadataEditor({
       setDescription(values.description ?? "");
       setOwner(values.owner ?? "");
       setHydrationPending(false);
-      toast.success("Flag details saved");
+      toast.success(translateUi("Flag details saved"));
     },
     (pending) => hasFieldConflicts(pending.before, current, pending.body),
     flag.key,
@@ -1170,13 +1142,13 @@ function FlagMetadataEditor({
     return (
       <dl className="space-y-2 text-14">
         <div className="space-y-0.5">
-          <dt className="text-13 text-muted-foreground">Description</dt>
+          <dt className="text-13 text-muted-foreground">{translateUi("Description")}</dt>
           <dd className="text-foreground">{flag.description}</dd>
         </div>
         <div className="space-y-0.5">
-          <dt className="text-13 text-muted-foreground">Owner</dt>
+          <dt className="text-13 text-muted-foreground">{translateUi("Owner")}</dt>
           <dd className={cn(!flag.owner && "text-muted-foreground")}>
-            {flag.owner ?? "Unassigned"}
+            {flag.owner ?? translateUi("Unassigned")}
           </dd>
         </div>
       </dl>
@@ -1200,9 +1172,7 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
-        >
-          Description — what this flag controls
-        </Label>
+        >{translateUi("Description — what this flag controls")}</Label>
         <Input
           id={`flag-description-${flag.key}`}
           disabled={review.saving || update.isPending}
@@ -1216,26 +1186,24 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-owner-${flag.key}`}
-        >
-          Owner — who to ask about it
-        </Label>
+        >{translateUi("Owner — who to ask about it")}</Label>
         <Input
           id={`flag-owner-${flag.key}`}
           disabled={review.saving || update.isPending}
           value={owner}
           maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
           onChange={(event) => setOwner(event.target.value)}
-          placeholder="Unassigned — e.g. Platform team"
+          placeholder={translateUi("Unassigned — e.g. Platform team")}
           className="h-8 text-14"
         />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-13 text-muted-foreground">
           {flag.customDescription == null
-            ? "Using the original description."
+            ? translateUi("Using the original description.")
             : flag.metadataUpdatedAt
-              ? `Edited ${formatRelativeTime(flag.metadataUpdatedAt)}.`
-              : "Edited by an admin."}
+              ? translateUi("Edited {{value1}}.", { value1: formatRelativeTime(flag.metadataUpdatedAt) })
+              : translateUi("Edited by an admin.")}
         </p>
         <div className="flex items-center gap-2">
           {description !== "" && (
@@ -1244,9 +1212,7 @@ function FlagMetadataEditor({
               size="sm"
               onClick={() => setDescription("")}
               disabled={update.isPending}
-            >
-              Use default description
-            </Button>
+            >{translateUi("Use default description")}</Button>
           )}
           <Button
             variant="primary"
@@ -1254,7 +1220,7 @@ function FlagMetadataEditor({
             onClick={save}
             disabled={stale || !dirty || update.isPending}
           >
-            {update.isPending ? "Saving…" : "Save details"}
+            {update.isPending ? translateUi("Saving…") : translateUi("Save details")}
           </Button>
         </div>
       </div>
@@ -1278,6 +1244,7 @@ function AccountSearchPicker({
   readonly excludedIds: readonly string[];
   readonly onPick: (picked: { id: string; label: string }) => void;
 }) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [focused, setFocused] = useState(false);
@@ -1348,10 +1315,10 @@ function AccountSearchPicker({
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           placeholder={
-            isOrg ? "Search organizations by name…" : "Search users by email…"
+            isOrg ? translateUi("Search organizations by name…") : translateUi("Search users by email…")
           }
           aria-label={
-            isOrg ? "Search organizations by name" : "Search users by email"
+            isOrg ? translateUi("Search organizations by name") : translateUi("Search users by email")
           }
           className="h-8 pl-8 text-14"
         />
@@ -1359,14 +1326,12 @@ function AccountSearchPicker({
       {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
-            <p className="px-3 py-2 text-13 text-muted-foreground">
-              Searching…
-            </p>
+            <p className="px-3 py-2 text-13 text-muted-foreground">{translateUi("Searching…")}</p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-13 text-muted-foreground">
               {isOrg
-                ? "No organizations match this search."
-                : "No users match this search."}
+                ? translateUi("No organizations match this search.")
+                : translateUi("No users match this search.")}
             </p>
           ) : (
             results.map((account) => (
@@ -1383,14 +1348,12 @@ function AccountSearchPicker({
         showDefaults && (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
             {defaultsLoading ? (
-              <p className="px-3 py-2 text-13 text-muted-foreground">
-                Loading…
-              </p>
+              <p className="px-3 py-2 text-13 text-muted-foreground">{translateUi("Loading…")}</p>
             ) : defaults.length === 0 ? (
               <p className="px-3 py-2 text-13 text-muted-foreground">
                 {isOrg
-                  ? "No organizations to suggest."
-                  : "No users to suggest."}
+                  ? translateUi("No organizations to suggest.")
+                  : translateUi("No users to suggest.")}
               </p>
             ) : (
               <>
@@ -1403,9 +1366,7 @@ function AccountSearchPicker({
                   />
                 ))}
                 {hasMoreSuggestions && (
-                  <p className="border-t border-border/40 px-3 py-2 text-13 text-muted-foreground">
-                    More accounts — keep typing to narrow
-                  </p>
+                  <p className="border-t border-border/40 px-3 py-2 text-13 text-muted-foreground">{translateUi("More accounts — keep typing to narrow")}</p>
                 )}
               </>
             )}
@@ -1425,6 +1386,7 @@ function AccountOption({
   readonly isOrg: boolean;
   readonly onPick: (account: FeatureFlagTarget) => void;
 }) {
+  useUiTranslation();
   return (
     <button
       type="button"
@@ -1459,6 +1421,7 @@ function FlagsEmptyState({
   readonly subtitle: string;
   readonly tone?: "neutral" | "error";
 }) {
+  useUiTranslation();
   const error = tone === "error";
   return (
     <div
@@ -1495,6 +1458,7 @@ function Group({
   readonly label: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <div className="grid gap-2 border-t border-border/40 pt-4 first:border-t-0 first:pt-0 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-4">
       <p className="type-secondary-strong text-text-tertiary sm:pt-1.5">
@@ -1518,6 +1482,7 @@ function ScopeRow({
   readonly disabled?: boolean;
   readonly onChange: (s: ScopeState) => void;
 }) {
+  useUiTranslation();
   return (
     <div
       className={cn(
@@ -1546,9 +1511,9 @@ function ScopeRow({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="inherit">Inherit</SelectItem>
-          <SelectItem value="enabled">Enabled</SelectItem>
-          <SelectItem value="disabled">Disabled</SelectItem>
+          <SelectItem value="inherit">{translateUi("Inherit")}</SelectItem>
+          <SelectItem value="enabled">{translateUi("Enabled")}</SelectItem>
+          <SelectItem value="disabled">{translateUi("Disabled")}</SelectItem>
         </SelectContent>
       </Select>
     </div>
@@ -1561,6 +1526,7 @@ function ScopeRow({
  * (and is found) as one string.
  */
 function BreakableKey({ value }: { readonly value: string }) {
+  useUiTranslation();
   return value
     .split(/(?<=[:_-])/)
     .flatMap((part, index) =>

@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import {
   composeTokenExchangeCredential,
@@ -311,10 +314,10 @@ function shouldShowAuthKeyName(authMethod: string): boolean {
 }
 
 function getAuthKeyNameLabel(authMethod: string): string {
-  if (authMethod === "body") return "Body Field Name";
-  if (authMethod === "header") return "Header Name";
-  if (authMethod === "query") return "Query Parameter";
-  return "Auth Key Name";
+  if (authMethod === "body") return translateUi("Body Field Name");
+  if (authMethod === "header") return translateUi("Header Name");
+  if (authMethod === "query") return translateUi("Query Parameter");
+  return translateUi("Auth Key Name");
 }
 
 const INITIAL_FORM: FormState = {
@@ -336,9 +339,10 @@ const INITIAL_FORM: FormState = {
 };
 
 function CopyableCode({ children }: { readonly children: string }) {
+  useUiTranslation();
   function handleCopy() {
     void copyToClipboard(children).then(() => {
-      toast.success("Copied to clipboard");
+      toast.success(translateUi("Copied to clipboard"));
     });
   }
 
@@ -368,6 +372,7 @@ function CatalogGrid({
   readonly onCustom: () => void;
   readonly onCustomSsh: () => void;
 }) {
+  useUiTranslation();
   const { data: entries, isLoading } = useCatalog();
   const [search, setSearch] = useState("");
 
@@ -405,14 +410,12 @@ function CatalogGrid({
           onClick={() => setChoosingPostHogRegion(false)}
           className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft className="h-3 w-3" />
-          Back to catalog
-        </button>
+          <ArrowLeft className="h-3 w-3" />{translateUi("Back to catalog")}</button>
         <StepHeader
           slug={postHogRepresentative?.slug}
           iconUrl={postHogRepresentative?.icon_url}
-          title="Connect PostHog"
-          description="Choose where your existing PostHog project is hosted."
+          title={translateUi("Connect PostHog")}
+          description={translateUi("Choose where your existing PostHog project is hosted.")}
         />
         <div className="grid grid-cols-2 gap-3">
           {[...postHogEntries]
@@ -427,7 +430,7 @@ function CatalogGrid({
                 className="flex flex-col gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-hairline-strong hover:bg-accent/40"
               >
                 <span className="type-row-title">
-                  {postHogRegion(entry) === "US" ? "United States" : "European Union"}
+                  {postHogRegion(entry) === "US" ? translateUi("United States") : translateUi("European Union")}
                 </span>
                 <span className="text-13 text-muted-foreground">
                   {new URL(entry.base_url).hostname}
@@ -444,7 +447,7 @@ function CatalogGrid({
       <div className="relative">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
-          placeholder="Search services..."
+          placeholder={translateUi("Search services...")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="pl-9"
@@ -458,7 +461,7 @@ function CatalogGrid({
           className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
-          <span className="type-secondary-emphasis">Custom Endpoint</span>
+          <span className="type-secondary-emphasis">{translateUi("Custom Endpoint")}</span>
         </button>
 
         <button
@@ -467,7 +470,7 @@ function CatalogGrid({
           className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
-          <span className="type-secondary-emphasis">Custom SSH</span>
+          <span className="type-secondary-emphasis">{translateUi("Custom SSH")}</span>
         </button>
 
         {filtered?.map((entry) => (
@@ -485,33 +488,25 @@ function CatalogGrid({
               <ServiceIcon slug={entry.slug} iconUrl={entry.icon_url} size="sm" />
               <div className="flex flex-wrap justify-end gap-1">
                 {entry.service_type === "ssh" && (
-                  <Badge variant="secondary" className="text-12">
-                    SSH
-                  </Badge>
+                  <Badge variant="secondary" className="text-12">{translateUi("SSH")}</Badge>
                 )}
                 {entry.requires_gateway_url && (
-                  <Badge variant="secondary" className="text-12">
-                    URL required
-                  </Badge>
+                  <Badge variant="secondary" className="text-12">{translateUi("URL required")}</Badge>
                 )}
                 {entry.provider_type === "oauth2" && (
-                  <Badge variant="secondary" className="text-12">
-                    OAuth
-                  </Badge>
+                  <Badge variant="secondary" className="text-12">{translateUi("OAuth")}</Badge>
                 )}
                 {entry.provider_type === "device_code" && (
-                  <Badge variant="secondary" className="text-12">
-                    Device Code
-                  </Badge>
+                  <Badge variant="secondary" className="text-12">{translateUi("Device Code")}</Badge>
                 )}
               </div>
             </div>
             <span className="line-clamp-1 w-full type-row-title">
-              {entry === postHogRepresentative ? "PostHog" : entry.name}
+              {entry === postHogRepresentative ? translateUi("PostHog") : entry.name}
             </span>
             <span className="line-clamp-2 w-full text-13 text-muted-foreground">
               {entry === postHogRepresentative
-                ? "Connect projects and analytics in the US or EU."
+                ? translateUi("Connect projects and analytics in the US or EU.")
                 : (entry.description ?? entry.base_url)}
             </span>
           </button>
@@ -544,6 +539,7 @@ function RoutingStep({
   readonly clientSource: "managed" | "self";
   readonly onClientSourceChange: (source: "managed" | "self") => void;
 }) {
+  useUiTranslation();
   const { data: nodes, isLoading } = useNodes();
   const onlineNodes = nodes?.filter((n) => n.status === "online") ?? [];
   const [routingChoice, setRoutingChoice] = useState<"direct" | "node">(
@@ -572,25 +568,23 @@ function RoutingStep({
         onClick={onBack}
         className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3 w-3" />
-        Back to catalog
-      </button>
+        <ArrowLeft className="h-3 w-3" />{translateUi("Back to catalog")}</button>
 
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry
-            ? `Configure routing for ${catalogEntry.name}`
-            : "Configure routing"
+            ? translateUi("Configure routing for {{value1}}", { value1: catalogEntry.name })
+            : translateUi("Configure routing")
         }
         description={
-          catalogEntry?.description ?? "Choose how requests reach the endpoint."
+          catalogEntry?.description ?? translateUi("Choose how requests reach the endpoint.")
         }
       />
 
       <div className="space-y-3">
-        <Label>How should requests reach this service?</Label>
+        <Label>{translateUi("How should requests reach this service?")}</Label>
 
         {!isSshOnly ? (
           <div className="grid grid-cols-2 gap-3">
@@ -607,10 +601,8 @@ function RoutingStep({
               }`}
             >
               <Globe className="h-5 w-5" />
-              <span className="type-secondary-emphasis">Direct</span>
-              <span className="text-12 text-muted-foreground">
-                NyxID proxies to endpoint
-              </span>
+              <span className="type-secondary-emphasis">{translateUi("Direct")}</span>
+              <span className="text-12 text-muted-foreground">{translateUi("NyxID proxies to endpoint")}</span>
             </button>
             <button
               type="button"
@@ -623,35 +615,31 @@ function RoutingStep({
               }`}
             >
               <Server className="h-5 w-5" />
-              <span className="type-secondary-emphasis">Via Node</span>
+              <span className="type-secondary-emphasis">{translateUi("Via Node")}</span>
               <span className="text-12 text-muted-foreground">
                 {catalogEntry?.auth_method === "ifttt_mcp"
-                  ? "IFTTT OAuth uses direct routing"
-                  : "Route through credential node"}
+                  ? translateUi("IFTTT OAuth uses direct routing")
+                  : translateUi("Route through credential node")}
               </span>
             </button>
           </div>
         ) : (
-          <p className="text-14 text-muted-foreground">
-            SSH services must be routed through a credential node.
-          </p>
+          <p className="text-14 text-muted-foreground">{translateUi("SSH services must be routed through a credential node.")}</p>
         )}
 
         {routingChoice === "node" && (
           <div className="space-y-1.5">
-            <Label htmlFor="routing-node-select">Select Node</Label>
+            <Label htmlFor="routing-node-select">{translateUi("Select Node")}</Label>
             <Select
               value={form.nodeId || undefined}
               onValueChange={(v) => onChange({ nodeId: v })}
             >
               <SelectTrigger id="routing-node-select">
-                <SelectValue placeholder="Choose a node..." />
+                <SelectValue placeholder={translateUi("Choose a node...")} />
               </SelectTrigger>
               <SelectContent>
                 {isLoading && (
-                  <SelectItem value="_loading" disabled>
-                    Loading nodes...
-                  </SelectItem>
+                  <SelectItem value="_loading" disabled>{translateUi("Loading nodes...")}</SelectItem>
                 )}
                 {onlineNodes.map((node) => (
                   <SelectItem key={node.id} value={node.id}>
@@ -662,9 +650,7 @@ function RoutingStep({
                   </SelectItem>
                 ))}
                 {!isLoading && onlineNodes.length === 0 && (
-                  <SelectItem value="_none" disabled>
-                    No online nodes
-                  </SelectItem>
+                  <SelectItem value="_none" disabled>{translateUi("No online nodes")}</SelectItem>
                 )}
               </SelectContent>
             </Select>
@@ -686,17 +672,17 @@ function RoutingStep({
         disabled={routingChoice === "node" && !form.nodeId}
       >
         {routingChoice === "node"
-          ? "Next: Node Setup"
+          ? translateUi("Next: Node Setup")
           : showClientChoice
             ? clientSource === "managed"
-              ? "Next: Connect"
-              : "Next: Enter Credentials"
+              ? translateUi("Next: Connect")
+              : translateUi("Next: Enter Credentials")
             : catalogEntry &&
                 (catalogEntry.provider_type === "oauth2" ||
                   catalogEntry.provider_type === "device_code") &&
                 !entryNeedsByoCredentials(catalogEntry)
-              ? "Next: Connect"
-              : "Next: Enter Credentials"}
+              ? translateUi("Next: Connect")
+              : translateUi("Next: Enter Credentials")}
       </Button>
     </div>
   );
@@ -717,6 +703,7 @@ function KeyForm({
   readonly onBack: () => void;
   readonly isPending: boolean;
 }) {
+  useUiTranslation();
   const isCustom = catalogEntry === null;
   const endpointEditable =
     isCustom || (catalogEntry?.requires_gateway_url ?? false);
@@ -752,19 +739,17 @@ function KeyForm({
         onClick={onBack}
         className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3 w-3" />
-        Back
-      </button>
+        <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
 
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
         title={
-          catalogEntry ? `Configure ${catalogEntry.name}` : "Custom endpoint"
+          catalogEntry ? translateUi("Configure {{value1}}", { value1: catalogEntry.name }) : translateUi("Custom endpoint")
         }
         description={
           catalogEntry?.description ??
-          "Configure your custom endpoint and credentials."
+          translateUi("Configure your custom endpoint and credentials.")
         }
       />
 
@@ -774,9 +759,7 @@ function KeyForm({
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
-        >
-          Get API key
-          <ExternalLink className="h-3 w-3" />
+        >{translateUi("Get API key")}<ExternalLink className="h-3 w-3" />
         </a>
       )}
 
@@ -788,24 +771,20 @@ function KeyForm({
 
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="add-key-label">
-            Label <span className="text-destructive">*</span>
+          <Label htmlFor="add-key-label">{translateUi("Label ")}<span className="text-destructive">*</span>
           </Label>
           <Input
             id="add-key-label"
             placeholder={
               catalogEntry
-                ? `e.g., ${catalogEntry.name} - Production`
-                : "My API Key"
+                ? translateUi("e.g., {{value1}} - Production", { value1: catalogEntry.name })
+                : translateUi("My API Key")
             }
             value={form.label}
             maxLength={200}
             onChange={(e) => onChange({ label: e.target.value })}
           />
-          <p className="text-13 text-muted-foreground">
-            Give it a name you'll recognize. The proxy slug is auto-generated
-            from this.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("Give it a name you'll recognize. The proxy slug is auto-generated from this.")}</p>
         </div>
 
         {form.authMethod === "token_exchange" &&
@@ -828,7 +807,7 @@ function KeyForm({
                       type={field.secret ? "password" : "text"}
                       placeholder={
                         field.placeholder ??
-                        `Enter ${field.label.toLowerCase()}`
+                        translateUi("Enter {{value1}}", { value1: field.label.toLowerCase() })
                       }
                       value={values[field.name] ?? ""}
                       onChange={(e) =>
@@ -841,11 +820,7 @@ function KeyForm({
                       }
                     />
                     {field.secret && (
-                      <p className="text-13 text-muted-foreground">
-                        Stored encrypted. NyxID exchanges this server-side for
-                        an access token and caches it -- you never have to
-                        refresh tokens, and the secret never leaves NyxID.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Stored encrypted. NyxID exchanges this server-side for an access token and caches it -- you never have to refresh tokens, and the secret never leaves NyxID.")}</p>
                     )}
                   </div>
                 ))}
@@ -862,43 +837,36 @@ function KeyForm({
             return (
               <>
                 <div className="space-y-1.5">
-                  <Label htmlFor="add-key-aws-akid">
-                    Access Key ID
-                    {requiresCredential && (
+                  <Label htmlFor="add-key-aws-akid">{translateUi("Access Key ID")}{requiresCredential && (
                       <span className="text-destructive"> *</span>
                     )}
                   </Label>
                   <Input
                     id="add-key-aws-akid"
-                    placeholder="AKIA..."
+                    placeholder={translateUi("AKIA...")}
                     value={fields.access_key_id}
                     onChange={(e) => update({ access_key_id: e.target.value })}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="add-key-aws-secret">
-                    Secret Access Key
-                    {requiresCredential && (
+                  <Label htmlFor="add-key-aws-secret">{translateUi("Secret Access Key")}{requiresCredential && (
                       <span className="text-destructive"> *</span>
                     )}
                   </Label>
                   <Input
                     id="add-key-aws-secret"
                     type="password"
-                    placeholder="40-character secret"
+                    placeholder={translateUi("40-character secret")}
                     value={fields.secret_access_key}
                     onChange={(e) =>
                       update({ secret_access_key: e.target.value })
                     }
                   />
-                  <p className="text-13 text-muted-foreground">
-                    Stored encrypted. The IAM policy attached to this key
-                    enforces read-only — NyxID never elevates it.
-                  </p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Stored encrypted. The IAM policy attached to this key enforces read-only — NyxID never elevates it.")}</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
-                    <Label htmlFor="add-key-aws-region">Region</Label>
+                    <Label htmlFor="add-key-aws-region">{translateUi("Region")}</Label>
                     <Input
                       id="add-key-aws-region"
                       placeholder="us-east-1"
@@ -907,31 +875,24 @@ function KeyForm({
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label htmlFor="add-key-aws-service">Service</Label>
+                    <Label htmlFor="add-key-aws-service">{translateUi("Service")}</Label>
                     <Input
                       id="add-key-aws-service"
-                      placeholder="ce"
+                      placeholder={translateUi("ce")}
                       value={fields.service}
                       onChange={(e) => update({ service: e.target.value })}
                     />
                   </div>
                 </div>
-                <p className="text-13 text-muted-foreground">
-                  Cost Explorer is single-region (us-east-1, service=ce). For
-                  other AWS services, change `service` to match (e.g. `s3`,
-                  `dynamodb`).
-                </p>
+                <p className="text-13 text-muted-foreground">{translateUi("Cost Explorer is single-region (us-east-1, service=ce). For other AWS services, change `service` to match (e.g. `s3`, `dynamodb`).")}</p>
                 <div className="space-y-1.5">
-                  <Label htmlFor="add-key-aws-session-token">
-                    Session Token{" "}
-                    <span className="text-text-tertiary">
-                      (optional, for STS temporary credentials)
-                    </span>
+                  <Label htmlFor="add-key-aws-session-token">{translateUi("Session Token")}{" "}
+                    <span className="text-text-tertiary">{translateUi("(optional, for STS temporary credentials)")}</span>
                   </Label>
                   <Input
                     id="add-key-aws-session-token"
                     type="password"
-                    placeholder="Leave blank for long-lived IAM user credentials"
+                    placeholder={translateUi("Leave blank for long-lived IAM user credentials")}
                     value={fields.session_token}
                     onChange={(e) => update({ session_token: e.target.value })}
                   />
@@ -953,7 +914,7 @@ function KeyForm({
               placeholder={
                 requiresCredential
                   ? credentialMeta.placeholder
-                  : "No credential required for this service"
+                  : translateUi("No credential required for this service")
               }
               value={requiresCredential ? form.credential : ""}
               onChange={(e) => onChange({ credential: e.target.value })}
@@ -963,20 +924,13 @@ function KeyForm({
               }
             />
             {!requiresCredential && (
-              <p className="text-13 text-muted-foreground">
-                This service can be used without storing a user credential in
-                NyxID.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("This service can be used without storing a user credential in NyxID.")}</p>
             )}
             {requiresCredential && form.authMethod === "body" && (
-              <p className="text-13 text-muted-foreground">
-                NyxID injects this value into the request JSON body under the
-                field name below.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("NyxID injects this value into the request JSON body under the field name below.")}</p>
             )}
             {requiresCredential && form.authMethod === "bot_bearer" && (
-              <p className="text-13 text-muted-foreground">
-                Sent as{" "}
+              <p className="text-13 text-muted-foreground">{translateUi("Sent as")}{" "}
                 <code className="font-mono">
                   Authorization: Bot &lt;token&gt;
                 </code>
@@ -988,7 +942,7 @@ function KeyForm({
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-endpoint">
-            {isSupabase ? "Supabase Project URL" : "Endpoint URL"}{" "}
+            {isSupabase ? translateUi("Supabase Project URL") : translateUi("Endpoint URL")}{" "}
             {(isCustom || catalogEntry?.requires_gateway_url) && (
               <span className="text-destructive">*</span>
             )}
@@ -1011,14 +965,13 @@ function KeyForm({
             }
           />
           {endpointUrlError && (
-            <p className="text-13 text-destructive">{endpointUrlError}</p>
+            <p className="text-13 text-destructive">{translateUi(endpointUrlError)}</p>
           )}
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="add-key-openapi-spec">
-            OpenAPI spec URL{" "}
-            <span className="text-muted-foreground">(optional)</span>
+          <Label htmlFor="add-key-openapi-spec">{translateUi("OpenAPI spec URL")}{" "}
+            <span className="text-muted-foreground">{translateUi("(optional)")}</span>
           </Label>
           <Input
             id="add-key-openapi-spec"
@@ -1029,18 +982,15 @@ function KeyForm({
             aria-invalid={openapiSpecUrlError ? true : undefined}
           />
           {openapiSpecUrlError && (
-            <p className="text-13 text-destructive">{openapiSpecUrlError}</p>
+            <p className="text-13 text-destructive">{translateUi(openapiSpecUrlError)}</p>
           )}
-          <p className="text-13 text-muted-foreground">
-            When set, AI agents discover concrete operations from the spec
-            instead of being limited to a single generic proxy tool.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("When set, AI agents discover concrete operations from the spec instead of being limited to a single generic proxy tool.")}</p>
         </div>
 
         {(isCustom || catalogEntry?.auth_method !== "none") && (
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="add-key-auth-method">Auth Method</Label>
+              <Label htmlFor="add-key-auth-method">{translateUi("Auth Method")}</Label>
               <Select
                 value={form.authMethod}
                 onValueChange={(v) =>
@@ -1054,22 +1004,18 @@ function KeyForm({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="bearer">Bearer</SelectItem>
-                  <SelectItem value="header">Header</SelectItem>
-                  <SelectItem value="query">Query Parameter</SelectItem>
-                  <SelectItem value="path">Path Prefix</SelectItem>
-                  <SelectItem value="ifttt_webhook">IFTTT Webhooks</SelectItem>
-                  <SelectItem value="basic">Basic Auth</SelectItem>
-                  <SelectItem value="body">JSON Body Injection</SelectItem>
-                  <SelectItem value="bot_bearer">
-                    Bot Token (Discord)
-                  </SelectItem>
-                  <SelectItem value="token_exchange">
-                    Token Exchange (Lark / OAuth client_credentials)
-                  </SelectItem>
-                  <SelectItem value="oauth2">OAuth 2.0</SelectItem>
-                  <SelectItem value="oidc">OIDC</SelectItem>
-                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="bearer">{translateUi("Bearer")}</SelectItem>
+                  <SelectItem value="header">{translateUi("Header")}</SelectItem>
+                  <SelectItem value="query">{translateUi("Query Parameter")}</SelectItem>
+                  <SelectItem value="path">{translateUi("Path Prefix")}</SelectItem>
+                  <SelectItem value="ifttt_webhook">{translateUi("IFTTT Webhooks")}</SelectItem>
+                  <SelectItem value="basic">{translateUi("Basic Auth")}</SelectItem>
+                  <SelectItem value="body">{translateUi("JSON Body Injection")}</SelectItem>
+                  <SelectItem value="bot_bearer">{translateUi("Bot Token (Discord)")}</SelectItem>
+                  <SelectItem value="token_exchange">{translateUi("Token Exchange (Lark / OAuth client_credentials)")}</SelectItem>
+                  <SelectItem value="oauth2">{translateUi("OAuth 2.0")}</SelectItem>
+                  <SelectItem value="oidc">{translateUi("OIDC")}</SelectItem>
+                  <SelectItem value="none">{translateUi("None")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1081,7 +1027,7 @@ function KeyForm({
                 <Input
                   id="add-key-auth-key"
                   placeholder={
-                    form.authMethod === "body" ? "app_secret" : "Authorization"
+                    form.authMethod === "body" ? "app_secret" : translateUi("Authorization")
                   }
                   value={form.authKeyName}
                   onChange={(e) => onChange({ authKeyName: e.target.value })}
@@ -1108,7 +1054,7 @@ function KeyForm({
             Boolean(openapiSpecUrlError)
           }
         >
-          {isPending ? "Connecting..." : "Connect Service"}
+          {isPending ? translateUi("Connecting...") : translateUi("Connect Service")}
         </Button>
       </DialogFooter>
     </div>
@@ -1130,6 +1076,7 @@ function NodeSetupStep({
   readonly onBack: () => void;
   readonly isPending: boolean;
 }) {
+  useUiTranslation();
   const isCustom = catalogEntry === null;
   const previewSlug =
     isCustom && form.label.trim()
@@ -1164,26 +1111,23 @@ function NodeSetupStep({
         onClick={onBack}
         className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3 w-3" />
-        Back
-      </button>
+        <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
 
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
         title={
-          catalogEntry ? `${catalogEntry.name} — Node setup` : "Node setup"
+          catalogEntry ? translateUi("{{value1}} — Node setup", { value1: catalogEntry.name }) : translateUi("Node setup")
         }
-        description="Configure credentials on your node agent."
+        description={translateUi("Configure credentials on your node agent.")}
       />
 
       <div className="space-y-1.5">
-        <Label htmlFor="node-label">
-          Label <span className="text-destructive">*</span>
+        <Label htmlFor="node-label">{translateUi("Label ")}<span className="text-destructive">*</span>
         </Label>
         <Input
           id="node-label"
-          placeholder={catalogEntry?.name ?? "My Service"}
+          placeholder={catalogEntry?.name ?? translateUi("My Service")}
           value={form.label}
           maxLength={200}
           onChange={(e) => onChange({ label: e.target.value })}
@@ -1196,16 +1140,16 @@ function NodeSetupStep({
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label htmlFor="node-ssh-host">SSH Host</Label>
+                  <Label htmlFor="node-ssh-host">{translateUi("SSH Host")}</Label>
                   <Input
                     id="node-ssh-host"
-                    placeholder="192.168.1.100 (optional, configured on node)"
+                    placeholder={translateUi("192.168.1.100 (optional, configured on node)")}
                     value={form.sshHost}
                     onChange={(e) => onChange({ sshHost: e.target.value })}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="node-ssh-port">SSH Port</Label>
+                  <Label htmlFor="node-ssh-port">{translateUi("SSH Port")}</Label>
                   <Input
                     id="node-ssh-port"
                     type="number"
@@ -1215,13 +1159,13 @@ function NodeSetupStep({
                     aria-invalid={sshPortError ? true : undefined}
                   />
                   {sshPortError && (
-                    <p className="text-13 text-destructive">{sshPortError}</p>
+                    <p className="text-13 text-destructive">{translateUi(sshPortError)}</p>
                   )}
                 </div>
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="node-ssh-cert-auth">Certificate Auth</Label>
+                <Label htmlFor="node-ssh-cert-auth">{translateUi("Certificate Auth")}</Label>
                 <Select
                   value={form.sshCertificateAuth ? "enabled" : "disabled"}
                   onValueChange={(v) =>
@@ -1232,10 +1176,8 @@ function NodeSetupStep({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="enabled">Enabled</SelectItem>
-                    <SelectItem value="disabled">
-                      Disabled (transport only)
-                    </SelectItem>
+                    <SelectItem value="enabled">{translateUi("Enabled")}</SelectItem>
+                    <SelectItem value="disabled">{translateUi("Disabled (transport only)")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1243,26 +1185,21 @@ function NodeSetupStep({
               {form.sshCertificateAuth && (
                 <>
                   <div className="space-y-1.5">
-                    <Label htmlFor="node-ssh-principals">
-                      Allowed Principals{" "}
+                    <Label htmlFor="node-ssh-principals">{translateUi("Allowed Principals")}{" "}
                       <span className="text-destructive">*</span>
                     </Label>
                     <Input
                       id="node-ssh-principals"
-                      placeholder="ubuntu, deploy"
+                      placeholder={translateUi("ubuntu, deploy")}
                       value={form.sshPrincipals}
                       onChange={(e) =>
                         onChange({ sshPrincipals: e.target.value })
                       }
                     />
-                    <p className="text-13 text-muted-foreground">
-                      Comma-separated Unix usernames for certificate login
-                    </p>
+                    <p className="text-13 text-muted-foreground">{translateUi("Comma-separated Unix usernames for certificate login")}</p>
                   </div>
                   <div className="space-y-1.5">
-                    <Label htmlFor="node-ssh-ttl">
-                      Certificate TTL (minutes)
-                    </Label>
+                    <Label htmlFor="node-ssh-ttl">{translateUi("Certificate TTL (minutes)")}</Label>
                     <Input
                       id="node-ssh-ttl"
                       type="number"
@@ -1274,11 +1211,9 @@ function NodeSetupStep({
                       aria-invalid={sshTtlError ? true : undefined}
                     />
                     {sshTtlError && (
-                      <p className="text-13 text-destructive">{sshTtlError}</p>
+                      <p className="text-13 text-destructive">{translateUi(sshTtlError)}</p>
                     )}
-                    <p className="text-13 text-muted-foreground">
-                      15-60 minutes. Shorter is more secure.
-                    </p>
+                    <p className="text-13 text-muted-foreground">{translateUi("15-60 minutes. Shorter is more secure.")}</p>
                   </div>
                 </>
               )}
@@ -1286,16 +1221,14 @@ function NodeSetupStep({
           ) : (
             <>
               <div className="space-y-1.5">
-                <Label htmlFor="node-endpoint">Endpoint URL</Label>
+                <Label htmlFor="node-endpoint">{translateUi("Endpoint URL")}</Label>
                 <Input
                   id="node-endpoint"
                   placeholder="https://api.example.com/v1"
                   value={form.endpointUrl}
                   onChange={(e) => onChange({ endpointUrl: e.target.value })}
                 />
-                <p className="text-13 text-muted-foreground">
-                  The target URL configured on your node agent
-                </p>
+                <p className="text-13 text-muted-foreground">{translateUi("The target URL configured on your node agent")}</p>
               </div>
             </>
           )}
@@ -1303,7 +1236,7 @@ function NodeSetupStep({
           {!isSsh && (
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label htmlFor="node-auth-method">Auth Method</Label>
+                <Label htmlFor="node-auth-method">{translateUi("Auth Method")}</Label>
                 <Select
                   value={form.authMethod}
                   onValueChange={(v) =>
@@ -1317,19 +1250,17 @@ function NodeSetupStep({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="bearer">Bearer</SelectItem>
-                    <SelectItem value="header">Header</SelectItem>
-                    <SelectItem value="query">Query Parameter</SelectItem>
-                    <SelectItem value="path">Path Prefix</SelectItem>
-                    <SelectItem value="ifttt_webhook">IFTTT Webhooks</SelectItem>
-                    <SelectItem value="basic">Basic Auth</SelectItem>
-                    <SelectItem value="body">JSON Body Injection</SelectItem>
-                    <SelectItem value="bot_bearer">
-                      Bot Token (Discord)
-                    </SelectItem>
-                    <SelectItem value="oauth2">OAuth 2.0</SelectItem>
-                    <SelectItem value="oidc">OIDC</SelectItem>
-                    <SelectItem value="none">None</SelectItem>
+                    <SelectItem value="bearer">{translateUi("Bearer")}</SelectItem>
+                    <SelectItem value="header">{translateUi("Header")}</SelectItem>
+                    <SelectItem value="query">{translateUi("Query Parameter")}</SelectItem>
+                    <SelectItem value="path">{translateUi("Path Prefix")}</SelectItem>
+                    <SelectItem value="ifttt_webhook">{translateUi("IFTTT Webhooks")}</SelectItem>
+                    <SelectItem value="basic">{translateUi("Basic Auth")}</SelectItem>
+                    <SelectItem value="body">{translateUi("JSON Body Injection")}</SelectItem>
+                    <SelectItem value="bot_bearer">{translateUi("Bot Token (Discord)")}</SelectItem>
+                    <SelectItem value="oauth2">{translateUi("OAuth 2.0")}</SelectItem>
+                    <SelectItem value="oidc">{translateUi("OIDC")}</SelectItem>
+                    <SelectItem value="none">{translateUi("None")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1343,7 +1274,7 @@ function NodeSetupStep({
                     placeholder={
                       form.authMethod === "body"
                         ? "app_secret"
-                        : "Authorization"
+                        : translateUi("Authorization")
                     }
                     value={form.authKeyName}
                     onChange={(e) => onChange({ authKeyName: e.target.value })}
@@ -1358,33 +1289,22 @@ function NodeSetupStep({
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary-text" />
-          <p className="type-row-title">Node Setup Instructions</p>
+          <p className="type-row-title">{translateUi("Node Setup Instructions")}</p>
         </div>
 
         {isSsh ? (
           <div className="space-y-2">
-            <p className="text-13 text-muted-foreground">
-              The SSH service will be created with certificate-based
-              authentication. After creation, full setup instructions (CA key,
-              sshd_config, node agent setup) will be available on the service
-              detail page.
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("The SSH service will be created with certificate-based authentication. After creation, full setup instructions (CA key, sshd_config, node agent setup) will be available on the service detail page.")}</p>
           </div>
         ) : (
           <div className="space-y-3">
-            <p className="text-13 text-muted-foreground">
-              Run this on your node to auto-setup credentials. It detects the
-              service type and guides you through the right flow:
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("Run this on your node to auto-setup credentials. It detects the service type and guides you through the right flow:")}</p>
             <CopyableCode>
               {`nyxid node credentials setup --service ${slug || "<slug>"}`}
             </CopyableCode>
             {isCustom && (
-              <p className="text-13 text-muted-foreground">
-                The exact service slug will be shown on the service detail page
-                after creation. Update the{" "}
-                <code className="text-14">--service</code> flag accordingly.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("The exact service slug will be shown on the service detail page after creation. Update the")}{" "}
+                <code className="text-14">--service</code>{translateUi(" flag accordingly.")}</p>
             )}
             {catalogEntry?.api_key_url && (
               <a
@@ -1392,9 +1312,7 @@ function NodeSetupStep({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
-              >
-                Get API key
-                <ExternalLink className="h-3 w-3" />
+              >{translateUi("Get API key")}<ExternalLink className="h-3 w-3" />
               </a>
             )}
           </div>
@@ -1417,7 +1335,7 @@ function NodeSetupStep({
               !form.sshPrincipals.trim())
           }
         >
-          {isPending ? "Connecting..." : "Connect Service"}
+          {isPending ? translateUi("Connecting...") : translateUi("Connect Service")}
         </Button>
       </DialogFooter>
     </div>
@@ -1547,6 +1465,7 @@ function OAuthStep({
   readonly onPopupViewResult?: (keyId: string) => boolean;
   readonly onPopupDismiss: () => void;
 }) {
+  useUiTranslation();
   const { mutateAsync: initiateOAuthAsync, isPending: oauthInitiatePending } =
     useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
@@ -1921,8 +1840,8 @@ function OAuthStep({
         <StepHeader
           slug={catalogEntry?.slug}
           iconUrl={catalogEntry?.icon_url}
-          title={`Authorize ${catalogEntry.name}`}
-          description={`Open ${catalogEntry.name} to approve access. Leave this open — it updates automatically when you're done.`}
+          title={translateUi("Authorize {{value1}}", { value1: catalogEntry.name })}
+          description={translateUi("Open {{value1}} to approve access. Leave this open — it updates automatically when you're done.", { value1: catalogEntry.name })}
         />
 
         <a
@@ -1931,8 +1850,7 @@ function OAuthStep({
           rel="noopener noreferrer"
           className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 type-row-title text-primary-foreground transition-opacity hover:opacity-90"
         >
-          <ExternalLink className="h-4 w-4" />
-          Open {catalogEntry.name}
+          <ExternalLink className="h-4 w-4" />{translateUi("Open ")}{catalogEntry.name}
         </a>
 
         <div
@@ -1943,30 +1861,22 @@ function OAuthStep({
           {authorized ? (
             <>
               <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
-              <span className="text-foreground">
-                Connected. Credential sealed in NyxID&apos;s vault.
-              </span>
+              <span className="text-foreground">{translateUi("Connected. Credential sealed in NyxID's vault.")}</span>
             </>
           ) : authorizationFailed ? (
             <>
               <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" />
-              <span className="text-destructive">
-                Authorization was denied or expired.
-              </span>
+              <span className="text-destructive">{translateUi("Authorization was denied or expired.")}</span>
             </>
           ) : popupMayBeClosed ? (
             <>
               <AlertCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
-              <span className="text-foreground">
-                The provider window may have closed. If it is still open, finish
-                there; otherwise start again.
-              </span>
+              <span className="text-foreground">{translateUi("The provider window may have closed. If it is still open, finish there; otherwise start again.")}</span>
             </>
           ) : (
             <>
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" />
-              <span className="text-muted-foreground">
-                Waiting for {catalogEntry.name}…
+              <span className="text-muted-foreground">{translateUi("Waiting for ")}{catalogEntry.name}…
               </span>
             </>
           )}
@@ -1981,9 +1891,7 @@ function OAuthStep({
               if (launchId) useOAuthPopupStore.getState().end(launchId);
               onComplete(pendingKeyId);
             }}
-          >
-            Continue
-          </Button>
+          >{translateUi("Continue")}</Button>
         ) : null}
 
         {authorizationFailed && (
@@ -1995,9 +1903,7 @@ function OAuthStep({
               setPendingKeyId(null);
               setPreviousAuthorizationAt(undefined);
             }}
-          >
-            Try again
-          </Button>
+          >{translateUi("Try again")}</Button>
         )}
 
         {popupMayBeClosed && !authorized && !authorizationFailed ? (
@@ -2005,9 +1911,7 @@ function OAuthStep({
             variant="outline"
             className="w-full"
             onClick={startOverAfterClosedHint}
-          >
-            Start again
-          </Button>
+          >{translateUi("Start again")}</Button>
         ) : null}
       </div>
     );
@@ -2020,15 +1924,13 @@ function OAuthStep({
         onClick={onBack}
         className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3 w-3" />
-        Back
-      </button>
+        <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
 
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
-        title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
-        description="This service uses OAuth to authenticate. Click the button below to connect your account."
+        title={reconnectMode ? translateUi("Reconnect to {{service}}", { service: catalogEntry.name }) : translateUi("Connect to {{service}}", { service: catalogEntry.name })}
+        description={translateUi("This service uses OAuth to authenticate. Click the button below to connect your account.")}
       />
 
       {catalogEntry.supports_oauth_scopes !== false && (
@@ -2047,7 +1949,7 @@ function OAuthStep({
 
       {error && (
         <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
-          {error}
+          {translateUi(error)}
         </div>
       )}
 
@@ -2061,15 +1963,12 @@ function OAuthStep({
           <>
             <ButtonIcon>
               <Loader2 className="h-3 w-3 animate-spin" />
-            </ButtonIcon>
-            Connecting...
-          </>
+            </ButtonIcon>{translateUi("Connecting...")}</>
         ) : (
           <>
             <ButtonIcon>
               <ExternalLink className="h-4 w-4" />
-            </ButtonIcon>
-            Connect with {catalogEntry.name}
+            </ButtonIcon>{translateUi("Connect with ")}{catalogEntry.name}
           </>
         )}
       </Button>
@@ -2115,6 +2014,7 @@ function DeviceCodeStep({
   /** Additional normalized scopes requested by an assistant action. */
   readonly prefillScopes?: readonly string[];
 }) {
+  useUiTranslation();
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
@@ -2423,7 +2323,7 @@ function DeviceCodeStep({
 
   function handleCopyCode() {
     void copyToClipboard(userCode).then(() => {
-      toast.success("Code copied to clipboard");
+      toast.success(translateUi("Code copied to clipboard"));
     });
   }
 
@@ -2466,15 +2366,13 @@ function DeviceCodeStep({
           onClick={onBack}
           className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft className="h-3 w-3" />
-          Back
-        </button>
+          <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
 
         <StepHeader
           slug={catalogEntry?.slug}
           iconUrl={catalogEntry?.icon_url}
-          title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
-          description="This service uses a device code to authenticate. Click continue to request a code."
+          title={translateUi("{{value1}} to {{value2}}", { value1: reconnectMode ? "Reconnect" : "Connect", value2: catalogEntry.name })}
+          description={translateUi("This service uses a device code to authenticate. Click continue to request a code.")}
         />
 
         {supportsAdditionalScopes ? (
@@ -2489,19 +2387,14 @@ function DeviceCodeStep({
             idPrefix="device-scope"
           />
         ) : (
-          <p className="text-13 text-muted-foreground">
-            This provider does not accept additional scopes -- they are fixed by
-            the upstream client registration.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("This provider does not accept additional scopes -- they are fixed by the upstream client registration.")}</p>
         )}
 
         <Button
           variant="primary"
           className="w-full"
           onClick={() => void handleInitiate()}
-        >
-          Continue
-        </Button>
+        >{translateUi("Continue")}</Button>
       </div>
     );
   }
@@ -2514,14 +2407,12 @@ function DeviceCodeStep({
           onClick={onBack}
           className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft className="h-3 w-3" />
-          Back
-        </button>
+          <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
         <StepHeader
           slug={catalogEntry?.slug}
           iconUrl={catalogEntry?.icon_url}
-          title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
-          description={`Requesting code from ${catalogEntry.name}...`}
+          title={translateUi("{{value1}} to {{value2}}", { value1: reconnectMode ? "Reconnect" : "Connect", value2: catalogEntry.name })}
+          description={translateUi("Requesting code from {{value1}}...", { value1: catalogEntry.name })}
         />
         <div className="flex justify-center py-6">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -2536,8 +2427,8 @@ function DeviceCodeStep({
         <StepHeader
           slug={catalogEntry?.slug}
           iconUrl={catalogEntry?.icon_url}
-          title={`${catalogEntry.name} connected`}
-          description={`Your ${catalogEntry.name} account has been connected successfully.`}
+          title={translateUi("{{value1}} connected", { value1: catalogEntry.name })}
+          description={translateUi("Your {{value1}} account has been connected successfully.", { value1: catalogEntry.name })}
         />
         <div className="flex justify-center py-4">
           <CheckCircle2 className="h-8 w-8 text-success" />
@@ -2551,9 +2442,7 @@ function DeviceCodeStep({
             }
           }}
           disabled={!createdKeyId}
-        >
-          Done
-        </Button>
+        >{translateUi("Done")}</Button>
       </div>
     );
   }
@@ -2566,14 +2455,12 @@ function DeviceCodeStep({
           onClick={onBack}
           className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft className="h-3 w-3" />
-          Back
-        </button>
+          <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
         <StepHeader
           slug={catalogEntry?.slug}
           iconUrl={catalogEntry?.icon_url}
-          title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
-          description="Something went wrong. Review the error below and try again."
+          title={translateUi("{{value1}} to {{value2}}", { value1: reconnectMode ? "Reconnect" : "Connect", value2: catalogEntry.name })}
+          description={translateUi("Something went wrong. Review the error below and try again.")}
         />
         <div className="flex flex-col items-center gap-3 py-4">
           <AlertCircle className="h-8 w-8 text-destructive" />
@@ -2582,12 +2469,8 @@ function DeviceCodeStep({
           </p>
         </div>
         <div className="flex justify-end gap-2">
-          <Button variant="outline" className="flex-1" onClick={onBack}>
-            Cancel
-          </Button>
-          <Button variant="primary" className="flex-1" onClick={handleRetry}>
-            Try Again
-          </Button>
+          <Button variant="outline" className="flex-1" onClick={onBack}>{translateUi("Cancel")}</Button>
+          <Button variant="primary" className="flex-1" onClick={handleRetry}>{translateUi("Try Again")}</Button>
         </div>
       </div>
     );
@@ -2601,21 +2484,17 @@ function DeviceCodeStep({
         onClick={onBack}
         className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3 w-3" />
-        Back
-      </button>
+        <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
 
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
-        title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
-        description={`Enter this code at ${catalogEntry.name} to finish authenticating.`}
+        title={translateUi("{{value1}} to {{value2}}", { value1: reconnectMode ? "Reconnect" : "Connect", value2: catalogEntry.name })}
+        description={translateUi("Enter this code at {{value1}} to finish authenticating.", { value1: catalogEntry.name })}
       />
 
       <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-        <p className="type-secondary-emphasis uppercase tracking-wider text-muted-foreground">
-          Your code
-        </p>
+        <p className="type-secondary-emphasis uppercase tracking-wider text-muted-foreground">{translateUi("Your code")}</p>
         <div className="flex items-center gap-3">
           <code className="type-metric tracking-[0.3em] font-mono text-primary-text">
             {userCode}
@@ -2625,7 +2504,7 @@ function DeviceCodeStep({
             variant="ghost"
             onClick={handleCopyCode}
             className="h-8 w-8 p-0"
-            title="Copy code"
+            title={translateUi("Copy code")}
           >
             <Copy className="h-4 w-4" />
           </Button>
@@ -2637,27 +2516,25 @@ function DeviceCodeStep({
           <a href={verificationUri} target="_blank" rel="noopener noreferrer">
             <ButtonIcon>
               <ExternalLink className="h-4 w-4" />
-            </ButtonIcon>
-            Open {catalogEntry.name} Authentication
-          </a>
+            </ButtonIcon>{translateUi("Open ")}{catalogEntry.name}{translateUi(" Authentication")}</a>
         </Button>
       </div>
 
       <div className="rounded-lg bg-muted p-3 text-14 text-muted-foreground">
         <ol className="list-decimal list-inside space-y-1">
-          <li>Click the link above to open the authentication page</li>
-          <li>Enter the code shown above</li>
-          <li>Sign in with your account</li>
+          <li>{translateUi("Click the link above to open the authentication page")}</li>
+          <li>{translateUi("Enter the code shown above")}</li>
+          <li>{translateUi("Sign in with your account")}</li>
         </ol>
       </div>
 
       <div className="flex items-center justify-between text-13 text-muted-foreground">
         <div className="flex items-center gap-2">
           <Loader2 className="h-3 w-3 animate-spin" />
-          <span>Waiting for authentication...</span>
+          <span>{translateUi("Waiting for authentication...")}</span>
         </div>
         {secondsRemaining > 0 && (
-          <span>Expires in {formatTime(secondsRemaining)}</span>
+          <span>{translateUi("Expires in ")}{formatTime(secondsRemaining)}</span>
         )}
       </div>
     </div>
@@ -2692,6 +2569,7 @@ function OAuthCredentialsStep({
    */
   readonly onComplete: (clientId: string, clientSecret: string) => void;
 }) {
+  useUiTranslation();
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -2727,15 +2605,13 @@ function OAuthCredentialsStep({
         onClick={onBack}
         className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3 w-3" />
-        Back
-      </button>
+        <ArrowLeft className="h-3 w-3" />{translateUi("Back")}</button>
 
       <StepHeader
         slug={catalogEntry?.slug}
         iconUrl={catalogEntry?.icon_url}
-        title={`Setup ${catalogEntry.name} credentials`}
-        description="This service requires your own OAuth app credentials."
+        title={translateUi("Setup {{value1}} credentials", { value1: catalogEntry.name })}
+        description={translateUi("This service requires your own OAuth app credentials.")}
       />
 
       {catalogEntry.documentation_url && (
@@ -2744,9 +2620,7 @@ function OAuthCredentialsStep({
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
-        >
-          How to create an OAuth app
-          <ExternalLink className="h-3 w-3" />
+        >{translateUi("How to create an OAuth app")}<ExternalLink className="h-3 w-3" />
         </a>
       )}
 
@@ -2760,18 +2634,17 @@ function OAuthCredentialsStep({
 
       {error && (
         <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
-          {error}
+          {translateUi(error)}
         </div>
       )}
 
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="oauth-client-id">
-            Client ID <span className="text-destructive">*</span>
+          <Label htmlFor="oauth-client-id">{translateUi("Client ID ")}<span className="text-destructive">*</span>
           </Label>
           <Input
             id="oauth-client-id"
-            placeholder="Your OAuth app Client ID"
+            placeholder={translateUi("Your OAuth app Client ID")}
             value={clientId}
             onChange={(e) => setClientId(e.target.value)}
             autoComplete="off"
@@ -2779,8 +2652,7 @@ function OAuthCredentialsStep({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="oauth-client-secret">
-            Client Secret{" "}
+          <Label htmlFor="oauth-client-secret">{translateUi("Client Secret")}{" "}
             {requireSecret ? <span className="text-destructive">*</span> : null}
           </Label>
           <Input
@@ -2788,8 +2660,8 @@ function OAuthCredentialsStep({
             type="password"
             placeholder={
               requireSecret
-                ? "Your OAuth app Client Secret"
-                : "Your OAuth app Client Secret (optional for public clients)"
+                ? translateUi("Your OAuth app Client Secret")
+                : translateUi("Your OAuth app Client Secret (optional for public clients)")
             }
             value={clientSecret}
             onChange={(e) => setClientSecret(e.target.value)}
@@ -2803,9 +2675,7 @@ function OAuthCredentialsStep({
         className="w-full"
         onClick={handleSave}
         disabled={!clientId.trim() || (requireSecret && !clientSecret.trim())}
-      >
-        Continue to Authentication
-      </Button>
+      >{translateUi("Continue to Authentication")}</Button>
     </div>
   );
 }
@@ -2824,6 +2694,7 @@ function OwnerPicker({
   readonly value: string | null;
   readonly onChange: (orgId: string | null) => void;
 }) {
+  useUiTranslation();
   const { data: orgs } = useOrgs();
   // Hide the picker entirely when the caller has no admin orgs -- a
   // Personal-only select is noise in that case.
@@ -2833,17 +2704,12 @@ function OwnerPicker({
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 type-secondary-emphasis text-muted-foreground">
-          <Building2 className="h-3.5 w-3.5" />
-          Owner
-        </div>
+          <Building2 className="h-3.5 w-3.5" />{translateUi("Owner")}</div>
         <div className="w-[220px]">
-          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
+          <OrgScopeSelect value={value} onChange={onChange} label={translateUi("Owner")} />
         </div>
       </div>
-      <p className="mt-1 text-13 text-muted-foreground">
-        Org-owned services are shared with every admin of that organization and
-        can be proxied by its members.
-      </p>
+      <p className="mt-1 text-13 text-muted-foreground">{translateUi("Org-owned services are shared with every admin of that organization and can be proxied by its members.")}</p>
     </div>
   );
 }
@@ -2855,16 +2721,13 @@ function AccessPolicyPicker({
   readonly checked: boolean;
   readonly onChange: (checked: boolean) => void;
 }) {
+  useUiTranslation();
   return (
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <Label htmlFor="add-key-admin-only">
-            Admin-only execution
-          </Label>
-          <p className="text-13 text-muted-foreground">
-            Restrict this org-owned service to organization admins.
-          </p>
+          <Label htmlFor="add-key-admin-only">{translateUi("Admin-only execution")}</Label>
+          <p className="text-13 text-muted-foreground">{translateUi("Restrict this org-owned service to organization admins.")}</p>
         </div>
         <Switch
           id="add-key-admin-only"
@@ -2946,6 +2809,7 @@ export function AddKeyDialog({
   readonly flow?: OAuthFlowKind;
   readonly onPopupViewResult?: (keyId: string) => boolean;
 }) {
+  useUiTranslation();
   const createKey = useCreateKey();
   const updateKey = useUpdateKey();
   const { data: catalogEntries } = useCatalog({
@@ -3133,7 +2997,7 @@ export function AddKeyDialog({
         use_platform_key: true, ...(targetOrgId ? { target_org_id: targetOrgId } : {}) });
       setCreatedKey({ id: key.id, slug: key.slug, catalogSlug: selectedEntry.slug, serviceName: selectedEntry.name, completionMode: "credential" });
       setStep("verify");
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Failed to connect service"); }
+    } catch (error) { toast.error(translateErrorMessage(error instanceof Error ? error.message : "Failed to connect service")); }
   }
 
   function handleSelectCustom() {
@@ -3388,7 +3252,7 @@ export function AddKeyDialog({
       onError: (err) => {
         const message =
           err instanceof ApiError ? err.message : "Failed to create key";
-        toast.error(message);
+        toast.error(translateErrorMessage(message));
       },
     });
   }
@@ -3458,7 +3322,7 @@ export function AddKeyDialog({
       onError: (err) => {
         const message =
           err instanceof ApiError ? err.message : "Failed to create service";
-        toast.error(message);
+        toast.error(translateErrorMessage(message));
       },
     });
   }
@@ -3473,11 +3337,11 @@ export function AddKeyDialog({
             gap-4, and leaves exactly one heading in the a11y tree. */}
         {step === "catalog" && (
           <StepHeader
-            title={isReconnect ? "Reconnect Service" : "Add AI Service"}
+            title={isReconnect ? translateUi("Reconnect Service") : translateUi("Add AI Service")}
             description={
               isReconnect
-                ? "Restart authentication for this existing service."
-                : "Pick from the catalog or create a custom endpoint."
+                ? translateUi("Restart authentication for this existing service.")
+                : translateUi("Pick from the catalog or create a custom endpoint.")
             }
           />
         )}
@@ -3503,8 +3367,8 @@ export function AddKeyDialog({
           <div className="space-y-4 p-5">
             <CredentialBindingChoice value={usePlatformKey} onChange={setUsePlatformKey} platformPrice={selectedEntry.platform_key?.pricing} byokPrice={selectedEntry.byok_pricing} legacyBillable={selectedEntry.billing?.platform_billable} resaleBillable={selectedEntry.billing?.resale_billable} disabled={createKey.isPending} />
             <div className="flex justify-end gap-2">
-              <Button onClick={() => setStep("catalog")}>Back</Button>
-              <Button variant="primary" isLoading={createKey.isPending} onClick={() => usePlatformKey ? void handlePlatformConnect() : setStep("routing")}>{usePlatformKey ? "Connect" : "Continue"}</Button>
+              <Button onClick={() => setStep("catalog")}>{translateUi("Back")}</Button>
+              <Button variant="primary" isLoading={createKey.isPending} onClick={() => usePlatformKey ? void handlePlatformConnect() : setStep("routing")}>{usePlatformKey ? translateUi("Connect") : translateUi("Continue")}</Button>
             </div>
           </div>
         )}

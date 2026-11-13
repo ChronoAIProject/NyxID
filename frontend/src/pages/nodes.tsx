@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { MachineIsolationBadge } from "@/components/shared/machine-isolation";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -63,7 +67,7 @@ function nodeOwnerLabel(
   currentUserId: string | null,
 ): string {
   if (owner.kind === "user" && owner.id === currentUserId) {
-    return "You";
+    return translateUi("You");
   }
   return owner.display_name;
 }
@@ -89,6 +93,7 @@ function RegisterNodeDialog({
    */
   readonly onRegistered?: () => void;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [createdToken, setCreatedToken] = useState<{
     readonly token: string;
@@ -117,7 +122,7 @@ function RegisterNodeDialog({
         name: result.name,
         expires_at: result.expires_at,
       });
-      toast.success("Registration token created");
+      toast.success(translateUi("Registration token created"));
       // Wake up NodesPage's polling window so the empty list refetches
       // every ~3s for 60s, auto-navigating once the node registers.
       onRegistered?.();
@@ -125,7 +130,7 @@ function RegisterNodeDialog({
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create registration token");
+        toast.error(translateErrorMessage("Failed to create registration token"));
       }
     }
   }
@@ -143,43 +148,34 @@ function RegisterNodeDialog({
     >
       <DialogTrigger asChild>
         <span>
-          <AddCtaButton label="Register Node" onClick={() => setOpen(true)} />
+          <AddCtaButton label={translateUi("Register Node")} onClick={() => setOpen(true)} />
         </span>
       </DialogTrigger>
       <DialogContent>
         {createdToken ? (
           <>
             <DialogHeader>
-              <DialogTitle>Registration Token Created</DialogTitle>
-              <DialogDescription>
-                Copy the token and use it to register your node. This token will
-                not be shown again and expires at{" "}
-                {new Date(createdToken.expires_at).toLocaleString()}.
+              <DialogTitle>{translateUi("Registration Token Created")}</DialogTitle>
+              <DialogDescription>{translateUi("Copy the token and use it to register your node. This token will not be shown again and expires at")}{" "}
+                {new Date(createdToken.expires_at).toLocaleString(getFormattingLocale())}.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
               <CopyableField
-                label="Registration Token"
+                label={translateUi("Registration Token")}
                 value={createdToken.token}
               />
               <div className="rounded-lg bg-muted p-3 space-y-2">
-                <p className="type-secondary-emphasis text-text-tertiary">
-                  Run on your node
-                </p>
+                <p className="type-secondary-emphasis text-text-tertiary">{translateUi("Run on your node")}</p>
                 <div>
-                  <p className="text-12 text-muted-foreground mb-0.5">
-                    File-based storage (default, works on servers)
-                  </p>
+                  <p className="text-12 text-muted-foreground mb-0.5">{translateUi("File-based storage (default, works on servers)")}</p>
                   <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag}
                   </code>
                 </div>
                 <div>
-                  <p className="text-12 text-muted-foreground mb-0.5">
-                    OS keychain storage (macOS Keychain, Windows Credential
-                    Manager)
-                  </p>
+                  <p className="text-12 text-muted-foreground mb-0.5">{translateUi("OS keychain storage (macOS Keychain, Windows Credential Manager)")}</p>
                   <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag} --keychain
@@ -188,16 +184,14 @@ function RegisterNodeDialog({
               </div>
             </div>
             <DialogFooter>
-              <Button variant="primary" onClick={handleClose}>Done</Button>
+              <Button variant="primary" onClick={handleClose}>{translateUi("Done")}</Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
-              <DialogTitle>Register a New Node</DialogTitle>
-              <DialogDescription>
-                Create a registration token to connect a new credential node.
-              </DialogDescription>
+              <DialogTitle>{translateUi("Register a New Node")}</DialogTitle>
+              <DialogDescription>{translateUi("Create a registration token to connect a new credential node.")}</DialogDescription>
             </DialogHeader>
             <Form {...form}>
               <form
@@ -214,7 +208,7 @@ function RegisterNodeDialog({
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Node Name</FormLabel>
+                      <FormLabel>{translateUi("Node Name")}</FormLabel>
                       <FormControl>
                         <Input placeholder="my-home-server" {...field} />
                       </FormControl>
@@ -227,12 +221,12 @@ function RegisterNodeDialog({
                   name="owner_user_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Owner</FormLabel>
+                      <FormLabel>{translateUi("Owner")}</FormLabel>
                       <FormControl>
                         <OrgScopeSelect
                           value={field.value ?? null}
                           onChange={field.onChange}
-                          label="Node owner"
+                          label={translateUi("Node owner")}
                         />
                       </FormControl>
                       <FormMessage />
@@ -240,12 +234,8 @@ function RegisterNodeDialog({
                   )}
                 />
                 <DialogFooter>
-                  <Button type="button" variant="outline" onClick={handleClose}>
-                    Cancel
-                  </Button>
-                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
-                    Create Token
-                  </Button>
+                  <Button type="button" variant="outline" onClick={handleClose}>{translateUi("Cancel")}</Button>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>{translateUi("Create Token")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -257,6 +247,7 @@ function RegisterNodeDialog({
 }
 
 export function NodesPage() {
+  useUiTranslation();
   const navigate = useNavigate();
   // Set to true when `RegisterNodeDialog` mint succeeds; stays true for
   // up to 60s (enforced by the timeout effect below) so the empty node
@@ -323,10 +314,10 @@ export function NodesPage() {
     if (!deleteTarget) return;
     try {
       await deleteMutation.mutateAsync(deleteTarget.id);
-      toast.success(`Node "${deleteTarget.name}" deleted`);
+      toast.success(translateUi("Node \"{{value1}}\" deleted", { value1: deleteTarget.name }));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete node",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete node"),
       );
     } finally {
       setDeleteTarget(null);
@@ -336,8 +327,8 @@ export function NodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Nodes"
-        description="Manage credential routing and machines your agents may use."
+        title={translateUi("Nodes")}
+        description={translateUi("Manage credential routing and machines your agents may use.")}
         actions={
           <div className="flex items-center gap-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
@@ -353,7 +344,7 @@ export function NodesPage() {
           ))}
         </div>
       ) : error ? (
-        <ErrorBanner message="Failed to load nodes. Please try again." onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load nodes. Please try again.")} onRetry={refetch} />
       ) : !nodes || nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <WifiRouterIcon className="h-64 w-64 text-muted-foreground" />
@@ -362,18 +353,14 @@ export function NodesPage() {
               <>
                 <div className="flex items-center justify-center gap-2">
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <p className="type-row-title text-foreground">Waiting for your node to connect…</p>
+                  <p className="type-row-title text-foreground">{translateUi("Waiting for your node to connect…")}</p>
                 </div>
-                <p className="text-14 text-muted-foreground">
-                  Run the registration command on the node. We&apos;ll take you to its page automatically.
-                </p>
+                <p className="text-14 text-muted-foreground">{translateUi("Run the registration command on the node. We'll take you to its page automatically.")}</p>
               </>
             ) : (
               <>
-                <p className="type-row-title text-foreground">No Credential Nodes</p>
-                <p className="text-14 text-muted-foreground">
-                  Create a registration token to get started.
-                </p>
+                <p className="type-row-title text-foreground">{translateUi("No Credential Nodes")}</p>
+                <p className="text-14 text-muted-foreground">{translateUi("Create a registration token to get started.")}</p>
               </>
             )}
           </div>
@@ -417,8 +404,8 @@ export function NodesPage() {
                   {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                 </div>
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
-                  <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
-                  <span>Created {formatRelativeTime(node.created_at)}</span>
+                  <span>{formatRelativeTime(node.last_heartbeat_at) ?? translateUi("No heartbeat")}</span>
+                  <span>{translateUi("Created ")}{formatRelativeTime(node.created_at)}</span>
                 </div>
               </div>
             ))}
@@ -463,8 +450,8 @@ export function NodesPage() {
                   {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                   </div>
                   <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
-                    <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
-                    <span>Created {formatRelativeTime(node.created_at)}</span>
+                    <span>{formatRelativeTime(node.last_heartbeat_at) ?? translateUi("No heartbeat")}</span>
+                    <span>{translateUi("Created ")}{formatRelativeTime(node.created_at)}</span>
                   </div>
                 </Link>
               ))}
@@ -477,13 +464,13 @@ export function NodesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Owner</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Last Heartbeat</TableHead>
-                    <TableHead>Created</TableHead>
+                    <TableHead>{translateUi("Name")}</TableHead>
+                    <TableHead>{translateUi("Owner")}</TableHead>
+                    <TableHead>{translateUi("Status")}</TableHead>
+                    <TableHead>{translateUi("Last Heartbeat")}</TableHead>
+                    <TableHead>{translateUi("Created")}</TableHead>
                     {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
-                      <TableHead className="w-[80px]">Actions</TableHead>
+                      <TableHead className="w-[80px]">{translateUi("Actions")}</TableHead>
                     )}
                   </TableRow>
                 </TableHeader>
@@ -517,7 +504,7 @@ export function NodesPage() {
                         {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
-                        {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
+                        {formatRelativeTime(node.last_heartbeat_at) ?? translateUi("Never")}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatRelativeTime(node.created_at)}
@@ -535,7 +522,7 @@ export function NodesPage() {
                               }}
                             >
                               <Trash2 className="h-4 w-4 text-destructive" />
-                              <span className="sr-only">Delete {node.name}</span>
+                              <span className="sr-only">{translateUi("Delete ")}{node.name}</span>
                             </Button>
                           )}
                         </TableCell>
@@ -558,24 +545,16 @@ export function NodesPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Node</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete &quot;{deleteTarget?.name ?? ""}
-              &quot;? This will disconnect the node and detach any AI Services
-              routed through it. This action cannot be undone.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Delete Node")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to delete \"")}{deleteTarget?.name ?? ""}{translateUi("\"? This will disconnect the node and detach any AI Services routed through it. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >
-              Delete
-            </Button>
+            >{translateUi("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

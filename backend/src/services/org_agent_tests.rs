@@ -16,6 +16,7 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 pub(crate) struct Fixture {
+    pub(crate) readiness: tokio::task::JoinHandle<()>,
     pub(crate) state: crate::AppState,
     pub(crate) admin: String,
     pub(crate) member: String,
@@ -151,7 +152,7 @@ impl Fixture {
         (Self::with_db(db).await, memberships, reads)
     }
     pub(crate) async fn with_db(db: mongodb::Database) -> Self {
-        super::security_readiness_service::ready_test_replica(&db).await;
+        let readiness = super::security_readiness_service::controlled_ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -199,6 +200,7 @@ impl Fixture {
                 .unwrap();
         }
         Self {
+            readiness,
             state: test_app_state(db),
             admin: ids[0].clone(),
             member: ids[1].clone(),
@@ -2182,34 +2184,6 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     ))
     .await;
     assert!(error);
-    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
-        .await
-        .unwrap()
-        .unwrap();
-    for (tool, arguments) in [
-        ("nyxid__get_agent_skills", json!({"agent": agent.name})),
-        (
-            "nyxid__get_agent_operations",
-            json!({"subagent": agent.name}),
-        ),
-    ] {
-        let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
-            &f.state, &chat, tool, &arguments,
-        ))
-        .await;
-        assert!(!error, "a specialist can read its own settings by name");
-    }
-    let (content, error) = Box::pin(crate::handlers::agent_skills::dispatch(
-        &f.state,
-        &chat,
-        "skill_read",
-        &json!({"skill": id}),
-    ))
-    .await
-    .unwrap();
-    assert!(!error);
-    assert_eq!(content["content"], "Pinned team guidance");
-    assert!(content["untrusted_guidance"].as_bool().unwrap());
     // The same signed pin must work through an ungranted concrete organization
     // connection, with a real live thread/key and current organization access.
     let endpoint = Uuid::new_v4().to_string();
@@ -2259,6 +2233,34 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     )
     .await
     .unwrap();
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for (tool, arguments) in [
+        ("nyxid__get_agent_skills", json!({"agent": agent.name})),
+        (
+            "nyxid__get_agent_operations",
+            json!({"subagent": agent.name}),
+        ),
+    ] {
+        let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
+            &f.state, &chat, tool, &arguments,
+        ))
+        .await;
+        assert!(!error, "a specialist can read its own settings by name");
+    }
+    let (content, error) = Box::pin(crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &chat,
+        "skill_read",
+        &json!({"skill": id}),
+    ))
+    .await
+    .unwrap();
+    assert!(!error);
+    assert_eq!(content["content"], "Pinned team guidance");
+    assert!(content["untrusted_guidance"].as_bool().unwrap());
     let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
         .await
         .unwrap()

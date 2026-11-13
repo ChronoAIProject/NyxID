@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Activity, RefreshCw } from "lucide-react";
@@ -63,6 +66,7 @@ function CheckSummary({
   now: number;
   configuration?: MonitoringCheck | null;
 }) {
+  useUiTranslation();
   const status = check ? displayedCheckStatus(check, now) : "unknown";
   const variant =
     status === "healthy" || status === "ready"
@@ -78,7 +82,7 @@ function CheckSummary({
         <Badge variant={variant}>{statusLabels[status]}</Badge>
       </div>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-14">
-        <dt className="text-muted-foreground">Source</dt>
+        <dt className="text-muted-foreground">{translateUi("Source")}</dt>
         <dd>
           {
             sourceLabels[
@@ -88,17 +92,17 @@ function CheckSummary({
             ]
           }
         </dd>
-        <dt className="text-muted-foreground">Path</dt>
+        <dt className="text-muted-foreground">{translateUi("Path")}</dt>
         <dd className="break-all font-mono">
           {check?.path || configuration?.path || "—"}
         </dd>
         {configuration && (
           <>
-            <dt className="text-muted-foreground">Expected HTTP</dt>
+            <dt className="text-muted-foreground">{translateUi("Expected HTTP")}</dt>
             <dd>{configuration.expect_status.join(", ")}</dd>
             {configuration.body_contains && (
               <>
-                <dt className="text-muted-foreground">Body contains</dt>
+                <dt className="text-muted-foreground">{translateUi("Body contains")}</dt>
                 <dd className="break-all font-mono">
                   {configuration.body_contains}
                 </dd>
@@ -106,28 +110,28 @@ function CheckSummary({
             )}
           </>
         )}
-        <dt className="text-muted-foreground">Last checked</dt>
+        <dt className="text-muted-foreground">{translateUi("Last checked")}</dt>
         <dd>
           {Number.isFinite(checkedAt)
-            ? new Date(checkedAt).toLocaleString()
-            : "Not checked"}
+            ? new Date(checkedAt).toLocaleString(getFormattingLocale())
+            : translateUi("Not checked")}
         </dd>
-        <dt className="text-muted-foreground">Freshness</dt>
+        <dt className="text-muted-foreground">{translateUi("Freshness")}</dt>
         <dd>
           {check?.freshness === "fresh" && status !== "unknown"
-            ? "Fresh"
+            ? translateUi("Fresh")
             : check?.checked_at
-              ? "Stale or unknown"
-              : "Unknown"}
+              ? translateUi("Stale or unknown")
+              : translateUi("Unknown")}
         </dd>
-        <dt className="text-muted-foreground">Duration / HTTP</dt>
+        <dt className="text-muted-foreground">{translateUi("Duration / HTTP")}</dt>
         <dd>
           {Number.isFinite(checkedAt) && check?.duration_ms != null
-            ? `${Math.round(check.duration_ms)} ms`
+            ? translateUi("{{value1}} ms", { value1: Math.round(check.duration_ms) })
             : "—"}{" "}
           / {Number.isFinite(checkedAt) ? (check?.status_code ?? "—") : "—"}
         </dd>
-        <dt className="text-muted-foreground">Reason</dt>
+        <dt className="text-muted-foreground">{translateUi("Reason")}</dt>
         <dd className="break-words">
           {check?.reason.replaceAll("_", " ") || "—"}
         </dd>
@@ -147,6 +151,7 @@ function CheckFields({
   disabled: boolean;
   onEdit: () => void;
 }) {
+  useUiTranslation();
   const enabled = form.watch(`${kind}.enabled`);
   const errors = form.formState.errors[kind];
   return (
@@ -155,10 +160,10 @@ function CheckFields({
       className="space-y-3 rounded-lg border border-border p-3"
     >
       <Label asChild><legend className="px-1">
-        {kind === "health" ? "Health" : "Readiness"}
+        {kind === "health" ? translateUi("Health") : translateUi("Readiness")}
       </legend></Label>
       <div className="flex items-center justify-between gap-3">
-        <Label htmlFor={`${kind}-enabled`}>Use owner configuration</Label>
+        <Label htmlFor={`${kind}-enabled`}>{translateUi("Use owner configuration")}</Label>
         <Switch
           id={`${kind}-enabled`}
           checked={enabled}
@@ -171,10 +176,10 @@ function CheckFields({
       {enabled && (
         <>
           <div className="space-y-1.5">
-            <Label htmlFor={`${kind}-path`}>Relative GET path</Label>
+            <Label htmlFor={`${kind}-path`}>{translateUi("Relative GET path")}</Label>
             <Input
               id={`${kind}-path`}
-              placeholder={kind === "health" ? "healthz" : "readyz"}
+              placeholder={kind === "health" ? translateUi("healthz") : translateUi("readyz")}
               {...form.register(`${kind}.path`)}
               aria-invalid={Boolean(errors?.path)}
             />
@@ -185,7 +190,7 @@ function CheckFields({
             )}
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${kind}-statuses`}>Expected HTTP statuses</Label>
+            <Label htmlFor={`${kind}-statuses`}>{translateUi("Expected HTTP statuses")}</Label>
             <Input
               id={`${kind}-statuses`}
               placeholder="200, 204"
@@ -199,7 +204,7 @@ function CheckFields({
             )}
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${kind}-body`}>Body contains (optional)</Label>
+            <Label htmlFor={`${kind}-body`}>{translateUi("Body contains (optional)")}</Label>
             <Input
               id={`${kind}-body`}
               autoComplete="off"
@@ -235,6 +240,7 @@ function ConfigurationForm({
   onCancel: () => void;
   onEdit: () => void;
 }) {
+  useUiTranslation();
   const form = useAppForm<MonitoringFormValues>({
     resolver: zodResolver(monitoringFormSchema),
     defaultValues: monitoringFormDefaults(config),
@@ -260,30 +266,20 @@ function ConfigurationForm({
           disabled={busy}
           onEdit={onEdit}
         />
-        <p className="text-14 text-muted-foreground">
-          Health falls back to an available built-in or discovered check when
-          owner configuration is off. Readiness is checked only when explicitly
-          configured.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("Health falls back to an available built-in or discovered check when owner configuration is off. Readiness is checked only when explicitly configured.")}</p>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <Button type="button" onClick={onCancel} disabled={busy}>
-            Cancel
-          </Button>
+          <Button type="button" onClick={onCancel} disabled={busy}>{translateUi("Cancel")}</Button>
           <Button
             type="button"
             disabled={busy || !canProbe || !hasCheck}
             onClick={() => void form.handleSubmit(onTest)()}
-          >
-            Test draft
-          </Button>
+          >{translateUi("Test draft")}</Button>
           <Button
             type="submit"
             variant="primary"
             isLoading={busy}
             disabled={busy || !form.formState.isDirty}
-          >
-            Save
-          </Button>
+          >{translateUi("Save")}</Button>
         </div>
         <FormSubmitErrors />
       </form>
@@ -292,11 +288,13 @@ function ConfigurationForm({
 }
 
 export function ServiceMonitoring({ serviceId }: { serviceId: string }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.SERVICE_MONITORING);
   return enabled ? <MonitoringCard serviceId={serviceId} /> : null;
 }
 
 function MonitoringCard({ serviceId }: { serviceId: string }) {
+  useUiTranslation();
   const { query, operation } = useMonitoring(serviceId);
   const [editing, setEditing] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -326,13 +324,11 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle className="flex items-center gap-2 text-15">
-            <Activity className="size-4" />
-            Monitoring
-          </CardTitle>
+            <Activity className="size-4" />{translateUi("Monitoring")}</CardTitle>
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
-              aria-label="Refresh monitoring status"
+              aria-label={translateUi("Refresh monitoring status")}
               isLoading={query.isFetching}
               disabled={busy || query.isFetching}
               onClick={() => {
@@ -340,9 +336,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                 void query.refetch();
               }}
             >
-              <RefreshCw className="size-3" />
-              Refresh
-            </Button>
+              <RefreshCw className="size-3" />{translateUi("Refresh")}</Button>
             <Button
               size="sm"
               disabled={!data?.can_probe || busy}
@@ -351,9 +345,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                 setDraftResult(null);
                 operation.mutate({ kind: "probe" });
               }}
-            >
-              Check now
-            </Button>
+            >{translateUi("Check now")}</Button>
             {data?.can_manage && config && (
               <>
                 <Button
@@ -364,9 +356,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                     setDraftResult(null);
                     setEditing(true);
                   }}
-                >
-                  Configure
-                </Button>
+                >{translateUi("Configure")}</Button>
                 <Button
                   size="sm"
                   disabled={
@@ -378,39 +368,29 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                     operation.reset();
                     setClearing(true);
                   }}
-                >
-                  Clear configuration
-                </Button>
+                >{translateUi("Clear configuration")}</Button>
               </>
             )}
           </div>
         </div>
-        <CardDescription>
-          Latest health and readiness checks from chrono-probe. Viewing this
-          section does not run a live check.
-        </CardDescription>
+        <CardDescription>{translateUi("Latest health and readiness checks from chrono-probe. Viewing this section does not run a live check.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {query.isPending ? (
-          <p className="text-14 text-muted-foreground" role="status">
-            Loading monitoring…
-          </p>
+          <p className="text-14 text-muted-foreground" role="status">{translateUi("Loading monitoring…")}</p>
         ) : query.isError ? (
-          <p role="alert" className="text-14 text-muted-foreground">
-            Monitoring is unavailable. Health and readiness are unknown. Refresh
-            to try again.
-          </p>
+          <p role="alert" className="text-14 text-muted-foreground">{translateUi("Monitoring is unavailable. Health and readiness are unknown. Refresh to try again.")}</p>
         ) : (
           result && (
             <div className="grid gap-5 sm:grid-cols-2">
               <CheckSummary
-                title="Health"
+                title={translateUi("Health")}
                 check={result.health}
                 now={displayNow}
                 configuration={config?.owner_config.health}
               />
               <CheckSummary
-                title="Readiness"
+                title={translateUi("Readiness")}
                 check={result.readiness}
                 now={displayNow}
                 configuration={config?.owner_config.readiness}
@@ -434,11 +414,8 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
         >
           <DialogContent className="max-h-[90dvh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>Configure monitoring</DialogTitle>
-              <DialogDescription>
-                Set safe GET checks for this service. Testing a draft does not
-                save it.
-              </DialogDescription>
+              <DialogTitle>{translateUi("Configure monitoring")}</DialogTitle>
+              <DialogDescription>{translateUi("Set safe GET checks for this service. Testing a draft does not save it.")}</DialogDescription>
             </DialogHeader>
             {config && (
               <ConfigurationForm
@@ -489,23 +466,19 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                   operation.reset();
                   void query.refetch();
                 }}
-              >
-                Reload configuration
-              </Button>
+              >{translateUi("Reload configuration")}</Button>
             )}
             {draftResult && (
               <div className="space-y-2 border-t border-border pt-3">
-                <p className="type-row-title">
-                  Draft test result (not saved)
-                </p>
+                <p className="type-row-title">{translateUi("Draft test result (not saved)")}</p>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <CheckSummary
-                    title="Draft health"
+                    title={translateUi("Draft health")}
                     check={draftResult.health}
                     now={now}
                   />
                   <CheckSummary
-                    title="Draft readiness"
+                    title={translateUi("Draft readiness")}
                     check={draftResult.readiness}
                     now={now}
                   />
@@ -525,11 +498,8 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
         >
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Clear owner configuration?</DialogTitle>
-              <DialogDescription>
-                This removes your health and readiness settings. An available
-                built-in or discovered health check may take over.
-              </DialogDescription>
+              <DialogTitle>{translateUi("Clear owner configuration?")}</DialogTitle>
+              <DialogDescription>{translateUi("This removes your health and readiness settings. An available built-in or discovered health check may take over.")}</DialogDescription>
             </DialogHeader>
             {error && (
               <p role="alert" className="text-14 text-destructive">
@@ -537,9 +507,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
               </p>
             )}
             <div className="flex justify-end gap-2">
-              <Button disabled={busy} onClick={() => setClearing(false)}>
-                Cancel
-              </Button>
+              <Button disabled={busy} onClick={() => setClearing(false)}>{translateUi("Cancel")}</Button>
               <Button
                 variant="destructive"
                 isLoading={busy}
@@ -556,9 +524,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                       },
                     );
                 }}
-              >
-                Clear configuration
-              </Button>
+              >{translateUi("Clear configuration")}</Button>
             </div>
             {conflict && (
               <Button
@@ -568,9 +534,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
                   operation.reset();
                   void query.refetch();
                 }}
-              >
-                Reload configuration
-              </Button>
+              >{translateUi("Reload configuration")}</Button>
             )}
           </DialogContent>
         </Dialog>

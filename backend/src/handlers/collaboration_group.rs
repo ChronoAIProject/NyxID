@@ -393,7 +393,11 @@ pub(crate) async fn messages(
     before: Option<i64>,
 ) -> AppResult<Value> {
     let group = groups::get(&state.db, actor, id).await?;
-    let rows = groups::messages(&state.db, actor, id, before).await?;
+    let mut rows = groups::messages(&state.db, actor, id, before).await?;
+    Box::pin(crate::services::assistant_activity_decision::refresh_group(
+        &state.db, &mut rows,
+    ))
+    .await?;
     let before_seq = (rows.len() == 100).then(|| rows[0].seq);
     let agents = groups::roster(&state.db, actor, id).await?;
     let participants = groups::participants(&state.db, &group).await?;

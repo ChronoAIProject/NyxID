@@ -738,6 +738,25 @@ unrelated asynchronous updates use the source-bound gateway reply endpoint.
 
 ### Discord transport and provider boundary
 
+**Health evidence (#2328 / #2323):** `selected` and `pending_discovery` confirm
+source selection only. They do not prove a connected Discord session. NyxID
+records optional `gateway_intake` at adoption (exact binding and hand-over time),
+then samples its last authenticated native event at most once per minute in the
+admission transaction (first/binding/hand-over changes bypass the interval). That
+transaction clears only the exact stored intake-unconfirmed state; real delivery
+failures remain. Bot inbound diagnostics share the existing admission fence write. Health
+and the channel aggregate use this evidence separately from activation and
+historical relay delivery; no event means `discord_native_intake_unconfirmed`.
+Existing native bots are not automatically returned to relay. Positive connection
+confirmation and automatic rollback require a negotiated CMA health contract,
+a default-off rollout and all-replica readiness; CMA#1586 tracks that contract.
+
+Failed setup is cleaned through the exact attempt fence, including errors before
+a reservation is returned. The bounded release sweep also repairs stale direct
+references after terminal cleanup. It never treats an uncertain create/DELETE
+as absence, and every existing native drain guard remains authoritative for
+old and new ingress readers. See [Discord intake health](CHANNEL_BOT_RELAY.md#discord-intake-health-and-failed-hand-overs-2328-2323).
+
 `channel:discord-gateway` controls NyxID's relay WebSocket ingress.
 `nyxbot:gateway-discord` selects **native Discord** only after authenticated
 `/channel-capabilities` discovery and a bot-token `/users/@me` identity check.
@@ -775,8 +794,10 @@ default-only routing, a successful direct reply, or `pending_discovery` alone
 never acknowledges the requested native policy.
 
 Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
-native enrollment. The existing roster/drained check refuses selection during a
-mixed rollout. A persisted `preparing` phase permits binding setup but refuses
+its first clean, drained activation. Native selection uses serving readiness:
+recorded activation tolerates supported roster overlaps, while an unsupported
+or undrained live generation still refuses selection. A persisted `preparing`
+phase permits binding setup but refuses
 provider execution with CMA's exact pre-admission `429` JSON refusal
 `{"error":{"type":"invalid_request_error","code":"conversation_not_ready"}}`
 until the transaction commits
@@ -916,7 +937,19 @@ ID names an existing row outside its authorized owner/chat/sender/route returns
 HTTP **403** with problem code `media_source_refused`. This refusal is terminal
 and must not be retried. Database failures still return **503**
 `provider_unavailable`; a missing source row produces the fixed unavailable-media
-note in the turn. Source presence does not authorize a provider download.
+note in the turn. A media-free activity does not assert a source and is never
+refused by this presence check, even when its source ID is missing or belongs to
+an unrelated row. Source presence does not authorize a provider download.
+
+The source fence compares platform families through NyxID's existing
+`channel_platform::canonical_platform` mapping. In particular, the managed
+Telegram adapter stores `telegram-new` on the inbound `ChannelMessage` while the
+NyxBot channel uses canonical `telegram`; this is the same authenticated bot,
+route key, conversation, sender and thread fence. Other platform identities are
+still exact. The terminal `media_source_refused` contract therefore applies only
+to a media-bearing activity whose source row exists but fails that complete
+owner/chat/sender/route/thread and platform-family fence. This is additive and
+mixed-fleet safe; no callback or API shape changes.
 
 Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
 `api/crates/cmaeg/src/{turns,tools/reply_targets}`:
@@ -1119,7 +1152,55 @@ retains its PR1 owner-wide channel management scope; CMA still enforces owner
 identity, and cleanup additionally pins destination, record and acknowledged
 version. It is not a token restricted to one channel.
 
+### Automatic repair of stale local bindings
+
+An ordinary personal gateway link can retain a valid remote record but have a
+null, missing or mismatching local `binding_id` (legacy setup or partial provider
+unbind). A valid authenticated conversation PUT with a binding mismatch triggers
+a detached repair attempt; the original 404 returns without awaiting remote
+proof. A transactional claim permits at most one attempt per channel per
+15 minutes. Refused proofs additionally set optional
+`gateway_binding_repair_retry_at` at least six hours ahead; transient Deferred
+outcomes retain the 15-minute window. Both triggers check these same timestamps.
+The existing startup/30-second maintenance worker selects at most eight due stale
+links per pass, excluding healthy and cooling-down links before the limit.
+Malformed rows are decoded individually and deferred for six hours so later
+candidates are not starved. Scan failures log only a fixed warning code and never
+abort existing release reconciliation, direct-attempt repair or native drains.
+The failed customer message is never replayed; the next request can create its
+partition after repair.
+
+Repair derives `bnd_` plus the stored record UUID's 32 hex digits, then performs an
+owner-authenticated GET of that exact record through the catalog gateway. It must
+match record, channel, positive version, owner, provider, derived binding and exact
+relay source (issuer, route key and platform). A transaction rechecks/fences live
+owner, personal bot, provider/route keys and route, then CAS-restores only the
+binding. The channel policy revision and owner verification/settings/history stay
+unchanged. Native/org links, setup/move attempts, revoked authority, missing
+identity and failed remote proof stay refused; no key is replaced or reactivated.
+
+Audits `nyxbot_gateway_binding_repair_scheduled`,
+`nyxbot_gateway_binding_repaired`, `nyxbot_gateway_binding_repair_refused` and
+`nyxbot_gateway_binding_repair_deferred` contain only channel ID, trigger, repair
+mode and stable reason. Claim and success audits commit with their transitions.
+No owner disconnect/reconnect is required for the proven stale-metadata case.
+Provider binding DELETE preserves the active row, binding and provider/route
+keys and records only optional `gateway_binding_unbound_at` metadata. CMA also
+uses unbind for rollback and consumer cleanup; even channel deletion unbinds
+before its remote-record deletion commits. The notification alone is not terminal
+authority. Only the existing explicit local retirement protocol captures cleanup
+authority and revokes keys; its release worker still requires exact remote proof.
+No new effect follows the observational timestamp, and it is ignored by old
+replicas. Old unbind writers can still unset bindings until drained.
+
 ### Deployment and rollback
+
+Binding repair adds only optional Mongo metadata. Old replicas understand the
+restored binding and continue enforcing their current key/authority checks. Old
+unbind writers can still create stale rows until drained; the bounded sweep can
+repair those only while remote proof remains valid. Rolling back stops repair;
+retain cooldown/fence metadata and already-restored bindings. There is no new
+flag, environment variable or persisted enum value.
 
 Startup creates release and reconciliation indexes before workers start. Deploy
 normally across replicas; no global mutation freeze is needed.
@@ -1343,8 +1424,9 @@ Telegram has no explicit stop-typing API; its last indicator expires naturally.
 
 Reader rollout is fenced by the existing security-readiness mechanism's
 `nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
-relay events through the legacy path until every declared replica can serve
-these responses. This uses the existing roster and drain configuration, with
+relay events through the legacy path until the capability has clean activation
+and serving readiness. Recorded active capabilities tolerate roster warnings
+while every live generation supports them, including native transport selection. This uses the existing roster and drain configuration, with
 no new environment variables. The separately negotiated Lark/Feishu followed
 thread path retains its existing stream/late-send routing contract so its
 resolved `thread_reply` choice cannot change after the first durable frame.
@@ -1393,7 +1475,7 @@ cross-service extension, not an endpoint implemented by this change.
 Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
 Provider/creator keys stay on the linking admin and route keys stay org-owned;
 CMA source contracts are unchanged. NyxID resolves each verified sender to a
-live org member or an explicitly delegated, budgeted org-paid guest. Optional
+live org member or an explicitly enabled org-paid guest under specialist Grants (or frozen legacy service limits). Optional
 versioned origins carry that actor through replay/queues/async replies. Native
 and relay events use the same authority checks and dedup namespace. There is no
 CMA-provided membership/payer and no fallback to a personal agent. See

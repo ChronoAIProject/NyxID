@@ -1,11 +1,11 @@
 ---
 title: Privacy Policy
-effective_date: 2026-10-23
+effective_date: 2026-11-12
 ---
 
 # Privacy Policy
 
-**Effective date: 2026-10-23**
+**Effective date: 2026-11-12**
 
 ## 1. Introduction
 
@@ -109,6 +109,20 @@ Depending on enabled features and operator configuration, data can reach:
 - Hosting, database, storage and key-management services managed by the operator: the application data and key-management requests needed to run the deployment.
 
 This inventory describes supported data flows, not a claim that every listed service is enabled or acts as our sub-processor. A provider engaged to process hosted-service data on our behalf may be a sub-processor; a service you connect or a messaging platform may process data under its own policies. The software's integration list does not establish a provider's contractual role, current processing region, retention period or training practices. Contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun) for the hosted deployment's current provider and sub-processor information, processing regions, retention and cross-border transfer arrangements. For a self-hosted deployment, request those details from its operator.
+
+### Google user data
+
+NyxID's use and transfer to any other app of information received from Google APIs will adhere to the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), including the Limited Use requirements.
+
+**What we access.** If you sign in with Google, we receive your name, email address and profile picture to create and authenticate your NyxID account. If you connect a Google service (Google Workspace, Gmail, Google Calendar, Google Drive, Docs, Sheets or Slides), we receive OAuth tokens for the permissions you approve on Google's consent screen. Depending on those permissions, NyxID can read your Gmail messages and settings and send email on your behalf; see, create and edit your calendars and events; and see, create and edit your Google Drive files, including Docs, Sheets and Slides. NyxID does not request permission to delete, archive or relabel Gmail messages.
+
+**How we use it.** Google user data is used only to provide the features you request: actions you take in NyxID, tasks you ask the assistant (NyxBot or your other agents) to perform, automations you configure and agents you authorise. For example, NyxBot can summarise your inbox, check your availability, add a meeting to your calendar, reply to an email or edit a document when you ask it to. Depending on your settings, NyxID asks you to confirm actions that change your data before they are sent to Google.
+
+**How we store and protect it.** OAuth tokens are stored with application-layer AES-256 encryption. NyxID does not keep a separate copy of your mailbox, calendar or files. Google data that the assistant retrieves while answering you becomes part of that conversation and is stored with it until you delete the conversation or your account (see sections 4 and 6).
+
+**Who receives it.** To carry out a request, the relevant Google data is sent to the assistant and model services that process that request, as described in the inventory above. We do not sell Google user data, use it for advertising, or transfer it to data brokers or information resellers. We do not use Google user data to develop, improve or train generalised or non-personalised AI or machine-learning models, and we do not transfer it to third parties for that purpose. People at NyxID do not read your Google user data unless you give us permission for specific data, it is necessary for security purposes such as investigating abuse, it is required to comply with applicable law, or it has been aggregated and anonymised for internal operations.
+
+**Your controls.** You can disable or delete a Google connection at any time in AI Services. Deleting a connection removes its stored tokens and asks Google to revoke NyxID's access. You can also remove NyxID's access from your [Google Account permissions](https://myaccount.google.com/permissions) page. Deleting a conversation removes the Google data saved in it. Notes an agent saved to its memory are separate and can be removed from that agent's memory. Account deletion is described in section 6.
 
 ## 6. Data Retention
 

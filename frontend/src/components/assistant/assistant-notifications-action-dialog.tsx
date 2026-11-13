@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { Bell, MessageCircle, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -81,6 +83,7 @@ export function AssistantNotificationsActionDialog({
   readonly params: Record<string, unknown>;
   readonly onComplete: (bindingId: string) => void;
 }) {
+  useUiTranslation();
   const [before, setBefore] = useState<NotificationEvidence | null>(null);
   const [telegramEnabled, setTelegramEnabled] = useState(false);
   const [approvalMode, setApprovalMode] = useState<GlobalApprovalMode>("writes_only");
@@ -210,21 +213,21 @@ export function AssistantNotificationsActionDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">{action === "update" ? <Bell className="size-4" /> : <MessageCircle className="size-4" />}{title}</DialogTitle>
-          <DialogDescription>{result?.linkCode ? "Use this code now; it is available only from this browser response." : result ? "The canonical notification projection confirms the requested state." : destructive ? "Disconnecting Telegram is confirmed every time." : "NyxID keeps notification choices in your signed-in browser session."}</DialogDescription>
+          <DialogDescription>{result?.linkCode ? translateUi("Use this code now; it is available only from this browser response.") : result ? translateUi("The canonical notification projection confirms the requested state.") : destructive ? translateUi("Disconnecting Telegram is confirmed every time.") : translateUi("NyxID keeps notification choices in your signed-in browser session.")}</DialogDescription>
         </DialogHeader>
         {result ? (
           <div className="space-y-3 border-y border-border py-4">
-            {result.linkCode ? <><div className="space-y-2"><Label htmlFor="telegram-link-code">One-time link code</Label><Input id="telegram-link-code" readOnly value={result.linkCode} className="font-mono" /></div><p className="text-13 text-muted-foreground">@{result.botUsername}</p></> : null}
+            {result.linkCode ? <><div className="space-y-2"><Label htmlFor="telegram-link-code">{translateUi("One-time link code")}</Label><Input id="telegram-link-code" readOnly value={result.linkCode} className="font-mono" /></div><p className="text-13 text-muted-foreground">@{result.botUsername}</p></> : null}
             <p className="font-mono text-13 text-muted-foreground">{result.id}</p>
           </div>
         ) : (
           <div className="space-y-4 border-y border-border py-4">
-            {action === "update" ? <><Label className="flex items-center gap-2"><Checkbox checked={telegramEnabled} onCheckedChange={(value) => setTelegramEnabled(value === true)} />Telegram notifications</Label><Label className="flex items-center gap-2"><Checkbox checked={pushEnabled} onCheckedChange={(value) => setPushEnabled(value === true)} />Push notifications</Label><div className="space-y-2"><Label>Approval (Global Default)</Label><Select value={approvalMode} onValueChange={(value) => setApprovalMode(globalApprovalModeSchema.parse(value))}><SelectTrigger aria-label="Approval (Global Default)"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="writes_only">Writes only (default)</SelectItem><SelectItem value="all">All requests</SelectItem><SelectItem value="off">Off</SelectItem></SelectContent></Select></div><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="approval-timeout">Timeout (seconds)</Label><Input id="approval-timeout" type="number" min={10} max={300} value={approvalTimeoutSecs} onChange={(event) => setApprovalTimeoutSecs(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="grant-expiry">Grant expiry (days)</Label><Input id="grant-expiry" type="number" min={1} max={365} value={grantExpiryDays} onChange={(event) => setGrantExpiryDays(event.target.value)} /></div></div></> : <p className="font-mono text-13 text-muted-foreground">{before?.id ?? "Loading"}</p>}
-            {destructive ? <Label className="flex items-start gap-2"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span className="flex items-center gap-1"><ShieldAlert className="size-3" />I understand Telegram will be disconnected.</span></Label> : null}
+            {action === "update" ? <><Label className="flex items-center gap-2"><Checkbox checked={telegramEnabled} onCheckedChange={(value) => setTelegramEnabled(value === true)} />{translateUi("Telegram notifications")}</Label><Label className="flex items-center gap-2"><Checkbox checked={pushEnabled} onCheckedChange={(value) => setPushEnabled(value === true)} />{translateUi("Push notifications")}</Label><div className="space-y-2"><Label>{translateUi("Approval (Global Default)")}</Label><Select value={approvalMode} onValueChange={(value) => setApprovalMode(globalApprovalModeSchema.parse(value))}><SelectTrigger aria-label={translateUi("Approval (Global Default)")}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="writes_only">{translateUi("Writes only (default)")}</SelectItem><SelectItem value="all">{translateUi("All requests")}</SelectItem><SelectItem value="off">{translateUi("Off")}</SelectItem></SelectContent></Select></div><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="approval-timeout">{translateUi("Timeout (seconds)")}</Label><Input id="approval-timeout" type="number" min={10} max={300} value={approvalTimeoutSecs} onChange={(event) => setApprovalTimeoutSecs(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="grant-expiry">{translateUi("Grant expiry (days)")}</Label><Input id="grant-expiry" type="number" min={1} max={365} value={grantExpiryDays} onChange={(event) => setGrantExpiryDays(event.target.value)} /></div></div></> : <p className="font-mono text-13 text-muted-foreground">{before?.id ?? translateUi("Loading")}</p>}
+            {destructive ? <Label className="flex items-start gap-2"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span className="flex items-center gap-1"><ShieldAlert className="size-3" />{translateUi("I understand Telegram will be disconnected.")}</span></Label> : null}
           </div>
         )}
-        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
-        <DialogFooter>{result ? <Button type="button" onClick={() => { onComplete(result.id); close(); }}>Done</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant={destructive ? "destructive" : "primary"} isLoading={pending} disabled={pending || !before || (destructive && !confirmed)} onClick={() => void submit()}>{destructive ? "Disconnect" : "Continue"}</Button></>}</DialogFooter>
+        {error ? <p role="alert" className="text-13 text-destructive">{translateUi(error)}</p> : null}
+        <DialogFooter>{result ? <Button type="button" onClick={() => { onComplete(result.id); close(); }}>{translateUi("Done")}</Button> : <><Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button><Button type="button" variant={destructive ? "destructive" : "primary"} isLoading={pending} disabled={pending || !before || (destructive && !confirmed)} onClick={() => void submit()}>{destructive ? translateUi("Disconnect") : translateUi("Continue")}</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

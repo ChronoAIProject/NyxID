@@ -23,6 +23,12 @@ export const serviceConnectionSchema = z.object({
   can_edit_configuration: z.boolean().optional(),
   credential_source: credentialSourceSchema.optional(),
   credential_type: z.string(),
+  node_id: z.string().nullish(),
+  has_node_binding: z.boolean().optional(),
+  credential_verification: z.object({
+    state: z.string(), reason_code: z.string(), observed_at: z.string().nullish(),
+    source: z.string().nullish(), can_check: z.boolean().default(false),
+  }).nullish(),
   service_type: z.string().optional(),
   endpoint_url: z.string().nullish(),
   api_key_id: z.string().nullish(),

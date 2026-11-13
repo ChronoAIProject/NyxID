@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
@@ -35,6 +37,7 @@ export default function CreditsDeniedDialog({
   billingAvailable,
   onDismiss,
 }: CreditsDeniedDialogProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   const router = useRouter();
   const purchaseOrigin = useRef<{ path: string; actor?: string } | null>(null);
@@ -86,50 +89,40 @@ export default function CreditsDeniedDialog({
           data-testid="credits-denied-illustration"
         />
         <DialogHeader className="items-center space-y-2 text-center">
-          <DialogTitle>Not enough credits to continue</DialogTitle>
+          <DialogTitle>{translateUi("Not enough credits to continue")}</DialogTitle>
           <DialogDescription className="max-w-[330px] text-14">
             {org
-              ? `This request is billed to ${orgName ?? "your organization"}'s credits, which have been used up or have expired, so it couldn't run.`
-              : "Your free platform credits have been used up or have expired, so this request couldn't run."}
+              ? translateUi("This request is billed to {{value1}}'s credits, which have been used up or have expired, so it couldn't run.", { value1: orgName ?? "your organization" })
+              : translateUi("Your free platform credits have been used up or have expired, so this request couldn't run.")}
           </DialogDescription>
         </DialogHeader>
-        <ul className="space-y-2" aria-label="Ways to continue">
+        <ul className="space-y-2" aria-label={translateUi("Ways to continue")}>
           <OptionRow
             icon={<ShieldCheck className="h-3.5 w-3.5" />}
-            title="Ask an admin"
+            title={translateUi("Ask an admin")}
           >
             {org
-              ? `Only an admin of ${orgName ?? "that organization"} can add credits to it.`
-              : "An admin can add credits to your account."}
+              ? translateUi("Only an admin of {{value1}} can add credits to it.", { value1: orgName ?? "that organization" })
+              : translateUi("An admin can add credits to your account.")}
           </OptionRow>
           {canPurchase && (
             <OptionRow
               icon={<CreditCard className="h-3.5 w-3.5" />}
-              title="Purchase platform credits"
-            >
-              Buy credits for your account and keep going.
-            </OptionRow>
+              title={translateUi("Purchase platform credits")}
+            >{translateUi("Buy credits for your account and keep going.")}</OptionRow>
           )}
         </ul>
         {payer === "unknown" && (
-          <p className="text-13 text-muted-foreground">
-            If this is billed to an organization, ask one of its admins instead.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("If this is billed to an organization, ask one of its admins instead.")}</p>
         )}
         <DialogFooter>
           {canPurchase ? (
             <>
-              <Button variant="outline" onClick={onDismiss}>
-                Not now
-              </Button>
-              <Button variant="primary" onClick={purchase}>
-                Purchase credits
-              </Button>
+              <Button variant="outline" onClick={onDismiss}>{translateUi("Not now")}</Button>
+              <Button variant="primary" onClick={purchase}>{translateUi("Purchase credits")}</Button>
             </>
           ) : (
-            <Button variant="primary" onClick={onDismiss}>
-              Got it
-            </Button>
+            <Button variant="primary" onClick={onDismiss}>{translateUi("Got it")}</Button>
           )}
         </DialogFooter>
       </DialogContent>
@@ -146,6 +139,7 @@ function OptionRow({
   title: string;
   children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <li className="flex items-start gap-3 rounded-lg border border-border/60 bg-overlay px-3 py-2.5">
       <span

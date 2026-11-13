@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAppForm } from "@/components/ui/form";
@@ -83,6 +85,7 @@ export function AssistantServiceAccountActionDialog({
   readonly params: Record<string, unknown>;
   readonly onComplete: (serviceAccountId: string) => void;
 }) {
+  useUiTranslation();
   const [name, setName] = useState(textParam(params, "name"));
   const [description, setDescription] = useState(
     textParam(params, "description"),
@@ -245,21 +248,21 @@ export function AssistantServiceAccountActionDialog({
           </DialogTitle>
           <DialogDescription>
             {result?.secret
-              ? "Save this secret now. It will not be shown again."
+              ? translateUi("Save this secret now. It will not be shown again.")
               : result?.unavailable
-                ? "The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value."
+                ? translateUi("The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value.")
                 : result
-                  ? "The canonical service-account projection confirms the change."
+                  ? translateUi("The canonical service-account projection confirms the change.")
                   : destructive
-                    ? "This change revokes access and must be confirmed every time."
-                    : "NyxID keeps the service-account secret out of chat."}
+                    ? translateUi("This change revokes access and must be confirmed every time.")
+                    : translateUi("NyxID keeps the service-account secret out of chat.")}
           </DialogDescription>
         </DialogHeader>
         {result ? (
           <div className="space-y-3 border-y border-border py-4">
             {result.secret ? (
               <div className="space-y-2">
-                <Label htmlFor="one-time-secret">One-time secret</Label>
+                <Label htmlFor="one-time-secret">{translateUi("One-time secret")}</Label>
                 <Input
                   id="one-time-secret"
                   readOnly
@@ -277,7 +280,7 @@ export function AssistantServiceAccountActionDialog({
             {action === "create" || action === "update" ? (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="sa-name">Name</Label>
+                  <Label htmlFor="sa-name">{translateUi("Name")}</Label>
                   <Input
                     id="sa-name"
                     value={name}
@@ -285,7 +288,7 @@ export function AssistantServiceAccountActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="sa-description">Description</Label>
+                  <Label htmlFor="sa-description">{translateUi("Description")}</Label>
                   <Input
                     id="sa-description"
                     value={description}
@@ -301,7 +304,7 @@ export function AssistantServiceAccountActionDialog({
             {action === "create" ? (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="sa-scopes">Allowed scopes</Label>
+                  <Label htmlFor="sa-scopes">{translateUi("Allowed scopes")}</Label>
                   <ServiceAccountScopePicker
                     id="sa-scopes"
                     ownerId={targetOrgId || currentUserId || ""}
@@ -311,7 +314,7 @@ export function AssistantServiceAccountActionDialog({
                 </div>
                 {targetOrgId ? (
                   <div className="space-y-1.5">
-                    <p className="type-secondary-emphasis">Target organization</p>
+                    <p className="type-secondary-emphasis">{translateUi("Target organization")}</p>
                     <p className="break-all font-mono text-13 text-muted-foreground">
                       {targetOrgId}
                     </p>
@@ -326,16 +329,14 @@ export function AssistantServiceAccountActionDialog({
                   onCheckedChange={(value) => setConfirmed(value === true)}
                 />
                 <span className="flex items-center gap-1">
-                  <ShieldAlert className="size-3" />I understand this change
-                  revokes access.
-                </span>
+                  <ShieldAlert className="size-3" />{translateUi("I understand this change revokes access.")}</span>
               </Label>
             ) : null}
           </div>
         )}
         {error ? (
           <p role="alert" className="text-13 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -347,13 +348,11 @@ export function AssistantServiceAccountActionDialog({
                 close();
               }}
             >
-              {result.unavailable ? "Acknowledge" : "Done"}
+              {result.unavailable ? translateUi("Acknowledge") : translateUi("Done")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant={destructive ? "destructive" : "primary"}
@@ -361,7 +360,7 @@ export function AssistantServiceAccountActionDialog({
                 disabled={pending || (destructive && !confirmed)}
                 onClick={() => void submit()}
               >
-                {destructive ? "Confirm change" : "Continue"}
+                {destructive ? translateUi("Confirm change") : translateUi("Continue")}
               </Button>
             </>
           )}

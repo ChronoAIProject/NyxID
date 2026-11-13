@@ -354,7 +354,7 @@ pub(super) async fn execute_with_runtime(
     // Check before any decoder reservation/base64 work. Plan and dispatch
     // retain their checks to fence readiness changes after this entrance.
     if execution::images::contains_images(&value) {
-        crate::services::security_readiness_service::require(
+        crate::services::security_readiness_service::require_serving(
             &state.db,
             execution::images::READINESS,
         )

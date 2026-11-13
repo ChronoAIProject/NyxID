@@ -5,6 +5,16 @@ navigation translates the slab right by 77% of the window width; no scrim or
 panel covers it. The near-black dark sidebar and gray light sidebar sit behind
 the elevated content surface. The slab keeps its rounded left corners and shadow.
 
+On windows at least 900pt wide, the sidebar remains visible at 300pt beside the
+main content; both columns are interactive and available to accessibility. No
+modal focus, closing sliver or sidebar Back interception applies in this mode.
+Below 900pt, including narrow iPad Split View or Stage Manager windows, the push
+sidebar is retained with a maximum width of 360pt. Layout uses the current
+window width and keeps the navigator and chat drafts mounted through resize.
+Crossing the breakpoint cancels obsolete push/fade/focus callbacks; compact mode
+starts with the sidebar closed. Critical writes block sidebar destinations and
+Settings/QR/terminal shortcuts; dirty route editors keep their native leave guard.
+
 Only Settings, its account pages and the QR/terminal quick actions use the
 pull-up surface. The full-screen desktop viewer retains its own presentation.
 Other task-local pickers, confirmations, attachment preview and voice call are
@@ -27,12 +37,13 @@ transient interactions, rather than workspace destinations.
 | Content / Agents, AgentCreate, AgentDetail, AgentProfileEdit, GroupEditor            | Agents, crews and their guarded editors; each agent profile value is edited on its own page.                                              |
 | Content / AgentSkills, SkillDetail, SkillVersions, SkillHistory, AuthoredSkillReview | Read-only skill files/history, exact version pinning and owner publication decisions.                                                      |
 | Content / Activity, ActivityDetail, ActiveGrants                                     | Incoming actionable approvals, date-grouped history, detail and the existing grants view. Canonical approval links still address Activity. |
+| Content / Notifications                                                              | The owner's durable NyxBot notification feed (`assistant:notifications` flag): filters All, Needs you, Automations and Chats, cursor paging (a page the server filtered empty but gave a cursor is followed automatically, one hop per distinct cursor and at most five, then Load more is offered; the final empty copy appears only once the server is exhausted), mark all read with the server `as_of` fence; a row opens its thread, crew or automation and is marked read. Canonical `/assistant?panel=notifications` and `/assistant/notifications` address it. |
 | Content / WorkspaceSearch, WorkspaceRecents                                          | Grouped local search and cursor-paged See all, with chat-title search and per-agent filtering.                                             |
 | Sheet / AccountSettings, AccountSecurity, UsageCredits                               | Settings, account/security, display, notifications and usage/credits.                                                                      |
 | Sheet / DeviceLogin, AgentKeyLogin                                                   | QR, terminal and Agent Key sign-in flows with existing write guards.                                                                       |
 | Sheet / TermsOfService, PrivacyPolicy                                                | Signed-in legal documents.                                                                                                                 |
 | Root / Workspace, WorkspaceSheet                                                     | Main signed-in shell and the account/quick-action sheet host above it.                                                                     |
-| Root / MachineDesktop                                                                | Full-screen native desktop; landscape while focused/active, upright portrait restored on exit/background. No desktop web fallback.          |
+| Root / MachineDesktop                                                                | Full-screen native desktop; iPhone landscape while focused/active with portrait restoration on exit/background; iPad follows its resizable window without locks. No desktop web fallback.          |
 | Root / Auth, DeviceLogin, AgentKeyLogin, TermsOfService, PrivacyPolicy               | Signed-out authentication and shared canonical entries; signed-in wrappers resolve into the account sheet.                                 |
 
 Chat Details, History and Working context are nested content pages. History
@@ -46,8 +57,26 @@ retains its media presentation.
 
 The sidebar header contains the NyxID logo and circular Search control. Quick
 actions (Scan QR code and Terminal login code) precede Workspace. Workspace
-contains Automations, Machines, Plugins, Activity with its live pending count,
-and Create new agent. There are no disabled coming-soon destinations. Agents
+contains Notifications with its unread count (only while both the
+`assistant:notifications` and `assistant:nyxagent-engine` flags are on; the
+count turns amber while a decision waits), Automations, Machines, Plugins,
+Activity with its live pending count, and Create new agent. Private chats also
+show the same bell in their header. Thread, crew, channel-bot and Recents rows
+carry the unread counts the one notification summary attributes to them.
+Opening a thread or crew marks its notifications read once it has stayed in
+front for 1.5 seconds. A notification row follows the server's canonical
+link first (`/assistant?c=<thread|crew>`, `?card=` focuses a decision,
+`?agent=<id>&details=<section>` opens the agent's details, where an
+organization bot's public transcript lives, `/assistant/automations` the
+list) and falls back to its own references; links on other origins open
+nothing. The same parser serves `?g=<crew>`, `?agent=` chats and
+`?panel=notifications` above them. All push taps use the single account-bound
+queue in `useNotificationNavigation`, including cold starts and the foreground
+toast's Open action. NyxBot taps carry their `notification_id` through that queue;
+after a supported canonical destination is dispatched, the feed controller marks
+that row read. Authentication, navigation readiness and guards can defer the tap.
+A newer tap or supported direct link supersedes it; leaving its account drops it.
+An Activity fallback for an unknown destination does not mark a feed row read. There are no disabled coming-soon destinations. Agents
 (personal, then organization), Crews and plain-text Recents follow. The pinned
 Chat pill opens NyxBot Home; the gear opens Settings. A measured bottom spacer
 keeps the last row above the bar at maximum scroll. A fade hides rows passing
@@ -92,6 +121,13 @@ retains its equivalent Close/backdrop/drag/Back/Escape guards. Sign-out clears
 account state and unmounts editors. `navigationHierarchy.test.ts`,
 `workspaceChatNavigation.test.ts` and the surface/guard tests cover route,
 restoration, transition and dismissal behavior.
+
+At window widths of at least 768pt, Settings and quick-action sheets use a
+centered card up to 720×860pt with 24pt plus safe-area margins. Narrow windows
+retain the bottom sheet. The measured host shrinks above the keyboard, retaining
+the same sheet navigator and guarded edits; rotation does not replay entrance
+animation. Settings content is centered up to 720pt and row wrapping follows
+measured row width and Dynamic Type.
 
 Accessibility exposure follows the shell's settled visual endpoint. While
 navigation is open the slab is hidden except for Close navigation; focus moves

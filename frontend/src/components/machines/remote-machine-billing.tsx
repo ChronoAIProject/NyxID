@@ -1,3 +1,7 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -28,6 +32,7 @@ export function RemoteMachineBilling({
   readonly billingState?: string;
   readonly runId?: string;
 }) {
+  useUiTranslation();
   const [offsets, setOffsets] = useState<number[]>([0]);
   const [selectedRunId, setSelectedRunId] = useState(runId);
   const [runCursors, setRunCursors] = useState<string[]>([]);
@@ -52,69 +57,45 @@ export function RemoteMachineBilling({
       [
         "runtime billing contract not found",
         "Not found: runtime billing contract not found",
-      ].includes(query.error.message)) ||
+      ].includes(translateErrorMessage(query.error.message))) ||
       (query.error.status === 400 &&
         query.error.errorCode === 1008 &&
         [
           "runtime contract not found",
           "Validation error: runtime contract not found",
-        ].includes(query.error.message)));
+        ].includes(translateErrorMessage(query.error.message))));
   const missing =
     query.error instanceof ApiError &&
     [404, 405, 501].includes(query.error.status);
   return (
     <div className="space-y-6">
       <div className="space-y-2 text-14 text-muted-foreground">
-        <p>
-          Runtime billing uses the accepted continuous-run rate and cumulative
-          whole seconds. There is no per-instance cap. Paused storage is free.
-        </p>
-        <p>
-          Gateway services have their own charges. A free Machine never makes
-          downstream services free, and service costs are not added to these
-          runtime totals.
-        </p>
+        <p>{translateUi("Runtime billing uses the accepted continuous-run rate and cumulative whole seconds. There is no per-instance cap. Paused storage is free.")}</p>
+        <p>{translateUi("Gateway services have their own charges. A free Machine never makes downstream services free, and service costs are not added to these runtime totals.")}</p>
       </div>
       {billingState === "free" && (
-        <p className="rounded-lg border border-border/50 p-4 text-14 text-muted-foreground">
-          This resource currently reports free runtime billing. Paid historical
-          contracts, if any, are shown only when the server provides them.
-        </p>
+        <p className="rounded-lg border border-border/50 p-4 text-14 text-muted-foreground">{translateUi("This resource currently reports free runtime billing. Paid historical contracts, if any, are shown only when the server provides them.")}</p>
       )}
-      <DetailSection title="Current and historical contracts">
+      <DetailSection title={translateUi("Current and historical contracts")}>
         <div className="space-y-3 px-4 py-3">
           <Button
             variant={selectedRunId ? "outline" : "default"}
             onClick={() => selectRun(undefined)}
-          >
-            View current contract
-          </Button>
+          >{translateUi("View current contract")}</Button>
           {selectedRunId && (
-            <p className="break-all text-14 text-muted-foreground">
-              Viewing historical run {selectedRunId}. Each run retains its
-              accepted rate version.
-            </p>
+            <p className="break-all text-14 text-muted-foreground">{translateUi("Viewing historical run ")}{selectedRunId}{translateUi(". Each run retains its accepted rate version. ")}</p>
           )}
-          <p className="text-14 text-muted-foreground">
-            Historical summaries contain accepted rates and state. Open a
-            contract to read its settled and reserved amounts separately.
-          </p>
+          <p className="text-14 text-muted-foreground">{translateUi("Historical summaries contain accepted rates and state. Open a contract to read its settled and reserved amounts separately.")}</p>
           {runs.isPending && (
-            <p role="status" className="text-14">
-              Loading historical contracts…
-            </p>
+            <p role="status" className="text-14">{translateUi("Loading historical contracts…")}</p>
           )}
           {runs.error &&
             (runs.error instanceof ApiError &&
             [404, 405, 501].includes(runs.error.status) ? (
-              <p className="text-14 text-muted-foreground">
-                Historical contract lookup is unavailable on this server.
-                Current billing remains independently available when its
-                endpoint is enabled.
-              </p>
+              <p className="text-14 text-muted-foreground">{translateUi("Historical contract lookup is unavailable on this server. Current billing remains independently available when its endpoint is enabled.")}</p>
             ) : (
               <ErrorBanner
-                message={`Historical contracts could not be loaded. ${runs.error.message}`}
+                message={translateUi("Historical contracts could not be loaded. {{value1}}", { value1: runs.error.message })}
                 onRetry={() => void runs.refetch()}
               />
             ))}
@@ -126,71 +107,56 @@ export function RemoteMachineBilling({
               <div className="min-w-0 space-y-1 text-14">
                 <p className="break-all font-mono">{run.run_id}</p>
                 <p>
-                  {run.accepted_credits_per_second} Credits / second ·{" "}
+                  {run.accepted_credits_per_second}{translateUi(" Credits / second ·")}{" "}
                   {run.state.replaceAll("_", " ")}
                 </p>
-                <p className="break-all text-muted-foreground">
-                  Rate {run.rate_version} · Created{" "}
-                  {new Date(run.created_at).toLocaleString()}
+                <p className="break-all text-muted-foreground">{translateUi("Rate ")}{run.rate_version}{translateUi(" · Created")}{" "}
+                  {new Date(run.created_at).toLocaleString(getFormattingLocale())}
                 </p>
               </div>
               <Button
-                aria-label={`View run ${run.run_id}`}
+                aria-label={translateUi("View run {{value1}}", { value1: run.run_id })}
                 disabled={selectedRunId === run.run_id}
                 onClick={() => selectRun(run.run_id)}
-              >
-                View contract
-              </Button>
+              >{translateUi("View contract")}</Button>
             </article>
           ))}
           {runs.data && !runs.data.runs.length && (
-            <p className="text-14 text-muted-foreground">
-              No runtime contracts in this page.
-            </p>
+            <p className="text-14 text-muted-foreground">{translateUi("No runtime contracts in this page.")}</p>
           )}
           <div className="flex justify-between gap-2">
             <Button
               disabled={!runCursors.length}
               onClick={() => setRunCursors((values) => values.slice(0, -1))}
-            >
-              Previous contracts
-            </Button>
+            >{translateUi("Previous contracts")}</Button>
             <Button
               disabled={!runs.data?.next_cursor || runs.isFetching}
               onClick={() => {
                 const next = runs.data?.next_cursor;
                 if (next) setRunCursors((values) => [...values, next]);
               }}
-            >
-              Next contracts
-            </Button>
+            >{translateUi("Next contracts")}</Button>
           </div>
         </div>
       </DetailSection>
       {query.isPending && (
-        <p role="status" className="text-14">
-          Loading runtime billing…
-        </p>
+        <p role="status" className="text-14">{translateUi("Loading runtime billing…")}</p>
       )}
       {query.error && (
         <div role="status" className="space-y-3">
           {noContract ? (
             <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
               {selectedRunId
-                ? "Selected historical contract was not found. Refresh the contract list or view the current contract; its amounts remain unknown."
+                ? translateUi("Selected historical contract was not found. Refresh the contract list or view the current contract; its amounts remain unknown.")
                 : billingState === "free"
-                  ? "No current paid runtime contract. This is expected for free runtime; downstream service usage remains separate. Historical contracts can still be reviewed above."
-                  : "No current runtime contract was found. Current billing amounts remain unknown; this does not establish zero cost or completed settlement."}
+                  ? translateUi("No current paid runtime contract. This is expected for free runtime; downstream service usage remains separate. Historical contracts can still be reviewed above.")
+                  : translateUi("No current runtime contract was found. Current billing amounts remain unknown; this does not establish zero cost or completed settlement.")}
             </p>
           ) : missing ? (
-            <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
-              Runtime billing details are unavailable on this server. Accepted
-              rates, exact settled/reserved amounts, pending liability, and
-              account-duration estimates cannot be shown yet.
-            </p>
+            <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("Runtime billing details are unavailable on this server. Accepted rates, exact settled/reserved amounts, pending liability, and account-duration estimates cannot be shown yet.")}</p>
           ) : (
             <ErrorBanner
-              message={`Runtime billing could not be loaded. ${query.error.message}`}
+              message={translateUi("Runtime billing could not be loaded. {{value1}}", { value1: query.error.message })}
               onRetry={() => void query.refetch()}
             />
           )}
@@ -200,7 +166,7 @@ export function RemoteMachineBilling({
               if (noContract) void runs.refetch();
             }}
           >
-            {noContract ? "Refresh contracts" : "Check billing availability"}
+            {noContract ? translateUi("Refresh contracts") : translateUi("Check billing availability")}
           </Button>
         </div>
       )}
@@ -209,87 +175,76 @@ export function RemoteMachineBilling({
           <DetailSection
             title={
               selectedRunId
-                ? "Historical runtime contract"
-                : "Current runtime contract"
+                ? translateUi("Historical runtime contract")
+                : translateUi("Current runtime contract")
             }
           >
-            <DetailRow label="Run ID" value={data.run_id} mono copyable />
+            <DetailRow label={translateUi("Run ID")} value={data.run_id} mono copyable />
             <DetailRow
-              label="Contract state"
+              label={translateUi("Contract state")}
               value={data.state.replaceAll("_", " ")}
               badge
             />
-            <DetailRow label="Rate version" value={data.rate_version} mono />
+            <DetailRow label={translateUi("Rate version")} value={data.rate_version} mono />
             <DetailRow
-              label="Accepted rate"
+              label={translateUi("Accepted rate")}
               value={`${data.accepted_credits_per_second} Credits / second`}
             />
             <DetailRow
-              label="Cumulative billed time"
+              label={translateUi("Cumulative billed time")}
               value={`${data.cumulative_seconds} whole seconds`}
             />
             <DetailRow
-              label="Funded through"
-              value={new Date(data.covered_until).toLocaleString()}
+              label={translateUi("Funded through")}
+              value={new Date(data.covered_until).toLocaleString(getFormattingLocale())}
             />
             <DetailRow
-              label="Settled"
+              label={translateUi("Settled")}
               value={`${data.settled_credits} Credits`}
             />
             <DetailRow
-              label="Reserved (includes pending)"
+              label={translateUi("Reserved (includes pending)")}
               value={`${data.reserved_credits} Credits`}
             />
             <DetailRow
-              label="Pending within reserved"
+              label={translateUi("Pending within reserved")}
               value={`${data.pending_credits} Credits`}
             />
-            <p className="px-4 py-3 text-14 text-muted-foreground">
-              Pending liability is included in reserved Credits. It is not an
-              additional amount to sum. Unknown stop evidence can retain
-              responsibility until verified settlement; later funds do not
-              retroactively cover expired execution.
-            </p>
+            <p className="px-4 py-3 text-14 text-muted-foreground">{translateUi("Pending liability is included in reserved Credits. It is not an additional amount to sum. Unknown stop evidence can retain responsibility until verified settlement; later funds do not retroactively cover expired execution.")}</p>
           </DetailSection>
-          <DetailSection title="Shared account funds and estimate">
+          <DetailSection title={translateUi("Shared account funds and estimate")}>
             <DetailRow
-              label="Wallet available"
+              label={translateUi("Wallet available")}
               value={`${data.funds.wallet_available} Credits`}
             />
             <DetailRow
-              label="Wallet reserved across account"
+              label={translateUi("Wallet reserved across account")}
               value={`${data.funds.wallet_reserved} Credits`}
             />
             <DetailRow
-              label="Pending debits"
+              label={translateUi("Pending debits")}
               value={`${data.funds.pending_debits} Credits`}
             />
             <DetailRow
-              label="Pending purchased-credit expiry"
+              label={translateUi("Pending purchased-credit expiry")}
               value={`${data.funds.pending_expiry} Credits`}
             />
             <DetailRow
-              label="Matching allowance remaining"
+              label={translateUi("Matching allowance remaining")}
               value={`${data.funds.matching_allowance_seconds} seconds`}
             />
             <DetailRow
-              label="Available matching grants"
+              label={translateUi("Available matching grants")}
               value={`${data.funds.available_grants} Credits`}
             />
             <DetailRow
-              label="Current estimate"
+              label={translateUi("Current estimate")}
               value={`${data.funds.estimated_seconds} seconds`}
             />
-            <p className="px-4 py-3 text-14 text-muted-foreground">
-              This is an account-wide estimate, not a reserved duration or
-              spending limit. Other Machines and services share these funds;
-              allowances and grants can expire. A finite reservation, live
-              eligibility, and provider checks still govern every execution
-              window.
-            </p>
+            <p className="px-4 py-3 text-14 text-muted-foreground">{translateUi("This is an account-wide estimate, not a reserved duration or spending limit. Other Machines and services share these funds; allowances and grants can expire. A finite reservation, live eligibility, and provider checks still govern every execution window.")}</p>
           </DetailSection>
           <div className="space-y-3">
-            <h3 className="type-card-title">Runtime intervals</h3>
+            <h3 className="type-card-title">{translateUi("Runtime intervals")}</h3>
             <div className="flex flex-col gap-3 md:hidden">
               {data.intervals.map((row) => (
                 <article
@@ -300,20 +255,16 @@ export function RemoteMachineBilling({
                     {row.interval_id}
                   </p>
                   <Badge variant={row.settled ? "success" : "warning"}>
-                    {row.settled ? "Settled" : "Reserved"}
+                    {row.settled ? translateUi("Settled") : translateUi("Reserved")}
                   </Badge>
-                  <p className="text-13 text-muted-foreground">
-                    Generation {row.runtime_generation} ·{" "}
+                  <p className="text-13 text-muted-foreground">{translateUi("Generation ")}{row.runtime_generation} ·{" "}
                     {row.quantity === null
-                      ? "Awaiting evidence"
-                      : `${row.quantity} seconds`}
+                      ? translateUi("Awaiting evidence")
+                      : translateUi("{{value1}} seconds", { value1: row.quantity })}
                   </p>
                   <p className="text-13 text-muted-foreground">
-                    {row.settled ? row.settled_credits : row.reserved_credits}{" "}
-                    Credits
-                  </p>
-                  <p className="break-all text-13 text-text-tertiary">
-                    Rate {row.rate_version}
+                    {row.settled ? row.settled_credits : row.reserved_credits}{" "}{translateUi("Credits")}</p>
+                  <p className="break-all text-13 text-text-tertiary">{translateUi("Rate ")}{row.rate_version}
                   </p>
                 </article>
               ))}
@@ -322,10 +273,10 @@ export function RemoteMachineBilling({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Interval</TableHead>
-                    <TableHead>Generation / seconds</TableHead>
-                    <TableHead>Funding</TableHead>
-                    <TableHead>Status</TableHead>
+                    <TableHead>{translateUi("Interval")}</TableHead>
+                    <TableHead>{translateUi("Generation / seconds")}</TableHead>
+                    <TableHead>{translateUi("Funding")}</TableHead>
+                    <TableHead>{translateUi("Status")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -336,30 +287,26 @@ export function RemoteMachineBilling({
                           {row.interval_id}
                         </span>
                         <span className="text-13 text-text-tertiary">
-                          {new Date(row.covered_from).toLocaleString()} –{" "}
-                          {new Date(row.covered_until).toLocaleString()}
+                          {new Date(row.covered_from).toLocaleString(getFormattingLocale())} –{" "}
+                          {new Date(row.covered_until).toLocaleString(getFormattingLocale())}
                         </span>
-                        <span className="block break-all text-13 text-text-tertiary">
-                          Rate {row.rate_version}
+                        <span className="block break-all text-13 text-text-tertiary">{translateUi("Rate ")}{row.rate_version}
                         </span>
                       </TableCell>
                       <TableCell>
-                        {row.runtime_generation} / {row.quantity ?? "Pending"}
+                        {row.runtime_generation} / {row.quantity ?? translateUi("Pending")}
                       </TableCell>
                       <TableCell>
                         {row.settled
                           ? row.settled_credits
-                          : row.reserved_credits}{" "}
-                        Credits
-                        <br />
-                        <span className="text-13 text-text-tertiary">
-                          Allowance {row.allowance_funded} · Grant{" "}
-                          {row.grant_funded} · Wallet {row.wallet_funded}
+                          : row.reserved_credits}{" "}{translateUi("Credits")}<br />
+                        <span className="text-13 text-text-tertiary">{translateUi("Allowance ")}{row.allowance_funded}{translateUi(" · Grant")}{" "}
+                          {row.grant_funded}{translateUi(" · Wallet ")}{row.wallet_funded}
                         </span>
                       </TableCell>
                       <TableCell>
                         <Badge variant={row.settled ? "success" : "warning"}>
-                          {row.settled ? "Settled" : "Reserved"}
+                          {row.settled ? translateUi("Settled") : translateUi("Reserved")}
                         </Badge>
                       </TableCell>
                     </TableRow>
@@ -368,17 +315,13 @@ export function RemoteMachineBilling({
               </Table>
             </div>
             {!data.intervals.length && (
-              <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
-                No runtime intervals in this page.
-              </p>
+              <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("No runtime intervals in this page.")}</p>
             )}
             <div className="flex justify-between gap-2">
               <Button
                 disabled={offsets.length < 2}
                 onClick={() => setOffsets((values) => values.slice(0, -1))}
-              >
-                Previous intervals
-              </Button>
+              >{translateUi("Previous intervals")}</Button>
               <Button
                 disabled={
                   data.next_interval_offset === null || query.isFetching
@@ -390,27 +333,17 @@ export function RemoteMachineBilling({
                       data.next_interval_offset!,
                     ]);
                 }}
-              >
-                Next intervals
-              </Button>
+              >{translateUi("Next intervals")}</Button>
             </div>
           </div>
         </>
       )}
-      <DetailSection title="Recovery and separate service usage">
+      <DetailSection title={translateUi("Recovery and separate service usage")}>
         <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
-          <p>
-            Insufficient funds never triggers automatic top-up or resume. First
-            resolve any old pending responsibility, then manually review a new
-            quote and resume.
-          </p>
-          <p>
-            Load Machine-attributed gateway service rows separately below. Use
-            account Billing & Usage for service totals; those charges are not
-            copied into Machine runtime totals.
-          </p>
+          <p>{translateUi("Insufficient funds never triggers automatic top-up or resume. First resolve any old pending responsibility, then manually review a new quote and resume.")}</p>
+          <p>{translateUi("Load Machine-attributed gateway service rows separately below. Use account Billing & Usage for service totals; those charges are not copied into Machine runtime totals.")}</p>
           <Button asChild>
-            <Link to="/billing">Open Billing &amp; Usage</Link>
+            <Link to="/billing">{translateUi("Open Billing & Usage")}</Link>
           </Button>
         </div>
       </DetailSection>

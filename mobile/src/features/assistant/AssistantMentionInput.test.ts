@@ -1,3 +1,4 @@
+import { composerInputMinHeight } from "./composerGeometry";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -59,6 +60,7 @@ function setup(
     ...initial,
   };
   const harness = hookHarness<Element>({
+    "./composerGeometry": { composerInputMinHeight },
     "../display/ChatLayoutContext": {
       useComposerHeight: () => maxHeight,
       useChatColumn: () => ({
@@ -76,7 +78,10 @@ function setup(
         scroll() {},
       }),
     },
-    "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar", AgentAvatarStack: "AgentAvatarStack" },
+    "../../components/AgentAvatar": {
+      AgentAvatar: "AgentAvatar",
+      AgentAvatarStack: "AgentAvatarStack",
+    },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown, key?: unknown) => ({
         type,
@@ -90,6 +95,7 @@ function setup(
       }),
     },
     "react-native": {
+      useWindowDimensions: () => ({ fontScale: 1 }),
       Platform: { OS: platform },
       Pressable: "Pressable",
       ScrollView: "ScrollView",
@@ -300,18 +306,14 @@ test("native measured content grows the shared composer to its preference/keyboa
   assert.equal(inputStyle(view.input()).height, 44);
   view.input().props.onChangeText("1234567890".repeat(20));
   view.harness.render();
-  view
-    .input()
-    .props.onContentSizeChange({
-      nativeEvent: { contentSize: { width: 256, height: 96.4 } },
-    });
+  view.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { width: 256, height: 96.4 } },
+  });
   view.harness.flush();
   assert.equal(inputStyle(view.input()).height, 97);
-  view
-    .input()
-    .props.onContentSizeChange({
-      nativeEvent: { contentSize: { width: 256, height: 275 } },
-    });
+  view.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { width: 256, height: 275 } },
+  });
   view.harness.flush();
   assert.equal(inputStyle(view.input()).height, 140);
   assert.equal(view.input().props.multiline, true);
@@ -333,11 +335,9 @@ test("native measured content grows the shared composer to its preference/keyboa
     240,
     "increasing the cap reuses measured overflow",
   );
-  view
-    .input()
-    .props.onContentSizeChange({
-      nativeEvent: { contentSize: { width: 300, height: 58 } },
-    });
+  view.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { width: 300, height: 58 } },
+  });
   view.harness.flush();
   assert.equal(
     inputStyle(view.input()).height,
@@ -382,18 +382,14 @@ test("draft replacement resets measured height and rejects stale size events whi
   assert.equal(inputStyle(view.input()).height, 44);
   view.props.editable = false;
   view.harness.render();
-  view
-    .input()
-    .props.onContentSizeChange({
-      nativeEvent: { contentSize: { height: 70 } },
-    });
+  view.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { height: 70 } },
+  });
   view.harness.flush();
   assert.equal(inputStyle(view.input()).height, 70);
-  view
-    .input()
-    .props.onContentSizeChange({
-      nativeEvent: { contentSize: { height: NaN } },
-    });
+  view.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { height: NaN } },
+  });
   view.harness.flush();
   assert.equal(inputStyle(view.input()).height, 70);
   view.harness.unmount();
@@ -424,11 +420,9 @@ test("the full-width composer keeps mention and action controls below its live i
     .input()
     .props.onChangeText("A draft that uses the width above the controls");
   view.harness.render();
-  view
-    .input()
-    .props.onContentSizeChange({
-      nativeEvent: { contentSize: { height: 96 } },
-    });
+  view.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { height: 96 } },
+  });
   view.harness.flush();
   assert.equal(inputStyle(view.input()).height, 96);
   assert.equal(view.input().key, key);
@@ -450,4 +444,22 @@ test("the full-width composer keeps mention and action controls below its live i
     "toolbar actions preserve the native input and selection owner",
   );
   view.harness.unmount();
+});
+
+test("the empty iOS placeholder stays one visual line and cannot enlarge the normal composer", () => {
+  const f = setup({ value: "", placeholder: "Message NyxBot" }, "ios");
+  assert.equal(f.input().props.placeholder, "");
+  assert.equal(f.input().props.accessibilityHint, "Message NyxBot");
+  assert.equal(inputStyle(f.input()).height, 44);
+  f.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { height: 200 } },
+  });
+  f.harness.flush();
+  assert.equal(inputStyle(f.input()).height, 44);
+  const placeholder = elements(f.harness.flush()).find(
+    (n) => n.type === "Text" && n.props.children === "Message NyxBot",
+  )!;
+  assert.equal(placeholder.props.numberOfLines, 1);
+  assert.equal(placeholder.props.pointerEvents, "none");
+  f.harness.unmount();
 });

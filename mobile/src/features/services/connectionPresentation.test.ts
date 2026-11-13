@@ -288,3 +288,15 @@ test("unsupported scope protocols and absent saved grants leave defaults untouch
     undefined,
   );
 });
+
+test("saved API keys default to unverified even with last_used_at or an old server", () => {
+  const key = { ...connection, credential_type: "api_key", last_used_at: "2026-11-11" };
+  assert.equal(describeConnection(key).label, "Saved, not verified");
+  for (const state of ["verified", "rejected", "not_verified", "future_state"]) {
+    const result = describeConnection({ ...key, credential_verification: { state, reason_code: "provider_unauthorized", can_check: true } });
+    assert.equal(result.label, state === "verified" ? "Verified" : state === "rejected" ? "Rejected by provider" : "Saved, not verified");
+  }
+  assert.match(describeConnection({ ...key, credential_verification: { state: "rejected", reason_code: "provider_forbidden", can_check: true } }).description, /permissions.*not necessarily/);
+  assert.equal(describeConnection({ ...key, node_id: "node" }).label, "Credential available");
+  assert.equal(describeConnection({ ...key, credential_binding: "platform" }).label, "Platform credential");
+});

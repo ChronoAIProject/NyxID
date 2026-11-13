@@ -1,7 +1,7 @@
 //! HTTP/native adapters for agent guidance. All Ornn egress uses the normal proxy.
 use crate::{
     AppState,
-    errors::{AppError, AppResult},
+    errors::{AppError, AppResult, skill_read::SkillReadReason},
     mw::auth::AuthUser,
     services::{
         agent_skill_service::{
@@ -29,6 +29,9 @@ pub(crate) struct OrnnSkillRead;
 /// connection exception carried by `OrnnSkillRead`.
 #[derive(Clone)]
 pub(crate) struct OrnnIdentityRead;
+/// Only the org skill adapter may forward its purpose-limited lookup bearer.
+#[derive(Clone, Copy)]
+pub(crate) struct OrnnOrgRead;
 #[derive(Clone, Copy)]
 pub(crate) struct OrnnSkillPublication;
 /// Drafting's pre-review format check. Never worth an owner approval prompt:
@@ -94,23 +97,28 @@ struct OrnnFetch<'a> {
     method: http::Method,
     body: Body,
     bound_skill_read: bool,
+    owner_access: Option<(
+        std::sync::Arc<crate::services::org_agent_service::RequestAccess>,
+        crate::models::assistant_agent::AssistantAgent,
+    )>,
 }
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
-        self.classified_request(http::Method::GET, path, Vec::new(), false)
+        self.classified_request(http::Method::GET, path, Vec::new(), false, None)
             .await
             .into_app_result()
     }
 
     async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
-        self.classified_request(method, path, body, false)
+        self.classified_request(method, path, body, false, None)
             .await
             .into_app_result()
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
-        self.classified_request(method, path, body, false).await
+        self.classified_request(method, path, body, false, None)
+            .await
     }
 
     async fn classified_as_owner(
@@ -126,7 +134,7 @@ impl skills::OrnnReader for Reader<'_> {
             scopes: None,
             chat: None,
         }
-        .classified_request(method, path, body, false)
+        .classified_request(method, path, body, false, None)
         .await
     }
 }
@@ -148,6 +156,10 @@ impl Reader<'_> {
         path: &str,
         body: Vec<u8>,
         bound_skill_read: bool,
+        owner_access: Option<(
+            std::sync::Arc<crate::services::org_agent_service::RequestAccess>,
+            crate::models::assistant_agent::AssistantAgent,
+        )>,
     ) -> OrnnOutcome {
         // A proxy request is a substantial state machine. Poll it as its own
         // task so nested native MCP dispatch does not accumulate its debug
@@ -169,6 +181,7 @@ impl Reader<'_> {
                 method,
                 body: Body::from(body),
                 bound_skill_read,
+                owner_access,
             }))
             .await
         }));
@@ -179,8 +192,65 @@ impl Reader<'_> {
     }
 }
 
+/// Attached previews and bound downloads share an organization connection
+/// scope. The actor remains the signed Ornn principal; an organization is never
+/// substituted as the JWT subject and personal/shared readers keep their lane.
+struct AgentOwnerReader<'a> {
+    reader: &'a Reader<'a>,
+    agent: &'a crate::models::assistant_agent::AssistantAgent,
+}
+
+impl AgentOwnerReader<'_> {
+    async fn fetch(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+        bound: bool,
+    ) -> OrnnOutcome {
+        let access = match crate::services::org_agent_service::resolve_agent_access(
+            &self.reader.state.db,
+            self.reader.person,
+            self.agent,
+        )
+        .await
+        {
+            Ok(access) => access.filter(|access| access.shared().is_none()),
+            Err(error) => return OrnnOutcome::LocalError(error),
+        };
+        // A channel snapshot also carries its delegated-resource intersection.
+        let access = access.map(|access| {
+            self.reader
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.org_agent_access.as_ref())
+                .filter(|snapshot| snapshot.channel().is_some())
+                .cloned()
+                .unwrap_or(access)
+        });
+        self.reader
+            .classified_request(
+                method,
+                path,
+                body,
+                bound,
+                access.map(|access| (access, self.agent.clone())),
+            )
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl OrnnReader for AgentOwnerReader<'_> {
+    async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        self.fetch(http::Method::GET, path, Vec::new(), false)
+            .await
+            .into_skill_read_result()
+    }
+}
+
 /// Reader used only after `agent_skill_service::read` has resolved and
-/// validated the agent's exact attached pin.  The marker is intentionally
+/// validated the agent's exact attached pin. The marker is intentionally
 /// separate from `Reader` so catalog search, version previews and publication
 /// never receive the bound-skill grant exception.
 struct BoundSkillReader<'a> {
@@ -193,11 +263,13 @@ impl skills::OrnnReader for BoundSkillReader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
         self.classified(http::Method::GET, path, Vec::new())
             .await
-            .into_app_result()
+            .into_skill_read_result()
     }
 
     async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
-        self.classified(method, path, body).await.into_app_result()
+        self.classified(method, path, body)
+            .await
+            .into_skill_read_result()
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
@@ -223,9 +295,12 @@ impl skills::OrnnReader for BoundSkillReader<'_> {
             audit_skill_read_refusal(self.reader.state, self.reader.person, "skill_not_bound");
             return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
         }
-        self.reader
-            .classified_request(method, path, body, true)
-            .await
+        AgentOwnerReader {
+            reader: self.reader,
+            agent: self.agent,
+        }
+        .fetch(method, path, body, true)
+        .await
     }
 
     async fn classified_as_owner(
@@ -249,6 +324,7 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         method,
         body,
         bound_skill_read,
+        owner_access,
     } = request;
     let publication = method != http::Method::GET;
     if !ornn_operation_allowed(&method, path, publication) {
@@ -291,13 +367,62 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     auth.assistant_operation_scopes = scopes;
     auth.assistant_turn_fence = chat.as_ref().map(|chat| Box::new(chat.turn_fence()));
     auth.assistant_chat = chat;
-    let Ok(mut request) = Request::builder()
-        .method(method)
-        .uri(format!("/api/v1/proxy/{}{path}", service.id))
-        .body(body)
-    else {
+    let via = if let Some((access, agent)) = owner_access {
+        let connection = match crate::services::agent_skill_org_access::connection(
+            &state.db,
+            &access,
+            &service.id,
+        )
+        .await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                if bound_skill_read && matches!(error, AppError::SkillRead(_)) {
+                    audit_skill_read_refusal(state, person, "owner_connection_unavailable");
+                }
+                return OrnnOutcome::LocalError(error);
+            }
+        };
+        let token = match crate::services::agent_skill_org_access::issue(
+            state,
+            person,
+            &agent,
+            &connection,
+            auth.assistant_chat.as_deref(),
+        ) {
+            Ok(token) => token,
+            Err(error) => return OrnnOutcome::LocalError(error),
+        };
+        auth.assistant_agent_owner_id = Some(access.owner().to_owned());
+        auth.org_agent_access = Some(access);
+        Some((connection, token))
+    } else {
+        None
+    };
+    let uri = match &via {
+        Some((connection, _)) => format!(
+            "/api/v1/proxy/{}{path}{}_nyxid_via={connection}",
+            service.id,
+            if path.contains('?') { "&" } else { "?" }
+        ),
+        None => format!("/api/v1/proxy/{}{path}", service.id),
+    };
+    let Ok(mut request) = Request::builder().method(method).uri(uri).body(body) else {
         return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::InvalidPath);
     };
+    if let Some((_, token)) = &via {
+        let authorization = zeroize::Zeroizing::new(format!("Bearer {}", token.as_str()));
+        let Ok(mut header) = http::HeaderValue::from_str(&authorization) else {
+            return OrnnOutcome::LocalError(AppError::Internal(
+                "Invalid Ornn lookup capability".into(),
+            ));
+        };
+        header.set_sensitive(true);
+        request
+            .headers_mut()
+            .insert(http::header::AUTHORIZATION, header);
+        request.extensions_mut().insert(OrnnOrgRead);
+    }
     if publication {
         request.headers_mut().insert(
             http::header::CONTENT_TYPE,
@@ -329,6 +454,12 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     .await
     {
         Ok(response) => response,
+        Err(error @ AppError::SkillRead(_)) => return OrnnOutcome::LocalError(error),
+        Err(AppError::CredentialUnavailable(_) | AppError::NotFound(_)) if via.is_some() => {
+            return OrnnOutcome::LocalError(AppError::SkillRead(
+                SkillReadReason::OwnerConnectionUnavailable,
+            ));
+        }
         Err(AppError::ApiKeyScopeForbidden(message)) => {
             if bound_skill_read {
                 let reason = if message.to_ascii_lowercase().contains("operation") {
@@ -505,7 +636,20 @@ pub async fn catalog(
         chat: None,
     };
     let value = match (query.skill, query.version) {
-        (Some(id), Some(version)) => json!(skills::preview(&reader, &id, &version).await?),
+        (Some(id), Some(version)) => {
+            let preview = skills::preview(&reader, &id, &version).await?;
+            // `assistant:skill-runs` adds the parsed outline and the author; a
+            // failed flag lookup keeps today's response.
+            if Box::pin(crate::services::skill_outline::enabled(&state.db, &owner))
+                .await
+                .unwrap_or(false)
+            {
+                let publisher = Box::pin(skills::publisher_kind(&state.db, &preview)).await;
+                skills::catalog_preview(&preview, publisher)
+            } else {
+                json!(preview)
+            }
+        }
         (Some(id), None) => skills::versions(&reader, &id, query.page).await?,
         (None, _) => skills::search(&reader, &query.q, query.page).await?,
     };
@@ -654,6 +798,35 @@ pub struct SkillTestResponse {
 
 const TEST_EXCERPT_CHARS: usize = 2_000;
 
+fn same_pinned_content(
+    current: &crate::models::catalog_skill_revision::SkillReference,
+    pinned: &crate::models::catalog_skill_revision::SkillReference,
+) -> bool {
+    fn dependencies(
+        pin: &crate::models::catalog_skill_revision::SkillReference,
+    ) -> Vec<(&str, &str, &str, &str)> {
+        let mut identities: Vec<_> = pin
+            .dependencies
+            .iter()
+            .map(|dep| {
+                (
+                    dep.source.as_str(),
+                    dep.skill_id.as_str(),
+                    dep.version.as_str(),
+                    dep.sha256.as_str(),
+                )
+            })
+            .collect();
+        identities.sort_unstable();
+        identities
+    }
+    current.source == pinned.source
+        && current.skill_id == pinned.skill_id
+        && current.version == pinned.version
+        && current.sha256 == pinned.sha256
+        && dependencies(current) == dependencies(pinned)
+}
+
 /// Test an attached skill: verify the exact pinned version in Ornn, then read
 /// its SKILL.md through the same reader the agent's `nyxid__skill_read` uses.
 pub async fn preview_attached(
@@ -678,11 +851,19 @@ pub async fn preview_attached(
         scopes: None,
         chat: None,
     };
-    let preview = skills::preview(&reader, &pin.skill_id, &pin.version).await?;
-    if preview.reference.sha256 != pin.sha256 {
-        return Err(AppError::Conflict(
-            "Ornn now serves different content for this pinned version; reattach the skill".into(),
-        ));
+    let preview = skills::preview(
+        &AgentOwnerReader {
+            reader: &reader,
+            agent: &agent,
+        },
+        &pin.skill_id,
+        &pin.version,
+    )
+    .await?;
+    // Ornn's detail response uses the current display names even for an old
+    // version. Compare package identities, not names or dependency ordering.
+    if !same_pinned_content(&preview.reference, &pin) {
+        return Err(AppError::SkillRead(SkillReadReason::PinnedVersionMismatch));
     }
     let (readable, excerpt) = if pin.disabled {
         (false, String::new())
@@ -781,6 +962,37 @@ fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args[key].as_str().unwrap_or_default()
 }
 
+/// `skill_read` of a file, or of the NYX template outline when `outline`.
+async fn read_attached(
+    reader: &impl skills::OrnnReader,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    args: &Value,
+    outline: bool,
+) -> AppResult<Value> {
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    if outline {
+        skills::read_outline(
+            reader,
+            agent,
+            arg(args, "skill"),
+            args["dependency"].as_str(),
+            offset,
+            args["outline_fingerprint"].as_str(),
+        )
+        .await
+    } else {
+        skills::read(
+            reader,
+            agent,
+            arg(args, "skill"),
+            args["dependency"].as_str(),
+            args["path"].as_str().unwrap_or("SKILL.md"),
+            offset,
+        )
+        .await
+    }
+}
+
 pub(crate) async fn dispatch(
     state: &AppState,
     chat: &ChatAuthority,
@@ -811,10 +1023,25 @@ pub(crate) async fn dispatch(
             chat: Some(std::sync::Arc::new(chat.clone())),
         };
         let input = authoring::parse_input(args)?;
+        // Template advice only; it never refuses or changes the draft.
+        let warnings = if Box::pin(crate::services::skill_outline::enabled(
+            &state.db,
+            &chat.user_id,
+        ))
+        .await
+        .unwrap_or(false)
+        {
+            crate::services::skill_outline::template_warnings(input.skill_md())
+        } else {
+            Vec::new()
+        };
         // The pre-review format check is the agent's own Ornn request, so it
         // keeps the thread key's approval policy, turn fence and attribution.
-        let result = Box::pin(authoring::create(state, chat, input, &reader, &reader)).await?;
+        let mut result = Box::pin(authoring::create(state, chat, input, &reader, &reader)).await?;
         let asks = result["error"] == "acknowledgement_required";
+        if !warnings.is_empty() && result.is_object() {
+            result["outline_warnings"] = json!(warnings);
+        }
         return Ok((result, asks));
     }
     // Ornn reads run as the thread key, so they keep its agent's operation scopes.
@@ -878,7 +1105,22 @@ pub(crate) async fn dispatch(
             .await?
         }
         "preview_agent_skill" => {
-            json!(skills::preview(&reader, arg(args, "skill"), arg(args, "version")).await?)
+            let preview =
+                skills::preview(&reader, arg(args, "skill"), arg(args, "version")).await?;
+            if Box::pin(crate::services::skill_outline::enabled(db, &chat.user_id))
+                .await
+                .unwrap_or(false)
+            {
+                skills::preview_with_outline(
+                    &preview,
+                    args["outline_offset"]
+                        .as_u64()
+                        .map(|offset| offset as usize),
+                    args["outline_fingerprint"].as_str(),
+                )?
+            } else {
+                json!(preview)
+            }
         }
         "skill_read" => {
             let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
@@ -902,26 +1144,29 @@ pub(crate) async fn dispatch(
                         })
                     })
             });
+            let outline = match args["section"].as_str() {
+                None => false,
+                Some("outline") => {
+                    if !Box::pin(crate::services::skill_outline::enabled(db, &chat.user_id)).await?
+                    {
+                        return Err(AppError::Forbidden("Skill outlines are not enabled".into()));
+                    }
+                    true
+                }
+                Some(_) => {
+                    return Err(AppError::ValidationError("section must be outline".into()));
+                }
+            };
             if !bound {
                 audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
-                skills::read(
-                    &reader,
-                    &agent,
-                    arg(args, "skill"),
-                    args["dependency"].as_str(),
-                    args["path"].as_str().unwrap_or("SKILL.md"),
-                    args["offset"].as_u64().unwrap_or(0) as usize,
-                )
-                .await
+                Box::pin(read_attached(&reader, &agent, args, outline)).await
             } else {
-                skills::read(
+                Box::pin(read_attached(
                     &reader.bound_skill(&agent),
                     &agent,
-                    arg(args, "skill"),
-                    args["dependency"].as_str(),
-                    args["path"].as_str().unwrap_or("SKILL.md"),
-                    args["offset"].as_u64().unwrap_or(0) as usize,
-                )
+                    args,
+                    outline,
+                ))
                 .await
             }?
         }
@@ -1133,6 +1378,40 @@ async fn missing_skill(
         ),
         true,
     ))
+}
+
+/// Dedicated GET /orgs callback for Ornn. Other tokens use ordinary auth; this
+/// capability is never accepted by the general AuthUser extractor.
+pub(crate) async fn org_membership_lookup(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> AppResult<axum::response::Response> {
+    use axum::{extract::FromRequestParts, response::IntoResponse};
+    let token = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    // Untrusted dispatch hint only: lookup verifies signature, purpose and
+    // live authority before this branch can return any membership.
+    if let Some(token) = token.filter(|token| {
+        jsonwebtoken::decode_header(token)
+            .ok()
+            .is_some_and(|header| {
+                header.typ.as_deref() == Some(crate::services::agent_skill_org_access::TOKEN_TYPE)
+            })
+    }) {
+        if request.method() != http::Method::GET {
+            return Err(AppError::Forbidden("Ornn lookup requires GET".into()));
+        }
+        let org = crate::services::agent_skill_org_access::lookup(&state, token).await?;
+        return Ok(Json(json!({"orgs":[org]})).into_response());
+    }
+    let (mut parts, _) = request.into_parts();
+    let auth = AuthUser::from_request_parts(&mut parts, &state).await?;
+    Ok(super::orgs::list_orgs(State(state), auth)
+        .await?
+        .into_response())
 }
 
 #[cfg(test)]
@@ -1599,3 +1878,7 @@ mod tests {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "agent_skills/org_owner_tests.rs"]
+mod org_owner_tests;

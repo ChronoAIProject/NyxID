@@ -1,0 +1,12 @@
+{
+  "just now": "just now",
+  "{{count}}m ago": "{{count}}m ago",
+  "{{count}}h ago": "{{count}}h ago",
+  "{{count}}d ago": "{{count}}d ago",
+  "in a moment": "in a moment",
+  "in {{count}}m": "in {{count}}m",
+  "in {{count}}h": "in {{count}}h",
+  "in {{count}}d": "in {{count}}d",
+  "Couldn't reach NyxID. Check your connection and try again.": "Couldn't reach NyxID. Check your connection and try again.",
+  "Generate new code": "Generate new code"
+}

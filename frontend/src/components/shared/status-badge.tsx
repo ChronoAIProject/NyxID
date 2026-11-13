@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -48,7 +49,7 @@ export function StatusBadge({ domain, statusKey, className }: StatusBadgeProps) 
 
   const badge = (
     <Badge variant={meta.variant} className={cn(className, "cursor-help")}>
-      {meta.label}
+      {translateUi(meta.label)}
     </Badge>
   );
 
@@ -64,13 +65,13 @@ export function StatusBadge({ domain, statusKey, className }: StatusBadgeProps) 
           </span>
         </TooltipTrigger>
         <TooltipContent className="max-w-xs space-y-1">
-          <p className="text-13">{meta.tooltip}</p>
+          <p className="text-13">{translateUi(meta.tooltip)}</p>
           {meta.remediation ? (
             <Link
               to={meta.remediation.href}
               className="inline-block type-row-title text-primary-text underline"
             >
-              {meta.remediation.label} →
+              {translateUi(meta.remediation.label)} →
             </Link>
           ) : null}
         </TooltipContent>

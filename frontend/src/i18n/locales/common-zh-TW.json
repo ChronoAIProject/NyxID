@@ -1,0 +1,12 @@
+{
+  "just now": "剛剛",
+  "{{count}}m ago": "{{count}} 分鐘前",
+  "{{count}}h ago": "{{count}} 小時前",
+  "{{count}}d ago": "{{count}} 天前",
+  "in a moment": "即將",
+  "in {{count}}m": "{{count}} 分鐘後",
+  "in {{count}}h": "{{count}} 小時後",
+  "in {{count}}d": "{{count}} 天後",
+  "Couldn't reach NyxID. Check your connection and try again.": "無法連線至 NyxID。請檢查網路連線後再試。",
+  "Generate new code": "產生新驗證碼"
+}

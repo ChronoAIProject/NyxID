@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -39,6 +41,7 @@ import {
 } from "@/schemas/saved-logins";
 
 export function SavedLoginsPage() {
+  useUiTranslation();
   const [owner, setOwner] = useState<string | null>(null);
   const logins = useSavedLogins(owner);
   const remove = useDeleteSavedLogin();
@@ -47,10 +50,10 @@ export function SavedLoginsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Saved logins"
-        description="Let NyxBot sign in to approved websites. Specialists need an explicit grant. Never put a password in chat."
+        title={translateUi("Saved logins")}
+        description={translateUi("Let NyxBot sign in to approved websites. Specialists need an explicit grant. Never put a password in chat.")}
         actions={
-          <AddCtaButton label="Add login" onClick={() => setEditing("new")} />
+          <AddCtaButton label={translateUi("Add login")} onClick={() => setEditing("new")} />
         }
       />
       <div className="max-w-xs">
@@ -60,7 +63,7 @@ export function SavedLoginsPage() {
         {SAVED_LOGIN_RESIDUAL}
       </p>
       {logins.isLoading ? (
-        <p className="text-14">Loading saved logins…</p>
+        <p className="text-14">{translateUi("Loading saved logins…")}</p>
       ) : null}
       {logins.error || remove.error ? (
         <p role="alert" className="text-14 text-destructive">
@@ -68,9 +71,7 @@ export function SavedLoginsPage() {
         </p>
       ) : null}
       {!logins.isLoading && !logins.data?.length ? (
-        <p className="text-14 text-muted-foreground">
-          No saved logins in this account.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("No saved logins in this account.")}</p>
       ) : null}
       <div className="grid gap-4 sm:grid-cols-2">
         {logins.data?.map((login) => (
@@ -98,15 +99,11 @@ export function SavedLoginsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete {deleting?.label}?</DialogTitle>
-            <DialogDescription>
-              This removes the saved login and its specialist grants.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Delete ")}{deleting?.label}?</DialogTitle>
+            <DialogDescription>{translateUi("This removes the saved login and its specialist grants.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setDeleting(undefined)}>
-              Cancel
-            </Button>
+            <Button variant="ghost" onClick={() => setDeleting(undefined)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={remove.isPending}
@@ -117,9 +114,7 @@ export function SavedLoginsPage() {
                     .then(() => setDeleting(undefined))
                     .catch(() => undefined);
               }}
-            >
-              Delete login
-            </Button>
+            >{translateUi("Delete login")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -135,29 +130,28 @@ function SavedLoginCard({
   readonly onEdit: (login: SavedLogin) => void;
   readonly onDelete: (login: SavedLogin) => void;
 }) {
+  useUiTranslation();
   return (
     <article className="space-y-3 rounded-xl border border-border bg-card p-4">
       <h2 className="font-display type-card-title">{login.label}</h2>
       <p className="break-all text-14 text-muted-foreground">
         {login.allowed_origins.join(", ")}
       </p>
-      <p className="text-14">Username {login.username_hint}</p>
+      <p className="text-14">{translateUi("Username ")}{login.username_hint}</p>
       <div className="flex flex-wrap gap-2">
         {login.has_password ? (
-          <Badge variant="secondary">Password set</Badge>
+          <Badge variant="secondary">{translateUi("Password set")}</Badge>
         ) : null}
         {login.has_totp ? (
-          <Badge variant="secondary">One-time codes</Badge>
+          <Badge variant="secondary">{translateUi("One-time codes")}</Badge>
         ) : null}
         {login.confirm_each_sign_in ? (
-          <Badge variant="info">Confirm each sign-in</Badge>
+          <Badge variant="info">{translateUi("Confirm each sign-in")}</Badge>
         ) : null}
       </div>
       <div className="flex gap-2">
-        <Button onClick={() => onEdit(login)}>Replace</Button>
-        <Button variant="destructive" onClick={() => onDelete(login)}>
-          Delete
-        </Button>
+        <Button onClick={() => onEdit(login)}>{translateUi("Replace")}</Button>
+        <Button variant="destructive" onClick={() => onDelete(login)}>{translateUi("Delete")}</Button>
       </div>
     </article>
   );
@@ -172,6 +166,7 @@ function LoginEditor({
   readonly owner: string | null;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const query = useQueryClient();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
@@ -220,13 +215,12 @@ function LoginEditor({
       >
         <DialogHeader>
           <DialogTitle>
-            {login ? "Replace saved login" : "Add saved login"}
+            {login ? translateUi("Replace saved login") : translateUi("Add saved login")}
           </DialogTitle>
-          <DialogDescription>
-            Secrets are write-only.{" "}
+          <DialogDescription>{translateUi("Secrets are write-only.")}{" "}
             {login
-              ? "Re-enter every value to replace this login atomically."
-              : "Enter them here, never in chat."}
+              ? translateUi("Re-enter every value to replace this login atomically.")
+              : translateUi("Enter them here, never in chat.")}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -240,7 +234,7 @@ function LoginEditor({
               name="label"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Label</FormLabel>
+                  <FormLabel>{translateUi("Label")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -253,7 +247,7 @@ function LoginEditor({
               name="allowed_origins"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Allowed HTTPS origins (one per line)</FormLabel>
+                  <FormLabel>{translateUi("Allowed HTTPS origins (one per line)")}</FormLabel>
                   <FormControl>
                     <Textarea
                       className="min-h-20"
@@ -272,8 +266,7 @@ function LoginEditor({
                         key={index}
                         role="alert"
                         className="text-14 text-destructive"
-                      >
-                        Line {index + 1}: {message}
+                      >{translateUi("Line ")}{index + 1}: {message}
                       </p>
                     ) : null;
                   })}
@@ -289,10 +282,10 @@ function LoginEditor({
                   <FormItem>
                     <FormLabel>
                       {name === "username"
-                        ? "Username"
+                        ? translateUi("Username")
                         : name === "password"
-                          ? "Password (optional)"
-                          : "TOTP secret or otpauth URI (optional)"}
+                          ? translateUi("Password (optional)")
+                          : translateUi("TOTP secret or otpauth URI (optional)")}
                     </FormLabel>
                     <FormControl>
                       <Input
@@ -314,7 +307,7 @@ function LoginEditor({
               name="confirm_each_sign_in"
               render={({ field }) => (
                 <FormItem className="flex items-center justify-between">
-                  <FormLabel>Confirm each sign-in</FormLabel>
+                  <FormLabel>{translateUi("Confirm each sign-in")}</FormLabel>
                   <FormControl>
                     <Switch
                       checked={field.value}
@@ -326,7 +319,7 @@ function LoginEditor({
             />
             {error ? (
               <p role="alert" className="text-14 text-destructive">
-                {error}
+                {translateUi(error)}
               </p>
             ) : null}
             <DialogFooter>
@@ -338,9 +331,7 @@ function LoginEditor({
                   form.reset();
                   onClose();
                 }}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -350,9 +341,7 @@ function LoginEditor({
                   !form.watch("username") ||
                   !form.watch("label")
                 }
-              >
-                Save login
-              </Button>
+              >{translateUi("Save login")}</Button>
             </DialogFooter>
           </form>
         </Form>

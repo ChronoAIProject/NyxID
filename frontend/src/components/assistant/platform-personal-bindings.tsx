@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   GroupedList,
   GroupedRow,
@@ -22,10 +24,12 @@ import {
 } from "@/components/ui/dialog";
 
 export function PlatformPersonalBindings() {
+  useUiTranslation();
   const actor = useAuthStore((state) => state.user?.id);
   return <OwnedBindings key={actor ?? "signed-out"} />;
 }
 function OwnedBindings() {
+  useUiTranslation();
   const query = usePersonalBindings();
   const revoke = useRevokePersonalBinding();
   const [review, setReview] = useState<PersonalBinding>();
@@ -33,16 +37,13 @@ function OwnedBindings() {
   return (
     <section className="space-y-3 text-14">
       <GroupedList
-        title="Personal chat links"
+        title={translateUi("Personal chat links")}
         footer={
           <>
-            <p>
-              These platform-operated chat bots use your existing NyxBot permissions
-              and personal billing. Each verified identity has its own thread.
-            </p>
+            <p>{translateUi("These platform-operated chat bots use your existing NyxBot permissions and personal billing. Each verified identity has its own thread.")}</p>
             {query.error && (
               <ErrorBanner
-                message="Personal chat links are unavailable."
+                message={translateUi("Personal chat links are unavailable.")}
                 onRetry={() => void query.refetch()}
               />
             )}
@@ -51,12 +52,12 @@ function OwnedBindings() {
         }
       >
         {query.isPending && (
-          <GroupedRow role="status" title="Loading personal links..." />
+          <GroupedRow role="status" title={translateUi("Loading personal links...")} />
         )}
         {query.isSuccess && rows.length === 0 && (
           <GroupedRow
-            title="No personal chat links"
-            description="Use the login control shown by a platform bot's private chat help to begin."
+            title={translateUi("No personal chat links")}
+            description={translateUi("Use the login control shown by a platform bot's private chat help to begin.")}
           />
         )}
         {query.hasNextPage && (
@@ -65,9 +66,7 @@ function OwnedBindings() {
               type="button"
               onClick={() => void query.fetchNextPage()}
               disabled={query.isFetchingNextPage}
-            >
-              More personal links
-            </button>
+            >{translateUi("More personal links")}</button>
           </GroupedRow>
         )}
       </GroupedList>
@@ -87,7 +86,7 @@ function OwnedBindings() {
         return (
           <GroupedList key={row.id} title={row.manager.display_name}>
             <GroupedRow
-              title={`${row.chat.display_name} account`}
+              title={translateUi("{{value1}} account", { value1: row.chat.display_name })}
               description={
                 row.sender.display_name
                   ? `${row.sender.display_name} (${row.sender.id})`
@@ -97,39 +96,25 @@ function OwnedBindings() {
             />
             <GroupedFooter>
               {availability === "temporarily_unavailable" && (
-                <p>
-                  The bot connection is unavailable. Your consent is retained and
-                  access can return when the connection is restored. Disconnect
-                  personal access to prevent that restoration.
-                </p>
+                <p>{translateUi("The bot connection is unavailable. Your consent is retained and access can return when the connection is restored. Disconnect personal access to prevent that restoration.")}</p>
               )}
               {availability === "paused" && (
-                <p>
-                  Personal work is paused for this bot. Your consent is retained.
-                  Disconnect personal access to prevent it returning when the bot
-                  resumes.
-                </p>
+                <p>{translateUi("Personal work is paused for this bot. Your consent is retained. Disconnect personal access to prevent it returning when the bot resumes.")}</p>
               )}
               {availability === "reconnect_required" && (
-                <p>
-                  This saved link no longer grants personal access. Start a fresh
-                  login request in the bot's private chat to reconnect.
-                </p>
+                <p>{translateUi("This saved link no longer grants personal access. Start a fresh login request in the bot's private chat to reconnect.")}</p>
               )}
             </GroupedFooter>
             {row.conversation_id ? (
               <GroupedRow asChild interactive>
                 <a
                   href={`/assistant?c=${encodeURIComponent(row.conversation_id)}`}
-                >
-                  Open saved {row.chat.display_name} thread
-                </a>
+                >{translateUi("Open saved ")}{row.chat.display_name}{translateUi(" thread")}</a>
               </GroupedRow>
             ) : availability === "available" ? (
               <GroupedFooter>
                 <p>
-                  {row.chat.question_instruction} This creates its saved thread.
-                </p>
+                  {row.chat.question_instruction}{translateUi(" This creates its saved thread.")}</p>
               </GroupedFooter>
             ) : null}
             {consentActive && (
@@ -138,9 +123,7 @@ function OwnedBindings() {
                   type="button"
                   className="text-destructive"
                   onClick={() => setReview(row)}
-                >
-                  Disconnect personal access
-                </button>
+                >{translateUi("Disconnect personal access")}</button>
               </GroupedRow>
             )}
           </GroupedList>
@@ -154,19 +137,11 @@ function OwnedBindings() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>
-              Disconnect personal {review?.chat.display_name ?? "chat"} access?
-            </DialogTitle>
-            <DialogDescription>
-              Work already started may keep running in NyxID; stop it from the
-              app. Your saved thread and pending approvals remain available.
-              This disconnects only personal access for this identity.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Disconnect personal ")}{review?.chat.display_name ?? translateUi("chat")}{translateUi(" access?")}</DialogTitle>
+            <DialogDescription>{translateUi("Work already started may keep running in NyxID; stop it from the app. Your saved thread and pending approvals remain available. This disconnects only personal access for this identity.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReview(undefined)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setReview(undefined)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={revoke.isPending}
@@ -176,9 +151,7 @@ function OwnedBindings() {
                     onSuccess: () => setReview(undefined),
                   });
               }}
-            >
-              Disconnect
-            </Button>
+            >{translateUi("Disconnect")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

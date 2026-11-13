@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label } from "@/components/ui/label";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -17,6 +20,7 @@ import {
 import { ServiceIcon } from "@/components/service-icon";
 
 export function ToolManagerEditor({ service }: { service: DownstreamService }) {
+  useUiTranslation();
   const mutation = useCatalogToolMutation();
   const icon = useToolIcon();
   const form = useAppForm<z.infer<typeof schema>>({
@@ -37,7 +41,7 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
     <div className="space-y-6">
       <PageHeader
         title={service.name}
-        description="Prepare and validate this Tool. An Admin approves audience, prices and publication."
+        description={translateUi("Prepare and validate this Tool. An Admin approves audience, prices and publication.")}
       />
       <CatalogToolMetadata service={service} />
       <form
@@ -46,22 +50,20 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
           try {
             await mutation.mutateAsync({ serviceId: service.id, body: values });
             destination.reset(values);
-            toast.success("Destination updated");
+            toast.success(translateUi("Destination updated"));
           } catch {
             toast.error(
-              "Destination update failed; reread the Tool before retrying",
+              translateErrorMessage("Destination update failed; reread the Tool before retrying"),
             );
           }
         })}
       >
-        <Label>
-          API base URL
-          <Input disabled={!!frozen} {...destination.register("base_url")} />
+        <Label>{translateUi("API base URL")}<Input disabled={!!frozen} {...destination.register("base_url")} />
         </Label>
         <p className="text-13 text-text-tertiary">
           {frozen
-            ? "Destination frozen. Changes require an Admin."
-            : "Review the vendor destination before setting the first credential."}
+            ? translateUi("Destination frozen. Changes require an Admin.")
+            : translateUi("Review the vendor destination before setting the first credential.")}
         </p>
         {!frozen && (
           <Button
@@ -70,21 +72,19 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
               !destination.formState.isDirty || !destination.formState.isValid
             }
             isLoading={mutation.isPending}
-          >
-            Save destination
-          </Button>
+          >{translateUi("Save destination")}</Button>
         )}
       </form>
       <section className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-        <h2 className="type-card-title">Shared vendor credential</h2>
+        <h2 className="type-card-title">{translateUi("Shared vendor credential")}</h2>
         <p className="text-14 text-muted-foreground">
           {service.auth_method === "none"
-            ? "No credential required."
+            ? translateUi("No credential required.")
             : service.credential_configured
-              ? "Configured. Replacement requires an Admin."
+              ? translateUi("Configured. Replacement requires an Admin.")
               : service.tools_credential_frozen
-                ? "An Admin must restore the credential."
-                : "Set the first credential once. This freezes the destination URL."}
+                ? translateUi("An Admin must restore the credential.")
+                : translateUi("Set the first credential once. This freezes the destination URL.")}
         </p>
         {canSetCredential && (
           <form
@@ -96,10 +96,10 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
                   body: { credential: values.credential },
                 });
                 form.reset();
-                toast.success("Credential configured");
+                toast.success(translateUi("Credential configured"));
               } catch {
                 toast.error(
-                  "Credential installation failed; reread the Tool before retrying",
+                  translateErrorMessage("Credential installation failed; reread the Tool before retrying"),
                 );
               }
             })}
@@ -107,7 +107,7 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
             <Input
               type="password"
               autoComplete="new-password"
-              aria-label="Shared vendor credential"
+              aria-label={translateUi("Shared vendor credential")}
               {...form.register("credential")}
             />
             <Button
@@ -115,23 +115,21 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
               variant="primary"
               disabled={!form.formState.isDirty || !form.formState.isValid}
               isLoading={mutation.isPending}
-            >
-              Set first credential
-            </Button>
+            >{translateUi("Set first credential")}</Button>
           </form>
         )}
       </section>
       <section className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-        <h2 className="type-card-title">Tool icon</h2>
+        <h2 className="type-card-title">{translateUi("Tool icon")}</h2>
         {service.icon_url && (
-          <span role="img" aria-label="Current tool icon" className="inline-flex">
+          <span role="img" aria-label={translateUi("Current tool icon")} className="inline-flex">
             <ServiceIcon iconUrl={service.icon_url} size="lg" />
           </span>
         )}
         <Input
           type="file"
           accept="image/svg+xml,.svg"
-          aria-label="Upload Tool SVG"
+          aria-label={translateUi("Upload Tool SVG")}
           disabled={icon.isPending}
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -139,10 +137,10 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
               icon.mutate(
                 { serviceId: service.id, file },
                 {
-                  onSuccess: () => toast.success("Tool icon saved"),
+                  onSuccess: () => toast.success(translateUi("Tool icon saved")),
                   onError: () =>
                     toast.error(
-                      "Use a static UTF-8 SVG with a viewBox, up to 128 KiB",
+                      translateErrorMessage("Use a static UTF-8 SVG with a viewBox, up to 128 KiB"),
                     ),
                 },
               );

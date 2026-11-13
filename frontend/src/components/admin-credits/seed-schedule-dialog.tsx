@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useRef } from "react";
 import { toast } from "sonner";
 import { useSeedCreditSchedule } from "@/hooks/use-billing-credits";
@@ -21,6 +23,7 @@ export function SeedScheduleDialog({
   readonly schedule: CreditSchedule;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const mutation = useSeedCreditSchedule();
   const inFlight = useRef(false);
   const credits =
@@ -42,14 +45,28 @@ export function SeedScheduleDialog({
         periodStart: schedule.current_period?.start,
       });
       toast.success(
-        `Granted credits to ${String(result.created)} users; ${String(result.existing)} already received this period's grant.${result.pending > 0 ? ` ${String(result.pending)} awaiting activation.` : ""}`,
+        result.pending > 0
+          ? translateUi(
+              "Granted credits to {{created}} users; {{existing}} already received this period's grant. {{pending}} awaiting activation.",
+              {
+                created: result.created,
+                existing: result.existing,
+                pending: result.pending,
+              },
+            )
+          : translateUi(
+              "Granted credits to {{created}} users; {{existing}} already received this period's grant.",
+              { created: result.created, existing: result.existing },
+            ),
       );
       onClose();
     } catch (error) {
       toast.error(
-        error instanceof ApiError && error.status === 409
-          ? "The schedule or period changed. Close this dialog and review the refreshed schedule before trying again."
-          : "Granting missing credits did not finish. Retry safely; users already granted are skipped.",
+        translateErrorMessage(
+          error instanceof ApiError && error.status === 409
+            ? "The schedule or period changed. Close this dialog and review the refreshed schedule before trying again."
+            : "Granting missing credits did not finish. Retry safely; users already granted are skipped.",
+        ),
       );
     } finally {
       inFlight.current = false;
@@ -65,21 +82,21 @@ export function SeedScheduleDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Grant missing credits</DialogTitle>
+          <DialogTitle>{translateUi("Grant missing credits")}</DialogTitle>
           <DialogDescription>
-            Give {formatExactCredits(credits, 12)} credits to each currently
-            eligible user who missed this schedule&apos;s current-period grant.
-            Existing users are included.
+            {translateUi(
+              "Give {{credits}} credits to each currently eligible user who missed this schedule's current-period grant. Existing users are included.",
+              { credits: formatExactCredits(credits, 12) },
+            )}
           </DialogDescription>
         </DialogHeader>
         <p className="text-14 text-muted-foreground">
-          The current period&apos;s recipient rules, service limits and expiry
-          apply. Users who already received its grant are skipped, including
-          grants that have been spent, expired or reclaimed. Earlier periods are
-          not backfilled. Retrying will not grant credits twice.
+          {translateUi(
+            "The current period's recipient rules, service limits and expiry apply. Users who already received its grant are skipped, including grants that have been spent, expired or reclaimed. Earlier periods are not backfilled. Retrying will not grant credits twice.",
+          )}
         </p>
         <p className="break-all text-13 text-muted-foreground">
-          Schedule {schedule.id}
+          {translateUi("Schedule {{id}}", { id: schedule.id })}
         </p>
         <DialogFooter>
           <Button
@@ -87,10 +104,10 @@ export function SeedScheduleDialog({
             disabled={mutation.isPending}
             onClick={onClose}
           >
-            Cancel
+            {translateUi("Cancel")}
           </Button>
           <Button isLoading={mutation.isPending} onClick={() => void seed()}>
-            Grant missing credits
+            {translateUi("Grant missing credits")}
           </Button>
         </DialogFooter>
       </DialogContent>

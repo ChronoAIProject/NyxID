@@ -454,7 +454,7 @@ async fn flag_is_default_off_activation_is_blocked_and_disabling_works() {
     );
     security_readiness_service::ready_test_replica(&db).await;
     assert!(
-        security_readiness_service::require(&db, REGISTRY_READINESS)
+        security_readiness_service::require_activation(&db, REGISTRY_READINESS)
             .await
             .is_ok()
     );

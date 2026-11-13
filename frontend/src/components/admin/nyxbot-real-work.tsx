@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -63,27 +65,20 @@ const elapsed = (seconds: number | null) =>
         : `${(seconds / 86400).toFixed(1)} days`;
 
 export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
+  useUiTranslation();
   return (
     <Card className="space-y-4 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-display type-card-title">
-            Weekly real work
-          </h3>
-          <p className="mt-1 text-14 text-muted-foreground">
-            Merchants with at least {data.threshold} completed tasks using their
-            own connected business systems.
-          </p>
-          <p className="mt-1 text-13 text-text-tertiary">
-            Monday–Sunday · Asia/Singapore · partial weeks use only the selected
-            dates.
-          </p>
+          <h3 className="font-display type-card-title">{translateUi("Weekly real work")}</h3>
+          <p className="mt-1 text-14 text-muted-foreground">{translateUi("Merchants with at least ")}{data.threshold}{translateUi(" completed tasks using their own connected business systems.")}</p>
+          <p className="mt-1 text-13 text-text-tertiary">{translateUi("Monday–Sunday · Asia/Singapore · partial weeks use only the selected dates.")}</p>
         </div>
         <InternalOwners />
       </div>
       <div
         className="analytics-plot h-48"
-        aria-label="Weekly merchants and internal owners"
+        aria-label={translateUi("Weekly merchants and internal owners")}
       >
         <ResponsiveContainer
           width="100%"
@@ -132,7 +127,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <Table className="text-14" aria-label="Weekly real work totals">
+      <Table className="text-14" aria-label={translateUi("Weekly real work totals")}>
         <TableHeader>
           <TableRow>
             {[
@@ -154,9 +149,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
               <TableCell>
                 {w.week}
                 {w.partial && (
-                  <span className="ml-2 text-12 text-text-tertiary">
-                    Partial
-                  </span>
+                  <span className="ml-2 text-12 text-text-tertiary">{translateUi("Partial")}</span>
                 )}
               </TableCell>
               <TableCell className="font-normal tabular-nums">
@@ -168,7 +161,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
               <TableCell>{rate(w.completed, w.attempted)}</TableCell>
               <TableCell>
                 {rate(w.helpful, w.votes)}{" "}
-                <span className="text-text-tertiary">({w.votes} votes)</span>
+                <span className="text-text-tertiary">({w.votes}{translateUi(" votes)")}</span>
               </TableCell>
             </TableRow>
           ))}
@@ -177,20 +170,16 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
       {data.weeks.map((w) => (
         <details key={w.week} className="text-14">
           <summary className="cursor-pointer">
-            {w.week} · Owners and activation
-          </summary>
+            {w.week}{translateUi(" · Owners and activation")}</summary>
           <div className="mt-3 space-y-4">
-            <p className="text-13 text-muted-foreground">
-              Internal owners: {w.internal_completed} completed ·{" "}
-              {rate(w.internal_triggered, w.internal_completed)} from triggers ·{" "}
-              {rate(w.internal_completed, w.internal_attempted)} success ·{" "}
-              {rate(w.internal_helpful, w.internal_votes)} helpful (
-              {w.internal_votes} votes).
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("Internal owners: ")}{w.internal_completed}{translateUi(" completed ·")}{" "}
+              {rate(w.internal_triggered, w.internal_completed)}{translateUi(" from triggers ·")}{" "}
+              {rate(w.internal_completed, w.internal_attempted)}{translateUi(" success ·")}{" "}
+              {rate(w.internal_helpful, w.internal_votes)}{translateUi(" helpful (")}{w.internal_votes}{translateUi(" votes).")}</p>
             {w.owners.length ? (
               <Table
                 className="text-14"
-                aria-label={`Work per owner ${w.week}`}
+                aria-label={translateUi("Work per owner {{value1}}", { value1: w.week })}
               >
                 <TableHeader>
                   <TableRow>
@@ -213,7 +202,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                         {o.owner_id}
                       </TableCell>
                       <TableCell>
-                        {o.internal ? "Internal" : "Merchant"}
+                        {o.internal ? translateUi("Internal") : translateUi("Merchant")}
                       </TableCell>
                       <TableCell>{o.completed}</TableCell>
                       <TableCell>{rate(o.triggered, o.completed)}</TableCell>
@@ -224,20 +213,16 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                 </TableBody>
               </Table>
             ) : (
-              <p className="rounded-lg border border-dashed border-border p-3 text-muted-foreground">
-                No real work recorded in this week.
-              </p>
+              <p className="rounded-lg border border-dashed border-border p-3 text-muted-foreground">{translateUi("No real work recorded in this week.")}</p>
             )}
             {w.owners_truncated && (
-              <p className="text-13 text-text-tertiary">
-                Showing the top 100 owners. Weekly totals include every owner.
-              </p>
+              <p className="text-13 text-text-tertiary">{translateUi("Showing the top 100 owners. Weekly totals include every owner.")}</p>
             )}
-            <h4 className="font-medium">New-owner activation</h4>
+            <h4 className="font-medium">{translateUi("New-owner activation")}</h4>
             {w.funnel.length ? (
               <Table
                 className="text-14"
-                aria-label={`Activation funnel ${w.week}`}
+                aria-label={translateUi("Activation funnel {{value1}}", { value1: w.week })}
               >
                 <TableHeader>
                   <TableRow>
@@ -258,7 +243,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                   {w.funnel.map((f) => (
                     <TableRow key={String(f.internal)}>
                       <TableCell>
-                        {f.internal ? "Internal" : "Merchants"}
+                        {f.internal ? translateUi("Internal") : translateUi("Merchants")}
                       </TableCell>
                       <TableCell>{f.owners}</TableCell>
                       <TableCell>{f.has_nyxbot}</TableCell>
@@ -273,52 +258,35 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                 </TableBody>
               </Table>
             ) : (
-              <p className="text-muted-foreground">
-                No owners created in this selected portion of the week.
-              </p>
+              <p className="text-muted-foreground">{translateUi("No owners created in this selected portion of the week.")}</p>
             )}
           </div>
         </details>
       ))}
-      <p className="text-13 text-text-tertiary">
-        Success is completed tasks divided by settled tasks with a successful
-        business call, including tasks that later failed or stopped. Helpful
-        feedback uses votes on completed real work. Model calls, platform
-        credentials and chat alone do not count. Each triggered run and mirrored
-        voice reply counts once.
-      </p>
-      <p className="text-13 text-text-tertiary">
-        Activation includes each prior stage, observed through the selected end
-        date; organization assistants count as having NyxBot. The median is
-        estimated for owners reaching every stage. Reports use retained records
-        collected since real-work tracking began. Internal classification
-        applies to past weeks too.
-      </p>
+      <p className="text-13 text-text-tertiary">{translateUi("Success is completed tasks divided by settled tasks with a successful business call, including tasks that later failed or stopped. Helpful feedback uses votes on completed real work. Model calls, platform credentials and chat alone do not count. Each triggered run and mirrored voice reply counts once.")}</p>
+      <p className="text-13 text-text-tertiary">{translateUi("Activation includes each prior stage, observed through the selected end date; organization assistants count as having NyxBot. The median is estimated for owners reaching every stage. Reports use retained records collected since real-work tracking began. Internal classification applies to past weeks too.")}</p>
     </Card>
   );
 }
 
 function InternalOwners() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const [open, setOpen] = useState(false);
   const { query, save } = useAssistantInternalOwners(open);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button variant="outline" onClick={() => setOpen(true)}>
-        Internal owners
-      </Button>
+      <Button variant="outline" onClick={() => setOpen(true)}>{translateUi("Internal owners")}</Button>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Internal and test owners</DialogTitle>
-          <DialogDescription>
-            These owners are reported separately from merchants in every week.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Internal and test owners")}</DialogTitle>
+          <DialogDescription>{translateUi("These owners are reported separately from merchants in every week.")}</DialogDescription>
         </DialogHeader>
         {query.isPending ? (
-          <p className="text-14">Loading owners…</p>
+          <p className="text-14">{translateUi("Loading owners…")}</p>
         ) : query.isError ? (
           <ErrorBanner
-            message="Could not load internal owners."
+            message={translateUi("Could not load internal owners.")}
             onRetry={() => void query.refetch()}
           />
         ) : hasAdminRead(user) ? (
@@ -330,7 +298,7 @@ function InternalOwners() {
         ) : (
           <p className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-13">
             {query.data.owner_ids.join("\n") ||
-              "No internal owners configured."}
+              translateUi("No internal owners configured.")}
           </p>
         )}
       </DialogContent>
@@ -346,6 +314,7 @@ function InternalOwnersForm({
   save: ReturnType<typeof useAssistantInternalOwners>["save"];
   onSaved: () => void;
 }) {
+  useUiTranslation();
   const form = useAppForm({
     resolver: zodResolver(internalOwnersFormSchema),
     defaultValues: { owners: initial.join("\n") },
@@ -368,12 +337,12 @@ function InternalOwnersForm({
           name="owners"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Person or organization IDs</FormLabel>
+              <FormLabel>{translateUi("Person or organization IDs")}</FormLabel>
               <FormControl>
                 <Textarea
                   {...field}
                   rows={8}
-                  placeholder="One owner UUID per line"
+                  placeholder={translateUi("One owner UUID per line")}
                 />
               </FormControl>
               <FormMessage />
@@ -381,13 +350,13 @@ function InternalOwnersForm({
           )}
         />
         {save.isError && (
-          <ErrorBanner message="Could not save. Check that every ID is an existing person or organization." />
+          <ErrorBanner message={translateUi("Could not save. Check that every ID is an existing person or organization.")} />
         )}
         <Button
           type="submit"
           disabled={save.isPending || !form.formState.isDirty}
         >
-          {save.isPending ? "Saving…" : "Save internal owners"}
+          {save.isPending ? translateUi("Saving…") : translateUi("Save internal owners")}
         </Button>
       </form>
     </Form>

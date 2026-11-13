@@ -1,3 +1,6 @@
+import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
+import { settledInterruptedTurn } from "./interrupted-turn";
+import { assistantTitleLanguage } from "@/lib/assistant/title-language";
 import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
 import { AssistantHttpError, assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
@@ -40,6 +43,8 @@ type NyxAgentMessage = NyxAgentHistory["messages"][number];
 type LiveMessage = DirectTurnState["messages"][number];
 
 interface LiveTurn {
+  /** Identity received from this send, never inferred from a history checkpoint. */
+  streamTurnId?: string;
   state: DirectTurnState;
   conversation: NyxAgentConversation;
   controller: AbortController;
@@ -83,12 +88,17 @@ function toolCalls(
       ...(activity.machine ? { machine: activity.machine, conversationId } : {}),
       name: activity.label,
       status:
-        activity.status === "running" ? "running" : activity.status === "error" ? "error" : "done",
+        activity.status === "running" ? "running" : activity.status === "error" ? "error" : activity.status === "completed" ? "done" : "unknown",
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
+      decision: activity.decision,
     })),
   };
+}
+
+function supportedFeedback(value: NyxAgentMessage["feedback"]): ChatMessage["feedback"] {
+  return value?.vote === "up" || value?.vote === "down" ? { ...value, vote: value.vote } : undefined;
 }
 
 function images(
@@ -214,7 +224,7 @@ async function subscriptionDeadline<T>(
 /** Only a presentation cache. MongoDB owns transcripts, running turns and stop. */
 export class NyxAgentTransport {
   private generation = 0;
-  private interrupted = new Set<string>();
+  private interrupted = new Map<string, { turnId?: string; message: string }>();
   private owner = getAssistantIdentityUserId();
   private revision = 0;
   private mutationRevision = 0;
@@ -314,12 +324,31 @@ export class NyxAgentTransport {
       this.acceptedTurns.delete(row.id);
       this.reviewCards.delete(row.id);
       this.views.delete(row.id);
+      this.interrupted.delete(row.id);
     }
     this.changed();
   }
 
   getHistory(id?: string) {
     return id ? this.histories.get(id) : undefined;
+  }
+
+  /** Transient browser state, reconciled with the exact saved turn, never persisted. */
+  getInterruption(id?: string): string | undefined {
+    const key = id ?? "draft";
+    const notice = this.interrupted.get(key);
+    if (!notice) return undefined;
+    const settled = settledInterruptedTurn(this.histories.get(key), notice.turnId);
+    if (settled?.error_code === "turn_lost") {
+      return withAssistantTrace(storedError("turn_lost"), settled.turn_id);
+    }
+    return settled ? undefined : notice.message;
+  }
+
+  hasUnsettledInterruption(id?: string): boolean {
+    const key = id ?? "draft";
+    const notice = this.interrupted.get(key);
+    return !!notice && !settledInterruptedTurn(this.histories.get(key), notice.turnId);
   }
 
   getModel(id?: string) {
@@ -348,8 +377,8 @@ export class NyxAgentTransport {
     const rows = new Map<string, NyxAgentConversation>();
     const scope = agentId ? `&agent_id=${encodeURIComponent(agentId)}` : "";
     do {
-      const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-      const page = nyxAgentIndexSchema.parse(
+      const query: string = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+      const page: ReturnType<typeof nyxAgentIndexSchema.parse> = parseHistoryResponse(nyxAgentIndexSchema,
         await assistantJson(`${ROOT}/conversations?limit=100${scope}${query}`),
       );
       this.current(generation);
@@ -412,7 +441,7 @@ export class NyxAgentTransport {
     } finally {
       this.requests.delete(controller);
     }
-    const page = nyxAgentHistorySchema.parse(response);
+    const page = parseHistoryResponse(nyxAgentHistorySchema, response);
     // New servers keep `approvals` pending-only for older clients.
     page.approvals = page.approval_history ?? page.approvals;
     this.current(generation);
@@ -424,6 +453,7 @@ export class NyxAgentTransport {
     if (request < (this.historyApplied.get(id) ?? 0) && existing) {
       if (!beforeSeq) return existing;
       page.conversation = existing.conversation;
+      page.cma_operations = existing.cma_operations;
     } else {
       this.historyApplied.set(id, request);
     }
@@ -445,7 +475,8 @@ export class NyxAgentTransport {
     if (live) {
       restoreReply(live, page.conversation.active_turn);
       const turnId = live.state.activeTurn?.turnId ?? live.conversation.active_turn?.turn_id;
-      const settled = page.messages.find((message) => message.role === "assistant" && message.turn_id === turnId && !live.baseMessageIds.has(message.id));
+      const candidate = settledInterruptedTurn(page, live.streamTurnId);
+      const settled = candidate && !live.baseMessageIds.has(candidate.id) ? candidate : undefined;
       if (settled) {
         live.settled = settled;
         live.controller.abort();
@@ -477,7 +508,9 @@ export class NyxAgentTransport {
       messages: [...merged.values()].sort((a, b) => a.seq - b.seq),
     };
     this.histories.set(id, history);
-    if (!history.conversation.active_turn) this.interrupted.delete(id);
+    const notice = this.interrupted.get(id);
+    const settled = settledInterruptedTurn(history, notice?.turnId);
+    if (settled && settled.error_code !== "turn_lost") this.interrupted.delete(id);
     this.index.set(id, page.conversation);
     this.changed();
     return history;
@@ -554,6 +587,7 @@ export class NyxAgentTransport {
     this.acceptedTurns.delete(id);
     this.reviewCards.delete(id);
     this.views.delete(id);
+    this.interrupted.delete(id);
     this.changed();
   }
 
@@ -627,12 +661,12 @@ export class NyxAgentTransport {
         recovery: message.recovery,
         artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,rejected: message.artifact_delivery.rejected,recoveryAvailable: message.artifact_delivery.recovery_available,messageSeq: message.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
         id: message.id,
-        feedback: message.feedback ?? undefined,
+        feedback: supportedFeedback(message.feedback),
         role: message.role,
         content: message.text,
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
-        status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
+        status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : message.status === "completed" ? "complete" : "unknown",
         error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms, message.turn_metadata?.failure_reason?.model_route?.reason) : undefined,
         channelDelivery: message.turn_metadata?.channel_delivery,
         turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
@@ -672,7 +706,8 @@ export class NyxAgentTransport {
             || (history?.approvals ?? []).some((row) => !row.status || row.status === "pending"),
           ),
           retrying: Boolean(live?.retrying),
-          interrupted: this.interrupted.has(id ?? "draft"),
+          interrupted: this.hasUnsettledInterruption(id) &&
+            this.interrupted.get(id ?? "draft")?.turnId === liveTurnId,
         })
       : null;
     if (live) {
@@ -693,7 +728,7 @@ export class NyxAgentTransport {
           artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,rejected: settled.artifact_delivery.rejected,recoveryAvailable: settled.artifact_delivery.recovery_available,messageSeq: settled.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,
           id: message.id,
           role: settled?.role ?? message.role,
-          feedback: settled?.feedback ?? undefined,
+          feedback: supportedFeedback(settled?.feedback),
           errorCode: settled?.error_code ?? (streaming ? live.state.activeTurn?.error?.code : undefined),
           error: streaming && live.state.activeTurn?.error ? storedError(live.state.activeTurn.error.code, live.state.activeTurn.error.capacity_wait_ms) : undefined,
           channelDelivery: settled?.turn_metadata?.channel_delivery,
@@ -821,19 +856,7 @@ export class NyxAgentTransport {
       });
     }
     // Rows rebuilt above with identical fields keep their previous object.
-    // Card state belongs to the external operation, independently of the turn
-    // and its cached text. Attach after both live and stored views are built.
     const previousViews = this.views.get(id ?? "draft");
-    if (history?.cma_operations.length) {
-      messages = messages.map((message) => {
-        if (message.role !== "assistant") return message;
-        const turnId = message.turnId ?? (message.status === "streaming" ? liveTurnId : undefined);
-        const operations = history.cma_operations.filter((operation) => operation.turn_id === turnId);
-        if (!operations.length) return message;
-        const previous = previousViews?.get(message.id)?.cmaOperations;
-        return { ...message, cmaOperations: previous && JSON.stringify(previous) === JSON.stringify(operations) ? previous : operations };
-      });
-    }
     const views = new Map<string, ChatMessage>();
     messages = messages.map((message) => {
       const previous = previousViews?.get(message.id);
@@ -848,6 +871,7 @@ export class NyxAgentTransport {
       conversationId: id,
       title: conversation?.title ?? "New chat",
       messages,
+      cmaOperations: history?.cma_operations,
       expectedTurnCount: messages.filter((message) => message.role === "user" && !message.steering).length,
       status: running
         ? "streaming"
@@ -940,6 +964,8 @@ export class NyxAgentTransport {
     let terminal = false;
     let responded = false;
     let traceId: string | null = null;
+    let interruption: Error | undefined;
+    let streamError: unknown;
     const startedAt = Date.now();
     let errorReported = false;
     let correlation: ErrorCorrelation = {};
@@ -982,7 +1008,7 @@ export class NyxAgentTransport {
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
-          headers: { Accept: "text/event-stream" },
+          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
           signal: controller.signal,
           creditsDenial: {
             key: `assistant:nyxagent:${key}:${userMessageId}`,
@@ -1045,6 +1071,7 @@ export class NyxAgentTransport {
                 turn.conversation = { ...turn.conversation, id: key };
                 onAdopt(key);
               }
+              turn.streamTurnId = event.turn_id;
               if (event.engine_accepted) this.acceptedTurns.set(key, event.turn_id);
               const accepted = this.acceptedTurns.get(key) === event.turn_id;
               const previous = turn.conversation.active_turn?.turn_id === event.turn_id
@@ -1121,6 +1148,7 @@ export class NyxAgentTransport {
               if (event.status === "failed" && event.error) {
                 onTurnFailed?.(key, event.turn_id, event.error.code);
               }
+              break; // A terminal event owns the outcome, including trailing transport cleanup.
             }
           }
           if (terminal) break;
@@ -1134,24 +1162,16 @@ export class NyxAgentTransport {
         throw new Error("The connection was interrupted. The assistant may still be working.");
       }
     } catch (error) {
+      if (terminal) return;
       if (responded && adopted && generation === this.generation && !turn.settled) {
         await this.history(key).catch(() => undefined);
       }
-      // A history refresh can prove completion before a stalled reader does.
-      if (turn.settled) {
-        terminal = true;
-        if (turn.settled.status === "failed" && turn.settled.error_code !== "cancelled") {
-          reportFailure(undefined, turn.settled.error_code ?? "other", turn.settled.turn_id);
-        }
-        if (turn.settled.status === "failed" && turn.settled.error_code) {
-          onTurnFailed?.(key, turn.settled.turn_id, turn.settled.error_code);
-        }
-        return;
-      }
-      reportFailure(error);
       // After a 2xx the server has stored the message and bound its uploads:
       // every later failure (deadline, size, parse, mismatch, early end) is admitted.
-      if (!responded) throw error;
+      if (!responded) {
+        reportFailure(error);
+        throw error;
+      }
       // A failed reader can throw a browser's opaque "network error" after
       // admission. Keep that failure distinct from a rejected send, including
       // the admission marker that prevents the composer restoring uploads.
@@ -1162,7 +1182,8 @@ export class NyxAgentTransport {
       // DOMException.message may be read-only. Preserve cancellation/type
       // classification without mutating errors supplied by the browser.
       if (error instanceof Error) failure.name = error.name;
-      throw markAdmitted(failure);
+      interruption = failure;
+      streamError = error;
     } finally {
       this.requests.delete(controller);
       if (generation === this.generation) {
@@ -1180,10 +1201,26 @@ export class NyxAgentTransport {
             text: reply.blocks.map((row) => row.text).join("\n\n"), cursor: turn.replyCursor! };
         }
         this.live.delete(key);
-        if (!terminal && this.getHistory(key)?.conversation.active_turn) this.interrupted.add(key);
-        else this.interrupted.delete(key);
+        if (interruption && !turn.settled) {
+          this.interrupted.set(key, { turnId: turn.streamTurnId, message: interruption.message });
+        } else {
+          this.interrupted.delete(key);
+        }
         this.changed();
       }
+    }
+    // The final refresh can settle after catch's refresh. Do not throw a stale
+    // interruption or toast over a reply whose outcome is already recorded.
+    if (interruption && turn.settled) {
+      if (turn.settled.status === "failed" && turn.settled.error_code !== "cancelled") {
+        reportFailure(undefined, turn.settled.error_code ?? "other", turn.settled.turn_id);
+      }
+      if (turn.settled.status === "failed" && turn.settled.error_code) {
+        onTurnFailed?.(key, turn.settled.turn_id, turn.settled.error_code);
+      }
+    } else if (interruption) {
+      reportFailure(streamError);
+      throw markAdmitted(interruption);
     }
   }
 

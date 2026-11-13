@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { apiClient } from "@/lib/api-client";
@@ -15,6 +17,7 @@ export function MfaStepUpForm({
   onVerified: () => Promise<void>;
   onCancel: () => void;
 }) {
+  useUiTranslation();
   const [recovery, setRecovery] = useState(false);
   const form = useAppForm<MfaVerifyFormData>({
     resolver: zodResolver(mfaLoginSchema),
@@ -42,9 +45,9 @@ export function MfaStepUpForm({
   return (
     <section
       className="rounded-xl border border-border bg-card p-4 text-left"
-      aria-label="Verify this session"
+      aria-label={translateUi("Verify this session")}
     >
-      <h2 className="type-card-title">Verify this session</h2>
+      <h2 className="type-card-title">{translateUi("Verify this session")}</h2>
       <p className="mt-2 text-14 unthemed:text-12 text-muted-foreground">{message}</p>
       <Form {...form}>
         <form className="mt-4 space-y-3" onSubmit={form.handleSubmit(submit)}>
@@ -68,17 +71,13 @@ export function MfaStepUpForm({
               variant="ghost"
               disabled={form.formState.isSubmitting}
               onClick={onCancel}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               type="submit"
               variant="primary"
               disabled={form.formState.isSubmitting}
               isLoading={form.formState.isSubmitting}
-            >
-              Verify & continue
-            </Button>
+            >{translateUi("Verify & continue")}</Button>
           </div>
         </form>
       </Form>

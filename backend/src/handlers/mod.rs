@@ -63,6 +63,7 @@ pub mod connect_links;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;
+pub mod credential_verification;
 pub mod delegation;
 pub mod demo;
 pub mod developer_apps;
@@ -149,10 +150,13 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod assistant_cma_agents;
+pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
 pub mod assistant_group;
+pub mod assistant_notifications;
 pub mod assistant_nyxagent;
 pub mod assistant_onboarding;
 pub mod assistant_platform_models;
@@ -236,6 +240,7 @@ pub mod cma_sessions;
 pub mod org_specialist_channels;
 
 pub(crate) mod execution_permission_resume;
+pub(crate) mod invocation_diagnostics;
 
 mod platform_model_gateway;
 pub mod platform_models;

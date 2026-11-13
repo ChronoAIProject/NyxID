@@ -1034,7 +1034,8 @@ pub async fn configure(
                 .find(doc!{"agent_id":&agent.id}).session(&mut *session).await?.stream(&mut *session).try_collect().await?;
             let ids:Vec<&str>=rows.iter().map(|r|r.id.as_str()).collect();
             db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
-                .update_many(doc!{"conversation_id":{"$in":ids},"status":{"$in":["pending","allowed"]},"$or":[{"kind":"machine","service_id":&node_id},{"tool_name":{"$regex":"^(nyx__machine_|nyxid__machine_)"}}]},doc!{"$set":{"status":"expired"}}).session(&mut *session).await?;
+                .update_many(doc!{"conversation_id":{"$in":ids.clone()},"status":{"$in":["pending","allowed"]},"$or":[{"kind":"machine","service_id":&node_id},{"tool_name":{"$regex":"^(nyx__machine_|nyxid__machine_)"}}]},doc!{"$set":{"status":"expired"}}).session(&mut *session).await?;
+            super::assistant_notification_service::resolve_cards_in_session(&db,session,super::assistant_notification_service::CardScope::Conversations(&ids),"superseded").await?;
             Box::pin(super::assistant_team_service::sync_thread_authority(&db,&agent,&rows,session)).await?;
             Ok(*agent.machine_access.expect("policy"))
         }).await; transactions::transaction_result(result)

@@ -76,18 +76,8 @@ pub(super) fn verify(
 
 pub(super) fn target(body: &[u8]) -> AppResult<Option<String>> {
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
-    if !matches!(
-        body["data"]["event_type"].as_str(),
-        Some(
-            "dm.received"
-                | "chat.received"
-                | "post.mention.create"
-                | "post.reply.create"
-                | "post.create"
-        )
-    ) {
-        return Ok(None);
-    }
+    // Account binding is independent of event shape. A signed, tagged event
+    // with a missing type must reach the bot's invalid-payload diagnostic.
     Ok(Some(
         body["data"]["filter"]["user_id"]
             .as_str()
@@ -98,6 +88,19 @@ pub(super) fn target(body: &[u8]) -> AppResult<Option<String>> {
 }
 
 pub(super) fn parse(body: &[u8]) -> AppResult<Vec<InboundMessage>> {
+    let envelope: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+    if !matches!(
+        envelope["data"]["event_type"].as_str(),
+        Some(
+            "dm.received"
+                | "chat.received"
+                | "post.mention.create"
+                | "post.reply.create"
+                | "post.create"
+        )
+    ) {
+        return Ok(vec![]);
+    }
     let Some(own_id) = target(body)? else {
         return Ok(vec![]);
     };

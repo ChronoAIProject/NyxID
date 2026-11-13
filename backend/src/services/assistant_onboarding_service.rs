@@ -128,7 +128,7 @@ const EMAIL: &[&str] = &[
 ];
 const CALENDAR: &[&str] = &["calendar", "outlook", "google-workspace"];
 
-static CATALOG: &[Recommendation] = &[
+pub(super) static CATALOG: &[Recommendation] = &[
     Recommendation {
         id: "connect_inbox",
         title: "Connect your inbox",

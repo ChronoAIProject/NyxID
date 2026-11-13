@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { useOverlayLayer } from "@/lib/overlay-layer";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -67,6 +68,7 @@ function ConnectLinkModal({
   >;
   readonly onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const layer = useOverlayLayer();
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -78,7 +80,7 @@ function ConnectLinkModal({
           style={{ zIndex: layer }}
           className="fixed top-1/2 left-1/2 w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 outline-none"
         >
-          <DialogTitle className="sr-only">Connect a service</DialogTitle>
+          <DialogTitle className="sr-only">{t("Connect a service")}</DialogTitle>
           <DialogBody className="max-h-[calc(100dvh-2rem)] rounded-xl bg-card shadow-xl shadow-primary/5">
             <ConnectLinkContent
               token={target.token}
@@ -88,7 +90,7 @@ function ConnectLinkModal({
           </DialogBody>
           <DialogClose className="absolute top-3 right-3 flex size-8 items-center justify-center rounded-full bg-card/80 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
             <X className="size-4" aria-hidden="true" />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">{t("Close")}</span>
           </DialogClose>
         </DialogPrimitive.Content>
         </OverlayLayer>

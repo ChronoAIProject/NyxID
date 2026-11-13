@@ -1,5 +1,28 @@
 export type KeyboardFrame = { screenY: number; height: number };
 
+/** Fabric modal measurements use the sheet's root, while keyboard events use
+ * the presenting window. A bottom-anchored safe-area provider supplies the
+ * root's actual bottom, including a drawer's existing origin.
+ */
+export function keyboardInViewportWindow(
+  keyboard: KeyboardFrame,
+  safeAreaFrame: { y: number; height: number },
+): KeyboardFrame {
+  if (
+    !Number.isFinite(safeAreaFrame.y) ||
+    !Number.isFinite(safeAreaFrame.height) ||
+    safeAreaFrame.height <= 0
+  )
+    return keyboard;
+  return {
+    ...keyboard,
+    screenY: Math.min(
+      keyboard.screenY,
+      safeAreaFrame.y + safeAreaFrame.height - keyboard.height,
+    ),
+  };
+}
+
 /** Only consume the part of this view that the visible keyboard actually covers. */
 export function keyboardOverlap(
   frame: { y: number; height: number },

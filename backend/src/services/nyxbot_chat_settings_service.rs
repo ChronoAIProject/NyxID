@@ -182,3 +182,78 @@ pub(crate) async fn update_as(
     })
     .await
 }
+
+/// Remove the provider's exact chat, its derived delivery state and feed rows.
+/// Deleting the exact thread serializes retirement with flagged reply settlement.
+/// Per-actor organization lanes share one public channel chat.
+pub(crate) async fn remove_thread(
+    db: &Database,
+    row: &NyxbotChannel,
+    partition: &str,
+) -> AppResult<()> {
+    use futures::TryStreamExt;
+    let context = (db.clone(), row.clone(), partition.to_owned());
+    super::transaction_service::run_db_only(db, &context, |tx, (db, row, partition)| {
+        Box::pin(async move {
+            // Validate the binding at this transaction's snapshot. A later
+            // rebind increments the channel epoch, invalidating raced notification
+            // snapshots. The exact thread deletion below fences this chat.
+            if db
+                .collection::<Document>(CHANNELS)
+                .find_one(doc! {
+                    "_id":&row.id,"user_id":&row.user_id,"binding_id":&row.binding_id,
+                })
+                .projection(doc! {"_id": 1})
+                .session(&mut *tx)
+                .await?
+                .is_none()
+            {
+                return Err(AppError::Conflict("Channel binding changed".into()));
+            }
+            if let Some(thread) = db
+                .collection::<crate::models::nyxbot_channel::NyxbotThread>(THREADS)
+                .find_one_and_delete(doc! {"channel_id":&row.id,"partition":partition})
+                .session(&mut *tx)
+                .await?
+            {
+                let mut cursor = db
+                    .collection::<Document>(crate::models::org_channel::LANES)
+                    .find(doc! {"channel_id":&row.id,"partition":partition})
+                    .projection(doc! {"conversation_id":1})
+                    .session(&mut *tx)
+                    .await?;
+                let lanes: Vec<Document> = cursor.stream(&mut *tx).try_collect().await?;
+                let mut conversations: Vec<String> = lanes
+                    .iter()
+                    .filter_map(|lane| lane.get_str("conversation_id").ok().map(str::to_owned))
+                    .collect();
+                conversations.extend(thread.conversation_id);
+                super::assistant_notification_service::purge(
+                    db,
+                    doc! {
+                    "source.channel_id":&row.id,"$or":[
+                        {"source.conversation_id":{"$in":conversations}},
+                        {"source.thread_id":&thread.id},
+                        {"source.id":&thread.id},
+                    ]},
+                    Some(&mut *tx),
+                )
+                .await?;
+                db.collection::<Document>(
+                    crate::models::execution_permission_channel::COLLECTION_NAME,
+                )
+                .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
+                .session(&mut *tx)
+                .await?;
+            }
+            if row.gateway_source.is_some() {
+                db.collection::<Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME)
+                    .delete_many(doc! {"channel_id":&row.id,"partition":partition})
+                    .session(tx)
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}

@@ -46,16 +46,10 @@ fn invalid(message: &str) -> AppError {
     AppError::ValidationError(message.into())
 }
 
-/// All new writers require a full-fleet Phase 2 capability, not merely the
-/// already-enabled Phase 1 flag. Old replicas never admit a new marker.
+/// Group operations use the already activated fleet capability, including
+/// membership changes; live support and all existing authority fences remain.
 async fn require_rollout(db: &Database) -> AppResult<()> {
-    if !super::security_readiness_service::report(db, READINESS)
-        .await?
-        .ready
-    {
-        return Err(AppError::SecurityReadinessUnavailable);
-    }
-    Ok(())
+    super::security_readiness_service::require_serving(db, READINESS).await
 }
 
 fn marker(group: &AssistantGroup) -> AppResult<&model::Collaboration> {

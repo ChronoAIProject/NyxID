@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { describeChanges, changeLines } from "@/lib/grouped-form-changes";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -30,6 +33,7 @@ export function SkillPreloadSettings({
   readonly bytes: number;
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   const save = useSetSkillPreload(agentId, skillId);
   const form = useAppForm<z.infer<typeof skillPreloadFormSchema>>({
     resolver: zodResolver(skillPreloadFormSchema),
@@ -61,21 +65,13 @@ export function SkillPreloadSettings({
       <GroupedList
         title={
           paths.length
-            ? `Preloaded · ${bytes.toLocaleString()} bytes`
-            : "Preload settings"
+            ? translateUi("Preloaded · {{value1}} bytes", { value1: bytes.toLocaleString(getFormattingLocale()) })
+            : translateUi("Preload settings")
         }
         footer={
           <>
-            <p>
-              Include these skill files automatically in your chats, without a
-              skill lookup by the bot. Guest chats do not receive preloaded
-              skills. Files count toward the model’s context.
-            </p>
-            <p id={`preload-help-${skillId}`}>
-              One path per line. Include SKILL.md; add references as needed. Up
-              to 8 files per skill and 64 KiB across this agent. Choosing a new
-              skill version resets preloading for that skill.
-            </p>
+            <p>{translateUi("Include these skill files automatically in your chats, without a skill lookup by the bot. Guest chats do not receive preloaded skills. Files count toward the model’s context.")}</p>
+            <p id={`preload-help-${skillId}`}>{translateUi("One path per line. Include SKILL.md; add references as needed. Up to 8 files per skill and 64 KiB across this agent. Choosing a new skill version resets preloading for that skill.")}</p>
             {form.formState.errors.paths?.message ? (
               <p
                 id={`preload-error-${skillId}`}
@@ -94,10 +90,10 @@ export function SkillPreloadSettings({
         }
       >
         <GroupedRow
-          title="Preload for every turn"
+          title={translateUi("Preload for every turn")}
           accessory={
             <Switch
-              aria-label={`Preload ${name}`}
+              aria-label={translateUi("Preload {{value1}}", { value1: name })}
               checked={enabled}
               disabled={disabled || save.isPending}
               onCheckedChange={(value) => form.setValue("enabled", value)}
@@ -107,9 +103,9 @@ export function SkillPreloadSettings({
         {enabled ? (
           <GroupedRow asChild className="grouped-field">
             <Label>
-              <span>Files to preload</span>
+              <span>{translateUi("Files to preload")}</span>
               <GroupedTextarea
-                aria-label={`Preload files for ${name}`}
+                aria-label={translateUi("Preload files for {{value1}}", { value1: name })}
                 className="min-h-20 font-mono text-13"
                 aria-invalid={!!form.formState.errors.paths}
                 aria-describedby={`preload-help-${skillId}${form.formState.errors.paths ? ` preload-error-${skillId}` : ""}`}
@@ -122,11 +118,11 @@ export function SkillPreloadSettings({
       </GroupedList>
       <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "enabled", label: "Preload for every turn" }, { key: "paths", label: "Files to preload", list: changeLines }])}
-        label={`${name} preload`}
+        label={translateUi("{{value1}} preload", { value1: name })}
         dirty={form.formState.isDirty}
         pending={save.isPending}
         disabled={disabled}
-        saveLabel="Save preload settings"
+        saveLabel={translateUi("Save preload settings")}
         save={() => submit()}
         discard={() => form.reset(undefined, { keepDirtyValues: false })}
       />

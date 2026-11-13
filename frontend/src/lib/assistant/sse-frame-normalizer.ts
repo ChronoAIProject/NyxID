@@ -1,3 +1,4 @@
+import { responseApiError } from "@/lib/api-error";
 import { AGUIEventType, type AGUIEvent } from "@/lib/assistant/agui-types";
 
 type JsonRecord = Record<string, unknown>;
@@ -321,10 +322,7 @@ export async function* parseBackendSSEStream(
   options?: { signal?: AbortSignal },
 ): AsyncGenerator<AGUIEvent, void, undefined> {
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `SSE request failed: HTTP ${String(response.status)} - ${text || response.statusText}`,
-    );
+    throw await responseApiError(response);
   }
   if (!response.body) throw new Error("SSE response has no readable body.");
 

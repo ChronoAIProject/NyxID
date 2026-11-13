@@ -285,6 +285,119 @@ async fn channel_media_authority_refusal_matrix_never_downloads() {
 }
 
 #[tokio::test]
+async fn channel_media_telegram_new_guest_alias_uses_canonical_authority() {
+    let (state, mut row, _, _, server) = media_fixture("media_telegram_new_alias", "direct").await;
+    guest_media_tests::enable_guest(&state).await;
+    row.platform = "telegram".into();
+    row.owner_sender_ids = vec!["owner".into()];
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.channel_bot_id},
+            doc! {"$set": {"platform": "telegram-new"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": row.route_id.as_deref().unwrap()},
+            doc! {"$set": {"platform": "telegram-new"}},
+        )
+        .await
+        .unwrap();
+
+    let id = "telegram-new-guest-image";
+    let mut source = media_source(&state, &row, id, "native", "receipt").await;
+    source.platform = "telegram-new".into();
+    source.sender_platform_id = Some("visitor".into());
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .replace_one(doc! {"_id": id}, &source)
+        .await
+        .unwrap();
+    let mut request = media_request(&row, &source);
+    request.sender_id = "visitor".into();
+    assert_eq!(
+        authority::source(&state.db, &request)
+            .await
+            .unwrap()
+            .platform,
+        "telegram-new"
+    );
+    assert!(authority::supported_source(&source));
+    assert_eq!(
+        crate::services::channel_media_events::presence(&state.db, &request, true)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        crate::services::channel_media_events::admission(&state.db, &request)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_media_presence_text_does_not_refuse_foreign_source() {
+    let (state, mut row, _, _, server) = media_fixture("media_text_foreign_source", "direct").await;
+    enable_media(&state).await;
+    row.platform = "telegram".into();
+    row.owner_sender_ids = vec!["owner".into()];
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    let source = doc! {
+        "_id": "foreign-text-source", "channel_bot_id": &row.channel_bot_id,
+        "conversation_id": row.route_id.as_deref().unwrap(),
+        "platform_conversation_id": "other-chat", "user_id": OWNER,
+        "direction": "inbound", "platform": "telegram",
+        "sender_platform_id": "other-sender", "agent_api_key_id": &row.route_api_key_id,
+        "content_type": "text", "attachments": bson::Bson::Array(vec![]),
+        "embedded_attachments": bson::Bson::Array(vec![]),
+        "created_at": bson::DateTime::now(),
+    };
+    state
+        .db
+        .collection::<bson::Document>(MESSAGES)
+        .insert_one(source)
+        .await
+        .unwrap();
+    let request = MediaRequest {
+        channel: row,
+        source_message_id: "foreign-text-source".into(),
+        chat_id: "guest-chat".into(),
+        sender_id: "visitor".into(),
+        native_thread_id: None,
+        origin: None,
+        conversation_id: None,
+        agent_id: None,
+    };
+    assert_eq!(
+        crate::services::channel_media_events::presence(&state.db, &request, false)
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn channel_media_revoked_org_admin_never_downloads() {
     let (state, mut row, _, _, server) = media_fixture("media_org_authority", "direct").await;
     let org = Uuid::new_v4().to_string();

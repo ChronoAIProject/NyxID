@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { TableHead } from "@/components/ui/table";
@@ -571,6 +572,7 @@ export function DataTableColumnHeader<
   onResizeByKeyboard,
   onResizeReset,
 }: DataTableColumnHeaderProps<Field, Sort>) {
+  const { t } = useUiTranslation();
   const { field, label } = column;
   const direction = dataTableSortDirection(sort, field);
   const Icon =
@@ -633,8 +635,8 @@ export function DataTableColumnHeader<
         <button
           type="button"
           draggable
-          aria-label={`Move ${label} column`}
-          title={`Move ${label} column`}
+          aria-label={t("Move {{label}} column", { label: label })}
+          title={t("Move {{label}} column", { label: label })}
           onDragStart={(event) => onDragStart(field, event)}
           onDragEnd={onDragEnd}
           onKeyDown={(event) => {
@@ -659,8 +661,8 @@ export function DataTableColumnHeader<
             direction && "text-foreground",
           )}
           disabled={disabled}
-          aria-label={`Sort by ${label}, ${nextDirection}`}
-          title={`Sort by ${label}, ${nextDirection}`}
+          aria-label={t("Sort by {{label}}, {{nextDirection}}", { label: label, nextDirection: nextDirection })}
+          title={t("Sort by {{label}}, {{nextDirection}}", { label: label, nextDirection: nextDirection })}
           onClick={() => onSort(nextSort)}
         >
           <span className="truncate">{label}</span>
@@ -678,10 +680,10 @@ export function DataTableColumnHeader<
           type="button"
           aria-label={
             lastFrozen
-              ? `Unfreeze columns through ${label}`
-              : `Freeze columns through ${label}`
+              ? t("Unfreeze columns through {{label}}", { label: label })
+              : t("Freeze columns through {{label}}", { label: label })
           }
-          title={lastFrozen ? "Unfreeze columns" : "Freeze through this column"}
+          title={lastFrozen ? t("Unfreeze columns") : t("Freeze through this column")}
           aria-pressed={lastFrozen}
           onClick={() => onToggleFreeze(field)}
           className={cn(
@@ -701,12 +703,12 @@ export function DataTableColumnHeader<
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label={`Resize ${label} column`}
+        aria-label={t("Resize {{label}} column", { label: label })}
         aria-valuenow={width}
         aria-valuemin={MIN_COLUMN_WIDTH}
         aria-valuemax={MAX_COLUMN_WIDTH}
         tabIndex={0}
-        title={`Drag to resize ${label}, double-click to reset`}
+        title={t("Drag to resize {{label}}, double-click to reset", { label: label })}
         onPointerDown={(event) => onResizeStart(field, event)}
         onDoubleClick={() => onResizeReset(field)}
         onKeyDown={(event) => {

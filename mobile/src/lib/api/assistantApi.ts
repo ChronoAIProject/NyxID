@@ -1,3 +1,5 @@
+import { parseHistoryResponse } from "../../features/assistant/assistantHistoryCompat";
+import { assistantTitleLanguage } from "../../features/assistant/titleLanguage";
 import {
   requestAuthenticatedResponse,
   requestJson,
@@ -81,7 +83,7 @@ export const assistantApi = {
     const query = new URLSearchParams({ limit: "50" });
     if (cursor) query.set("cursor", cursor);
     if (agentId) query.set("agent_id", agentId);
-    return indexSchema.parse(
+    return parseHistoryResponse(indexSchema,
       await requestJson(`${ROOT}/conversations?${query}`, { signal }),
     );
   },
@@ -91,7 +93,7 @@ export const assistantApi = {
     signal?: AbortSignal,
     acknowledgementId?: string,
   ) {
-    const result = historySchema.parse(
+    const result = parseHistoryResponse(historySchema,
       await requestJson(
         assistantHistoryRequestPath(id, beforeSeq, acknowledgementId),
         { signal },
@@ -169,7 +171,7 @@ export async function streamAssistantTurn(
     requestAuthenticatedResponse(`${ROOT}/turns`, {
       method: "POST",
       signal: controller.signal,
-      headers: { Accept: "text/event-stream" },
+      headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
       body,
     }),
     45000,

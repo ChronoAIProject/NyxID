@@ -1,3 +1,4 @@
+import { certifiedContractSchema } from "@/schemas/model-contracts";
 import {
   useInfiniteQuery,
   useMutation,
@@ -91,5 +92,18 @@ export function usePlatformModelChange() {
       await client.invalidateQueries({ queryKey: root });
       await client.invalidateQueries({ queryKey: ["admin", "billing"] });
     },
+  });
+}
+
+export function useModelContracts() {
+  const user = useAuthStore((s) => s.user);
+  return useQuery({
+    queryKey: [...root, "contracts", user?.id],
+    queryFn: async () =>
+      certifiedContractSchema
+        .array()
+        .parse(await api.get("/admin/platform-models/contracts")),
+    enabled: hasAdminRead(user),
+    refetchOnWindowFocus: false,
   });
 }

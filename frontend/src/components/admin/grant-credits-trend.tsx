@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useId } from "react";
 import {
   Area,
@@ -18,6 +21,7 @@ import { useTextSize } from "@/hooks/use-text-size";
 import "@/components/billing-analytics/visualization.css";
 
 export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
+  useUiTranslation();
   const id = useId().replace(/:/g, "");
   const tokenSize = useTextSize(13);
   const tick = { ...chartTick, fontSize: tokenSize };
@@ -32,7 +36,7 @@ export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
   return (
     <div className="analytics-visuals analytics-chart min-w-0">
       <div className="mb-2 flex flex-wrap items-center gap-x-5 gap-y-1 type-secondary text-muted-foreground">
-        <span>Daily · UTC · Credits</span>
+        <span>{translateUi("Daily · UTC · Credits")}</span>
         {colors.map((color, i) => (
           <span key={color} className="inline-flex items-center gap-1.5">
             <span
@@ -40,14 +44,14 @@ export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
               className="h-0.5 w-3"
               style={{ background: color }}
             />
-            {i === 0 ? "Granted" : "Used"}
+            {i === 0 ? translateUi("Granted") : translateUi("Used")}
           </span>
         ))}
       </div>
       <div
         className="h-44"
         role="img"
-        aria-label="Daily grant credits granted and used. Exact values are available in View chart data."
+        aria-label={translateUi("Daily grant credits granted and used. Exact values are available in View chart data.")}
       >
         <ResponsiveContainer
           width="100%"
@@ -78,7 +82,7 @@ export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
               width={Math.ceil(tokenSize * 5)}
               tick={tick}
               tickFormatter={(v: number) =>
-                v.toLocaleString(undefined, {
+                v.toLocaleString(getFormattingLocale(), {
                   notation: "compact",
                   maximumSignificantDigits: 3,
                 })
@@ -96,14 +100,8 @@ export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
                     <p className="mb-1 type-secondary-emphasis">
                       {utc(point.start)} – {utc(point.end)}
                     </p>
-                    <p className="type-secondary">
-                      Granted: <span className="font-mono">{point.issued}</span>{" "}
-                      credits
-                    </p>
-                    <p className="type-secondary">
-                      Used: <span className="font-mono">{point.used}</span>{" "}
-                      credits
-                    </p>
+                    <p className="type-secondary">{translateUi("Granted: ")}<span className="font-mono">{point.issued}</span>{" "}{translateUi("credits")}</p>
+                    <p className="type-secondary">{translateUi("Used: ")}<span className="font-mono">{point.used}</span>{" "}{translateUi("credits")}</p>
                   </div>
                 ) : null;
               }}
@@ -130,18 +128,15 @@ export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
         </ResponsiveContainer>
       </div>
       <details className="mt-2 type-secondary text-muted-foreground">
-        <summary className="w-fit cursor-pointer">View chart data</summary>
+        <summary className="w-fit cursor-pointer">{translateUi("View chart data")}</summary>
         <div className="mt-2 overflow-x-auto">
           <table className="w-full text-left type-secondary">
-            <caption className="sr-only">
-              Exact daily grant credits. UTC bucket bounds are clipped to the
-              selected window; end is exclusive.
-            </caption>
+            <caption className="sr-only">{translateUi("Exact daily grant credits. UTC bucket bounds are clipped to the selected window; end is exclusive.")}</caption>
             <thead>
               <tr>
-                <th className="py-2 pr-3 type-table-header">UTC window</th>
-                <th className="px-2 type-table-header">Granted</th>
-                <th className="pl-2 type-table-header">Used</th>
+                <th className="py-2 pr-3 type-table-header">{translateUi("UTC window")}</th>
+                <th className="px-2 type-table-header">{translateUi("Granted")}</th>
+                <th className="pl-2 type-table-header">{translateUi("Used")}</th>
               </tr>
             </thead>
             <tbody>
@@ -166,14 +161,14 @@ export function GrantCreditsTrend({ data }: { data: FreeGrantsReport }) {
   );
 }
 function day(value: string) {
-  return new Date(value).toLocaleDateString(undefined, {
+  return new Date(value).toLocaleDateString(getFormattingLocale(), {
     timeZone: "UTC",
     month: "short",
     day: "numeric",
   });
 }
 function utc(value: string) {
-  return new Date(value).toLocaleString(undefined, {
+  return new Date(value).toLocaleString(getFormattingLocale(), {
     timeZone: "UTC",
     timeZoneName: "short",
   });

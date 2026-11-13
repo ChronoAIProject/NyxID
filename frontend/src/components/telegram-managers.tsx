@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -21,6 +23,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
 export function TelegramManagers() {
+  useUiTranslation();
   const managers = useTelegramManagers();
   const save = useConfigureTelegramManager();
   const clear = useClearTelegramManager();
@@ -32,17 +35,13 @@ export function TelegramManagers() {
     defaultValues: { token: "" },
   });
   return (
-    <DetailSection title="Telegram managers">
+    <DetailSection title={translateUi("Telegram managers")}>
       <div className="space-y-4 p-4 text-14">
-        <p>
-          Connect additional BotFather managers here. Enable bot management in
-          BotFather for each one. Each manager has its own webhook and can use
-          any shared help library.
-        </p>
-        {managers.isPending && <p role="status">Loading Telegram managers…</p>}
+        <p>{translateUi("Connect additional BotFather managers here. Enable bot management in BotFather for each one. Each manager has its own webhook and can use any shared help library.")}</p>
+        {managers.isPending && <p role="status">{translateUi("Loading Telegram managers…")}</p>}
         {managers.error && (
           <ErrorBanner
-            message="Could not load Telegram managers."
+            message={translateUi("Could not load Telegram managers.")}
             onRetry={() => void managers.refetch()}
           />
         )}
@@ -52,20 +51,15 @@ export function TelegramManagers() {
             className="space-y-2 rounded-lg border border-border p-3"
           >
             <p>
-              @{m.username} · {m.ready ? "Connected" : "Needs configuration"}
+              @{m.username} · {m.ready ? translateUi("Connected") : translateUi("Needs configuration")}
               {m.legacy_default
-                ? " · Default (managed in Platform Credentials)"
+                ? translateUi(" · Default (managed in Platform Credentials)")
                 : ""}
             </p>
             {!m.legacy_default &&
               (removing === m.manager_bot_id ? (
                 <div className="space-y-2">
-                  <p>
-                    Clear @{m.username}'s saved manager configuration? Delete
-                    its channel connection and managed children, and finish or
-                    cancel its creation requests first. This does not delete the
-                    bot from Telegram.
-                  </p>
+                  <p>{translateUi("Clear @")}{m.username}{translateUi("'s saved manager configuration? Delete its channel connection and managed children, and finish or cancel its creation requests first. This does not delete the bot from Telegram.")}</p>
                   <Button
                     variant="destructive"
                     isLoading={clear.isPending}
@@ -74,8 +68,7 @@ export function TelegramManagers() {
                         onSuccess: () => setRemoving(undefined),
                       })
                     }
-                  >
-                    Clear @{m.username}
+                  >{translateUi("Clear @")}{m.username}
                   </Button>
                   <Button
                     disabled={clear.isPending}
@@ -83,9 +76,7 @@ export function TelegramManagers() {
                       clear.reset();
                       setRemoving(undefined);
                     }}
-                  >
-                    Keep manager
-                  </Button>
+                  >{translateUi("Keep manager")}</Button>
                 </div>
               ) : (
                 <Button
@@ -93,8 +84,7 @@ export function TelegramManagers() {
                     clear.reset();
                     setRemoving(m.manager_bot_id);
                   }}
-                >
-                  Review clearing @{m.username}
+                >{translateUi("Review clearing @")}{m.username}
                 </Button>
               ))}
           </div>
@@ -122,7 +112,7 @@ export function TelegramManagers() {
               name="token"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Additional manager bot token</FormLabel>
+                  <FormLabel>{translateUi("Additional manager bot token")}</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
@@ -135,9 +125,7 @@ export function TelegramManagers() {
                 </FormItem>
               )}
             />
-            <Button type="submit" variant="primary" isLoading={save.isPending}>
-              Connect manager
-            </Button>
+            <Button type="submit" variant="primary" isLoading={save.isPending}>{translateUi("Connect manager")}</Button>
             {error && <ErrorBanner message={error} />}
           </form>
         </Form>

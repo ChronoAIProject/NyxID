@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw, Server } from "lucide-react";
 import { z } from "zod";
@@ -128,6 +130,7 @@ export function AssistantServiceRotateCredentialDialog({
   readonly params: AssistantServiceRotateCredentialParams;
   readonly onComplete: (userServiceId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -277,22 +280,20 @@ export function AssistantServiceRotateCredentialDialog({
         <DialogHeader>
           <DialogTitle>
             {resultId
-              ? "Service credential rotated"
-              : "Rotate service credential"}
+              ? translateUi("Service credential rotated")
+              : translateUi("Rotate service credential")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "NyxID verified rotation through lineage ids and timestamps only. The replacement credential never left this dialog."
-              : "Enter the replacement credential. NyxID stores it; the assistant never sees it."}
+              ? translateUi("NyxID verified rotation through lineage ids and timestamps only. The replacement credential never left this dialog.")
+              : translateUi("Enter the replacement credential. NyxID stores it; the assistant never sees it.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-rotate-credential">
-                Replacement credential
-              </Label>
+              <Label htmlFor="assistant-service-rotate-credential">{translateUi("Replacement credential")}</Label>
               <Input
                 id="assistant-service-rotate-credential"
                 type="password"
@@ -306,14 +307,12 @@ export function AssistantServiceRotateCredentialDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="type-card-title">Rotated service</p>
+              <p className="type-card-title">{translateUi("Rotated service")}</p>
               <p className="break-all font-mono text-14 text-muted-foreground">
                 {resultId}
               </p>
               {verified ? (
-                <p className="text-13 text-success">
-                  Rotation lineage verified. No credential material returned.
-                </p>
+                <p className="text-13 text-success">{translateUi("Rotation lineage verified. No credential material returned.")}</p>
               ) : null}
             </div>
           </div>
@@ -321,7 +320,7 @@ export function AssistantServiceRotateCredentialDialog({
 
         {error ? (
           <p role="alert" className="text-14 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
@@ -345,9 +344,7 @@ export function AssistantServiceRotateCredentialDialog({
                   );
               }}
             >
-              <RefreshCw />
-              Retry verification
-            </Button>
+              <RefreshCw />{translateUi("Retry verification")}</Button>
           ) : null}
           {resultId ? (
             <Button
@@ -355,18 +352,14 @@ export function AssistantServiceRotateCredentialDialog({
               variant="primary"
               disabled={!verified}
               onClick={() => onComplete(resultId)}
-            >
-              Report service
-            </Button>
+            >{translateUi("Report service")}</Button>
           ) : (
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               onClick={() => void submit()}
-            >
-              Rotate credential
-            </Button>
+            >{translateUi("Rotate credential")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

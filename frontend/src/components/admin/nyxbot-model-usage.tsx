@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Label } from "@/components/ui/label";
 import { useState, type ReactNode } from "react";
 import {
@@ -24,7 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
-const count = (n: number) => n.toLocaleString();
+const count = (n: number) => n.toLocaleString(getFormattingLocale());
 // The Usage dashboard's Top billing accounts panel, rendered from NyxBot data.
 const ACCOUNTS_PANEL = newPanel({
   title: "Top billing accounts",
@@ -48,6 +51,7 @@ function Table({
   columns: string[];
   children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <div
       className="min-w-0 overflow-x-auto rounded-xl border border-border/50 bg-card"
@@ -82,6 +86,7 @@ function Cell({
   children: ReactNode;
   heading?: boolean;
 }) {
+  useUiTranslation();
   const Tag = heading ? "th" : "td";
   return (
     <Tag
@@ -99,7 +104,8 @@ function ModelName({
   row: NyxbotUsageModel;
   onSelect: (filter: ModelFilter) => void;
 }) {
-  if (row.is_other) return <span>Other · {count(row.groups)} models</span>;
+  useUiTranslation();
+  if (row.is_other) return <span>{translateUi("Other · ")}{count(row.groups)}{translateUi(" models")}</span>;
   return (
     <button
       type="button"
@@ -108,7 +114,7 @@ function ModelName({
         onSelect(row.model === null ? { unknown: true } : { model: row.model })
       }
     >
-      {row.model ?? "Unknown model"}
+      {row.model ?? translateUi("Unknown model")}
     </button>
   );
 }
@@ -129,6 +135,7 @@ const tokenLabels = [
   "Total tokens",
 ];
 export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
+  useUiTranslation();
   const [filter, setFilter] = useState<ModelFilter>({});
   const [draft, setDraft] = useState("");
   const query = useNyxbotModelUsage(from, to, filter, Boolean(from && to));
@@ -149,25 +156,17 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
       m.usage.image_output_tokens,
   );
   return (
-    <section className="space-y-4" aria-label="NyxBot model usage">
+    <section className="space-y-4" aria-label={translateUi("NyxBot model usage")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="font-display type-card-title">
-            Cost and billing by model
-          </h2>
-          <p className="mt-1 max-w-3xl text-14 text-muted-foreground">
-            Model executions by NyxBot and specialists. Credits include wallet,
-            grant and allowance funding. Model names are recorded billing
-            identities and may be request aliases.
-          </p>
+          <h2 className="font-display type-card-title">{translateUi("Cost and billing by model")}</h2>
+          <p className="mt-1 max-w-3xl text-14 text-muted-foreground">{translateUi("Model executions by NyxBot and specialists. Credits include wallet, grant and allowance funding. Model names are recorded billing identities and may be request aliases.")}</p>
         </div>
         <Button
           variant="outline"
           onClick={() => void query.refetch()}
           disabled={query.isFetching}
-        >
-          Refresh model usage
-        </Button>
+        >{translateUi("Refresh model usage")}</Button>
       </div>
       <form
         className="flex flex-wrap items-end gap-2"
@@ -176,53 +175,45 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
           if (draft.trim()) changeFilter({ model: draft.trim() });
         }}
       >
-        <Label className="min-w-0 space-y-1 text-muted-foreground">
-          Billing model
-          <Input
+        <Label className="min-w-0 space-y-1 text-muted-foreground">{translateUi("Billing model")}<Input
             value={draft}
             maxLength={256}
-            placeholder="Exact model name"
+            placeholder={translateUi("Exact model name")}
             onChange={(e) => setDraft(e.target.value)}
           />
         </Label>
-        <Button type="submit" variant="outline" disabled={!draft.trim()}>
-          Apply model
-        </Button>
+        <Button type="submit" variant="outline" disabled={!draft.trim()}>{translateUi("Apply model")}</Button>
         <Button
           type="button"
           variant="outline"
           onClick={() => changeFilter({ unknown: true })}
-        >
-          Unknown model
-        </Button>
+        >{translateUi("Unknown model")}</Button>
         {(filter.model || filter.unknown) && (
           <Button
             type="button"
             variant="outline"
             onClick={() => changeFilter({})}
-          >
-            All models
-          </Button>
+          >{translateUi("All models")}</Button>
         )}
         <p role="status" className="pb-2 text-13 text-text-tertiary">
           {filter.unknown
-            ? "Unknown model selected"
+            ? translateUi("Unknown model selected")
             : filter.model
-              ? `Model: ${filter.model}`
-              : "All models"}
-          {query.isFetching ? " · Updating…" : ""}
+              ? translateUi("Model: {{value1}}", { value1: filter.model })
+              : translateUi("All models")}
+          {query.isFetching ? translateUi(" · Updating…") : ""}
         </p>
       </form>
       {query.isError && (
         <div role="alert">
           <ErrorBanner
-            message="Unable to load NyxBot model usage."
+            message={translateUi("Unable to load NyxBot model usage.")}
             onRetry={() => void query.refetch()}
           />
         </div>
       )}
       {query.isPending && (
-        <div role="status" aria-label="Loading model usage">
+        <div role="status" aria-label={translateUi("Loading model usage")}>
           <Skeleton className="h-40 w-full" />
         </div>
       )}
@@ -234,33 +225,20 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             <p
               className="rounded-lg border border-warning/40 p-3 text-14"
               role="note"
-            >
-              Some confirmed historical assistant activity lacks evidence of
-              model execution. Its requests and costs are excluded from the
-              charts and tables; see Scope and data freshness for amounts.
-            </p>
+            >{translateUi("Some confirmed historical assistant activity lacks evidence of model execution. Its requests and costs are excluded from the charts and tables; see Scope and data freshness for amounts.")}</p>
           )}
           {candidates && candidates.usage.events > 0 && (
             <p
               className="rounded-lg border border-warning/40 p-3 text-14"
               role="note"
-            >
-              Some historical usage cannot be attributed.{" "}
-              {count(candidates.usage.events)} historical platform events are
-              excluded; their NyxBot share is unknown.
-            </p>
+            >{translateUi("Some historical usage cannot be attributed.")}{" "}
+              {count(candidates.usage.events)}{translateUi(" historical platform events are excluded; their NyxBot share is unknown.")}</p>
           )}
           {partial && (
-            <p role="note" className="text-14 text-warning">
-              Partial cost estimate · {count(data.totals.unknown_cost_events)}{" "}
-              billable events have unavailable historical prices. ≥ shows the
-              known subtotal; Unavailable means no cost could be priced.
-            </p>
+            <p role="note" className="text-14 text-warning">{translateUi("Partial cost estimate · ")}{count(data.totals.unknown_cost_events)}{" "}{translateUi("billable events have unavailable historical prices. ≥ shows the known subtotal; Unavailable means no cost could be priced.")}</p>
           )}
           {data.totals.events === 0 ? (
-            <p className="rounded-lg border border-dashed border-border p-5 text-14 text-muted-foreground">
-              No attributed model usage in this period
-              {filter.model || filter.unknown ? " for this model" : ""}.
+            <p className="rounded-lg border border-dashed border-border p-5 text-14 text-muted-foreground">{translateUi("No attributed model usage in this period")}{filter.model || filter.unknown ? translateUi(" for this model") : ""}.
             </p>
           ) : (
             <>
@@ -280,13 +258,13 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                     <p className="mt-2 break-words font-display type-metric tabular-nums">
                       {modelCost(data.totals, field)}
                     </p>
-                    <p className="mt-1 text-12 text-text-tertiary">credits</p>
+                    <p className="mt-1 text-12 text-text-tertiary">{translateUi("credits")}</p>
                   </Card>
                 ))}
               </div>
               <ModelTrends data={data} kind="cost" />
               <Table
-                title="Cost and billing by model in exact credits"
+                title={translateUi("Cost and billing by model in exact credits")}
                 columns={[
                   "Model",
                   "Gross credits",
@@ -316,17 +294,12 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 ))}
               </Table>
               <div>
-                <h2 className="font-display type-card-title">
-                  Traffic by model
-                </h2>
-                <p className="mt-1 text-14 text-muted-foreground">
-                  Provider-reported token counts. Total = input + output. Cache
-                  counts can overlap input; audio and image counts are subsets.
-                </p>
+                <h2 className="font-display type-card-title">{translateUi("Traffic by model")}</h2>
+                <p className="mt-1 text-14 text-muted-foreground">{translateUi("Provider-reported token counts. Total = input + output. Cache counts can overlap input; audio and image counts are subsets.")}</p>
               </div>
               <ModelTrends data={data} kind="traffic" />
               <Table
-                title="Traffic by model with exact token counts"
+                title={translateUi("Traffic by model with exact token counts")}
                 columns={[
                   "Model",
                   ...tokenLabels,
@@ -364,13 +337,11 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
               </Table>
               <Card
                 role="article"
-                aria-label="Model services"
+                aria-label={translateUi("Model services")}
                 className="min-w-0 p-4"
               >
                 <div className="mb-4">
-                  <h2 className="font-display type-card-title tracking-tight">
-                    Model services
-                  </h2>
+                  <h2 className="font-display type-card-title tracking-tight">{translateUi("Model services")}</h2>
                   <p className="mt-1 text-14 text-muted-foreground">
                     {MEASURE_LABELS.requests} · {BREAKDOWN_LABELS.service}
                   </p>
@@ -380,24 +351,19 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   panel={SERVICES_PANEL}
                 />
                 <details className="group mt-4 border-t border-border/50 pt-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">
-                    Cost and tokens by service
-                    <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">{translateUi("Cost and tokens by service")}<ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
                   </summary>
-                  <p className="mt-2 text-13 text-muted-foreground">
-                    The inference service is recorded on every model execution,
-                    including usage from before model names were captured.
-                  </p>
+                  <p className="mt-2 text-13 text-muted-foreground">{translateUi("The inference service is recorded on every model execution, including usage from before model names were captured.")}</p>
                   <div className="mt-3">
                     <Table
-                      title="Model services usage"
+                      title={translateUi("Model services usage")}
                       columns={["Service", "Gross credits", ...tokenLabels]}
                     >
                       {data.services.map((row, index) => (
                         <tr key={index}>
                           <Cell heading>
                             {row.is_other
-                              ? `Other · ${count(row.groups)} services`
+                              ? translateUi("Other · {{value1}} services", { value1: count(row.groups) })
                               : serviceLabel(row)}
                           </Cell>
                           <Cell>{modelCost(row.usage, "gross_cost")}</Cell>
@@ -412,13 +378,11 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
               </Card>
               <Card
                 role="article"
-                aria-label="Top billing accounts"
+                aria-label={translateUi("Top billing accounts")}
                 className="min-w-0 p-4"
               >
                 <div className="mb-4">
-                  <h2 className="font-display type-card-title tracking-tight">
-                    Top billing accounts
-                  </h2>
+                  <h2 className="font-display type-card-title tracking-tight">{translateUi("Top billing accounts")}</h2>
                   <p className="mt-1 text-14 text-muted-foreground">
                     {MEASURE_LABELS.cost} · {BREAKDOWN_LABELS.owner}
                   </p>
@@ -428,15 +392,9 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   panel={ACCOUNTS_PANEL}
                 />
                 <details className="group mt-4 border-t border-border/50 pt-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">
-                    Models by billing account
-                    <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">{translateUi("Models by billing account")}<ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
                   </summary>
-                  <p className="mt-2 text-13 text-muted-foreground">
-                    Ranked by known gross credits, then requests. Missing prices
-                    can affect cost ranking. Each account shows up to 20 models
-                    and a summed Other row.
-                  </p>
+                  <p className="mt-2 text-13 text-muted-foreground">{translateUi("Ranked by known gross credits, then requests. Missing prices can affect cost ranking. Each account shows up to 20 models and a summed Other row.")}</p>
                   <div className="mt-3 space-y-4">
                     {data.accounts.map(({ account, usage, models }) => (
                       <div key={account.id} className="min-w-0 space-y-2">
@@ -447,18 +405,17 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                             </h3>
                             <p className="text-13 text-text-tertiary">
                               {account.user_type === "org"
-                                ? "Organization"
-                                : (account.email ?? "Billing account")}
+                                ? translateUi("Organization")
+                                : (account.email ?? translateUi("Billing account"))}
                             </p>
                           </div>
                           <p className="text-14 tabular-nums">
-                            {modelCost(usage, "gross_cost")} credits ·{" "}
-                            {count(usage.requests)} requests ·{" "}
-                            {count(usage.total_tokens)} tokens
-                          </p>
+                            {modelCost(usage, "gross_cost")}{translateUi(" credits ·")}{" "}
+                            {count(usage.requests)}{translateUi(" requests ·")}{" "}
+                            {count(usage.total_tokens)}{translateUi(" tokens")}</p>
                         </div>
                         <Table
-                          title={`${account.display_name} usage by model`}
+                          title={translateUi("{{value1}} usage by model", { value1: account.display_name })}
                           columns={["Model", "Gross credits", ...tokenLabels]}
                         >
                           {models.map((row, index) => (
@@ -479,15 +436,9 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                     ))}
                     {data.other_accounts && (
                       <p className="text-14 tabular-nums">
-                        <strong>
-                          Other · {count(data.other_accounts.groups)} billing
-                          accounts
-                        </strong>{" "}
-                        · {modelCost(data.other_accounts.usage, "gross_cost")}{" "}
-                        credits · {count(data.other_accounts.usage.requests)}{" "}
-                        requests ·{" "}
-                        {count(data.other_accounts.usage.total_tokens)} tokens
-                      </p>
+                        <strong>{translateUi("Other · ")}{count(data.other_accounts.groups)}{translateUi(" billing accounts")}</strong>{" "}
+                        · {modelCost(data.other_accounts.usage, "gross_cost")}{" "}{translateUi("credits · ")}{count(data.other_accounts.usage.requests)}{" "}{translateUi("requests ·")}{" "}
+                        {count(data.other_accounts.usage.total_tokens)}{translateUi(" tokens")}</p>
                     )}
                   </div>
                 </details>
@@ -495,39 +446,25 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             </>
           )}
           <details className="text-13 text-muted-foreground">
-            <summary className="cursor-pointer">
-              Scope and data freshness
-            </summary>
-            <p className="mt-2">
-              Orchestration requests to llm-nyx and ordinary tool calls are
-              excluded from model totals. They can have separate charges. Legacy
-              free summaries lack attribution. Retained raw records may permit a
-              separate recovery; this report does not scan their full history.
-              Historical attribution also needs retained assistant credential,
-              rotation, conversation, or provisioning evidence. Unknown model
-              means an execution had no recorded billing model; it does not use
-              a conversation’s selected model. Proxied executions record the
-              provider-reported model; earlier rows remain unknown.
-            </p>
+            <summary className="cursor-pointer">{translateUi("Scope and data freshness")}</summary>
+            <p className="mt-2">{translateUi("Orchestration requests to llm-nyx and ordinary tool calls are excluded from model totals. They can have separate charges. Legacy free summaries lack attribution. Retained raw records may permit a separate recovery; this report does not scan their full history. Historical attribution also needs retained assistant credential, rotation, conversation, or provisioning evidence. Unknown model means an execution had no recorded billing model; it does not use a conversation’s selected model. Proxied executions record the provider-reported model; earlier rows remain unknown.")}</p>
             {data.excluded
               .filter((e) => e.population !== "unattributable_legacy")
               .map((e) => (
                 <p key={e.population}>
                   {e.population === "tool"
-                    ? "Ordinary tools"
+                    ? translateUi("Ordinary tools")
                     : e.population === "unclassified"
-                      ? "Historical assistant activity without execution evidence"
-                      : "Orchestration"}
-                  : {count(e.usage.requests)} requests ·{" "}
-                  {modelCost(e.usage, "gross_cost")} credits excluded.
-                </p>
+                      ? translateUi("Historical assistant activity without execution evidence")
+                      : translateUi("Orchestration")}
+                  : {count(e.usage.requests)}{translateUi(" requests ·")}{" "}
+                  {modelCost(e.usage, "gross_cost")}{translateUi(" credits excluded.")}</p>
               ))}
             <p className="mt-2">
               {data.freshness.validated
-                ? "Validated totals"
-                : "Updating totals"}{" "}
-              · includes recent activity · summaries updated through{" "}
-              {new Date(data.freshness.rolled_up_through).toLocaleString()}.
+                ? translateUi("Validated totals")
+                : translateUi("Updating totals")}{" "}{translateUi("· includes recent activity · summaries updated through")}{" "}
+              {new Date(data.freshness.rolled_up_through).toLocaleString(getFormattingLocale())}.
             </p>
           </details>
         </>

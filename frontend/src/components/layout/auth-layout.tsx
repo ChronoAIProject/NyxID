@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useEffect } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
 import { GitHubButton } from "@/components/shared/github-button";
@@ -17,6 +19,7 @@ const INTERVAL_MS = 6000;
 const FADE_MS = 1200;
 
 export function AuthLayout() {
+  useUiTranslation();
   useApplyTheme();
   const [activeIndex, setActiveIndex] = useState(0);
   const logoHref = useLogoHref();
@@ -57,19 +60,14 @@ export function AuthLayout() {
         <div className="mt-auto shrink-0 px-4 pb-8 sm:px-10">
           <div className="mb-4 flex justify-center">
             <GitHubButton
-              label="View source on GitHub"
+              label={translateUi("View source on GitHub")}
               size={16}
               className="type-secondary-emphasis text-muted-foreground hover:text-foreground"
             />
           </div>
-          <p className="text-center text-13 text-muted-foreground">
-            By continuing, you agree to NyxID&apos;s{" "}
-            <a href="/terms" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Terms of Service</a>{" "}
-            and
-            <br />
-            <a href="/privacy" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Privacy Policy</a>
-            , and to receive periodic emails with updates.
-          </p>
+          <p className="text-center text-13 text-muted-foreground">{translateUi("By continuing, you agree to NyxID's")}{" "}
+            <a href="/terms" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Terms of Service")}</a>{" "}{translateUi("and")}<br />
+            <a href="/privacy" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Privacy Policy")}</a>{translateUi(", and to receive periodic emails with updates.")}</p>
         </div>
       </div>
 

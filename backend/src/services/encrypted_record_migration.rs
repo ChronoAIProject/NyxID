@@ -36,6 +36,7 @@ enum Adapter {
     AssistantCredential,
     Attachment,
     GeneratedArtifact,
+    ToolResult,
     Public,
     Header,
     Capability,
@@ -134,6 +135,11 @@ const REGISTRY: &[Entry] = &[
         collection: "assistant_attachments",
         adapter: Adapter::Attachment,
         fields: &["text_encrypted", "data_encrypted"],
+    },
+    Entry {
+        collection: "assistant_tool_results",
+        adapter: Adapter::ToolResult,
+        fields: &["data_encrypted"],
     },
     Entry {
         collection: "platform_public_sessions",
@@ -646,6 +652,9 @@ async fn verify(
             super::assistant_record_service::verify_current_attachment(db, keys, row).await
         }
         Adapter::GeneratedArtifact => super::generated_artifacts::storage::verify(keys, row).await,
+        Adapter::ToolResult => {
+            super::assistant_tool_result_service::storage::verify(keys, row).await
+        }
         Adapter::Public => {
             super::platform_public_record_service::verify_current_snapshot(
                 db,
@@ -755,6 +764,9 @@ async fn migrate(
         }
         Adapter::GeneratedArtifact => {
             super::generated_artifacts::storage::rewrap(db, keys, row).await
+        }
+        Adapter::ToolResult => {
+            super::assistant_tool_result_service::storage::rewrap(db, keys, row).await
         }
         Adapter::Public => {
             super::platform_public_record_service::migrate_snapshot(db, keys, entry.collection, row)
@@ -971,7 +983,7 @@ pub async fn lookup_finding(
     }
     let large = matches!(
         entry.adapter,
-        Adapter::GeneratedArtifact | Adapter::Attachment
+        Adapter::GeneratedArtifact | Adapter::Attachment | Adapter::ToolResult
     );
     let _artifact_budget = if large {
         Some(
@@ -1125,7 +1137,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
     }
     let large = matches!(
         entry.adapter,
-        Adapter::GeneratedArtifact | Adapter::Attachment
+        Adapter::GeneratedArtifact | Adapter::Attachment | Adapter::ToolResult
     );
     let _artifact_budget = if large {
         Some(

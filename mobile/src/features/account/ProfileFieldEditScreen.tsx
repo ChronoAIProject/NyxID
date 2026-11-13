@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -27,7 +28,8 @@ const COPY: Record<
   avatar_url: {
     title: "Avatar",
     placeholder: "https://example.com/avatar.png",
-    footer: "An https link to a square image. Your initial is shown until you add one.",
+    footer:
+      "An https link to a square image. Your initial is shown until you add one.",
   },
 };
 
@@ -40,6 +42,7 @@ export function ProfileFieldEditScreen({
   navigation,
   route,
 }: SheetScreenProps<"ProfileEdit">) {
+  const { t } = useAppLanguage();
   const field = route.params.field;
   const copy = COPY[field];
   const { isConnected } = useNetworkStatus();
@@ -78,18 +81,20 @@ export function ProfileFieldEditScreen({
   return (
     <SettingsPage>
       {!isConnected ? (
-        <Notice message="You're offline. Connect to save changes." />
+        <Notice message={t("You're offline. Connect to save changes.")} />
       ) : null}
       {error ? <Notice tone="error" message={error} /> : null}
-      <SettingsGroup inset={false} footer={copy.footer}>
+      <SettingsGroup inset={false} footer={t(copy.footer)}>
         <SettingsTextField
-          accessibilityLabel={copy.title}
+          accessibilityLabel={t(copy.title)}
           value={draft}
           onChangeText={(text) => {
             setValue(text);
             setError(undefined);
           }}
-          placeholder={copy.placeholder}
+          placeholder={
+            field === "avatar_url" ? copy.placeholder : t(copy.placeholder)
+          }
           autoFocus
           editable={!!profile.data && !save.isPending}
           returnKeyType="done"
@@ -102,7 +107,10 @@ export function ProfileFieldEditScreen({
                 autoCapitalize: "none" as const,
                 autoCorrect: false,
               }
-            : { autoCapitalize: "words" as const, textContentType: "name" as const })}
+            : {
+                autoCapitalize: "words" as const,
+                textContentType: "name" as const,
+              })}
         />
       </SettingsGroup>
     </SettingsPage>

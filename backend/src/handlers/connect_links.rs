@@ -172,6 +172,7 @@ impl std::fmt::Debug for CompleteConnectLinkRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct CompleteConnectLinkResponse {
+    pub credential_verification: Option<crate::services::credential_verification::VerificationView>,
     pub id: String,
     pub status: String,
     pub service_slug: String,
@@ -530,7 +531,15 @@ pub async fn complete_connect_link(
                 &view.link.id,
             )
             .await;
-            Ok(Json(completion_response(view, "completed")?))
+            let verification = match view.link.completed_user_service_id.as_deref() {
+                Some(id) => {
+                    super::credential_verification::after_save(&state, &auth_user, id).await
+                }
+                None => None,
+            };
+            let mut response = completion_response(view, "completed")?;
+            response.credential_verification = verification;
+            Ok(Json(response))
         }
         connect_link_service::CompleteResult::OauthRequired {
             view,
@@ -671,6 +680,7 @@ fn completion_response(
 ) -> AppResult<CompleteConnectLinkResponse> {
     let callback_url = connect_link_service::terminal_callback_url(&view.link)?;
     Ok(CompleteConnectLinkResponse {
+        credential_verification: None,
         id: view.link.id,
         status: status.to_string(),
         service_slug: view
@@ -1231,6 +1241,12 @@ mod tests {
         .expect("complete link");
         assert_eq!(completed.status, "completed");
         assert!(completed.user_service_id.is_some());
+        let verification = completed
+            .credential_verification
+            .as_ref()
+            .expect("saved API key projection");
+        assert_eq!(verification.state, "not_verified");
+        assert_eq!(verification.reason_code, "check_not_declared");
 
         let replay = complete_connect_link(
             State(state),

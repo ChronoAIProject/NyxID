@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { localTime } from "@/lib/automation-time";
 import { DatePicker } from "@/components/ui/date-picker";
@@ -24,6 +26,7 @@ export function AutomationDateTime({
   readonly errorId?: string;
   readonly invalid?: boolean;
 }) {
+  useUiTranslation();
   const [date = "", time = "09:00"] = value.split("T");
   const TimeInput = grouped ? GroupedInput : Input;
   const controls = (
@@ -32,13 +35,13 @@ export function AutomationDateTime({
         grouped={grouped}
         describedBy={errorId}
         invalid={invalid}
-        ariaLabel={`${label} date`}
+        ariaLabel={translateUi("{{value1}} date", { value1: label })}
         value={date || null}
         onChange={(next) => onChange(next ? `${next}T${time}` : "")}
       />
       <TimeInput
         type="time"
-        aria-label={`${label} time`}
+        aria-label={translateUi("{{value1}} time", { value1: label })}
         aria-describedby={errorId}
         aria-invalid={invalid}
         value={time}
@@ -53,11 +56,9 @@ export function AutomationDateTime({
         <Button
           type="button"
           variant="ghost"
-          aria-label={`Clear ${label}`}
+          aria-label={translateUi("Clear {{value1}}", { value1: label })}
           onClick={() => onChange("")}
-        >
-          Clear
-        </Button>
+        >{translateUi("Clear")}</Button>
       )}
     </div>
   );
@@ -72,17 +73,17 @@ export function AutomationDateTime({
     <fieldset className="space-y-1 text-14">
       <Label asChild><legend>
         {label}
-        {optional ? " (optional)" : ""}
+        {optional ? translateUi(" (optional)") : ""}
       </legend></Label>
       <div className="flex gap-2">
         <DatePicker
-          ariaLabel={`${label} date`}
+          ariaLabel={translateUi("{{value1}} date", { value1: label })}
           value={date || null}
           onChange={(next) => onChange(next ? `${next}T${time}` : "")}
         />
         <Input
           type="time"
-          aria-label={`${label} time`}
+          aria-label={translateUi("{{value1}} time", { value1: label })}
           value={time}
           onChange={(event) =>
             onChange(
@@ -95,11 +96,9 @@ export function AutomationDateTime({
           <Button
             type="button"
             variant="ghost"
-            aria-label={`Clear ${label}`}
+            aria-label={translateUi("Clear {{value1}}", { value1: label })}
             onClick={() => onChange("")}
-          >
-            Clear
-          </Button>
+          >{translateUi("Clear")}</Button>
         )}
       </div>
     </fieldset>

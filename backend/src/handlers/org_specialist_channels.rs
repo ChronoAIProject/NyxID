@@ -121,3 +121,26 @@ async fn audit(state: &AppState, actor: &str, action: &str, channel: &str) {
         None,
     );
 }
+
+/// Human-only, explicit whole-policy adoption from the specialist's Grants page.
+pub async fn adoption_preview(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    Ok(Json(
+        org::adoption::preview(&state.db, &auth.user_id.to_string(), &id).await?,
+    ))
+}
+pub async fn adopt_grants(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(input): Json<org::adoption::Adoption>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    org::adoption::adopt(&state.db, &actor, &id, input).await?;
+    Ok(Json(org::adoption::preview(&state.db, &actor, &id).await?))
+}

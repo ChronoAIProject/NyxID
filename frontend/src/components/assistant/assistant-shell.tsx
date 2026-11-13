@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { AssistantAccountPanel } from "./assistant-account-panel";
 import { useAssistantViewport } from "@/hooks/use-assistant-viewport";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -20,9 +22,11 @@ import { ChatContentLayout } from "./chat-content-layout";
 import { OfflineBanner } from "./offline-banner";
 import { ChatGripSlotContext } from "./chat-header-context";
 import { AssistantSearchButton, AssistantSearchDialog } from "./assistant-search";
+import { NotificationsBell } from "./notifications-bell";
 import { useAssistantSearchShortcut } from "@/hooks/use-assistant-search-shortcut";
 import { CmaSessionObserver } from "./cma-session-card";
 import { useMachinePaneStore } from "@/stores/machine-pane-store";
+import type { CmaOperation } from "@/schemas/cma-operation";
 
 interface AssistantShellProps {
   readonly title: string;
@@ -35,6 +39,7 @@ interface AssistantShellProps {
   readonly resizableContent?: boolean;
   /** Preview cards docked beside chat on wide screens. */
   readonly aside?: ReactNode;
+  readonly cmaOperations?: readonly CmaOperation[];
   /** Share of the content area `aside` takes, in percent. */
   readonly asidePercent?: number;
   /** Set by dragging (or keying) the divider between the content and `aside`. */
@@ -43,8 +48,9 @@ interface AssistantShellProps {
 }
 
 export function AssistantShell(props: AssistantShellProps) {
+  useUiTranslation();
   return (
-    <CmaSessionObserver>
+    <CmaSessionObserver operations={props.cmaOperations}>
       {(cmaCards) => <AssistantShellLayout {...props} cmaCards={cmaCards} />}
     </CmaSessionObserver>
   );
@@ -64,6 +70,7 @@ function AssistantShellLayout({
   children,
   cmaCards,
 }: AssistantShellProps & { readonly cmaCards: ReactNode }) {
+  useUiTranslation();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const desktop = useMediaQuery("(min-width: 768px)");
   const wideScreen = useMediaQuery("(min-width: 1024px)");
@@ -140,22 +147,25 @@ function AssistantShellLayout({
           <OfflineBanner />
           {/* Mobile only: the drawer opener. On desktop the sidebar column
               carries the brand and there is no top row. */}
-          <header className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center gap-2 px-3 py-1 sm:px-4 md:hidden">
-            <button
-              type="button"
-              onClick={() => setMobileSidebarOpen(true)}
-              className="flex shrink-0 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
-              aria-label="Open chats"
-              data-icon-button=""
-              data-assistant-account-fallback="drawer"
-            >
-              <Menu className="h-4 w-4" />
-            </button>
+          <header className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-2 px-3 py-1 sm:px-4 md:hidden">
             <div className="min-w-0 flex-1 truncate text-14 text-muted-foreground">
               {!desktop ? shellTitle : null}
             </div>
-            {!desktop ? headerActions : null}
-            <AssistantSearchButton onOpen={openSearch} />
+            <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setMobileSidebarOpen(true)}
+                className="flex shrink-0 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
+                aria-label={translateUi("Open chats")}
+                data-icon-button=""
+                data-assistant-account-fallback="drawer"
+              >
+                <Menu className="h-4 w-4" />
+              </button>
+              {!desktop ? headerActions : null}
+              <NotificationsBell />
+              <AssistantSearchButton onOpen={openSearch} />
+            </div>
           </header>
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -167,14 +177,17 @@ function AssistantShellLayout({
                   <Link
                     to="/assistant"
                     search={{}}
-                    aria-label="Assistant home"
+                    aria-label={translateUi("Assistant home")}
                     className="mb-1 flex h-8 w-8 items-center justify-center rounded-lg hover:bg-overlay"
                   >
                     <NyxidIcon className="h-5 w-5" />
                   </Link>
-                  <SidebarToggle hidden onToggle={() => setSidebarHidden(false)} />
-                  <AssistantSearchButton onOpen={openSearch} />
-                  {desktop ? headerActions : null}
+                  <div data-header-actions="" className="flex shrink-0 flex-col flex-nowrap items-center gap-1">
+                    <SidebarToggle hidden onToggle={() => setSidebarHidden(false)} />
+                    <NotificationsBell />
+                    <AssistantSearchButton onOpen={openSearch} />
+                    {desktop ? headerActions : null}
+                  </div>
                 </div>
                 <SidebarRailContext value>
                   <div className="min-h-0 w-full flex-1">{sidebar}</div>
@@ -186,18 +199,21 @@ function AssistantShellLayout({
                 className="relative hidden shrink-0 flex-col bg-sidebar md:flex"
                 style={{ width: sidebarWidth }}
               >
-                <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center gap-1 pl-4 pr-3 py-1">
-                  <Link to="/assistant" search={{}} aria-label="Assistant home" className="mr-auto">
+                <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-1 pl-4 pr-3 py-1">
+                  <Link to="/assistant" search={{}} aria-label={translateUi("Assistant home")} className="mr-auto">
                     <NyxidLogo className="h-5 w-auto" />
                   </Link>
-                  {desktop ? headerActions : null}
-                  <AssistantSearchButton onOpen={openSearch} />
-                  <SidebarToggle hidden={false} onToggle={() => setSidebarHidden(true)} />
+                  <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
+                    {desktop ? headerActions : null}
+                    <NotificationsBell />
+                    <AssistantSearchButton onOpen={openSearch} />
+                    <SidebarToggle hidden={false} onToggle={() => setSidebarHidden(true)} />
+                  </div>
                 </div>
                 <div className="min-h-0 flex-1 overflow-hidden">{sidebar}</div>
                 <SidebarResizeHandle
                   sidebar="assistant"
-                  label="Resize sidebar"
+                  label={translateUi("Resize sidebar")}
                   onPreview={setPreviewWidth}
                 />
               </aside>
@@ -222,7 +238,7 @@ function AssistantShellLayout({
                 {hasPreview ? (
                   // One shared stack for machine, CMA, and other preview cards.
                   <aside
-                    aria-label="Preview"
+                    aria-label={translateUi("Preview")}
                     className="hidden h-full shrink-0 lg:block"
                     style={{ width: asideWidth }}
                   >
@@ -256,7 +272,7 @@ function AssistantShellLayout({
                 type="button"
                 className="absolute inset-0 bg-background/80 backdrop-blur-sm"
                 onClick={() => setMobileSidebarOpen(false)}
-                aria-label="Close chats"
+                aria-label={translateUi("Close chats")}
               />
               <aside
                 data-tour="sidebar"
@@ -267,18 +283,20 @@ function AssistantShellLayout({
                   paddingLeft: "var(--sal)",
                 }}
               >
-                <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center gap-1 border-b border-border/60 px-4 py-1">
+                <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-1 border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="mr-auto h-5 w-auto" />
-                  <AssistantSearchButton onOpen={openSearch} />
-                  <button
-                    type="button"
-                    onClick={() => setMobileSidebarOpen(false)}
-                    className="flex items-center justify-center rounded-lg text-text-tertiary"
-                    aria-label="Close chats"
-                    data-icon-button=""
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
+                  <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
+                    <AssistantSearchButton onOpen={openSearch} />
+                    <button
+                      type="button"
+                      onClick={() => setMobileSidebarOpen(false)}
+                      className="flex items-center justify-center rounded-lg text-text-tertiary"
+                      aria-label={translateUi("Close chats")}
+                      data-icon-button=""
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
                 <div
                   className="min-h-0 flex-1"
@@ -329,6 +347,7 @@ function AsideDivider({
   readonly onPreview: (percent: number | null) => void;
   readonly onChange: (percent: number) => void;
 }) {
+  useUiTranslation();
   const drag = useRef<{ pointer: number; rect: DOMRect; current: number } | null>(null);
   const clamp = (value: number) => Math.round(Math.min(ASIDE_MAX, Math.max(ASIDE_MIN, value)));
   function cancel() {
@@ -338,14 +357,14 @@ function AsideDivider({
   return (
     <div
       role="separator"
-      aria-label="Resize preview column"
+      aria-label={translateUi("Resize preview column")}
       aria-orientation="vertical"
       aria-valuemin={ASIDE_MIN}
       aria-valuemax={ASIDE_MAX}
       aria-valuenow={percent}
       aria-valuetext={`Preview column ${percent}%`}
       tabIndex={0}
-      title="Drag to resize · double-click to reset"
+      title={translateUi("Drag to resize · double-click to reset")}
       className="group absolute -top-3 bottom-0 z-40 hidden w-5 translate-x-1/2 cursor-col-resize touch-none outline-none lg:block"
       style={{ right: `${percent}%` }}
       onPointerDown={(event) => {
@@ -401,6 +420,7 @@ function AsideDivider({
 }
 
 function SidebarToggle({ hidden, onToggle }: { readonly hidden: boolean; readonly onToggle: () => void }) {
+  useUiTranslation();
   const label = hidden ? "Show sidebar" : "Hide sidebar";
   return (
     <button

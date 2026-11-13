@@ -37,7 +37,9 @@ function setup() {
     },
     "../../lib/auth/sessionStore": { authSessionGeneration: () => generation },
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
-    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "./AuthSubmitButton": { AuthSubmitButton: "PrimaryButton" },
+    "./useAuthTheme": { useAuthTheme: () => ({ colors: {} }) },
+    "./AuthTextInput": { AuthTextInput: "TextInput" },
     "./deviceLoginStyles": { createDeviceLoginStyles: () => ({}) },
   });
   const module = harness.load(

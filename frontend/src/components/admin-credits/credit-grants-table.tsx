@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useState } from "react";
 import {
   decimalCredits,
@@ -50,6 +53,7 @@ export function CreditGrantsTable({
   onPageChange,
   onRevoke,
 }: CreditGrantsTableProps) {
+  useUiTranslation();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 15_000);
@@ -62,14 +66,14 @@ export function CreditGrantsTable({
         <Table className="max-sm:block">
           <TableHeader className="max-sm:hidden">
             <TableRow>
-              <TableHead>Recipient</TableHead>
-              <TableHead>Allocated / used / remaining</TableHead>
-              <TableHead>Scope</TableHead>
-              <TableHead>Expiry</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Reason</TableHead>
+              <TableHead>{translateUi("Recipient")}</TableHead>
+              <TableHead>{translateUi("Allocated / used / remaining")}</TableHead>
+              <TableHead>{translateUi("Scope")}</TableHead>
+              <TableHead>{translateUi("Expiry")}</TableHead>
+              <TableHead>{translateUi("Status")}</TableHead>
+              <TableHead>{translateUi("Reason")}</TableHead>
               {canWrite ? (
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="text-right">{translateUi("Actions")}</TableHead>
               ) : null}
             </TableRow>
           </TableHeader>
@@ -112,12 +116,10 @@ export function CreditGrantsTable({
                       className="mt-2 max-w-sm space-y-1 break-words text-13"
                     >
                       <p className="font-medium">
-                        {rule.label || "Service limit"}:{" "}
+                        {rule.label || translateUi("Service limit")}:{" "}
                         {rule.service_slugs.join(", ")}
                       </p>
-                      <p className="break-all">
-                        Up to {formatExactCredits(rule.limit, 12)} credits ·
-                        used {formatExactCredits(rule.consumed, 12)} · held{" "}
+                      <p className="break-all">{translateUi("Up to ")}{formatExactCredits(rule.limit, 12)}{translateUi(" credits · used ")}{formatExactCredits(rule.consumed, 12)}{translateUi(" · held")}{" "}
                         {formatExactCredits(rule.held ?? rule.reserved, 12)}
                       </p>
                     </div>
@@ -136,8 +138,8 @@ export function CreditGrantsTable({
                       type="button"
                       size="icon"
                       variant="ghost"
-                      title="Reclaim remaining credits"
-                      aria-label="Reclaim remaining credits"
+                      title={translateUi("Reclaim remaining credits")}
+                      aria-label={translateUi("Reclaim remaining credits")}
                       disabled={
                         grant.status !== "active" ||
                         Boolean(grant.revoke_requested_at) ||
@@ -160,9 +162,7 @@ export function CreditGrantsTable({
                 <TableCell
                   colSpan={canWrite ? 7 : 6}
                   className="py-10 text-center text-muted-foreground"
-                >
-                  No credit grants.
-                </TableCell>
+                >{translateUi("No credit grants.")}</TableCell>
               </TableRow>
             ) : null}
           </TableBody>
@@ -170,8 +170,7 @@ export function CreditGrantsTable({
       </div>
       {pageCount > 1 ? (
         <div className="flex items-center justify-between text-14 text-muted-foreground">
-          <span>
-            Page {page} of {pageCount}
+          <span>{translateUi("Page ")}{page}{translateUi(" of ")}{pageCount}
           </span>
           <div className="flex gap-2">
             <Button
@@ -180,18 +179,14 @@ export function CreditGrantsTable({
               variant="outline"
               disabled={page <= 1 || fetching}
               onClick={() => onPageChange(Math.max(1, page - 1))}
-            >
-              Previous
-            </Button>
+            >{translateUi("Previous")}</Button>
             <Button
               type="button"
               size="sm"
               variant="outline"
               disabled={page >= pageCount || fetching}
               onClick={() => onPageChange(Math.min(pageCount, page + 1))}
-            >
-              Next
-            </Button>
+            >{translateUi("Next")}</Button>
           </div>
         </div>
       ) : null}
@@ -200,19 +195,16 @@ export function CreditGrantsTable({
 }
 
 function RolloutWarning() {
+  useUiTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="mt-1 inline-flex cursor-help" tabIndex={0}>
           <Badge variant="warning" className="gap-1">
-            <AlertTriangle className="h-3 w-3" />
-            Billing rollout off
-          </Badge>
+            <AlertTriangle className="h-3 w-3" />{translateUi("Billing rollout off")}</Badge>
         </span>
       </TooltipTrigger>
-      <TooltipContent>
-        Not in billing rollout - user cannot see billing yet.
-      </TooltipContent>
+      <TooltipContent>{translateUi("Not in billing rollout - user cannot see billing yet.")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -224,16 +216,17 @@ function GrantStatus({
   readonly grant: AdminCreditGrant;
   readonly now: number;
 }) {
+  useUiTranslation();
   if (grant.status === "active" && grant.revoke_requested_at)
     return (
-      <Badge variant="warning">Reclaim pending — held requests finishing</Badge>
+      <Badge variant="warning">{translateUi("Reclaim pending — held requests finishing")}</Badge>
     );
   if (
     grant.status === "active" &&
     grant.expires_at &&
     Date.parse(grant.expires_at) <= now
   )
-    return <Badge variant="warning">Expired</Badge>;
+    return <Badge variant="warning">{translateUi("Expired")}</Badge>;
   if (
     grant.status === "active" &&
     grant.activation_state === "pending_activation"
@@ -242,12 +235,10 @@ function GrantStatus({
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex cursor-help" tabIndex={0}>
-            <Badge variant="warning">Pending activation</Badge>
+            <Badge variant="warning">{translateUi("Pending activation")}</Badge>
           </span>
         </TooltipTrigger>
-        <TooltipContent>
-          These issued credits are pending activation and cannot be used yet.
-        </TooltipContent>
+        <TooltipContent>{translateUi("These issued credits are pending activation and cannot be used yet.")}</TooltipContent>
       </Tooltip>
     );
   }
@@ -266,14 +257,15 @@ function GrantStatus({
 }
 
 function scopeLabel(allServices: boolean, slugs: readonly string[]) {
-  return allServices ? "All services" : slugs.join(", ");
+  return allServices ? translateUi("All services") : slugs.join(", ");
 }
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : "Never";
+  return value ? new Date(value).toLocaleString(getFormattingLocale()) : translateUi("Never");
 }
 
 function AllocationAmounts({ grant }: { readonly grant: AdminCreditGrant }) {
+  useUiTranslation();
   const amount = exactCredits(grant.amount, grant.amount_micros) ?? "0";
   const remaining =
     exactCredits(grant.remaining, grant.remaining_micros) ?? "0";
@@ -304,8 +296,8 @@ function AllocationAmounts({ grant }: { readonly grant: AdminCreditGrant }) {
           <dt className="inline text-muted-foreground">{label}: </dt>
           <dd className="inline break-all">
             {value === null
-              ? "Unavailable from this server"
-              : `${formatExactCredits(value ?? "0", 12)} credits`}
+              ? translateUi("Unavailable from this server")
+              : translateUi("{{value1}} credits", { value1: formatExactCredits(value ?? "0", 12) })}
           </dd>
         </div>
       ))}

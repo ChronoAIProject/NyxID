@@ -279,7 +279,8 @@ describe("Assistant uploads composer", () => {
       "Bad request: Malformed or unsupported attachment. Use PDF, DOCX, UTF-8 text, PNG, JPEG, GIF or WebP.";
     class RefusedUpload {
       status = 400;
-      responseText = JSON.stringify({ message });
+      responseText = JSON.stringify({ error: "bad_request", message });
+      getResponseHeader = vi.fn(() => null);
       upload = {};
       onload?: () => void;
       onloadend?: () => void;

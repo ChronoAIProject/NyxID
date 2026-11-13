@@ -2101,6 +2101,8 @@ mod tests {
 
     fn sample_request(user_id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),

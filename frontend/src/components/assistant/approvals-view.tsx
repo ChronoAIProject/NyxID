@@ -1,3 +1,7 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { ExecutionPermissionCard } from "@/components/assistant/blocks/execution-permission-card";
 import { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
@@ -57,7 +61,7 @@ function dayLabel(value: string | null | undefined) {
   yesterday.setDate(today.getDate() - 1);
   if (date.toDateString() === today.toDateString()) return "Today";
   if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return date.toLocaleDateString(undefined, {
+  return date.toLocaleDateString(getFormattingLocale(), {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -65,16 +69,17 @@ function dayLabel(value: string | null | undefined) {
 }
 
 function EmptyState({ history = false }: { readonly history?: boolean }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col items-center py-12 text-center">
       <ShieldCheck aria-hidden className="mb-3 size-6 text-text-tertiary" />
       <p className="type-card-title">
-        {history ? "No decisions yet" : "Nothing waiting on you"}
+        {history ? translateUi("No decisions yet") : translateUi("Nothing waiting on you")}
       </p>
       <p className="mt-1 text-13 text-text-tertiary">
         {history
-          ? "Decided approvals will show up here."
-          : "Approval requests appear when an action needs your sign-off."}
+          ? translateUi("Decided approvals will show up here.")
+          : translateUi("Approval requests appear when an action needs your sign-off.")}
       </p>
     </div>
   );
@@ -85,6 +90,7 @@ function HistorySection({
 }: {
   readonly entries: readonly AssistantApprovalEntry[];
 }) {
+  useUiTranslation();
   if (!entries.length) return <EmptyState history />;
   const proposals = entries.filter((entry) => entry.block.execution_proposal);
   const legacy = entries.filter((entry) => !entry.block.execution_proposal);
@@ -140,13 +146,13 @@ function HistorySection({
                     >
                       {decision
                         ? decision.charAt(0).toUpperCase() + decision.slice(1)
-                        : "Pending"}
+                        : translateUi("Pending")}
                     </span>
                     {[
                       channelLabel(entry.block.decision_channel),
                       at === null
                         ? ""
-                        : new Date(at).toLocaleTimeString(undefined, {
+                        : new Date(at).toLocaleTimeString(getFormattingLocale(), {
                             hour: "numeric",
                             minute: "2-digit",
                           }),
@@ -168,11 +174,12 @@ function HistorySection({
 }
 
 export function ApprovalsView() {
+  useUiTranslation();
   const approvals = useAssistantApprovals();
   const [tab, setTab] = useState("pending");
   useEffect(() => {
     if (!approvals.isError) return;
-    toast.error("Could not load approvals", {
+    toast.error(translateErrorMessage("Could not load approvals"), {
       id: "assistant-approvals-load-failed",
       description:
         "The assistant backend did not respond. Deciding from Telegram or mobile still works — retry below.",
@@ -196,12 +203,12 @@ export function ApprovalsView() {
   ): Promise<void> {
     try {
       await decide.mutateAsync({ requestId: entry.requestId, approved });
-      toast.success(approved ? "Request approved" : "Request denied");
+      toast.success(translateUi(approved ? "Request approved" : "Request denied"));
     } catch (error) {
       toast.error(
-        error instanceof ApiError
+        translateErrorMessage(error instanceof ApiError
           ? error.message
-          : `Failed to ${approved ? "approve" : "deny"} the request`,
+          : approved ? "Failed to approve the request" : "Failed to deny the request"),
       );
     }
   }
@@ -210,36 +217,31 @@ export function ApprovalsView() {
     <div className="shell-page-stack">
       <WorkspacePageHeader
         column
-        title="Approvals"
-        description="Review actions waiting for your permission. Decisions here, in Telegram or on mobile stay in sync."
+        title={translateUi("Approvals")}
+        description={translateUi("Review actions waiting for your permission. Decisions here, in Telegram or on mobile stay in sync.")}
       />
       <SegmentedControl
         value={tab}
         onValueChange={setTab}
         className="max-w-2xl space-y-6"
       >
-        <SegmentedControlList aria-label="Approval status" className="max-w-80">
-          <SegmentedControlTrigger value="pending">
-            Pending ({pending.length})
+        <SegmentedControlList aria-label={translateUi("Approval status")} className="max-w-80">
+          <SegmentedControlTrigger value="pending">{translateUi("Pending (")}{pending.length})
           </SegmentedControlTrigger>
-          <SegmentedControlTrigger value="history">
-            History
-          </SegmentedControlTrigger>
+          <SegmentedControlTrigger value="history">{translateUi("History")}</SegmentedControlTrigger>
         </SegmentedControlList>
         {approvals.isError ? (
-          <GroupedList footer="Approvals may be out of date until the backend responds.">
+          <GroupedList footer={translateUi("Approvals may be out of date until the backend responds.")}>
             <GroupedRow asChild interactive>
               <button onClick={approvals.refetch}>
-                <RefreshCw aria-hidden />
-                Retry
-              </button>
+                <RefreshCw aria-hidden />{translateUi("Retry")}</button>
             </GroupedRow>
           </GroupedList>
         ) : null}
         {approvals.isLoading ? (
           <div
             role="status"
-            aria-label="Loading approvals"
+            aria-label={translateUi("Loading approvals")}
             className="space-y-3"
           >
             {Array.from({ length: 3 }, (_, i) => (
@@ -256,7 +258,7 @@ export function ApprovalsView() {
                 pending.map((entry) => (
                   <article
                     key={entry.requestId}
-                    aria-label={`${entry.serviceName} request`}
+                    aria-label={translateUi("{{value1}} request", { value1: entry.serviceName })}
                     className="assistant-workspace-approval space-y-2"
                   >
                     <h3 className="flex items-center gap-2 px-4 type-row-title">

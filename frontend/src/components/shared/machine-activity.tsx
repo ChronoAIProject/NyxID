@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useMachineActivity } from "@/hooks/use-machine-activity";
@@ -12,6 +15,7 @@ import {
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 
 export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
+  useUiTranslation();
   const [agent, setAgent] = useState("");
   const [cursors, setCursors] = useState<string[]>([]);
   const before = cursors.at(-1);
@@ -25,36 +29,33 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
   }
   return (
     <div className="min-h-0 space-y-4 overflow-auto p-5">
-      <p className="text-13 text-muted-foreground">
-        Actions, agents and outcomes only. Commands, file paths, page contents
-        and private conversations are not shown.
-      </p>
+      <p className="text-13 text-muted-foreground">{translateUi("Actions, agents and outcomes only. Commands, file paths, page contents and private conversations are not shown.")}</p>
       <div className="space-y-1 text-13">
-        <Label htmlFor="machine-activity-agent">Agent</Label>
+        <Label htmlFor="machine-activity-agent">{translateUi("Agent")}</Label>
         <Select value={agent || "all"} onValueChange={selectAgent}>
           <SelectTrigger
             id="machine-activity-agent"
-            aria-label="Filter by agent"
+            aria-label={translateUi("Filter by agent")}
           >
-            <SelectValue placeholder="All agents" />
+            <SelectValue placeholder={translateUi("All agents")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All agents</SelectItem>
+            <SelectItem value="all">{translateUi("All agents")}</SelectItem>
             {agents.map((option) => (
               <SelectItem key={option.id} value={option.id}>
                 {option.display_name?.trim()
-                  ? `${option.display_name} (@${option.name})`
-                  : `@${option.name}`}
+                  ? translateUi("{{display_name}} (@{{name}})", { display_name: option.display_name, name: option.name })
+                  : translateUi("@{{name}}", { name: option.name })}
               </SelectItem>
             ))}
-            <SelectItem value="unknown">Unknown (older node)</SelectItem>
+            <SelectItem value="unknown">{translateUi("Unknown (older node)")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
-      {query.isPending && <p role="status">Loading activity…</p>}
-      {query.error && <p role="alert">Could not load machine activity.</p>}
+      {query.isPending && <p role="status">{translateUi("Loading activity…")}</p>}
+      {query.error && <p role="alert">{translateUi("Could not load machine activity.")}</p>}
       {query.data?.entries.length === 0 && (
-        <p role="status">No activity for this selection.</p>
+        <p role="status">{translateUi("No activity for this selection.")}</p>
       )}
       <ol className="space-y-3">
         {query.data?.entries.map((entry) => {
@@ -75,11 +76,11 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
                 <span className="min-w-0 break-words">
                   {namedAgent
                     ? namedAgent.display_name?.trim()
-                      ? `${namedAgent.display_name} (@${namedAgent.name})`
-                      : `@${namedAgent.name}`
+                      ? translateUi("{{display_name}} (@{{name}})", { display_name: namedAgent.display_name, name: namedAgent.name })
+                      : translateUi("@{{name}}", { name: namedAgent.name })
                     : entry.agent_id
-                      ? "Agent unavailable"
-                      : "Unknown (older node)"}
+                      ? translateUi("Agent unavailable")
+                      : translateUi("Unknown (older node)")}
                 </span>
               </div>
               <p className="break-words text-muted-foreground">{machineName}</p>
@@ -87,10 +88,10 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
                 className="text-muted-foreground"
                 dateTime={entry.created_at}
               >
-                {new Date(entry.created_at).toLocaleString()}
+                {new Date(entry.created_at).toLocaleString(getFormattingLocale())}
               </time>
               {entry.exit_code !== null && (
-                <span className="ml-2">Exit {entry.exit_code}</span>
+                <span className="ml-2">{translateUi("Exit ")}{entry.exit_code}</span>
               )}
               {(namedAgent || !entry.agent_id) && (
                 <Button
@@ -99,12 +100,10 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
                   onClick={() => {
                     selectAgent(entry.agent_id ?? "unknown");
                   }}
-                >
-                  Show this agent
-                </Button>
+                >{translateUi("Show this agent")}</Button>
               )}
               <details className="pt-1 text-muted-foreground">
-                <summary className="cursor-pointer">Correlation IDs</summary>
+                <summary className="cursor-pointer">{translateUi("Correlation IDs")}</summary>
                 <dl className="space-y-1 break-all pt-2">
                   {[
                     ["Machine", nodeId],
@@ -131,18 +130,14 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
         <Button
           disabled={!cursors.length}
           onClick={() => setCursors(cursors.slice(0, -1))}
-        >
-          Previous
-        </Button>
+        >{translateUi("Previous")}</Button>
         <Button
           disabled={!query.data?.next_cursor}
           onClick={() => {
             if (query.data?.next_cursor)
               setCursors([...cursors, query.data.next_cursor]);
           }}
-        >
-          Next
-        </Button>
+        >{translateUi("Next")}</Button>
       </div>
     </div>
   );

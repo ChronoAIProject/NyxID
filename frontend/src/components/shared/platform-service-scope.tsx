@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useId } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -28,30 +30,25 @@ export function PlatformServiceScope({
   readonly orgOwned?: boolean;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const prefix = useId();
   if (orgOwned && !services.some((service) => service.auto_connected)) {
     return (
-      <p className="text-14 unthemed:text-12 text-muted-foreground">
-        This org-owned key cannot use platform services from your personal account.
-      </p>
+      <p className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("This org-owned key cannot use platform services from your personal account.")}</p>
     );
   }
   return (
     <section
-      aria-label="Auto-connected platform services"
+      aria-label={translateUi("Auto-connected platform services")}
       className="space-y-2 border-t border-border/50 pt-3"
     >
-      <p className="type-row-title unthemed:text-12">
-        Auto-connected platform services
-      </p>
+      <p className="type-row-title unthemed:text-12">{translateUi("Auto-connected platform services")}</p>
       <Label className="flex items-start gap-2 unthemed:text-14">
         <Checkbox
           checked={allowAll}
           disabled={disabled}
           onCheckedChange={(value) => onAllowAllChange(value === true)}
-        />
-        Allow all auto-connected platform services (includes ones added later)
-      </Label>
+        />{translateUi("Allow all auto-connected platform services (includes ones added later)")}</Label>
       {services
         .filter((service) => service.auto_connected)
         .map((service) => {

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   createContext,
   memo,
@@ -191,6 +193,7 @@ function tableCellStyle(
 const InsideFootnoteSectionContext = createContext(false);
 
 function MarkdownHeadingTwo({ children }: ComponentProps<"h2">) {
+  useUiTranslation();
   const insideFootnotes = useContext(InsideFootnoteSectionContext);
   return insideFootnotes ? (
     <h2 className="sr-only">{children}</h2>
@@ -347,9 +350,7 @@ const COMPONENTS: Components = {
     <section
       className={`${BLOCK} border-t border-hairline pt-2 text-13 text-foreground/90`}
     >
-      <div className="mb-1 type-group-label text-muted-foreground">
-        Footnotes
-      </div>
+      <div className="mb-1 type-group-label text-muted-foreground">{translateUi("Footnotes")}</div>
       <InsideFootnoteSectionContext.Provider value>
         {children}
       </InsideFootnoteSectionContext.Provider>

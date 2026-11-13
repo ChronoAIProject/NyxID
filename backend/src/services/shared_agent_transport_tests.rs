@@ -651,9 +651,10 @@ async fn shared_transports_discovery_keeps_machine_and_account_authority_exclude
         "set_machine_capabilities",
         "create_automation",
         "link_channel_agent",
+        "list_notifications",
     ] {
         assert!(!tools.endpoints.iter().any(|e| e.name == name));
-        let (_, refused) = crate::handlers::assistant_team::execute_tool(
+        let (value, refused) = crate::handlers::assistant_team::execute_tool(
             &f.f.state,
             chat,
             &format!("nyxid__{name}"),
@@ -661,6 +662,9 @@ async fn shared_transports_discovery_keeps_machine_and_account_authority_exclude
         )
         .await;
         assert!(refused, "{name}");
+        if name == "list_notifications" {
+            assert_eq!(value["error"], "shared_agent_scope");
+        }
     }
     f.f.state.db.drop().await.unwrap();
 }
@@ -907,6 +911,7 @@ async fn shared_transports_async_mcp_survives_settlement_and_two_replica_polling
             .await
             .unwrap();
             let start = crate::services::assistant_nyxagent::TurnStart {
+                title_language: None,
                 automation_work: None,
                 automation_parent: None,
                 execution_enrollment: false,

@@ -2022,6 +2022,7 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        catalog_slug: None,
         execution_request: None,
         execution_permission: None,
         credential_deferred: false,

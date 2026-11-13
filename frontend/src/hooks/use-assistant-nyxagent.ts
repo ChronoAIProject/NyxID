@@ -1,3 +1,4 @@
+import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -226,7 +227,7 @@ export function useNyxAgentAssistantChat({
     // fallback without it and a slow backstop with it. A turn NyxID (not
     // this page) starts here reaches the thread row first: `streaming`.
     refetchInterval: (query) =>
-      streaming || query.state.data?.conversation.active_turn
+      streaming || nyxAgentTransport.hasUnsettledInterruption(selectedConversationId) || query.state.data?.conversation.active_turn
         ? (live ? 5000 : 2000)
         : query.state.data?.cma_operations.some(isCmaOperationPending)
           ? 5000
@@ -427,7 +428,9 @@ export function useNyxAgentAssistantChat({
     continuations: nyxAgentTransport.continuations(viewId),
     isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
-    error: history.error?.message ?? threads.threadsError?.message ?? agents.error?.message,
+    interruption: nyxAgentTransport.getInterruption(viewId),
+    error: historyErrorMessage(history.error ?? threads.threadsError ?? agents.error)
+      ?? (nyxAgentTransport.getHistory(selectedConversationId)?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
     send,
     retry: (id: string, messageId: string) =>
       nyxAgentTransport.retry(id, messageId, onConversationAdopted),
@@ -435,7 +438,7 @@ export function useNyxAgentAssistantChat({
       nyxAgentTransport.checkRecovery(id, messageId),
     /** Reload the selected thread's transcript (after a context reset). */
     refreshHistory: async () => {
-      if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);
+      if (selectedConversationId) await history.refetch();
     },
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],

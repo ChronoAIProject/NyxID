@@ -219,6 +219,54 @@ async fn invocation_late_events_are_fenced_and_async_results_are_individual() {
 }
 
 #[tokio::test]
+async fn invocation_action_decision_keeps_lineage_and_is_cancelled_with_its_family() {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let (state, owner, admission) = admitted("invocation_action_decision").await;
+    let invocation = admission.invocation;
+    let row = admission.claim.unwrap().conversation;
+    let chat = acks::for_key(&state.db, &owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let args = json!({"node_id":"node"});
+    let card = acks::request(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&args),
+            summary: "Delete node",
+            platform: true,
+        },
+    )
+    .await
+    .unwrap();
+    let decided = acks::decide(&state.db, &owner, &row.id, &card.id, true)
+        .await
+        .unwrap();
+    let current = engine::get(&state.db, &owner, &row.id).await.unwrap();
+    assert_eq!(current.pending_events.len(), 1);
+    let event = &current.pending_events[0];
+    assert_eq!(event.kind, "permission_decided");
+    assert_eq!(event.invocation_id.as_deref(), Some(invocation.id.as_str()));
+    assert_eq!(Some(&event.id), decided.continuation_receipt_id.as_ref());
+    assert!(event.text.contains("Continue within existing authority"));
+    invocations::cancel(&state, &owner, &invocation.idempotency_key)
+        .await
+        .unwrap();
+    assert!(
+        engine::get(&state.db, &owner, &row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn invocation_and_source_queues_preserve_work_and_rollback_overflow() {
     use crate::models::assistant_conversation::{COLLECTION_NAME as CONVERSATIONS, TurnOrigin};
     use crate::services::{assistant_team_service as team, async_service_operation as operations};
@@ -1005,6 +1053,8 @@ async fn invocation_watch_settlement_is_atomic_and_cancel_fences_late_producers(
     let (state, owner, admission) = admitted("invocation_watch_settlement").await;
     let claim = admission.claim.unwrap();
     let watch = NyxbotWatch {
+        source_connect_link_id: None,
+        source_turn_id: None,
         id: Uuid::new_v4().to_string(),
         invocation_id: Some(admission.invocation.id.clone()),
         user_id: owner.clone(),

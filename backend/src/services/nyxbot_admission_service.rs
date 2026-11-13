@@ -79,13 +79,23 @@ pub async fn finish(
     disposition: &'static str,
 ) -> AppResult<()> {
     // A committed turn is stronger evidence than a later response/cleanup error.
-    db.collection::<Document>(COLLECTION_NAME)
+    let updated = db
+        .collection::<Document>(COLLECTION_NAME)
         .update_one(
             doc! {"_id":source,"channel_bot_id":&row.channel_bot_id,
             "nyxbot_admission":{"$type":"object"},"nyxbot_admission.turn_id":null},
             doc! {"$set":{"nyxbot_admission.disposition":disposition}},
         )
         .await?;
+    if updated.modified_count == 1 && disposition != "reply_without_turn" && disposition != "queued"
+    {
+        super::channel_inbound_diagnostics::for_channel(
+            db,
+            row,
+            super::channel_inbound_diagnostics::Outcome::admission(disposition),
+        )
+        .await;
+    }
     Ok(())
 }
 

@@ -7,6 +7,7 @@ import {
   buildAgentPatch,
   changedGrants,
   grantOptions,
+  grantServiceSchema,
   grantSignature,
   profileHasConflict,
   type AssistantAgent,
@@ -110,57 +111,17 @@ test("profile conflict check blocks overwriting changed fields but permits unrel
   );
 });
 
-test("org grant options are exact IDs in the same authorized owner scope", () => {
-  const orgKey = {
-    ...key,
-    id: "org-service-id",
-    credential_source: {
-      type: "org" as const,
-      org_id: "org-1",
-      org_name: "Team",
-      role: "admin" as const,
-      allowed: true,
-    },
-  };
-  const orgAgent = { ...agent, owner_kind: "org" as const, owner_id: "org-1" };
-  assert.deepEqual(
-    grantOptions(
-      [
-        key,
-        orgKey,
-        {
-          ...orgKey,
-          id: "other-org",
-          credential_source: { ...orgKey.credential_source, org_id: "org-2" },
-        },
-        {
-          ...orgKey,
-          id: "denied",
-          credential_source: { ...orgKey.credential_source, allowed: false },
-        },
-      ],
-      orgAgent,
-    ),
-    [
-      {
-        value: "org-service-id",
-        label: "GitHub",
-        iconSlug: "api-github",
-        iconUrl: undefined,
-      },
-    ],
-  );
-  assert.deepEqual(
-    grantOptions([key, { ...key, id: "disabled", is_active: false }]),
-    [
-      {
-        value: "api-github",
-        label: "GitHub",
-        iconSlug: "api-github",
-        iconUrl: undefined,
-      },
-    ],
-  );
+test("grant options use the server scoped inventory with exact org IDs", () => {
+  const rows = [
+    { id: "one", slug: "calendar", label: "Calendar", executable: false },
+    { id: "two", slug: "calendar", label: "Other Calendar", executable: true },
+  ];
+  assert.deepEqual(grantOptions(rows, { ...agent, owner_kind: "org" }), [
+    { value: "one", label: "Calendar", iconSlug: "calendar", iconUrl: undefined },
+    { value: "two", label: "Other Calendar", iconSlug: "calendar", iconUrl: undefined },
+  ]);
+  assert.deepEqual(grantOptions(rows), [{ value: "calendar", label: "Calendar", iconSlug: "calendar", iconUrl: undefined }]);
+  assert.equal(grantOptions([{ id: "public", slug: "chrono-llm-public", label: "Chrono LLM (public)", executable: true }])[0]?.value, "chrono-llm-public");
 });
 
 test("permission signatures ignore ordering and detect account/guest authority changes", () => {
@@ -219,4 +180,29 @@ test("agent create/profile writes strip legacy model selection fields", () => {
   };
   assert.equal("model" in agentCreateSchema.parse(values), false);
   assert.deepEqual(buildAgentPatch(agent, values), {});
+});
+
+
+test("grant options preserve the catalog glyph and icon for a differently named connection", () => {
+  assert.deepEqual(grantOptions([grantServiceSchema.parse({
+    id: "github-second", slug: "api-github-2", label: "Second GitHub", executable: true,
+    catalog_slug: "api-github", icon_url: "https://example.test/catalog-github.svg",
+  })]), [{
+    value: "api-github-2", label: "Second GitHub", iconSlug: "api-github",
+    iconUrl: "https://example.test/catalog-github.svg",
+  }]);
+});
+
+test("grant options preserve custom icons and accept older inventory rows without icon metadata", () => {
+  assert.deepEqual(grantOptions([grantServiceSchema.parse({
+    id: "custom", slug: "renamed-account", label: "Custom", executable: true,
+    catalog_slug: "api-github", icon_url: "https://example.test/my-icon.svg",
+  }), grantServiceSchema.parse({
+    id: "older", slug: "custom-api", label: "Older", executable: true,
+  })]), [{
+    value: "renamed-account", label: "Custom", iconSlug: "api-github",
+    iconUrl: "https://example.test/my-icon.svg",
+  }, {
+    value: "custom-api", label: "Older", iconSlug: "custom-api", iconUrl: undefined,
+  }]);
 });

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -41,10 +43,12 @@ import {
 } from "@/components/ui/dialog";
 
 export function ChannelAdapterResources() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   return user?.is_admin ? <ResourceManagement key={user.id} /> : null;
 }
 function ResourceManagement() {
+  useUiTranslation();
   const data = useAdminAdapterResources();
   const services = useServices();
   const [search, setSearch] = useState("");
@@ -101,23 +105,16 @@ function ResourceManagement() {
   }
   return (
     <section
-      aria-label="Platform phone accounts and allocations"
+      aria-label={translateUi("Platform phone accounts and allocations")}
       className="space-y-6 rounded-xl border border-border bg-card p-5 text-14"
     >
       <div>
-        <h2 className="type-subheading">
-          Platform phone accounts and allocations
-        </h2>
-        <p className="mt-2 text-muted-foreground">
-          Trust a provider account, then allocate its verified number and
-          application to one person. Catalog platform-key access does not grant
-          ownership of a phone resource. Telnyx platform voice is unavailable
-          because its inbound API cannot enforce a call-leg time cap.
-        </p>
+        <h2 className="type-subheading">{translateUi("Platform phone accounts and allocations")}</h2>
+        <p className="mt-2 text-muted-foreground">{translateUi("Trust a provider account, then allocate its verified number and application to one person. Catalog platform-key access does not grant ownership of a phone resource. Telnyx platform voice is unavailable because its inbound API cannot enforce a call-leg time cap.")}</p>
       </div>
       {(data.accounts.error || data.allocations.error) && (
         <ErrorBanner
-          message="Could not load platform phone resources."
+          message={translateUi("Could not load platform phone resources.")}
           onRetry={() => {
             void data.accounts.refetch();
             void data.allocations.refetch();
@@ -125,7 +122,7 @@ function ResourceManagement() {
         />
       )}
       <div className="space-y-3">
-        <h3 className="font-medium">Trusted accounts</h3>
+        <h3 className="font-medium">{translateUi("Trusted accounts")}</h3>
         {data.accounts.data?.map((a) => (
           <article
             key={a.id}
@@ -133,11 +130,10 @@ function ResourceManagement() {
           >
             <div>
               {a.provider} · {a.account_id}
-              <p className="text-muted-foreground">
-                Revision {a.revision} ·{" "}
+              <p className="text-muted-foreground">{translateUi("Revision ")}{a.revision} ·{" "}
                 {a.webhook_key_configured
-                  ? "Verification key configured"
-                  : "Provider credential authentication"}
+                  ? translateUi("Verification key configured")
+                  : translateUi("Provider credential authentication")}
               </p>
             </div>
             <Button
@@ -145,9 +141,7 @@ function ResourceManagement() {
               onClick={() =>
                 setRemove({ kind: "account", id: a.id, name: a.account_id })
               }
-            >
-              Remove trust
-            </Button>
+            >{translateUi("Remove trust")}</Button>
           </article>
         ))}
         {data.accounts.hasNextPage && (
@@ -155,14 +149,10 @@ function ResourceManagement() {
             variant="outline"
             disabled={data.accounts.isFetchingNextPage}
             onClick={() => void data.accounts.fetchNextPage()}
-          >
-            Load more trusted accounts
-          </Button>
+          >{translateUi("Load more trusted accounts")}</Button>
         )}
         <details>
-          <summary className="cursor-pointer">
-            Configure or rotate account trust
-          </summary>
+          <summary className="cursor-pointer">{translateUi("Configure or rotate account trust")}</summary>
           <Form {...account}>
             <form
               className="mt-4 space-y-3"
@@ -179,7 +169,7 @@ function ResourceManagement() {
                 name="adapter_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Provider</FormLabel>
+                    <FormLabel>{translateUi("Provider")}</FormLabel>
                     <Select
                       value={field.value}
                       onValueChange={(v) => {
@@ -194,8 +184,8 @@ function ResourceManagement() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="telnyx.messaging">Telnyx</SelectItem>
-                        <SelectItem value="twilio.messaging">Twilio</SelectItem>
+                        <SelectItem value="telnyx.messaging">{translateUi("Telnyx")}</SelectItem>
+                        <SelectItem value="twilio.messaging">{translateUi("Twilio")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -207,11 +197,11 @@ function ResourceManagement() {
                 name="catalog_service_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Platform catalog service</FormLabel>
+                    <FormLabel>{translateUi("Platform catalog service")}</FormLabel>
                     <Select value={field.value} onValueChange={field.onChange}>
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Choose catalog service" />
+                          <SelectValue placeholder={translateUi("Choose catalog service")} />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
@@ -231,7 +221,7 @@ function ResourceManagement() {
                 name="account_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Provider account ID</FormLabel>
+                    <FormLabel>{translateUi("Provider account ID")}</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
@@ -245,7 +235,7 @@ function ResourceManagement() {
                   name="webhook_public_key"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Account Ed25519 public key</FormLabel>
+                      <FormLabel>{translateUi("Account Ed25519 public key")}</FormLabel>
                       <FormControl>
                         <Input {...field} value={field.value ?? ""} />
                       </FormControl>
@@ -254,11 +244,7 @@ function ResourceManagement() {
                   )}
                 />
               )}
-              <p className="text-muted-foreground">
-                Configure the encrypted platform credential and ACL in the
-                catalog first. Rotating trust invalidates existing bindings
-                until owners verify them again.
-              </p>
+              <p className="text-muted-foreground">{translateUi("Configure the encrypted platform credential and ACL in the catalog first. Rotating trust invalidates existing bindings until owners verify them again.")}</p>
               <Button
                 type="submit"
                 disabled={
@@ -266,15 +252,13 @@ function ResourceManagement() {
                   !account.formState.isValid ||
                   data.configure.isPending
                 }
-              >
-                Save trusted account
-              </Button>
+              >{translateUi("Save trusted account")}</Button>
             </form>
           </Form>
         </details>
       </div>
       <div className="space-y-3">
-        <h3 className="font-medium">Resource allocations</h3>
+        <h3 className="font-medium">{translateUi("Resource allocations")}</h3>
         {data.allocations.data?.map((a) => (
           <article
             key={a.id}
@@ -293,32 +277,25 @@ function ResourceManagement() {
                     name: a.phone_number,
                   })
                 }
-              >
-                Revoke allocation
-              </Button>
+              >{translateUi("Revoke allocation")}</Button>
             </div>
-            <p>
-              Owner:{" "}
+            <p>{translateUi("Owner:")}{" "}
               {users.data?.users.find((u) => u.id === a.owner_id)?.email ??
                 a.owner_id}
             </p>
-            <p className="text-muted-foreground">
-              Number {a.resource_id} · Application {a.application_id}
+            <p className="text-muted-foreground">{translateUi("Number ")}{a.resource_id}{translateUi(" · Application ")}{a.application_id}
             </p>
-            <p>
-              Tariff {a.tariff_version} ·{" "}
+            <p>{translateUi("Tariff ")}{a.tariff_version} ·{" "}
               <a
                 href={a.tariff_source}
                 target="_blank"
                 rel="noreferrer"
                 className="underline"
-              >
-                Evidence
-              </a>{" "}
+              >{translateUi("Evidence")}</a>{" "}
               ·{" "}
               {a.includes_all_provider_charges
-                ? "All provider charges covered"
-                : "Billing setup incomplete"}
+                ? translateUi("All provider charges covered")
+                : translateUi("Billing setup incomplete")}
             </p>
           </article>
         ))}
@@ -327,14 +304,10 @@ function ResourceManagement() {
             variant="outline"
             disabled={data.allocations.isFetchingNextPage}
             onClick={() => void data.allocations.fetchNextPage()}
-          >
-            Load more allocations
-          </Button>
+          >{translateUi("Load more allocations")}</Button>
         )}
         <details>
-          <summary className="cursor-pointer">
-            Allocate a verified number and application
-          </summary>
+          <summary className="cursor-pointer">{translateUi("Allocate a verified number and application")}</summary>
           <Form {...allocation}>
             <form
               className="mt-4 space-y-3"
@@ -351,7 +324,7 @@ function ResourceManagement() {
                 name="setup.adapter_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Profile</FormLabel>
+                    <FormLabel>{translateUi("Profile")}</FormLabel>
                     <Select
                       value={field.value}
                       onValueChange={(v) => {
@@ -369,15 +342,9 @@ function ResourceManagement() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="telnyx.messaging">
-                          Telnyx SMS
-                        </SelectItem>
-                        <SelectItem value="twilio.messaging">
-                          Twilio SMS
-                        </SelectItem>
-                        <SelectItem value="twilio.conversation_relay">
-                          Twilio ConversationRelay
-                        </SelectItem>
+                        <SelectItem value="telnyx.messaging">{translateUi("Telnyx SMS")}</SelectItem>
+                        <SelectItem value="twilio.messaging">{translateUi("Twilio SMS")}</SelectItem>
+                        <SelectItem value="twilio.conversation_relay">{translateUi("Twilio ConversationRelay")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -389,7 +356,7 @@ function ResourceManagement() {
                 name="setup.account_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Trusted account</FormLabel>
+                    <FormLabel>{translateUi("Trusted account")}</FormLabel>
                     <Select
                       value={field.value}
                       onValueChange={(id) => {
@@ -407,7 +374,7 @@ function ResourceManagement() {
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Choose trusted account" />
+                          <SelectValue placeholder={translateUi("Choose trusted account")} />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
@@ -428,9 +395,7 @@ function ResourceManagement() {
                 )}
               />
               <div>
-                <Label htmlFor="allocation-owner-search">
-                  Find owner by email
-                </Label>
+                <Label htmlFor="allocation-owner-search">{translateUi("Find owner by email")}</Label>
                 <Input
                   id="allocation-owner-search"
                   value={search}
@@ -442,11 +407,11 @@ function ResourceManagement() {
                 name="owner_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Owner</FormLabel>
+                    <FormLabel>{translateUi("Owner")}</FormLabel>
                     <Select value={field.value} onValueChange={field.onChange}>
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Choose a person" />
+                          <SelectValue placeholder={translateUi("Choose a person")} />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
@@ -506,21 +471,12 @@ function ResourceManagement() {
                         }
                       />
                     </FormControl>
-                    <FormLabel>
-                      The synchronized catalog price covers all carrier, relay
-                      and selected speech charges.
-                    </FormLabel>
+                    <FormLabel>{translateUi("The synchronized catalog price covers all carrier, relay and selected speech charges.")}</FormLabel>
                     <FormMessage />
                   </FormItem>
                 )}
               />
-              <p className="text-muted-foreground">
-                NyxID checks actual provider number/application ownership.
-                Configure a synchronized Requests price per SMS segment or Voice
-                seconds price for calls in Billing. Components and
-                operation-specific prices are currently unavailable for these
-                profiles. Tariff evidence must be refreshed within 30 days.
-              </p>
+              <p className="text-muted-foreground">{translateUi("NyxID checks actual provider number/application ownership. Configure a synchronized Requests price per SMS segment or Voice seconds price for calls in Billing. Components and operation-specific prices are currently unavailable for these profiles. Tariff evidence must be refreshed within 30 days.")}</p>
               <Button
                 type="submit"
                 disabled={
@@ -528,9 +484,7 @@ function ResourceManagement() {
                   !allocation.formState.isValid ||
                   data.allocate.isPending
                 }
-              >
-                Verify and allocate
-              </Button>
+              >{translateUi("Verify and allocate")}</Button>
             </form>
           </Form>
         </details>
@@ -546,20 +500,18 @@ function ResourceManagement() {
           <DialogHeader>
             <DialogTitle>
               {remove?.kind === "account"
-                ? "Remove account trust"
-                : "Revoke phone allocation"}
+                ? translateUi("Remove account trust")
+                : translateUi("Revoke phone allocation")}
             </DialogTitle>
             <DialogDescription>
               {remove?.kind === "account"
-                ? "All allocations must be removed first. Existing bindings lose verification authority."
-                : "This disables the owner’s bindings and removes them once all sessions and admitted usage are finalized. A pending cleanup returns a conflict; retry after it completes. The resource can then be assigned to another owner."}
+                ? translateUi("All allocations must be removed first. Existing bindings lose verification authority.")
+                : translateUi("This disables the owner’s bindings and removes them once all sessions and admitted usage are finalized. A pending cleanup returns a conflict; retry after it completes. The resource can then be assigned to another owner.")}
             </DialogDescription>
           </DialogHeader>
           <p>{remove?.name}</p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRemove(undefined)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRemove(undefined)}>{translateUi("Cancel")}</Button>
             <Button
               disabled={data.revoke.isPending || data.removeAccount.isPending}
               onClick={() =>
@@ -571,9 +523,7 @@ function ResourceManagement() {
                   setRemove(undefined);
                 })
               }
-            >
-              Confirm removal
-            </Button>
+            >{translateUi("Confirm removal")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

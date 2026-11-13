@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { serviceCredentialStatus } from "@/lib/service-credential-status";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -38,6 +40,7 @@ export function ProviderServices({
 }: {
   readonly provider: ProviderConfig;
 }) {
+  useUiTranslation();
   const { data: linked, isLoading, error } = useProviderServices(provider.id);
   const { data: services } = useServices();
   const link = useLinkProviderService();
@@ -57,23 +60,16 @@ export function ProviderServices({
   return (
     <section
       className="space-y-4 rounded-lg border p-5"
-      aria-label="Linked services"
+      aria-label={translateUi("Linked services")}
     >
       <div>
-        <h3 className="font-semibold">Linked services</h3>
-        <p className="text-13 text-muted-foreground">
-          Choose the service to configure. Shared credentials, access, endpoint
-          rules, and prices belong to each service. A provider can back multiple
-          services.
-        </p>
+        <h3 className="font-semibold">{translateUi("Linked services")}</h3>
+        <p className="text-13 text-muted-foreground">{translateUi("Choose the service to configure. Shared credentials, access, endpoint rules, and prices belong to each service. A provider can back multiple services.")}</p>
       </div>
-      {isLoading && <p>Loading services…</p>}
-      {error && <p role="alert">Could not load linked services.</p>}
+      {isLoading && <p>{translateUi("Loading services…")}</p>}
+      {error && <p role="alert">{translateUi("Could not load linked services.")}</p>}
       {linked?.length === 0 && (
-        <p className="text-14 text-muted-foreground">
-          No linked services. Link an existing service or create one to
-          configure access.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("No linked services. Link an existing service or create one to configure access.")}</p>
       )}
       {linked?.map((service) => (
         <div key={service.id} className="space-y-2 rounded-md border p-3">
@@ -86,16 +82,12 @@ export function ProviderServices({
               <Link
                 to="/services/$serviceId/edit"
                 params={{ serviceId: service.id }}
-              >
-                Configure service
-              </Link>
+              >{translateUi("Configure service")}</Link>
             </Button>
           </div>
           {!service.provider_config_id && (
             <div className="flex items-center gap-2">
-              <p className="text-13 text-muted-foreground">
-                Legacy provider requirement; primary provider link is not set.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("Legacy provider requirement; primary provider link is not set.")}</p>
               <Button
                 type="button"
                 variant="outline"
@@ -106,39 +98,32 @@ export function ProviderServices({
                     serviceId: service.id,
                   })
                 }
-              >
-                Set primary provider
-              </Button>
+              >{translateUi("Set primary provider")}</Button>
             </div>
           )}
-          <p className="text-13">
-            Shared credential: {serviceCredentialStatus(service)} · Platform
-            key:{" "}
+          <p className="text-13">{translateUi("Shared credential: ")}{serviceCredentialStatus(service)}{translateUi(" · Platform key:")}{" "}
             {service.platform_key?.enabled || service.legacy_public_master
-              ? "enabled"
-              : "disabled"}{" "}
-            · Audience:{" "}
+              ? translateUi("enabled")
+              : translateUi("disabled")}{" "}{translateUi("· Audience:")}{" "}
             {service.platform_key?.audience === "public" ||
             service.legacy_public_master
-              ? "all authenticated users"
-              : `${service.platform_key?.allowed_owner_ids.length ?? 0} selected owners`}
+              ? translateUi("all authenticated users")
+              : translateUi("{{value1}} selected owners", { value1: service.platform_key?.allowed_owner_ids.length ?? 0 })}
           </p>
           <p className="text-13">{laneSummary(service)}</p>
         </div>
       ))}
       {supportsServices && !provider.is_active && (
-        <p className="text-14 text-muted-foreground">
-          Enable this provider before linking or creating services.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("Enable this provider before linking or creating services.")}</p>
       )}
       {supportsServices && (
         <>
           <div className="flex flex-wrap items-end gap-2">
             <div className="min-w-56 flex-1 space-y-1">
-              <Label htmlFor="provider-service-choice">Existing service</Label>
+              <Label htmlFor="provider-service-choice">{translateUi("Existing service")}</Label>
               <Select value={selected} onValueChange={setSelected}>
                 <SelectTrigger id="provider-service-choice">
-                  <SelectValue placeholder="Select a service" />
+                  <SelectValue placeholder={translateUi("Select a service")} />
                 </SelectTrigger>
                 <SelectContent>
                   {candidates.map((service) => (
@@ -163,22 +148,18 @@ export function ProviderServices({
                   { onSuccess: () => setSelected("") },
                 )
               }
-            >
-              Link service
-            </Button>
+            >{translateUi("Link service")}</Button>
             <Button
               variant="outline"
               disabled={!provider.is_active}
               onClick={() => setCreateOpen(true)}
-            >
-              Create linked service
-            </Button>
+            >{translateUi("Create linked service")}</Button>
           </div>
           {link.error && (
             <p role="alert" className="text-14 text-destructive">
               {link.error instanceof ApiError
                 ? link.error.message
-                : "Could not link service"}
+                : translateUi("Could not link service")}
             </p>
           )}
           <CreateServiceDialog

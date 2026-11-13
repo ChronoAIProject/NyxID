@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { StyleSheet, View, useWindowDimensions } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
@@ -17,6 +18,7 @@ import { ChatBubbleSettings } from "./ChatBubbleSettings";
 
 /** Settings › Display groups for the message bubble and chat layout. */
 export function ChatDisplaySettings() {
+  const { t } = useAppLanguage();
   const { width } = useWindowDimensions();
   const navigation =
     useNavigation<NativeStackNavigationProp<WorkspaceSheetParamList>>();
@@ -28,13 +30,13 @@ export function ChatDisplaySettings() {
     <View style={styles.groups}>
       <ChatBubbleSettings />
       <SettingsGroup
-        title="Chat layout"
+        title={t("Chat layout")}
         inset={false}
-        footer="Saved on this device for every conversation."
+        footer={t("Saved on this device for every conversation.")}
       >
         {offersChatWidth(width) ? (
           <SettingsRow
-            label={chatLayoutTitle("columnWidth")}
+            label={t(chatLayoutTitle("columnWidth"))}
             value={`${layout.columnWidth} pt`}
             onPress={() =>
               navigation.navigate("ChatLayoutEdit", { key: "columnWidth" })
@@ -42,14 +44,18 @@ export function ChatDisplaySettings() {
           />
         ) : null}
         <SettingsRow
-          label={chatLayoutTitle("composerMaxHeight")}
+          label={t(chatLayoutTitle("composerMaxHeight"))}
           value={`${layout.composerMaxHeight} pt`}
           onPress={() =>
             navigation.navigate("ChatLayoutEdit", { key: "composerMaxHeight" })
           }
         />
         {customised ? (
-          <SettingsRow centered label="Reset Chat Layout" onPress={reset} />
+          <SettingsRow
+            centered
+            label={t("Reset Chat Layout")}
+            onPress={reset}
+          />
         ) : null}
       </SettingsGroup>
     </View>

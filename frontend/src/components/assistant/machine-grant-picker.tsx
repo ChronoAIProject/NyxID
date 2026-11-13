@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { useState } from "react";
@@ -25,6 +27,7 @@ export function MachineGrantPicker({
   readonly onChange: (ids: string[]) => void;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const nodes = useNodes();
   const logins = useSavedLogins("all");
@@ -61,10 +64,10 @@ export function MachineGrantPicker({
   return (
     <fieldset disabled={disabled} className="min-w-0">
       <Label asChild><legend className="sr-only">
-        {kind === "machines" ? "Machines" : "Saved logins"}
+        {kind === "machines" ? translateUi("Machines") : translateUi("Saved logins")}
       </legend></Label>
       <GroupedList
-        title={kind === "machines" ? "Machines" : "Saved logins"}
+        title={kind === "machines" ? translateUi("Machines") : translateUi("Saved logins")}
         footer={
           <>
             {footer}
@@ -79,8 +82,8 @@ export function MachineGrantPicker({
         {allRows.length > 8 ? (
           <GroupedRow>
             <GroupedInput
-              aria-label={`Search ${kind === "machines" ? "machines" : "saved logins"}`}
-              placeholder="Search"
+              aria-label={translateUi("Search {{value1}}", { value1: kind === "machines" ? "machines" : "saved logins" })}
+              placeholder={translateUi("Search")}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
@@ -122,13 +125,13 @@ export function MachineGrantPicker({
           ))}
           {!filtered.length ? (
             <GroupedRow
-              title={search ? "No matches" : "None available."}
+              title={search ? translateUi("No matches") : translateUi("None available.")}
               description={
                 search
                   ? undefined
                   : kind === "machines"
-                    ? "Pair a machine first, then grant it here."
-                    : "Save a login first, then grant it here."
+                    ? translateUi("Pair a machine first, then grant it here.")
+                    : translateUi("Save a login first, then grant it here.")
               }
             />
           ) : null}

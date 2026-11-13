@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useMfaStepUp } from "@/hooks/use-mfa-step-up";
 import { useCallback, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -30,6 +32,7 @@ import { draftSummary } from "@/lib/login-permissions";
 import { useAuthStore } from "@/stores/auth-store";
 
 function MintLoginCodePage() {
+  useUiTranslation();
   const { user, isAuthenticated, logout } = useAuthStore();
   const options = useAgentKeyLoginOptions("agent-key", true);
   const mint = useMintLoginCode();
@@ -115,7 +118,7 @@ function MintLoginCodePage() {
     <LoginDeviceShell>
       <header className="space-y-3 text-center">
         <NyxidIcon className="mx-auto size-10" />
-        <h1 className="text-22 font-bold">One-time login code</h1>
+        <h1 className="text-22 font-bold">{translateUi("One-time login code")}</h1>
       </header>
       {error && <ErrorBanner message={error} />}
       {issued ? (
@@ -134,9 +137,7 @@ function MintLoginCodePage() {
         />
       ) : !isAuthenticated ? (
         <Button asChild>
-          <Link to="/login" search={{ return_to: "/login/code" }}>
-            Approve on this computer
-          </Link>
+          <Link to="/login" search={{ return_to: "/login/code" }}>{translateUi("Approve on this computer")}</Link>
         </Button>
       ) : (
         <div className="space-y-4">
@@ -146,16 +147,11 @@ function MintLoginCodePage() {
               variant="link"
               disabled={busy}
               onClick={() => void run(logout)}
-            >
-              Sign out of this browser
-            </Button>
+            >{translateUi("Sign out of this browser")}</Button>
           </div>
           {step === "review" && (
             <div className="space-y-3">
-              <p className="text-12 text-muted-foreground">
-                Anyone with this code can redeem the selected access once,
-                within five minutes. Restricted Agent Key access is recommended.
-              </p>
+              <p className="text-12 text-muted-foreground">{translateUi("Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.")}</p>
               <Button
                 disabled={busy}
                 onClick={() =>
@@ -164,39 +160,26 @@ function MintLoginCodePage() {
                     setStep("options");
                   })
                 }
-              >
-                Restricted Agent Key
-              </Button>
-              <Button disabled={busy} onClick={() => setStep("account")}>
-                Full account session
-              </Button>
+              >{translateUi("Restricted Agent Key")}</Button>
+              <Button disabled={busy} onClick={() => setStep("account")}>{translateUi("Full account session")}</Button>
             </div>
           )}
           {step === "account" && (
             <section className="space-y-4">
-              <h2 className="text-15 font-semibold">
-                Confirm full account access
-              </h2>
-              <p className="text-12 text-muted-foreground">
-                This code grants a refreshable account session with your
-                account, services, credentials, and organization permissions.
-              </p>
-              <Button disabled={busy} onClick={() => setStep("review")}>
-                Back
-              </Button>
+              <h2 className="text-15 font-semibold">{translateUi("Confirm full account access")}</h2>
+              <p className="text-12 text-muted-foreground">{translateUi("This code grants a refreshable account session with your account, services, credentials, and organization permissions.")}</p>
+              <Button disabled={busy} onClick={() => setStep("review")}>{translateUi("Back")}</Button>
               <Button
                 variant="primary"
                 disabled={busy}
                 isLoading={busy}
                 onClick={() => void generate()}
-              >
-                Generate account login code
-              </Button>
+              >{translateUi("Generate account login code")}</Button>
             </section>
           )}
           {step === "options" && options.data && (
             <section className="space-y-4">
-              <h2 className="text-15 font-semibold">Choose an Agent Key</h2>
+              <h2 className="text-15 font-semibold">{translateUi("Choose an Agent Key")}</h2>
               <fieldset disabled={busy} className="space-y-3">
                 {options.data.keys.map((key) => (
                   <label
@@ -223,14 +206,12 @@ function MintLoginCodePage() {
                     checked={choice === "new"}
                     onChange={() => setChoice("new")}
                     className="accent-primary"
-                  />
-                  Create a new key
-                </label>
+                  />{translateUi("Create a new key")}</label>
               </fieldset>
               {choice === "new" ? (
                 <AgentKeyCreateForm
                   options={options.data}
-                  label="CLI Agent"
+                  label={translateUi("CLI Agent")}
                   initialValues={draft}
                   disabled={busy}
                   onReview={reviewNew}
@@ -245,24 +226,18 @@ function MintLoginCodePage() {
                     setSummary(key);
                     setStep("confirm");
                   }}
-                >
-                  Review permissions
-                </Button>
+                >{translateUi("Review permissions")}</Button>
               )}
             </section>
           )}
           {step === "confirm" && summary && (
             <section className="space-y-4">
-              <h2 className="text-15 font-semibold">
-                Confirm effective permissions
-              </h2>
+              <h2 className="text-15 font-semibold">{translateUi("Confirm effective permissions")}</h2>
               <AgentKeyPermissions apiKey={summary} />
               <AgentKeyIssuanceNotice
                 existing={selection?.kind === "existing"}
               />
-              <label className="block space-y-2 text-12">
-                Login credential expiry (blank: 90 days, bounded by key expiry)
-                <Input
+              <label className="block space-y-2 text-12">{translateUi("Login credential expiry (blank: 90 days, bounded by key expiry)")}<Input
                   type="datetime-local"
                   value={credentialExpiry}
                   disabled={busy}
@@ -270,12 +245,8 @@ function MintLoginCodePage() {
                 />
               </label>
               <div className="flex flex-wrap justify-end gap-2">
-                <Button disabled={busy} onClick={() => setStep("options")}>
-                  Back
-                </Button>
-                <Button disabled={busy} onClick={() => setStep("review")}>
-                  Cancel
-                </Button>
+                <Button disabled={busy} onClick={() => setStep("options")}>{translateUi("Back")}</Button>
+                <Button disabled={busy} onClick={() => setStep("review")}>{translateUi("Cancel")}</Button>
                 <Button
                   variant="primary"
                   isLoading={busy}
@@ -289,9 +260,7 @@ function MintLoginCodePage() {
                             Date.parse(summary.expires_at))))
                   }
                   onClick={() => void generate()}
-                >
-                  Generate restricted login code
-                </Button>
+                >{translateUi("Generate restricted login code")}</Button>
               </div>
             </section>
           )}
@@ -305,6 +274,7 @@ export function LoginAgentKeyPage({
   flow = "agent-key",
   mint = false,
 }: { flow?: LoginFlow; mint?: boolean } = {}) {
+  useUiTranslation();
   const { user } = useAuthStore();
   return mint ? (
     <MintLoginCodePage key={user?.id ?? "anonymous"} />

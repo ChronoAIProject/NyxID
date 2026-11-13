@@ -41,9 +41,12 @@ export const FEATURE_FLAG = {
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
   ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
+  ASSISTANT_CMA_SANDBOXES: "assistant:cma-sandboxes",
   ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
   ORG_AGENTS: "assistant:org-agents",
   SHARED_AGENTS: "assistant:shared-agents",
+  // Default off: the Notifications bell, feed, sidebar unread markers and push switches.
+  ASSISTANT_NOTIFICATIONS: "assistant:notifications",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   ORG_INSTRUCTION: "assistant:org-instruction-v1",
   EXECUTION_PERMISSIONS: "permissions:execution-v1",
@@ -57,6 +60,8 @@ export const FEATURE_FLAG = {
   ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
+  // NYX skill template outlines; off by default, piloted per person.
+  SKILL_RUNS: "assistant:skill-runs",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",

@@ -78,7 +78,8 @@ test("billing and conflict messages use mobile numeric fields instead of raw API
     assert.equal(result.includes("private"), false);
   }
   const conflict = voiceStartError(apiError({ statusCode: 409 }), "server");
-  assert.match(conflict, /Another voice call is active/);
+  assert.match(conflict, /Voice state changed/);
+  assert.equal(conflict.includes("Another voice call"), false);
   assert.match(conflict, /HTTP 409/);
 });
 

@@ -1,0 +1,124 @@
+{
+  "conversation": {
+    "id": "nyxa-11111111111111111111111111111111",
+    "title": "Retry",
+    "model": "nyxagent/chat",
+    "created_at": "2026-10-28T01:00:00Z",
+    "last_message_at": "2026-10-28T01:00:00Z",
+    "message_count": 1,
+    "active_turn": {
+      "turn_id": "retry-turn",
+      "started_at": "2026-10-28T01:00:00Z",
+      "activities": [
+        {
+          "id": "action-0",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-1",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z",
+          "failure": {
+            "kind": "retry_duplicate_action"
+          }
+        },
+        {
+          "id": "action-2",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-3",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-4",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-5",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-6",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-7",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-8",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-9",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-10",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-11",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "completed",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": "2026-10-28T01:00:00Z"
+        },
+        {
+          "id": "action-12",
+          "label": "api-lark-2__bitable_record_create",
+          "status": "running",
+          "started_at": "2026-10-28T01:00:00Z",
+          "ended_at": null
+        }
+      ]
+    },
+    "context_reset_at": null
+  },
+  "messages": [
+    {
+      "id": "question",
+      "seq": 1,
+      "turn_id": "retry-turn",
+      "role": "user",
+      "text": "Retry",
+      "status": "completed",
+      "error_code": null,
+      "created_at": "2026-10-28T01:00:00Z"
+    }
+  ],
+  "before_seq": null
+}

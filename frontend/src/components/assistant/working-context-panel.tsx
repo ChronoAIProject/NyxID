@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useContext, useState } from "react";
 import { ChatHeaderCompactContext } from "./chat-header-context";
 import { NotebookText } from "lucide-react";
@@ -22,6 +25,7 @@ export function WorkingContextPanel({
   readonly onManageMemory?: (agentId: string) => void;
   readonly onReset?: () => void;
 }) {
+  useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -35,71 +39,58 @@ export function WorkingContextPanel({
   return (
     <Sheet open={open} onOpenChange={(next) => { setOpen(next); setConfirming(false); }}>
       <SheetTrigger asChild>
-        <Button size={compact ? "icon" : "sm"} variant="ghost" aria-label="Working context" title="Working context">
+        <Button size={compact ? "icon" : "sm"} variant="ghost" aria-label={translateUi("Working context")} title={translateUi("Working context")}>
           <NotebookText aria-hidden="true" />
-          <span className={compact ? "sr-only" : undefined}>Working context</span>
+          <span className={compact ? "sr-only" : undefined}>{translateUi("Working context")}</span>
         </Button>
       </SheetTrigger>
       <SheetContent>
         <SheetHeader>
-          <SheetTitle>Working context</SheetTitle>
+          <SheetTitle>{translateUi("Working context")}</SheetTitle>
         </SheetHeader>
         <div className="mt-4 space-y-2 text-13 text-text-tertiary">
-          {query.isPending ? <p>Loading working context…</p> : null}
+          {query.isPending ? <p>{translateUi("Loading working context…")}</p> : null}
           {query.isError ? (
-            <p role="alert" className="text-destructive">
-              Unable to load the working context.{" "}
-              <button type="button" className="underline" onClick={() => void query.refetch()}>
-                Try again
-              </button>
+            <p role="alert" className="text-destructive">{translateUi("Unable to load the working context.")}{" "}
+              <button type="button" className="underline" onClick={() => void query.refetch()}>{translateUi("Try again")}</button>
             </p>
           ) : null}
           {context ? (
             <>
-              <div>Goal: {checkpoint?.goal ?? "No goal recorded"}</div>
-              <div>
-                Last checkpoint:{" "}
+              <div>{translateUi("Goal: ")}{checkpoint?.goal ?? translateUi("No goal recorded")}</div>
+              <div>{translateUi("Last checkpoint:")}{" "}
                 {checkpoint
-                  ? `${checkpoint.status === "completed" ? "completed" : `failed (${checkpoint.error_code ?? "unknown"})`} · ${new Date(checkpoint.updated_at).toLocaleString()}`
-                  : "None yet"}
+                  ? `${checkpoint.status === "completed" ? "completed" : `failed (${checkpoint.error_code ?? "unknown"})`} · ${new Date(checkpoint.updated_at).toLocaleString(getFormattingLocale())}`
+                  : translateUi("None yet")}
               </div>
-              <div>
-                Last successful checkpoint:{" "}
+              <div>{translateUi("Last successful checkpoint:")}{" "}
                 {checkpoint?.last_successful_at
-                  ? new Date(checkpoint.last_successful_at).toLocaleString()
-                  : "None"}
+                  ? new Date(checkpoint.last_successful_at).toLocaleString(getFormattingLocale())
+                  : translateUi("None")}
               </div>
-              <div>Completed since then: {labels(checkpoint?.completed_actions)}</div>
-              <div>Failed or interrupted: {labels(checkpoint?.failed_actions)}</div>
-              <div>Running now: {context.pending_actions.join(", ") || "None"}</div>
-              <div>Live context: {context.binding_state === "bound" ? "kept" : "starts fresh next turn"}</div>
-              {context.reset_reason ? <div>Last reset: {contextResetCopy(context.reset_reason)}</div> : null}
+              <div>{translateUi("Completed since then: ")}{labels(checkpoint?.completed_actions)}</div>
+              <div>{translateUi("Failed or interrupted: ")}{labels(checkpoint?.failed_actions)}</div>
+              <div>{translateUi("Running now: ")}{context.pending_actions.join(", ") || translateUi("None")}</div>
+              <div>{translateUi("Live context: ")}{context.binding_state === "bound" ? translateUi("kept") : translateUi("starts fresh next turn")}</div>
+              {context.reset_reason ? <div>{translateUi("Last reset: ")}{contextResetCopy(context.reset_reason)}</div> : null}
               {reset.isError ? (
                 <p role="alert" className="text-destructive">
                   {context.active_turn_id
-                    ? "A turn is running. Stop it or wait, then reset."
-                    : "Unable to reset the working context. Try again."}
+                    ? translateUi("A turn is running. Stop it or wait, then reset.")
+                    : translateUi("Unable to reset the working context. Try again.")}
                 </p>
               ) : null}
               {confirming ? (
-                <div role="group" aria-label="Confirm reset" className="space-y-1 rounded border border-hairline p-2">
-                  <p>Reset clears the live context and the checkpoint. The transcript stays; the next turn starts without a recap.</p>
-                  <button type="button" className="underline" disabled={reset.isPending} onClick={() => reset.mutate()}>
-                    Confirm reset
-                  </button>{" "}
-                  <button type="button" className="underline" onClick={() => setConfirming(false)}>
-                    Cancel
-                  </button>
+                <div role="group" aria-label={translateUi("Confirm reset")} className="space-y-1 rounded border border-hairline p-2">
+                  <p>{translateUi("Reset clears the live context and the checkpoint. The transcript stays; the next turn starts without a recap.")}</p>
+                  <button type="button" className="underline" disabled={reset.isPending} onClick={() => reset.mutate()}>{translateUi("Confirm reset")}</button>{" "}
+                  <button type="button" className="underline" onClick={() => setConfirming(false)}>{translateUi("Cancel")}</button>
                 </div>
               ) : (
-                <button type="button" className="underline" disabled={Boolean(context.active_turn_id)} onClick={() => setConfirming(true)}>
-                  Reset context
-                </button>
+                <button type="button" className="underline" disabled={Boolean(context.active_turn_id)} onClick={() => setConfirming(true)}>{translateUi("Reset context")}</button>
               )}{" "}
               {onManageMemory && context.agent_id ? (
-                <button type="button" className="underline" onClick={() => onManageMemory(context.agent_id!)}>
-                  Manage memory notes
-                </button>
+                <button type="button" className="underline" onClick={() => onManageMemory(context.agent_id!)}>{translateUi("Manage memory notes")}</button>
               ) : null}
             </>
           ) : null}

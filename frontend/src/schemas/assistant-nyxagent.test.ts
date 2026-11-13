@@ -92,12 +92,10 @@ describe("NyxBot conversation schema", () => {
     expect(chat.channel?.bot_label).toBe("Office bot");
     expect(row).not.toHaveProperty("team_id");
     expect(row).not.toHaveProperty("members");
-    expect(() =>
-      nyxAgentConversationSchema.parse({
-        ...legacyConversation,
-        agent: { id: "a", kind: "robot", name: "x", destroyed: false },
-      }),
-    ).toThrow();
+    expect(nyxAgentConversationSchema.parse({
+      ...legacyConversation,
+      agent: { id: "a", kind: "robot", name: "x", destroyed: false },
+    }).agent?.kind).toBe("unknown");
   });
 });
 
@@ -116,8 +114,9 @@ describe("NyxBot message and card schemas", () => {
     expect(nyxAgentMessageSchema.parse({ ...message, role }).role).toBe(role);
   });
 
-  it("rejects unknown roles", () => {
-    expect(() => nyxAgentMessageSchema.parse({ ...message, role: "system" })).toThrow();
+  it("keeps future roles neutral while rejecting malformed roles", () => {
+    expect(nyxAgentMessageSchema.parse({ ...message, role: "system" }).role).toBe("unknown");
+    expect(() => nyxAgentMessageSchema.parse({ ...message, role: 42 })).toThrow();
   });
 
   it("defaults acknowledgements to the user as decider and reads orchestrator routing", () => {

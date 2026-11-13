@@ -52,6 +52,10 @@ export const navigationLinkingConfig: NonNullable<
         },
         Services: "services",
         Activity: { path: "activity", parse: { challengeId: String } },
+        Notifications: {
+          path: "notifications",
+          alias: ["assistant/notifications"],
+        },
         AgentDetail: { path: "agents/:agentId", parse: { agentId: String } },
         GroupEditor: {
           path: "groups/edit/:groupId?",

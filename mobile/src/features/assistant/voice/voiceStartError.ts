@@ -63,7 +63,7 @@ function diagnosticIdentifier(value?: string) {
 
 function apiMessage(error: ApiError) {
   if (error.statusCode === 409)
-    return "Another voice call is active. End it before starting a new call.";
+    return "Voice state changed before the call could start. Check call status and try again.";
   if (error.errorCode === 11300) return "Insufficient voice credits";
   if (error.errorCode === 11307) return "Voice billing wallet is suspended";
   if (error.errorCode === 11301 || error.errorCode === 11302)

@@ -1,3 +1,4 @@
+import { ApiError, apiErrorBody, responseApiError } from "@/lib/api-error";
 import { apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { captureNyxbotError, httpErrorCode, responseCorrelation } from "./error-telemetry";
@@ -97,8 +98,8 @@ export function uploadFile(
       });
       if (signal.aborted) throw new Error("Upload cancelled.");
       if (!response) throw new Error("Preview upload route not found.");
+      if (!response.ok) throw await responseApiError(response);
       const body: unknown = await response.json();
-      if (!response.ok) throw new Error((body as { message?: string }).message ?? "Upload failed.");
       progress(100);
       return nyxAgentAttachmentSchema.parse(body);
     })();
@@ -155,17 +156,16 @@ export function uploadFile(
     xhr.onload = () => {
       if (settled) return;
       try {
-        const body: unknown = JSON.parse(xhr.responseText);
         if (xhr.status < 200 || xhr.status >= 300) {
-          const error = body as { message?: unknown };
-          if (typeof error.message === "string" && /malformed or unsupported attachment/i.test(error.message)) {
-            throw new Error(UNSUPPORTED_FORMAT_MESSAGE);
-          }
-          throw new Error(
-            typeof error.message === "string"
-              ? error.message
-              : "Upload failed.",
-          );
+          let payload: unknown = null;
+          try { payload = JSON.parse(xhr.responseText); } catch { /* Never display a parser's body snippet. */ }
+          const body = apiErrorBody(payload, xhr.status);
+          throw new ApiError(xhr.status, /malformed or unsupported attachment/i.test(body.message)
+            ? { ...body, message: UNSUPPORTED_FORMAT_MESSAGE } : body, { get: (name) => xhr.getResponseHeader(name) });
+        }
+        let body: unknown;
+        try { body = JSON.parse(xhr.responseText); } catch {
+          throw new ApiError(xhr.status, apiErrorBody(null, xhr.status), { get: (name) => xhr.getResponseHeader(name) });
         }
         const attachment = nyxAgentAttachmentSchema.parse(body);
         settled = true;

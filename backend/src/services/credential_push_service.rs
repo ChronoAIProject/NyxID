@@ -1038,6 +1038,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         let params = build_credential_params(
             &svc,

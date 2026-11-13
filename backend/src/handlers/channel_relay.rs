@@ -321,6 +321,13 @@ fn validate_reply_parts<'a>(
     >,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
+    if crate::services::channel_reply_plan::commonmark(metadata)
+        && !matches!(adapter.platform_id(), "telegram" | "telegram-new")
+    {
+        return Err(AppError::ValidationError(
+            "CommonMark relay formatting is supported for Telegram".into(),
+        ));
+    }
     let count = attachments.len();
     if count > 10 {
         return Err(AppError::ValidationError(
@@ -1972,8 +1979,16 @@ async fn edit_resolved_reply(
     };
 
     crate::services::ownership_transfer_service::require_current_bot(&state.db, &bot).await?;
-    adapter
-        .edit_reply(
+    let edit_result = crate::services::telegram_formatting::scope(
+        &state.db,
+        crate::services::telegram_formatting::Receipt {
+            collection: crate::models::channel_message::COLLECTION_NAME,
+            filter: doc! {"_id": &outbound.id, "channel_bot_id": &bot.id},
+            field: "formatting_fallback".into(),
+            plain: false,
+        },
+        Some(&bot.id),
+        adapter.edit_reply(
             &state.http_client,
             &crate::services::channel_platform::BotCredentials {
                 billing: None,
@@ -1984,8 +1999,16 @@ async fn edit_resolved_reply(
             platform_conversation_id,
             &body.message_id,
             &edit,
-        )
-        .await?;
+        ),
+    )
+    .await;
+    crate::services::channel_bot_service::record_outbound_outcome(
+        &state.db,
+        &bot.id,
+        edit_result.as_ref().err(),
+    )
+    .await;
+    edit_result?;
 
     let edited_at = Utc::now();
 

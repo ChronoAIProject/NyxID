@@ -219,6 +219,7 @@ function setup({
         },
         create: record("create", { ...row, id: "created-connection" }),
         setActive: record("setActive"),
+        checkCredential: record("checkCredential"),
         replaceCredential: record("replaceCredential"),
         remove: async (...args: unknown[]) => {
           calls.push({ method: "remove", args });
@@ -570,6 +571,28 @@ test("overview reads as label/value rows with the enable switch inline", () => {
   assert.equal(row("Granted permissions").props.value, "2 granted permissions");
   assert.equal(row("Connection enabled").props.accessory.type, "Switch");
   assert.equal(row("Refresh status").props.tone, "action");
+  assert.deepEqual(env.calls, []);
+  env.harness.unmount();
+});
+
+test("API-key status is honest and Refresh checks only the exact manageable connection", async () => {
+  for (const state of [undefined, "rejected", "verified"]) {
+    const env = setup({ row: { ...connection, credential_type: "api_key", credential_verification: state ? { state, reason_code: state === "rejected" ? "provider_forbidden" : "provider_accepted", can_check: true } : undefined } });
+    const status = env.find(item => item.props.label === "Status");
+    assert.equal(status.props.value, state === "verified" ? "Verified" : state === "rejected" ? "Rejected by provider" : "Saved, not verified");
+    if (state === undefined) assert.match(env.text(), /You can try this saved connection in Chat/);
+    assert.equal(env.calls.length, 0);
+    env.button("Refresh status").props.onPress();
+    await env.harness.settle();
+    assert.deepEqual(env.calls, state ? [{ method: "checkCredential", args: [connection.id] }] : []);
+    env.harness.unmount();
+  }
+});
+
+test("read-only org viewers cannot trigger provider checks", async () => {
+  const env = setup({ row: { ...connection, credential_type: "api_key", credential_source: { type: "org", org_id: "org", org_name: "Team", role: "viewer", allowed: true }, credential_verification: { state: "not_verified", reason_code: "not_checked", can_check: true } } });
+  env.button("Refresh status").props.onPress();
+  await env.harness.settle();
   assert.deepEqual(env.calls, []);
   env.harness.unmount();
 });

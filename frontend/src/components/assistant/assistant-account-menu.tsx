@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import type { AccountPanel, AccountPanelParams } from "@/lib/assistant/account-panel-search";
 import { useRef, type MouseEvent, type ReactNode } from "react";
@@ -28,6 +30,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { isBillingAvailable } from "@/types/api";
 
 export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (panel: AccountPanel, params?: AccountPanelParams) => void }) {
+  useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const billingAvailable = isBillingAvailable(user);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
@@ -59,38 +62,32 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
     <>
       <div className="shell-account-heading">
         <p className="truncate shell-user-name">
-          {user?.display_name ?? "User"}
+          {user?.display_name ?? translateUi("User")}
         </p>
         <p className="truncate shell-user-email">
           {user?.email ?? ""}
         </p>
       </div>
       <DropdownMenuItem onSelect={() => onPanel("settings")}>
-        <Settings aria-hidden="true" />Settings
-      </DropdownMenuItem>
+        <Settings aria-hidden="true" />{translateUi("Settings")}</DropdownMenuItem>
       {billingAvailable ? <>
         <DropdownMenuItem onSelect={() => onPanel("billing", { panelTab: "billing" })}>
-          <WalletCards aria-hidden="true" />Billing
-        </DropdownMenuItem>
+          <WalletCards aria-hidden="true" />{translateUi("Billing")}</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onPanel("billing", { panelTab: "usage" })}>
-          <ChartNoAxesCombined aria-hidden="true" />Usage
-        </DropdownMenuItem>
+          <ChartNoAxesCombined aria-hidden="true" />{translateUi("Usage")}</DropdownMenuItem>
       </> : null}
       <DropdownMenuItem asChild>
         <Link to="/approvals/settings" onClick={activateLink}>
           <Bell aria-hidden="true" />
-          <span className="min-w-0 flex-1">
-            Notification settings
-            <span aria-hidden="true" className="block text-12 text-text-tertiary">Studio</span>
+          <span className="min-w-0 flex-1">{translateUi("Notification settings")}<span aria-hidden="true" className="block text-12 text-text-tertiary">{translateUi("Studio")}</span>
           </span>
-          <span className="sr-only"> (opens in Studio)</span>
+          <span className="sr-only">{translateUi(" (opens in Studio)")}</span>
         </Link>
       </DropdownMenuItem>
       {nyxagentEnabled ? (
         <>
           <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
-            <Settings2 aria-hidden="true" />NyxBot settings
-          </DropdownMenuItem>
+            <Settings2 aria-hidden="true" />{translateUi("NyxBot settings")}</DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => {
               dismissDrawer();
@@ -99,25 +96,20 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
               void navigate({ to: "/assistant" });
             }}
           >
-            <Sparkles aria-hidden="true" />Replay intro
-          </DropdownMenuItem>
+            <Sparkles aria-hidden="true" />{translateUi("Replay intro")}</DropdownMenuItem>
         </>
       ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem asChild>
         <Link to="/dashboard" onClick={activateLink}>
-          <SlidersHorizontal aria-hidden="true" />
-          Open Studio
-        </Link>
+          <SlidersHorizontal aria-hidden="true" />{translateUi("Open Studio")}</Link>
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem
         onSelect={() => void handleLogout()}
         className="text-destructive focus:text-destructive"
       >
-        <LogOut aria-hidden="true" />
-        Log out
-      </DropdownMenuItem>
+        <LogOut aria-hidden="true" />{translateUi("Log out")}</DropdownMenuItem>
     </>
   );
 }
@@ -131,6 +123,7 @@ export function AssistantAccountMenu({
   readonly align?: "start" | "end";
   readonly side?: "top" | "bottom";
 }) {
+  useUiTranslation();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const pending = useRef<(() => void) | null>(null);
   const { prepareMenuOpen } = useAccountPanel();

@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
@@ -21,10 +24,12 @@ export function FreeGrantsReport({
   filters: AnalyticsFilters;
   refreshKey?: number;
 }) {
+  useUiTranslation();
   const params = freeGrantParams(filters);
   return <Report key={`${params.toString()}:${refreshKey}`} params={params} />;
 }
 function Report({ params }: { params: URLSearchParams }) {
+  useUiTranslation();
   const id = useId();
   const [page, setPage] = useState(1);
   const [servicePage, setServicePage] = useState(1);
@@ -58,36 +63,32 @@ function Report({ params }: { params: URLSearchParams }) {
   }
   return (
     <Card
-      aria-label="Grant credits"
+      aria-label={translateUi("Grant credits")}
       className="my-5"
       aria-busy={query.isFetching}
     >
       <CardHeader>
-        <CardTitle>Grant credits</CardTitle>
-        <p className="type-secondary text-muted-foreground">
-          Time and billing account filters · All services
-        </p>
+        <CardTitle>{translateUi("Grant credits")}</CardTitle>
+        <p className="type-secondary text-muted-foreground">{translateUi("Time and billing account filters · All services")}</p>
         {query.isError && (
           <ErrorBanner
             message={
               data
-                ? "Showing previously loaded grant totals. Refresh failed."
-                : "Could not load grant credits."
+                ? translateUi("Showing previously loaded grant totals. Refresh failed.")
+                : translateUi("Could not load grant credits.")
             }
             onRetry={() => void query.refetch()}
           />
         )}
         {query.isFetching && data && (
-          <p role="status" className="type-secondary text-text-tertiary">
-            Updating grant credits…
-          </p>
+          <p role="status" className="type-secondary text-text-tertiary">{translateUi("Updating grant credits…")}</p>
         )}
         {query.isPending ? (
           <Skeleton className="h-16" />
         ) : (
           data && (
             <dl
-              aria-label="Complete grant credit totals"
+              aria-label={translateUi("Complete grant credit totals")}
               className="flex flex-wrap gap-x-10 gap-y-3 pt-2"
             >
               {(
@@ -107,8 +108,8 @@ function Report({ params }: { params: URLSearchParams }) {
                     {formatExactCredits(value)}{" "}
                     <span className="type-secondary text-muted-foreground">
                       {formatCreditAmount(value).endsWith(" credits")
-                        ? "credits"
-                        : "credit"}
+                        ? translateUi("credits")
+                        : translateUi("credit")}
                     </span>
                   </dd>
                 </div>
@@ -120,15 +121,11 @@ function Report({ params }: { params: URLSearchParams }) {
       {data && (
         <CardContent className="space-y-3">
           <GrantCreditsTrend data={data} />
-          <p className="type-secondary text-muted-foreground">
-            Usage can include older grants and exceed credits granted in this
-            window.
-          </p>
+          <p className="type-secondary text-muted-foreground">{translateUi("Usage can include older grants and exceed credits granted in this window.")}</p>
           <p className="type-secondary text-text-tertiary">
-            {utc(data.window.from)} – {utc(data.window.to)} (end exclusive).
-            Updated {utc(data.generated_at)}.
+            {utc(data.window.from)} – {utc(data.window.to)}{translateUi(" (end exclusive). Updated ")}{utc(data.generated_at)}.
             {window
-              ? " Window held fixed while paging; Refresh starts a new report."
+              ? translateUi(" Window held fixed while paging; Refresh starts a new report.")
               : ""}
           </p>
           <button
@@ -138,7 +135,7 @@ function Report({ params }: { params: URLSearchParams }) {
             onClick={() => setExpanded(!expanded)}
             className="flex min-h-6 items-center gap-1 type-row-title text-muted-foreground transition-colors hover:text-foreground"
           >
-            {expanded ? "Hide breakdown" : "View breakdown"}
+            {expanded ? translateUi("Hide breakdown") : translateUi("View breakdown")}
             <ChevronDown
               aria-hidden="true"
               className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
@@ -149,26 +146,21 @@ function Report({ params }: { params: URLSearchParams }) {
             hidden={!expanded}
             className="space-y-3 border-t border-border pt-3"
           >
-            <p className="type-secondary text-muted-foreground">
-              Uses the time and Users / organizations filters. Request-user and
-              service filters do not apply.
-            </p>
+            <p className="type-secondary text-muted-foreground">{translateUi("Uses the time and Users / organizations filters. Request-user and service filters do not apply.")}</p>
             <p className="type-secondary text-text-tertiary">
-              {data.grants.toLocaleString()}{" "}
-              {data.grants === 1 ? "grant" : "grants"} ·{" "}
-              {data.total_accounts.toLocaleString()} billing{" "}
-              {data.total_accounts === 1 ? "account" : "accounts"} with issuance
-              or usage · complete filtered population
-            </p>
+              {data.grants.toLocaleString(getFormattingLocale())}{" "}
+              {data.grants === 1 ? translateUi("grant") : translateUi("grants")} ·{" "}
+              {data.total_accounts.toLocaleString(getFormattingLocale())}{translateUi(" billing")}{" "}
+              {data.total_accounts === 1 ? translateUi("account") : translateUi("accounts")}{translateUi(" with issuance or usage · complete filtered population")}</p>
             <Tabs value={mode} onValueChange={setMode}>
-              <TabsList aria-label="Grant credits breakdown">
-                <TabsTrigger value="account">Account</TabsTrigger>
-                <TabsTrigger value="service">Service</TabsTrigger>
+              <TabsList aria-label={translateUi("Grant credits breakdown")}>
+                <TabsTrigger value="account">{translateUi("Account")}</TabsTrigger>
+                <TabsTrigger value="service">{translateUi("Service")}</TabsTrigger>
               </TabsList>
               <TabsContent value="account">
                 <ul
                   className="divide-y divide-border/50"
-                  aria-label="Grant credits by billing account"
+                  aria-label={translateUi("Grant credits by billing account")}
                 >
                   {data.accounts.map((a) => (
                     <li
@@ -179,12 +171,12 @@ function Report({ params }: { params: URLSearchParams }) {
                         <p className="break-words type-row-title">{a.label}</p>
                         <p className="text-text-tertiary">
                           {a.account_kind === "org"
-                            ? "Organization"
+                            ? translateUi("Organization")
                             : a.account_kind === "person"
-                              ? "Personal account"
-                              : "Historical account"}{" "}
-                          · {a.grants.toLocaleString()}{" "}
-                          {a.grants === 1 ? "grant" : "grants"}
+                              ? translateUi("Personal account")
+                              : translateUi("Historical account")}{" "}
+                          · {a.grants.toLocaleString(getFormattingLocale())}{" "}
+                          {a.grants === 1 ? translateUi("grant") : translateUi("grants")}
                         </p>
                         <p className="break-all font-mono type-secondary text-text-tertiary">
                           {a.owner_id}
@@ -192,7 +184,7 @@ function Report({ params }: { params: URLSearchParams }) {
                       </div>
                       <dl className="flex max-w-full flex-wrap gap-x-5 gap-y-2">
                         <div className="min-w-0">
-                          <dt className="text-muted-foreground">Granted</dt>
+                          <dt className="text-muted-foreground">{translateUi("Granted")}</dt>
                           <dd
                             className="break-words tabular-nums"
                             title={a.issued}
@@ -201,7 +193,7 @@ function Report({ params }: { params: URLSearchParams }) {
                           </dd>
                         </div>
                         <div className="min-w-0">
-                          <dt className="text-muted-foreground">Used</dt>
+                          <dt className="text-muted-foreground">{translateUi("Used")}</dt>
                           <dd
                             className="break-words tabular-nums"
                             title={a.used}
@@ -214,19 +206,14 @@ function Report({ params }: { params: URLSearchParams }) {
                   ))}
                 </ul>
                 {!data.accounts.length && (
-                  <p className="py-3 type-secondary text-muted-foreground">
-                    No grant issuance or usage in this window.
-                  </p>
+                  <p className="py-3 type-secondary text-muted-foreground">{translateUi("No grant issuance or usage in this window.")}</p>
                 )}
               </TabsContent>
               <TabsContent value="service">
-                <p className="mt-3 type-secondary text-muted-foreground">
-                  Grant-funded usage by service. Shared grants have no
-                  per-service granted amount.
-                </p>
+                <p className="mt-3 type-secondary text-muted-foreground">{translateUi("Grant-funded usage by service. Shared grants have no per-service granted amount.")}</p>
                 <ul
                   className="divide-y divide-border/50"
-                  aria-label="Grant-funded usage by service"
+                  aria-label={translateUi("Grant-funded usage by service")}
                 >
                   {data.services.map((s) => (
                     <li
@@ -235,18 +222,15 @@ function Report({ params }: { params: URLSearchParams }) {
                     >
                       <span className="min-w-0 break-all type-row-title">
                         {s.service_slug ??
-                          "Historical usage · service unavailable"}
+                          translateUi("Historical usage · service unavailable")}
                       </span>
                       <span className="break-words tabular-nums" title={s.used}>
-                        {formatCreditAmount(s.used)} used
-                      </span>
+                        {formatCreditAmount(s.used)}{translateUi(" used")}</span>
                     </li>
                   ))}
                 </ul>
                 {!data.services.length && (
-                  <p className="py-3 type-secondary text-muted-foreground">
-                    No grant-funded service usage on this page.
-                  </p>
+                  <p className="py-3 type-secondary text-muted-foreground">{translateUi("No grant-funded service usage on this page.")}</p>
                 )}
               </TabsContent>
             </Tabs>
@@ -256,11 +240,9 @@ function Report({ params }: { params: URLSearchParams }) {
                   variant="outline"
                   disabled={currentPage === 1 || query.isFetching}
                   onClick={() => navigate(currentPage - 1)}
-                >
-                  Previous {accountMode ? "accounts" : "services"}
+                >{translateUi("Previous ")}{accountMode ? translateUi("accounts") : translateUi("services")}
                 </Button>
-                <span className="type-secondary text-text-tertiary">
-                  Page {currentPage} of {Math.ceil(total / data.per_page)}
+                <span className="type-secondary text-text-tertiary">{translateUi("Page ")}{currentPage}{translateUi(" of ")}{Math.ceil(total / data.per_page)}
                 </span>
                 <Button
                   variant="outline"
@@ -268,8 +250,7 @@ function Report({ params }: { params: URLSearchParams }) {
                     currentPage * data.per_page >= total || query.isFetching
                   }
                   onClick={() => navigate(currentPage + 1)}
-                >
-                  Next {accountMode ? "accounts" : "services"}
+                >{translateUi("Next ")}{accountMode ? translateUi("accounts") : translateUi("services")}
                 </Button>
               </div>
             )}
@@ -280,7 +261,7 @@ function Report({ params }: { params: URLSearchParams }) {
   );
 }
 function utc(value: string) {
-  return new Date(value).toLocaleString(undefined, {
+  return new Date(value).toLocaleString(getFormattingLocale(), {
     timeZone: "UTC",
     timeZoneName: "short",
   });

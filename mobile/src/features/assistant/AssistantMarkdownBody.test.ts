@@ -38,12 +38,21 @@ test("private and crew message bodies are memoized and keep parser props stable 
   assert.equal(
     Body.compare,
     null,
-    "React shallow comparison includes text, variant and the link handler",
+    "React shallow comparison includes text and the link handler",
   );
-  for (const variant of ["private", "crew"]) {
-    let text = "Saved reply";
-    h.mount(() => Body.type({ text, variant }));
+  for (const initial of ["Saved reply", "Streaming reply"]) {
+    let text = initial;
+    h.mount(() => Body.type({ text }));
     const first = h.value();
+    // Every surface retains the full base style (crew previously replaced
+    // nested heading, link and code objects with incomplete overrides).
+    assert.equal(first.props.style.heading1.lineHeight, 29);
+    assert.ok(first.props.style.heading1.fontFamily);
+    assert.equal(first.props.style.heading2.lineHeight, 25);
+    assert.equal(first.props.style.link.textDecorationLine, "underline");
+    assert.ok(first.props.style.code_inline.fontFamily);
+    assert.equal(first.props.style.fence.fontSize, 12);
+    assert.ok(first.props.style.fence.borderRadius);
     h.render();
     assert.equal(h.value().props.style, first.props.style);
     assert.equal(h.value().props.rules, first.props.rules);
@@ -112,8 +121,8 @@ test("private and crew GFM render accessible tasks, scrollable aligned tables, s
     attributes: Record<string, any> = {},
     children: any[] = [],
   ) => ({ key: "node", attributes, children });
-  for (const variant of ["private", "crew"]) {
-    h.mount(() => Body.type({ text: "GFM", variant }));
+  for (const text of ["GFM", "Crew GFM"]) {
+    h.mount(() => Body.type({ text }));
     const { rules } = h.value().props;
     for (const checked of [true, false]) {
       const task = rules.list_item(
@@ -319,7 +328,11 @@ test("hosted connect links render one button under their block and keep plain wo
     "Connect another GitHub account",
     "add-service links are connector buttons too",
   );
-  assert.equal(buttons(blocks[0])[0].props.href, href, "the button follows its link's live state");
+  assert.equal(
+    buttons(blocks[0])[0].props.href,
+    href,
+    "the button follows its link's live state",
+  );
   buttons(blocks[0])[0].props.onPress(42);
   assert.equal(
     JSON.stringify(opened),

@@ -50,7 +50,7 @@ describe("assistantHttp", () => {
     });
   });
 
-  it.each([false, true])("shows a server trace without exposing upstream details (JSON: %s)", async (json) => {
+  it.each([false, true])("retains a diagnostic trace separately from the message (JSON: %s)", async (json) => {
     const traceId = "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       json ? JSON.stringify({ error: "upstream_error", message: "private upstream diagnostic" }) : "<html>proxy failure</html>",
@@ -58,7 +58,9 @@ describe("assistantHttp", () => {
     )));
     await expect(assistantHttp("/assistant/nyxagent/turns")).rejects.toMatchObject({
       status: 502,
-      message: `NyxBot is temporarily unavailable. Try again shortly.\nTrace ID: ${traceId}`,
+      message: "NyxBot is temporarily unavailable. Try again shortly.",
+      traceId,
+      correlation: { traceId },
     });
   });
 
@@ -74,7 +76,8 @@ describe("assistantHttp", () => {
     )));
     await expect(assistantHttp("/assistant/nyxagent/agents")).rejects.toMatchObject({
       status: 503,
-      message: "This setting is unavailable until an administrator completes the security rollout. Your current permissions were not changed.\nTrace ID: " + traceId,
+      message: "This setting is unavailable until an administrator completes the security rollout. Your current permissions were not changed.",
+      traceId,
       errorResponse: { error: "security_readiness_unavailable", error_code: 12900 },
     });
   });
@@ -403,7 +406,7 @@ describe("originating-account telemetry", () => {
       throw new SyntaxError("private invalid response");
     });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
-    const pending = expect(assistantJson("/assistant/nyxagent/conversations")).rejects.toThrow(SyntaxError);
+    const pending = expect(assistantJson("/assistant/nyxagent/conversations")).rejects.toMatchObject({ status: 200, message: "NyxID couldn't complete this request. Please try again." });
     await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
     transitionAssistantIdentity("account-b");
     if (aba) transitionAssistantIdentity("account-a");

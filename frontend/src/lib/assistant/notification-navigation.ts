@@ -1,0 +1,82 @@
+import { isAssistantShellRoute, type AssistantShellRoute } from "@/lib/assistant/shell-routes";
+import type { AssistantNotification } from "@/schemas/assistant-notifications";
+
+/**
+ * Where a notification row leads. Server URLs are `AssistantPage` links
+ * (`/assistant?c=…`, `/assistant?g=…`, `/assistant/automations?agent=…`);
+ * only same-origin assistant routes become in-app navigation, with the
+ * query keys those routes own. Any other http(s) page is a plain link that
+ * opens in a new page (never replacing the app); other schemes are refused.
+ */
+export type NotificationTarget =
+  | {
+      readonly kind: "route";
+      readonly to: AssistantShellRoute;
+      readonly search: Readonly<Record<string, string>>;
+    }
+  | { readonly kind: "link"; readonly href: string };
+
+/** Window features for link targets: a new page that cannot reach this one. */
+export const NOTIFICATION_LINK_FEATURES = "noopener,noreferrer";
+
+/** Open a link target in a new page; the app stays where it is. */
+export function openNotificationLink(href: string): void {
+  window.open(href, "_blank", NOTIFICATION_LINK_FEATURES);
+}
+
+const ROUTE_SEARCH_KEYS: Record<AssistantShellRoute, readonly string[]> = {
+  "/assistant": ["c", "g", "agent", "card", "details"],
+  "/assistant/plugins": ["tab", "agentId"],
+  "/assistant/approvals": [],
+  "/assistant/automations": ["agent", "setup"],
+  "/assistant/machines": ["machine", "tab"],
+  "/assistant/machines/new": ["setup"],
+  "/assistant/machines/pair": ["code"],
+};
+
+export function notificationTargetFromUrl(href: string, origin: string): NotificationTarget | null {
+  let url: URL;
+  try {
+    url = new URL(href, origin);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password) return null;
+  // Only web pages: `javascript:`, `data:` and the like never become a link.
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.origin !== origin) return { kind: "link", href: url.href };
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (!isAssistantShellRoute(path)) return { kind: "link", href: url.href };
+  const search: Record<string, string> = {};
+  for (const key of ROUTE_SEARCH_KEYS[path]) {
+    const value = url.searchParams.get(key);
+    if (value) search[key] = value;
+  }
+  return { kind: "route", to: path, search };
+}
+
+/** The server link first; the row's own source identifiers when it has none. */
+export function notificationTarget(
+  notification: Pick<AssistantNotification, "url" | "source">,
+  origin: string,
+): NotificationTarget | null {
+  const fromUrl = notification.url ? notificationTargetFromUrl(notification.url, origin) : null;
+  if (fromUrl) return fromUrl;
+  const { source } = notification;
+  if (source.conversation_id) return { kind: "route", to: "/assistant", search: { c: source.conversation_id } };
+  // A channel chat is a conversation too: its source id is the thread id.
+  if (source.type === "conversation" || source.type === "channel_chat") {
+    return { kind: "route", to: "/assistant", search: { c: source.id } };
+  }
+  if (source.type === "group" || source.type === "collaboration_group") {
+    return { kind: "route", to: "/assistant", search: { g: source.id } };
+  }
+  if (source.type === "trigger") {
+    return {
+      kind: "route",
+      to: "/assistant/automations",
+      search: source.agent_id ? { agent: source.agent_id } : {},
+    };
+  }
+  return null;
+}

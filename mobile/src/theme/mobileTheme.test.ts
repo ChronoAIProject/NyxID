@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bubblePalettes, chatBubbleColors, normalizeBubblePalette } from "./chatAppearance";
+import { authLightColors, authSurfaceColors } from "../features/auth/authAppearance";
 import {
   darkColors,
   darkSheetColors,
@@ -34,6 +35,39 @@ function composite(rgba: string, base: string): Rgb {
       value * (1 - parts[3]!) + (parts[index]! / 255) * parts[3]!,
   ) as Rgb;
 }
+test("auth-only light fills, labels and control/focus edges retain contrast without changing global cards", () => {
+  const c = authSurfaceColors(lightColors, "light");
+  for (const fill of [c.bg, authLightColors.fill, authLightColors.pressed]) {
+    for (const text of [c.textPrimary, c.textSecondary, c.textMuted])
+      assert.ok(ratio(rgb(text), rgb(fill)) >= 4.5, `${text} on ${fill}`);
+    for (const edge of [authLightColors.border, authLightColors.focus])
+      assert.ok(ratio(rgb(edge), rgb(fill)) >= 3, `${edge} on ${fill}`);
+  }
+  assert.equal(lightColors.card, "#FFFFFF");
+  assert.equal(authSurfaceColors(darkColors, "dark"), darkColors);
+});
+
+test("auth primary submit labels meet AA across full, pressed, pending and half-opacity idle gradients", () => {
+  for (const c of [lightColors, darkColors]) {
+    for (const idle of [false, true]) {
+      for (const pressed of [false, true]) {
+        const start = rgb(pressed && !idle ? c.gradientStartPressed : c.gradientStart);
+        const end = rgb(pressed && !idle ? c.gradientEndPressed : c.gradientEnd);
+        const label = rgb(c.onPrimary);
+        // Light idle submits keep the full gradient; only dark mode dims it.
+        const dimmed = idle && c === darkColors;
+        for (let i = 0; i <= 20; i++) {
+          const fill = start.map((v, channel) => {
+            const gradient = v * (1 - i / 20) + end[channel]! * i / 20;
+            return dimmed ? (gradient + rgb(c.bg)[channel]!) / 2 : gradient;
+          }) as Rgb;
+          assert.ok(ratio(label, fill) >= 4.5, `${c.bg} idle=${idle}, pressed=${pressed}, stop=${i}`);
+        }
+      }
+    }
+    assert.ok(ratio(rgb(c.primary), rgb(c.bg)) >= 3, "idle button boundary");
+  }
+});
 test("every chat palette keeps AA text contrast in both themes and an invalid saved choice falls back to gray", () => {
   for (const palette of Object.values(bubblePalettes))
     for (const colors of [palette.light, palette.dark])

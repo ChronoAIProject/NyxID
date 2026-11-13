@@ -86,9 +86,7 @@ test("NyxAgent history retains failure diagnostics, recovery, continuation, deli
     messageSchema.parse({ ...m, continuation_of: "ack-1" }).continuation_of,
     "ack-1",
   );
-  assert.throws(() =>
-    activitySchema.parse({ ...m.activities[0], failure: { kind: "invented" } }),
-  );
+  assert.equal(activitySchema.parse({ ...m.activities[0], failure: { kind: "invented" } }).failure?.kind, "invented");
 });
 
 test("resumed active turns retain reply checkpoints and capacity timing", () => {
@@ -304,4 +302,28 @@ test("context reset, steering, model interruption and billing notices match web 
     billingError("billing_provider_unavailable")?.openBilling,
     false,
   );
+});
+
+test("2345 preserves original failure copy and generic handling of future errors", () => {
+  for (const [kind, expected] of [
+    ["service_status", "The service returned an error. No HTTP status is available."],
+    ["tool_error", "The tool reported an error."],
+    ["refused", "NyxID refused this call."],
+    ["internal", "NyxID could not complete this call."],
+    ["resource_unavailable", "A resource needed for this step is unavailable."],
+    ["future_kind", "This step did not complete. No additional error details are available."],
+  ]) assert.equal(toolFailureCopy({ kind: kind! }), expected);
+});
+
+test("Lark attachment diagnostics are closed, visible, and scoped to attachment tools", () => {
+  const tool = "api-lark-bot-3__bitable_record_create_with_attachments";
+  for (const reason of ["field_read_transport", "field_missing", "eligibility:flag_off", "ledger:uncertain"]) {
+    const row = activitySchema.parse({id:"lark",label:tool,status:"error",started_at:new Date(0).toISOString(),failure:{kind:"tool_error",reason}});
+    assert.equal(row.failure?.reason, reason);
+    assert.match(toolFailureCopy(row.failure, row.label), new RegExp(`Lark attachment write: ${reason}`));
+  }
+  assert.equal(toolFailureCopy({kind:"retry_duplicate_action",reason:"ledger:succeeded"}, tool), "Already done in the previous attempt; skipped this time.");
+  for (const [name, reason] of [[tool, "field_missing:private field"], ["unrelated", "internal"]]) {
+    assert.equal(toolFailureCopy({ kind: "tool_error", reason }, name), "The tool reported an error.");
+  }
 });

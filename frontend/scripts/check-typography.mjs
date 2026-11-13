@@ -67,11 +67,12 @@ export function typographyViolations(file, source) {
         if (file !== 'app.css' || decl.parent.type !== 'atrule' || decl.parent.name !== 'theme') errors.push(`${decl.prop} may only be defined in app.css @theme`);
       }
       if (!excluded(file) && /^(font|font-size)$/.test(decl.prop) && !decl.value.includes('var(--text-') && !/^(inherit|initial|unset)$/.test(decl.value)) errors.push(`${decl.prop}: ${decl.value} must use a numeric token`);
-      if (!excluded(file) && /var\(--text-(9|10|11)\)/.test(decl.value)) errors.push(`${decl.value} is below the readable role minimum`);
+      const countSize = file === 'typography.css' && decl.parent.type === 'atrule' && decl.parent.name === 'utility' && decl.parent.params === 'type-count-badge' && decl.prop === 'font-size' && decl.value === 'var(--text-10)';
+      if (!excluded(file) && !countSize && /var\(--text-(9|10|11)\)/.test(decl.value)) errors.push(`${decl.value} is below the readable role minimum`);
       if (!excluded(file) && file !== 'typography.css' && decl.prop === 'font' && !/^(inherit|initial|unset)$/.test(decl.value)) errors.push('font shorthands bypass role line-height; use a shared role and font-family');
       if (!excluded(file) && file !== 'typography.css' && decl.prop === 'font-weight' && !(decl.parent.type === 'atrule' && decl.parent.name === 'font-face')) errors.push('font weight belongs to a shared typography role');
       if (/^--line-/.test(decl.prop) && file !== 'typography.css') errors.push('role line-height definitions belong only in typography.css');
-      if (!excluded(file) && decl.prop === 'line-height' && !/^(?:inherit|normal|var\(--line-(?:body|public-body|title|page-title|metric|prose)\))$/.test(decl.value)) errors.push(`${decl.value}: line-height must consume a shared role`);
+      if (!excluded(file) && decl.prop === 'line-height' && !/^(?:inherit|normal|var\(--line-(?:body|public-body|title|page-title|metric|prose|count)\))$/.test(decl.value)) errors.push(`${decl.value}: line-height must consume a shared role`);
     });
     css.walkAtRules('apply', rule => classes(rule.params, rule.source.start.offset));
   } else if (!excluded(file)) {

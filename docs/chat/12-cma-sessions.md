@@ -6,12 +6,23 @@ conversation's header identify current CMA work. Unrelated chats and account
 inventory never establish attribution.
 
 Each compact card leads with the CMA glyph and actual task title, followed by
-one line for task and stream status. A tight shared list shows the three newest
+one line labelled **Agent:** for the overall agent status and its stream connection.
+One **Submission details** disclosure contains the **Request status** section
+and metadata for all submitted requests. It starts collapsed. Each request is
+tracked separately, so a
+newer queued request can appear alongside an older request still running. A
+tight shared list shows the three newest
 public actions; **Show all N actions** expands the bounded 30-action history.
-Source chat, supplied CMA link, pin, and minimise controls share the header.
+The **View execution** clipboard-list icon, source chat, supplied CMA link, pin, and minimise
+controls share the header. Execution access remains available while minimised.
 Each icon has a state-aware tooltip available on hover and keyboard focus.
 The compact action list and Session details use spacing without internal
 horizontal dividers.
+Motion identifies the latest reported running action while the agent is working
+or starting. Other action markers and the request rows stay static, preserving
+their reported statuses. Queued requests use a clock. The overall agent status
+provides the single busy indicator when the card is minimised or no running
+action has been reported. Reduced-motion preferences disable the spin.
 The solid **Pinned** control, filled pin icon, and unpin tooltip identify global
 monitoring. **Pin CMA session** makes that card
 available in other chats and on every other page. Assistant pages reuse the
@@ -24,7 +35,7 @@ preferences migrate; obsolete version-1 inventory pins are discarded.
 
 **Open source chat** links to the server-recorded conversation and specialist,
 including NyxBot's agent identity. **View in CMA** is available only when CMA
-supplies a valid `callback_url`. Both the inline operation card and preview card
+supplies a valid `callback_url`. Both the operation receipt and live session card
 use the same browser-link validation: absolute HTTP(S), a hostname, no userinfo,
 control characters, whitespace, backslashes, query, fragment, or cloud metadata
 endpoint. Valid supplied HTTP(S) scheme, host, port, and path are preserved
@@ -97,8 +108,20 @@ Only the exact personal default connection is supported by this observer.
 Shared-agent, group, guest, scheduled-invocation, organization-owned,
 node-routed (including catalog node bindings), platform-key, target-specific,
 and agent-credential-override paths
-remain outside automatic card discovery. They keep their existing inline
-operation behavior. Legacy receipts without the new server identity remain
+remain outside automatic session discovery. Thread operation receipts use the
+assets preview area and follow the dedicated card layout, minimise control and
+metadata disclosure independently of automatic session discovery. Unconfirmed
+submissions show recorded status without a live stream, actions or pin.
+Matching live cards retain per-request status, notices and metadata together
+inside one **Submission details** disclosure. Request rows have no nested
+disclosures. **Session details** continues to hold shared agent information.
+Their single header execution icon opens a panel focused on the newest pending
+verified request, or
+the newest verified request if none is pending. It uses the verified local Agent
+reference, never the remote session ID. Request rows and unmatched submission
+history initially show three items; older items are revealed three at a time.
+Live sessions precede submission history in the shared assets area.
+Legacy receipts without the new server identity remain
 unattributed; no migration guesses their origin. Unrelated sessions created
 outside NyxID do not appear automatically.
 
@@ -287,3 +310,112 @@ actions remain separate capabilities.
 - `frontend/e2e/login-redirect.spec.ts` checks app approval and password-MFA to
   app login against HTTP fixtures, preserving the absolute `return_to` and its
   assistant conversation query through profile restoration.
+
+## Catalog domain changes and auto-connected services
+
+NyxID-owned, auto-provisioned HTTP connections follow the current catalog target
+at proxy resolution. Reconciliation also updates the stored endpoint and inherited
+OpenAPI URL, keeping connection and endpoint IDs unchanged. This applies to all
+catalog services, including CMA and cmaeg; it does not rewrite explicit/custom,
+user-credential, gateway-provider or node destinations. Reconciliation runs during
+normal auto-provisioning (key listing, login and device approval), catalog URL/spec
+updates, and startup. Matching proxy snapshots add no database reads. Reconciliation
+batches connection, endpoint and catalog reads, and starts transactions only for
+mismatches; consistent pages perform no writes. Per-owner repair failures are
+logged without failing listing/login/approval. Admin updates return without waiting
+for repair: catalog updates and startup schedule bounded background passes with a
+five-minute limit. Live resolution already follows the catalog while repair runs.
+Repairs emit only identifier/changed-field audit metadata.
+
+NyxBot's cmaeg transport already resolves its target directly from the catalog;
+ordinary cmaeg proxy connections now follow catalog moves too. No user needs to
+delete or reconnect an auto-connected service.
+
+CMA still checks that the resolved connection targets the current catalog
+deployment at admission and immediately before sending. A mismatched explicit
+connection returns the existing `cma_configuration_required` conflict with the
+connection ID to inspect. Repair does not change credentials, key epochs, resource
+IDs, idempotency keys or retained creation fingerprints. A retained creation bound
+to the catalog **before** a domain move remains fenced against replay to the new
+deployment. Preserve that request and reconcile its outcome; do not create another
+request identity to bypass the fence. Endpoint-only repair under an unchanged
+catalog leaves valid retained creations recoverable.
+
+During a rolling upgrade, repaired rows work on old replicas too: old provisioning
+skips existing connections and does not revert their URLs. Until reconciliation
+visits a row, an old replica can still return the original conflict. The existing
+CMA safety check remains enforced throughout rollout.
+
+### Creation request encryption and writer cutover
+
+CMA sandbox/agent creation does not require `CONTEXTUAL_RECORD_WRITES=true`.
+Retained requests use the shared encrypted-field writer: legacy envelope encryption
+with the default setting off, contextual encryption with it on. The existing
+optional `request_context_version` on both creation and sandbox rows selects the
+reader: absent/null means legacy and `3` means contextual. Unknown or mismatched
+formats fail closed; readers never guess from ciphertext or retry another format.
+Existing contextual rows remain readable with writes off. No plaintext request is
+stored, and IDs, generations, idempotency keys and deployment fingerprints retain
+their existing meaning. Same-key pending retries preserve the saved ciphertext;
+only a proven-not-created retry replaces it and its marker together.
+
+During a mixed deployment, an old replica refuses a new legacy-format sandbox
+replay before any send: its marker check returns `cma_creation_recovery_unavailable`,
+and its contextual decoder cannot decrypt legacy ciphertext. This leaves the
+retained row and occupied slot intact for an upgraded replica. Receipt-only
+reconciliation remains valid; it clears recovery material only on the existing
+authoritative terminal evidence. Rolling back restores the creation/replay outage,
+not a plaintext fallback or automatic deletion. Account purge still deletes both
+owner-scoped record collections, while chat/watch cleanup does not discard an
+unresolved creation.
+
+This release does not enable writer cutover or disable legacy reads. CMA creation
+collections are not in the generic operator rewrap inventory; retain legacy reads
+until legacy pending requests have completed/been purged or a CMA migration adapter
+has been deployed and verified. An inventory pass alone does not establish that
+these CMA rows have been converted.
+
+### Sandbox trust confirmation and stranded requests
+
+CMA's exact `409 trust_confirmation_required` problem for `POST /api/v1/sandboxes`
+is proof that no sandbox was admitted. NyxID releases that creation's account slot
+and clears its encrypted request in the same transaction, with the existing
+receipt and generation fences. The response and `commands_digest` reach the
+caller unchanged. A problem with a resource/operation identifier, wrong type,
+status or code is not that proof. Workspace trust refusals never free the existing
+parent sandbox, and lifecycle Agent worker failures remain uncertain.
+
+CMA records this refusal in its idempotency cache. Repeating the original bytes
+and key returns the same refusal; **adding confirmation requires a new
+Idempotency-Key**. Review the indicated commands, then submit `trust_confirmed:true`
+and the exact `commands_digest` using a fresh key. A changed-body retry under the
+old key returns `cma_creation_authority_changed` with this instruction. NyxID does
+not silently replace upstream keys. This contract was checked against CMA commit
+[`68f26f17fd18a701958a27ea5b2b933227fa2fbf`](https://github.com/ChronoAIProject/cma/tree/68f26f17fd18a701958a27ea5b2b933227fa2fbf),
+`api/crates/layer1-public/src/rest/{idempotency,instances,sandboxes}.rs` and
+`api/crates/layer2-core/src/sandbox/service_creation.rs`.
+
+An affected account needs no deletion or reconnection. A new slot-allocating CMA
+creation first re-observes its one occupied unknown sandbox request, using the
+retained original bytes and key through the existing guarded replay. An explicit
+recovery does the same. Automatic proxy-admission recovery does not require the
+optional NyxBot CMA sandbox-management feature. Explicit management recovery still
+requires that feature at entry and immediately before replay, plus the existing
+first-party-human handler check. A proven refusal settles recovery as complete and permits
+the new creation; a real receipt preserves the original sandbox and its slot.
+Ambiguous replies, changed authority, unavailable dependencies or identifier-bearing
+problems never release capacity. No pending, never-dispatched request or unknown
+lifecycle Agent request is automatically resent.
+
+All original owner, catalog deployment, request, parent generation and erasure
+fences apply. Generic sandbox replay is limited to 23 hours from first dispatch,
+inside CMA's 24-hour idempotency retention. Explicit recovery outside that window
+returns `cma_creation_replay_expired` without sending. During automatic recovery,
+lookup or replay failures after finding the occupied slot instead return
+`cma_sandbox_account_slot_occupied`, explaining that the earlier creation is not
+confirmed absent and can be rechecked later. The new request is not dispatched.
+The initial slot lookup's database errors and the incoming request's own validation
+and authorization errors retain their usual responses. Such older uncertain requests require
+authoritative CMA investigation, not a new identity or a local force-unlock.
+A rolling old replica may still leave a refusal unknown; an upgraded replica can
+recover it within that window. No schema or writer-cutover change is required.

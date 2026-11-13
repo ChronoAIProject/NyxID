@@ -1,4 +1,7 @@
-//! Admin-only private configuration and an allowlisted public metadata view.
+mod contracts;
+pub use contracts::certified_contracts;
+pub mod credentials;
+// Admin-only private configuration and an allowlisted public metadata view.
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -98,10 +101,39 @@ pub struct AdminModel {
 }
 async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminModel> {
     let routing = registry::routing(&state.db, &row).await?;
-    let execution_ready = match registry::require_execution_ready(&state.db).await {
+    // The admin editor uses this projection to enable new model authority.
+    let execution_ready = match registry::require_activation_ready(&state.db).await {
         Ok(()) => true,
         Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
         Err(error) => return Err(error),
+    };
+    let mut required_readiness = vec![
+        registry::REGISTRY_READINESS,
+        registry::EXECUTION_READINESS,
+        registry::BILLING_READINESS,
+    ];
+    let contracts = crate::services::billing::model_tariffs::list(&state.db, &row.id)
+        .await?
+        .iter()
+        .any(|t| {
+            t.status != crate::models::platform_model_tariff::TariffStatus::Retired
+                && crate::services::platform_model_execution::certification::family_contract(
+                    &t.contract,
+                )
+        });
+    let execution_ready = if contracts {
+        let capability = crate::services::platform_model_execution::certification::READINESS;
+        required_readiness.push(capability);
+        execution_ready
+            && match crate::services::security_readiness_service::report(&state.db, capability)
+                .await
+            {
+                Ok(report) => report.ready,
+                Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
+                Err(error) => return Err(error),
+            }
+    } else {
+        execution_ready
     };
     Ok(AdminModel {
         id: row.id,
@@ -124,11 +156,7 @@ async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminMode
         } else {
             "execution_fleet_not_ready"
         },
-        required_readiness: vec![
-            registry::REGISTRY_READINESS,
-            registry::EXECUTION_READINESS,
-            registry::BILLING_READINESS,
-        ],
+        required_readiness,
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
     })

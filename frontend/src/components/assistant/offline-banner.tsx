@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Wifi, WifiOff } from "lucide-react";
@@ -21,6 +23,7 @@ function down(): boolean {
  * themselves when the connection returns.
  */
 export function OfflineBanner() {
+  useUiTranslation();
   const online = useOnline();
   const unreachable = useSyncExternalStore(subscribeConnection, isConnectionLost, () => false);
   const [reconnected, setReconnected] = useState(false);
@@ -77,10 +80,10 @@ export function OfflineBanner() {
       <span>
         {/* Nothing is persisted: what shows is what this tab already loaded. */}
         {!online
-          ? "You're offline. NyxBot can't send, run or refresh until you reconnect. You're seeing what was already loaded."
+          ? translateUi("You're offline. NyxBot can't send, run or refresh until you reconnect. You're seeing what was already loaded.")
           : unreachable
-            ? "Can't reach NyxID. NyxBot can't send, run or refresh until the connection is back. You're seeing what was already loaded."
-            : "Back online."}
+            ? translateUi("Can't reach NyxID. NyxBot can't send, run or refresh until the connection is back. You're seeing what was already loaded.")
+            : translateUi("Back online.")}
       </span>
     </div>
   );

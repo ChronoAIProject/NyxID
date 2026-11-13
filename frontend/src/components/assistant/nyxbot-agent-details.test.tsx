@@ -1,3 +1,4 @@
+import "@/i18n";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import type { ComponentProps } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -22,6 +23,12 @@ vi.mock("@/hooks/use-keys", () => ({
       { id: "slack-key", slug: "slack", label: "Slack", is_active: true },
     ],
   }),
+}));
+vi.mock("@/hooks/use-agent-grant-services", () => ({
+  useAgentGrantServices: () => ({ isPending: false, data: [
+    { id: "github-key", slug: "github", label: "GitHub", executable: false },
+    { id: "slack-key", slug: "slack", label: "Slack", executable: true },
+  ] }),
 }));
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ isPending: false, error: null, refetch: vi.fn(), data: availableBots }),
@@ -100,6 +107,9 @@ beforeEach(() => {
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
     if (method !== "GET") writes.push({ method, endpoint, body });
     const id = String(agent.id);
+    if (endpoint === `/assistant/nyxagent/agents/${id}/org-guest-grants`) {
+      return new Response(JSON.stringify({ ready: true, pending: false, review: "none", bots: [], services: [] }));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/guest-readiness`) {
       readinessReads++;
       return new Response(JSON.stringify({ status: "not_ready", fix: "Send one message to this assistant yourself." }));
@@ -221,7 +231,7 @@ it("replaces a specialist's grants with a dirty-gated save even when a granted n
     screen.queryByRole("region", { name: "Unsaved changes" }),
   ).not.toBeInTheDocument();
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeChecked();
-  expect(within(grants).getByText(/Currently not executable \(node home-server offline\)/)).toBeVisible();
+  expect(within(grants).getByText(/Currently not executable \(credential or node unavailable\)/)).toBeVisible();
   const guests = within(grants).getByRole("list", { name: "Guest access" });
   expect(within(guests).getByLabelText("github", { selector: '[role="combobox"]' })).toHaveTextContent(
     "Look things up only",
@@ -366,7 +376,7 @@ it("shows the server's refusal of a display name", async () => {
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const profile = await within(sheet).findByLabelText("Profile", { selector: "form" });
   globalThis.__nyxidAssistantHttpMock = () =>
-    new Response(JSON.stringify({ message: "A display name must not contain credentials" }), {
+    new Response(JSON.stringify({ error: "bad_request", message: "A display name must not contain credentials" }), {
       status: 400,
     });
   appendText(within(profile).getByLabelText("Display name", { selector: "input,textarea" }), "sk-live");
@@ -865,7 +875,7 @@ function machineAccessFixture() {
       writes.push({ endpoint, method: init.method!, body });
       if (control.fail === (machineWrite ? "machine access" : "grants")) {
         return new Response(
-          JSON.stringify({ message: "Access changed; review and retry." }),
+          JSON.stringify({ error: "conflict", message: "Access changed; review and retry." }),
           { status: 409 },
         );
       }
@@ -1424,4 +1434,23 @@ it("uses a leading search glyph and clears then closes search without losing its
   await waitFor(() => expect(screen.getByRole("button", { name: "Search researcher agent details" })).toHaveFocus());
   expect(role).toHaveValue("Retain this role");
   expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
+});
+
+
+it("a rejected grant save exits Saving and preserves the selected draft and server error", async () => {
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = request => {
+    if (request.endpoint.endsWith("/grants") && request.init.method === "PUT")
+      return new Response(JSON.stringify({error:"validation_error",message:"Unknown service or no access: slack"}), {status:400});
+    return original(request);
+  };
+  const {user} = renderSheet({tab:"grants"});
+  const grants = await screen.findByLabelText("Grants", {selector:"form"});
+  fireEvent.click(within(grants).getByRole("checkbox", {name:/Slack/}));
+  await user.click(screen.getByText("Save changes", {selector:"button"}));
+  await confirmChanges();
+  await screen.findByText("Unknown service or no access: slack");
+  expect(screen.queryByText("Saving…")).not.toBeInTheDocument();
+  expect(screen.getByRole("region", {name:"Unsaved changes"})).toBeInTheDocument();
+  expect(within(screen.getByRole("form", {name:"Grants"})).getByRole("checkbox", {name:/Slack/})).toBeChecked();
 });

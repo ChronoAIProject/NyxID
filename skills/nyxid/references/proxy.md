@@ -5,6 +5,7 @@
 - [How to find the right API paths](#how-to-find-the-right-api-paths)
 - [Important: paths are relative to the service's base URL](#important-paths-are-relative-to-the-services-base-url)
 - [Making the request](#making-the-request)
+- [Optional failure diagnostics](#optional-failure-diagnostics)
 - [Calling NyxID from raw HTTP (no CLI)](#calling-nyxid-from-raw-http-no-cli)
 - [Common service examples](#common-service-examples)
 - [WebSocket-authenticated services](#websocket-authenticated-services)
@@ -64,6 +65,20 @@ echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
 # one the proxy uses. Get the UserService ID from `nyxid service list`.
 nyxid proxy request <slug> <path> -m POST --via-service <USER_SERVICE_ID> -d '<body>'
 ```
+
+## Optional failure diagnostics
+
+NyxID may attach a short-lived opaque diagnostic handle when a REST, LLM, or MCP service invocation fails. The handle preserves the exact UserService selected by the backend, including a selected pool member, without exposing that identity, the downstream path, request data, or credentials to the caller.
+
+For REST and LLM responses, read `X-NyxID-Diagnostic-Handle` and `X-NyxID-Diagnostic-Expires-In`. MCP errors may include `nyxid_invocation_diagnostic.handle` as additive content while retaining the original tool error. When a handle is present, optionally redeem it with the same current NyxID identity:
+
+```bash
+nyxid monitoring diagnose <handle> --output json
+```
+
+The response contains only bounded `observation`, `assessment`, and `outcome` enums. Treat it as secondary evidence. The original invocation status, body, and error remain authoritative; a healthy caller-scoped probe does not prove that the failed operation was valid or authorized. `unknown` or `non_delegable` does not attribute the failure. Current Agent Key, bot, relay, session, delegated, and service-account identities do not produce caller-scoped evidence.
+
+Redeem a NyxID-issued handle at most once. The CLI itself may retry once only after the explicit `diagnostic_not_ready` response. Do not infer or enumerate UserServices, do not retry the failed business operation automatically, and do not log, repeat, persist, or place the handle in a URL.
 
 ## Calling NyxID from raw HTTP (no CLI)
 

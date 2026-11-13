@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { memo } from "react";
+import { translate } from "../../i18n/translate";
 
 type Effect = {
   dependencies?: unknown[];
@@ -24,7 +25,10 @@ export function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-export function hookHarness<T>(mocks: Record<string, unknown>) {
+export function hookHarness<T>(
+  mocks: Record<string, unknown>,
+  globals: Record<string, unknown> = {},
+) {
   const slots: unknown[] = [];
   const effects = new Map<number, Effect>();
   let pendingEffects: number[] = [];
@@ -110,6 +114,9 @@ export function hookHarness<T>(mocks: Record<string, unknown>) {
     return value;
   }
   return {
+    mock: (name: string, value: unknown) => {
+      mocks[name] = value;
+    },
     load: (filename: string) => {
       const require = createRequire(filename);
       const output = ts.transpileModule(readFileSync(filename, "utf8"), {
@@ -130,18 +137,30 @@ export function hookHarness<T>(mocks: Record<string, unknown>) {
               ? react
               : name in mocks
                 ? mocks[name]
-                : require(name),
+                : name.endsWith("/i18n/LanguageProvider")
+                  ? {
+                      useAppLanguage: () => ({
+                        language: "en",
+                        t: (
+                          phrase: string,
+                          values?: Record<string, string | number>,
+                        ) => translate("en", phrase, values),
+                      }),
+                    }
+                  : require(name),
           AbortController,
           URL,
           URLSearchParams,
           queueMicrotask,
-          requestAnimationFrame: (callback: () => void) => setTimeout(callback, 0),
+          requestAnimationFrame: (callback: () => void) =>
+            setTimeout(callback, 0),
           cancelAnimationFrame: clearTimeout,
           setTimeout,
           clearTimeout,
           // Polling is not advanced by these lifecycle/terminal-refresh tests.
           setInterval: () => 1,
           clearInterval: () => {},
+          ...globals,
         },
         { filename },
       );

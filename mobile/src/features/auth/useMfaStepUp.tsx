@@ -1,11 +1,13 @@
+import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AppState, View, Text, TextInput } from "react-native";
+import { AppState, View, Text } from "react-native";
 import { requestJson } from "../../lib/api/http";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { spacing } from "../../theme/designTokens";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme as useTheme } from "./useAuthTheme";
+import { AuthTextInput } from "./AuthTextInput";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import {
   decideStepUp,
@@ -184,7 +186,7 @@ function MfaStepUpPrompt({
     >
       <Text style={[styles.title, { flex: 0 }]}>Verify this session</Text>
       <Text style={styles.signInText}>{message}</Text>
-      <TextInput
+      <AuthTextInput
         accessibilityLabel={recovery ? "Recovery code" : "Authenticator code"}
         value={code}
         onChangeText={setCode}
@@ -210,7 +212,7 @@ function MfaStepUpPrompt({
           setCode("");
         }}
       />
-      <PrimaryButton
+      <AuthSubmitButton loading={busy}
         disabled={busy || !code.trim()}
         label={busy ? "Verifying..." : "Verify & continue"}
         onPress={() => void submit()}

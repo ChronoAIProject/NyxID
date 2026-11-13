@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { z } from "zod";
@@ -347,6 +349,7 @@ function groupSummaryRows(
 }
 
 function ParameterSummary({ rows }: { readonly rows: readonly SummaryRow[] }) {
+  useUiTranslation();
   if (rows.length === 0) return null;
   return (
     <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
@@ -394,6 +397,7 @@ function DescriptorIcon({
   readonly icon: ActionIcon;
   readonly params: ActionCardContentBlock["params"];
 }) {
+  useUiTranslation();
   if (icon === "service" && params.variant === "catalog") {
     return <ServiceIcon slug={params.service_slug} size="sm" />;
   }
@@ -437,6 +441,7 @@ const SETTLED = {
 type SettledStatus = keyof typeof SETTLED;
 
 function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
+  useUiTranslation();
   if (block.status !== "blocked" && block.status !== "conflicted") {
     return null;
   }
@@ -457,6 +462,7 @@ export function ActionCard({
   onBlock,
   onResolve,
 }: ActionCardProps) {
+  useUiTranslation();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reauthorizeKey, setReauthorizeKey] = useState<KeyInfo | null>(null);
   const resolvingRef = useRef(false);
@@ -797,16 +803,16 @@ export function ActionCard({
               {verdict
                 ? verdict.badge
                 : unsupported
-                  ? "Unsupported"
+                  ? translateUi("Unsupported")
                   : conflicted
-                    ? "Conflict"
+                    ? translateUi("Conflict")
                     : blocked
-                      ? "Blocked"
+                      ? translateUi("Blocked")
                       : awaitingAuthorization
-                        ? "Authorizing"
+                        ? translateUi("Authorizing")
                         : busy
-                          ? "In progress"
-                          : "Action required"}
+                          ? translateUi("In progress")
+                          : translateUi("Action required")}
             </Badge>
           </div>
           <p className="mt-1.5 text-14 text-muted-foreground">
@@ -852,7 +858,7 @@ export function ActionCard({
             >
               {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
               {awaitingAuthorization
-                ? "Waiting for authorization"
+                ? translateUi("Waiting for authorization")
                 : busy
                   ? descriptor.busyLabel
                   : descriptor.cta(params)}
@@ -865,9 +871,7 @@ export function ActionCard({
             disabled={secondaryDisabled}
             onClick={() => report("declined")}
           >
-            <X />
-            Decline
-          </Button>
+            <X />{translateUi("Decline")}</Button>
           {blocked ? (
             <Button
               type="button"
@@ -876,13 +880,9 @@ export function ActionCard({
               disabled={secondaryDisabled}
               onClick={() => report("failed")}
             >
-              <AlertTriangle />
-              Report failure
-            </Button>
+              <AlertTriangle />{translateUi("Report failure")}</Button>
           ) : null}
-          <span className="ml-auto text-12 text-muted-foreground">
-            Nothing is shared until you finish.
-          </span>
+          <span className="ml-auto text-12 text-muted-foreground">{translateUi("Nothing is shared until you finish.")}</span>
         </div>
       ) : null}
 

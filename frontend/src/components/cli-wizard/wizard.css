@@ -1,0 +1,16 @@
+.nyxid-wizard label + :is(input, textarea, select, button, div, [role="combobox"]) {
+  margin-top: 0;
+}
+
+.nyxid-wizard .nyx-gradient-vivid {
+  background: var(--color-primary);
+  box-shadow: none;
+  min-height: 40px;
+  padding-inline: 20px;
+}
+
+.nyxid-wizard .nyx-gradient-vivid:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 90%, white);
+  box-shadow: none;
+  filter: none;
+}

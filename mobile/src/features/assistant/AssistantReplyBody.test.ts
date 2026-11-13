@@ -16,16 +16,16 @@ test("private, streaming and crew reply cards are separated from prose without a
     h.load(fileURLToPath(new URL("./AssistantReplyBody.tsx", import.meta.url)))
       .AssistantReplyBody as any
   ).type;
-  for (const variant of ["private", "crew"]) {
-    h.mount(() => Body({ text: "## Review", activity: "Receipt", variant }));
+  for (const text of ["## Review", "Plain reply"]) {
+    h.mount(() => Body({ text, activity: "Receipt" }));
     const body = h.value();
     assert.equal(body.props.style.gap, 16);
     assert.equal(body.props.children[0].props.style.gap, 8);
-    assert.equal(body.props.children[1].props.variant, variant);
+    assert.equal(body.props.children[1].props.variant, undefined);
     assert.equal(body.props.style.marginTop, undefined);
     assert.equal(body.props.style.marginBottom, undefined);
     h.unmount();
-    h.mount(() => Body({ text: "Plain reply", variant }));
+    h.mount(() => Body({ text }));
     assert.equal(
       h.value().props.children.filter(Boolean).length,
       1,

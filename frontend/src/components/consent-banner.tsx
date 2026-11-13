@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 /** Explicit account permission plus a separately retained device restriction. */
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -8,6 +11,7 @@ import { useConsentStore } from '../stores/consent-store';
 import { usePublicConfig } from '../hooks/use-public-config';
 
 export function ConsentBanner() {
+  useUiTranslation();
   const asked = useConsentStore((s) => s.asked);
   const accountId = useAuthStore((s) => s.user?.id);
   const [saving, setSaving] = useState(false);
@@ -15,7 +19,7 @@ export function ConsentBanner() {
     if (!accountId) return;
     setSaving(true);
     try { await saveAnalyticsConsent(accountId, enabled); }
-    catch { toast.error('Could not save account analytics permission. This browser remains off.'); }
+    catch { toast.error(translateErrorMessage('Could not save account analytics permission. This browser remains off.')); }
     finally { setSaving(false); }
   }
   // Only fetch config if the banner could possibly render. Once the
@@ -39,33 +43,23 @@ export function ConsentBanner() {
     <div
       role="dialog"
       aria-live="polite"
-      aria-label="Telemetry consent"
+      aria-label={translateUi("Telemetry consent")}
       className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 backdrop-blur"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-14 unthemed:text-12 text-muted-foreground">
-          Optional usage analytics are linked to your account. Allow enables
-          account permission and this browser. Declining withdraws account
-          permission across devices. Each other device still needs its own
-          opt-in, and Do Not Track always disables collection. Change this in
-          Settings → Privacy.
-        </div>
+        <div className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.")}</div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
             variant="ghost"
             disabled={saving}
             onClick={() => void choose(false)}
-            aria-label="Decline telemetry"
-          >
-            No Thanks
-          </Button>
+            aria-label={translateUi("Decline telemetry")}
+          >{translateUi("No Thanks")}</Button>
           <Button
             disabled={saving}
             onClick={() => void choose(true)}
-            aria-label="Accept telemetry"
-          >
-            Allow
-          </Button>
+            aria-label={translateUi("Accept telemetry")}
+          >{translateUi("Allow")}</Button>
         </div>
       </div>
     </div>

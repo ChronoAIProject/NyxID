@@ -189,7 +189,14 @@ async fn complete_reply_partial_failure_and_lost_response_never_return_success_o
             .iter()
             .map(|p| p.as_document().unwrap().get_str("status").unwrap())
             .collect();
-        assert_eq!(statuses, ["accepted", "uncertain", "not_attempted"]);
+        assert_eq!(
+            statuses,
+            [
+                "accepted",
+                if lost_response { "uncertain" } else { "failed" },
+                "not_attempted"
+            ]
+        );
         assert_eq!(
             post(&fixture, &token, payload(&fixture, "replay"))
                 .await
@@ -366,4 +373,231 @@ async fn turn_trace_multipart_relay_command_count_parity() {
         "turn trace multipart relay command parity: {:?}",
         measured[0]
     );
+}
+
+#[tokio::test]
+async fn commonmark_multipart_parse_refusal_receipts_fallback_and_suffix_outcomes() {
+    for terminal in [200, 400, 500] {
+        let (fixture, server) = setup().await;
+        let sequence = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(path("/botbot-token/sendMessage")).respond_with(move |_: &wiremock::Request| {
+            let n=sequence.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            if n==1 {ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"}))}
+            else if n==2 && terminal!=200 {ResponseTemplate::new(terminal).set_body_json(serde_json::json!({"ok":false,"error_code":terminal,"description":"private provider text"}))}
+            else {ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"message_id":n+43}}))}
+        }).mount(&server).await;
+        let source = format!(
+            "**{}**\n\n**{}**\n\n**{}**",
+            "中文မြန်မာ🦉".repeat(350),
+            "English code a_b | ".repeat(250),
+            "END".repeat(1500)
+        );
+        let parts = crate::services::channel_reply_plan::assistant_parts(&source, "telegram", "");
+        let body=serde_json::json!({"message_id":fixture.message.id,"reply":{"text":source,"metadata":{"text_format":"commonmark"}}}).to_string();
+        let token = valid_reply_token(&fixture);
+        let response = post(&fixture, &token, body).await;
+        assert_eq!(
+            response.status(),
+            if terminal == 200 {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_GATEWAY
+            }
+        );
+        let record = receipt(&fixture).await;
+        assert_eq!(record.get_bool("complete").unwrap(), terminal == 200);
+        let statuses = record.get_array("parts").unwrap();
+        let failed = statuses[1].as_document().unwrap();
+        assert_eq!(
+            failed.get_str("formatting_fallback").unwrap(),
+            "telegram_formatting_fallback"
+        );
+        assert_eq!(
+            failed.get_str("status").unwrap(),
+            match terminal {
+                200 => "accepted",
+                400 => "failed",
+                _ => "uncertain",
+            }
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            if terminal == 200 { parts.len() + 1 } else { 3 }
+        );
+        let rejected: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let fallback: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert_eq!(rejected["text"], fallback["text"]);
+        if terminal == 200 {
+            let delivered: Vec<String> = requests
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != 1)
+                .map(|(_, r)| {
+                    serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["text"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(
+                delivered,
+                parts
+                    .iter()
+                    .map(|p| p.text.clone().unwrap())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(fallback.get("entities").is_none() && fallback.get("parse_mode").is_none());
+        let bot = fixture
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .find_one(doc! {"_id":&fixture.bot.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bot.get_document("diagnostics")
+                .unwrap()
+                .get_document("last_outbound_notice")
+                .unwrap()
+                .get_str("reason")
+                .unwrap(),
+            "telegram_formatting_fallback"
+        );
+        if terminal != 200 {
+            assert!(
+                statuses[2..]
+                    .iter()
+                    .all(|p| p.as_document().unwrap().get_str("status") == Ok("not_attempted"))
+            );
+        }
+        cleanup(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn gateway_commonmark_route_converts_once_and_keeps_legacy_route_separate() {
+    let (fixture, server) = setup().await;
+    Mock::given(path("/botbot-token/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"ok":true,"result":{"message_id":42}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let router = axum::Router::new()
+        .route(
+            "/reply/commonmark",
+            axum::routing::post(crate::handlers::channel_relay_request::commonmark_reply),
+        )
+        .with_state(fixture.state.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reply/commonmark")
+                .header(
+                    "authorization",
+                    format!("Bearer {}", valid_reply_token(&fixture)),
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(payload(
+                    &fixture,
+                    "**中文 🦉** `C:\\qa\\menu_01.txt` [D1-B-ZH] | မြန်မာ",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["text"],
+        "中文 🦉 C:\\qa\\menu_01.txt [D1-B-ZH] | မြန်မာ"
+    );
+    assert!(body.get("parse_mode").is_none());
+    assert_eq!(body["entities"].as_array().unwrap().len(), 2);
+    cleanup(fixture).await;
+}
+
+#[tokio::test]
+async fn commonmark_edit_retains_authorized_row_and_fallback_health() {
+    let (mut fixture, server) = setup().await;
+    fixture.outbound_message.platform_message_id = Some("42".into());
+    fixture
+        .state
+        .db
+        .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+        .replace_one(
+            doc! {"_id": &fixture.outbound_message.id},
+            &fixture.outbound_message,
+        )
+        .await
+        .unwrap();
+    let claims = valid_reply_claims(&fixture);
+    insert_reply_token_use(&fixture, &claims).await;
+    let token = encode_reply_claims(&fixture.state, &claims);
+    let mut request = UpdateReplyRequest {
+        message_id: "42".into(),
+        outbound_message_id: Some(fixture.outbound_message.id.clone()),
+        reply: body(Some("# 中文 🦉\n\n`a_b|c` မြန်မာ"), None),
+    };
+    crate::handlers::channel_relay_request::mark_commonmark(&mut request.reply).unwrap();
+    let headers = bearer_headers(&token);
+    let context = resolve_edit_request_context(&fixture.state, &headers, None, &request)
+        .await
+        .unwrap();
+    let sequence = std::sync::atomic::AtomicUsize::new(0);
+    Mock::given(path("/botbot-token/editMessageText")).respond_with(move |_: &wiremock::Request| {
+        if sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"}))
+        } else { ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})) }
+    }).expect(2).mount(&server).await;
+    let adapter =
+        crate::services::channel_adapters::telegram::TelegramAdapter::for_api_base(&server.uri());
+    let _ = edit_resolved_reply(&fixture.state, &headers, context, request, &adapter)
+        .await
+        .unwrap();
+    let saved = fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fixture.outbound_message.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.get_str("formatting_fallback").unwrap(),
+        "telegram_formatting_fallback"
+    );
+    assert!(saved.get_datetime("updated_at").is_ok());
+    let requests = server.received_requests().await.unwrap();
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let plain: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(first["text"], "中文 🦉\n\na_b|c မြန်မာ");
+    assert_eq!(plain["text"], first["text"]);
+    assert_eq!(plain["message_id"], 42);
+    assert!(plain.get("entities").is_none() && plain.get("parse_mode").is_none());
+    let bot = fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fixture.bot.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bot.get_document("diagnostics")
+            .unwrap()
+            .get_document("last_outbound_notice")
+            .unwrap()
+            .get_str("reason")
+            .unwrap(),
+        "telegram_formatting_fallback"
+    );
+    cleanup(fixture).await;
 }

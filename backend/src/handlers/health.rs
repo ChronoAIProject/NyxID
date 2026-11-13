@@ -24,7 +24,12 @@ pub async fn security_readiness(
     )
     .await?;
     let mut reports = std::collections::BTreeMap::new();
-    for capability in crate::services::security_readiness_service::CAPABILITIES {
+    for capability in crate::services::security_readiness_service::CAPABILITIES
+        .iter()
+        .chain(std::iter::once(
+            &crate::services::security_readiness_service::AUTOMATION_COMPLETION,
+        ))
+    {
         reports.insert(
             (*capability).to_owned(),
             crate::services::security_readiness_service::report(&state.db, capability).await?,

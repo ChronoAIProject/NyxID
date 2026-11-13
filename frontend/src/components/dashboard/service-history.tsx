@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -24,8 +27,9 @@ export function HistoryTime({
   readonly relative?: boolean;
   readonly expanded?: boolean;
 }) {
+  useUiTranslation();
   const date = new Date(value);
-  const exact = date.toLocaleString(undefined, {
+  const exact = date.toLocaleString(getFormattingLocale(), {
     dateStyle: "full",
     timeStyle: "long",
   });
@@ -42,7 +46,7 @@ export function HistoryTime({
             ? exact
             : relative
               ? formatRelativeTime(value)
-              : date.toLocaleDateString(undefined, {
+              : date.toLocaleDateString(getFormattingLocale(), {
                   day: "numeric",
                   month: "short",
                   year: "numeric",
@@ -75,6 +79,7 @@ export function ServiceAuthorshipFooter({
   readonly authorship?: ServiceAuthorship | null;
   readonly className?: string;
 }) {
+  useUiTranslation();
   if (!authorship) return null;
   return (
     <div
@@ -82,28 +87,26 @@ export function ServiceAuthorshipFooter({
         "mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-13 text-muted-foreground",
         className,
       )}
-      aria-label="Service authorship"
+      aria-label={translateUi("Service authorship")}
     >
       <p className="max-w-full break-words">
         {authorship.created_by ? (
-          <>
-            Created by {actorName(authorship.created_by.actor)} ·{" "}
+          <>{translateUi("Created by ")}{actorName(authorship.created_by.actor)} ·{" "}
             <HistoryTime value={authorship.created_by.at} />
           </>
         ) : (
-          "Creator not recorded"
+          translateUi("Creator not recorded")
         )}
       </p>
       <p className="max-w-full break-words">
         {authorship.last_change ? (
-          <>
-            Last edited by {actorName(authorship.last_change.actor)} ·{" "}
+          <>{translateUi("Last edited by ")}{actorName(authorship.last_change.actor)} ·{" "}
             <HistoryTime value={authorship.last_change.at} relative />
           </>
         ) : authorship.created_by ? (
-          "No edits since creation"
+          translateUi("No edits since creation")
         ) : (
-          "Earlier edits not recorded"
+          translateUi("Earlier edits not recorded")
         )}
       </p>
     </div>
@@ -142,6 +145,7 @@ function safeValue(field: string, value: unknown): string {
 }
 
 export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
+  useUiTranslation();
   const [actions, setActions] = useState<string[]>([]);
   const query = useServiceHistory(serviceId, actions);
   // An authorization or context failure must immediately hide previously cached rows.
@@ -149,50 +153,41 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
   const first = pages?.[0];
   const groups = pages?.flatMap((page) => page.groups) ?? [];
   return (
-    <section className="space-y-4" aria-label="Service history">
+    <section className="space-y-4" aria-label={translateUi("Service history")}>
       <div className="max-w-lg">
         <AsyncOptionSelect
           optionSet="service-history-action"
           context={{ kind: "service-history" }}
-          label="Filter history actions"
+          label={translateUi("Filter history actions")}
           value={actions}
           onChange={setActions}
         />
       </div>
       {query.isPending && (
-        <p role="status" className="text-14 text-muted-foreground">
-          Loading service history…
-        </p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading service history…")}</p>
       )}
       {query.isError && (
         <div role="alert" className="space-y-2 text-14">
           <p>
             {query.error instanceof ApiError &&
             [403, 404].includes(query.error.status)
-              ? "Service history is unavailable. Personal owners and currently permitted organization admins can view it."
-              : "Service history could not be loaded."}
+              ? translateUi("Service history is unavailable. Personal owners and currently permitted organization admins can view it.")
+              : translateUi("Service history could not be loaded.")}
           </p>
           <Button
             size="sm"
             variant="outline"
             onClick={() => void query.refetch()}
-          >
-            Retry history
-          </Button>
+          >{translateUi("Retry history")}</Button>
         </div>
       )}
       {first?.deleted && (
-        <p className="text-14 text-muted-foreground">
-          This service was deleted. Its recorded history is retained.
-        </p>
+        <p className="text-14 text-muted-foreground">{translateUi("This service was deleted. Its recorded history is retained.")}</p>
       )}
       {first?.legacy && (
-        <p className="text-14 text-muted-foreground">
-          Creator and earlier edits may not have been recorded.
-          {first.tracked_since && (
+        <p className="text-14 text-muted-foreground">{translateUi("Creator and earlier edits may not have been recorded.")}{first.tracked_since && (
             <>
-              {" "}
-              Reliable tracking began{" "}
+              {" "}{translateUi("Reliable tracking began")}{" "}
               <HistoryTime value={first.tracked_since} />.
             </>
           )}
@@ -201,8 +196,8 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
       {first && groups.length === 0 && (
         <p className="text-14 text-muted-foreground">
           {actions.length
-            ? "No changes match these filters."
-            : "No recorded changes yet."}
+            ? translateUi("No changes match these filters.")
+            : translateUi("No recorded changes yet.")}
         </p>
       )}
       <ol className="space-y-3">
@@ -219,31 +214,28 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
               <details className="rounded-xl border border-border/50 bg-card p-4">
                 <summary className="cursor-pointer text-14 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
                   <span className="font-medium">
-                    {summaryEvent.action_label || "Service updated"}
+                    {summaryEvent.action_label || translateUi("Service updated")}
                   </span>
                   <span className="ml-2 text-muted-foreground">
                     {actorName(summaryEvent.actor)} ·{" "}
                     <HistoryTime value={lastEvent.committed_at} />
                     {group.events.length > 1 &&
-                      ` · ${group.events.length} changes`}
+                      translateUi(" · {{length}} changes", { length: group.events.length })}
                   </span>
                 </summary>
                 <div className="mt-3 space-y-4">
                   {group.events.map((event) => (
                     <div key={event.id} className="space-y-2 text-14">
                       <p>
-                        {event.action_label || "Service updated"} ·{" "}
+                        {event.action_label || translateUi("Service updated")} ·{" "}
                         {actorName(event.actor)} ·{" "}
                         <HistoryTime value={event.committed_at} expanded />
                       </p>
                       {event.actor.api_key_id && (
-                        <p className="text-muted-foreground">
-                          Authenticated API key
-                        </p>
+                        <p className="text-muted-foreground">{translateUi("Authenticated API key")}</p>
                       )}
                       {event.actor.app_id && (
-                        <p className="break-all text-muted-foreground">
-                          Application {event.actor.app_id}
+                        <p className="break-all text-muted-foreground">{translateUi("Application ")}{event.actor.app_id}
                         </p>
                       )}
                       <dl className="space-y-1">
@@ -253,27 +245,22 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
                             className="flex flex-wrap gap-x-2"
                           >
                             <dt className="font-medium">
-                              {change.label || "Service setting"}
+                              {change.label || translateUi("Service setting")}
                             </dt>
                             <dd className="break-words text-muted-foreground">
                               {JSON.stringify(change.before ?? null) ===
                               JSON.stringify(change.after ?? null)
-                                ? "Changed; values omitted"
-                                : `${safeValue(change.field, change.before)} → ${safeValue(change.field, change.after)}`}
+                                ? translateUi("Changed; values omitted")
+                                : translateUi("{{value}} → {{value1}}", { value: safeValue(change.field, change.before), value1: safeValue(change.field, change.after) })}
                             </dd>
                           </div>
                         ))}
                       </dl>
                       {event.additional_changes && (
-                        <p className="text-muted-foreground">
-                          Other service settings updated. Additional change
-                          details are unavailable.
-                        </p>
+                        <p className="text-muted-foreground">{translateUi("Other service settings updated. Additional change details are unavailable.")}</p>
                       )}
                       {event.audit_status === "mismatch" && (
-                        <p role="alert" className="text-destructive">
-                          This record differs from its audit mirror.
-                        </p>
+                        <p role="alert" className="text-destructive">{translateUi("This record differs from its audit mirror.")}</p>
                       )}
                     </div>
                   ))}
@@ -288,53 +275,44 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
           variant="outline"
           isLoading={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
-        >
-          Load older changes
-        </Button>
+        >{translateUi("Load older changes")}</Button>
       )}
     </section>
   );
 }
 
 export function ArchivedServiceHistory() {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
-    <section className="mt-6 space-y-3" aria-label="Deleted service history">
+    <section className="mt-6 space-y-3" aria-label={translateUi("Deleted service history")}>
       <Button
         variant="outline"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-      >
-        Deleted service history
-      </Button>
+      >{translateUi("Deleted service history")}</Button>
       {open && <ArchiveList />}
     </section>
   );
 }
 function ArchiveList() {
+  useUiTranslation();
   const query = useArchivedServiceHistory();
   const rows = query.isError
     ? []
     : (query.data?.pages.flatMap((page) => page.services) ?? []);
   return (
     <div className="space-y-3 rounded-xl border border-border/50 p-4">
-      <p className="text-13 text-muted-foreground">
-        Recorded history of deleted services you currently have permission to
-        manage.
-      </p>
-      {query.isPending && <p role="status">Loading deleted service history…</p>}
+      <p className="text-13 text-muted-foreground">{translateUi("Recorded history of deleted services you currently have permission to manage.")}</p>
+      {query.isPending && <p role="status">{translateUi("Loading deleted service history…")}</p>}
       {query.isError && (
         <div role="alert">
-          <p>Deleted service history could not be loaded.</p>
-          <Button variant="outline" onClick={() => void query.refetch()}>
-            Retry archived history
-          </Button>
+          <p>{translateUi("Deleted service history could not be loaded.")}</p>
+          <Button variant="outline" onClick={() => void query.refetch()}>{translateUi("Retry archived history")}</Button>
         </div>
       )}
       {query.isSuccess && !rows.length && (
-        <p className="text-13 text-muted-foreground">
-          No deleted service history is available.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("No deleted service history is available.")}</p>
       )}
       <ul className="space-y-2">
         {rows.map((row) => (
@@ -347,10 +325,8 @@ function ArchiveList() {
               params={{ keyId: row.service_id }}
               className="break-all text-primary-text underline underline-offset-2"
             >
-              {row.service_slug} · View history
-            </Link>
-            <span className="text-muted-foreground">
-              Last change <HistoryTime value={row.last_changed_at} />
+              {row.service_slug}{translateUi(" · View history")}</Link>
+            <span className="text-muted-foreground">{translateUi("Last change ")}<HistoryTime value={row.last_changed_at} />
             </span>
           </li>
         ))}
@@ -360,9 +336,7 @@ function ArchiveList() {
           variant="outline"
           isLoading={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
-        >
-          Load older deleted services
-        </Button>
+        >{translateUi("Load older deleted services")}</Button>
       )}
     </div>
   );

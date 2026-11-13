@@ -1619,6 +1619,53 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
         second.unwrap().err().unwrap()["consent_id"]
     );
     let id = card["consent_id"].as_str().unwrap();
+    let activity = super::assistant_nyxagent::activity_started_for_turn(
+        &f.state.db,
+        &f.outsider,
+        &chat.conversation_id,
+        chat.turn_id.as_deref().unwrap(),
+        "calendar__events",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let linked = super::machine_activity_service::ACTIVITY_ID
+        .scope(
+            Some(activity.clone()),
+            consent::authorize(&f.state.db, &chat, access, &service, &binding, &operation),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    assert_eq!(
+        linked, card,
+        "decision tracking must preserve the tool result"
+    );
+    let mut activities =
+        super::assistant_nyxagent::get(&f.state.db, &f.outsider, &chat.conversation_id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .activities;
+    super::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.outsider,
+        &chat.conversation_id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    let decision = activities
+        .iter()
+        .find(|a| a.id == activity)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(decision.kind, "shared_consent");
+    assert_eq!(decision.state, "waiting");
     assert!(matches!(
         consent::authorize(
             &f.state.db,
@@ -1640,6 +1687,25 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
     consent::decide(&f.state.db, &f.outsider, id, ConsentDecision::Once)
         .await
         .unwrap();
+    super::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.outsider,
+        &chat.conversation_id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        activities
+            .iter()
+            .find(|a| a.id == activity)
+            .unwrap()
+            .decision
+            .as_ref()
+            .unwrap()
+            .state,
+        "allowed"
+    );
     assert!(
         consent::prompt(&f.state.db, &chat, access, &service, &binding, &operation)
             .await

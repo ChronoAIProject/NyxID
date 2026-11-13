@@ -553,3 +553,91 @@ async fn collaboration_guest_image_delete_after_turn_tracks_the_requester() {
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn retained_tool_parts_obey_collaboration_guest_opt_in_and_member_removal() {
+    use crate::services::assistant_tool_result_service as results;
+    for guest in [false, true] {
+        let (f, agent, group, _, started) = fixture(guest).await;
+        let row = &started.claim.conversation;
+        let chat = svc::assistant_acknowledgement_service::for_key(
+            &f.state.db,
+            &row.user_id,
+            Some(&row.credential_api_key_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let first = results::retain(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &chat,
+            &f.member,
+            &"public tool result".repeat(2000),
+        )
+        .await
+        .unwrap();
+        let request = results::ReadRequest {
+            reference: first["ref"].as_str().unwrap().into(),
+            part: 1,
+        };
+        assert!(
+            results::read(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &chat,
+                &f.member,
+                &request
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            results::read(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &chat,
+                &f.admin,
+                &request
+            )
+            .await
+            .is_err()
+        );
+        if guest {
+            change(
+                &f,
+                &f.admin,
+                &group,
+                Change::GuestAccess {
+                    agent_id: agent.id,
+                    enabled: false,
+                    expected_revision: 2,
+                    request_id: None,
+                },
+            )
+            .await;
+        } else {
+            change(
+                &f,
+                &f.admin,
+                &group,
+                Change::Remove {
+                    person_id: f.member.clone(),
+                },
+            )
+            .await;
+        }
+        assert!(
+            results::read(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &chat,
+                &f.member,
+                &request
+            )
+            .await
+            .is_err()
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}

@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ChannelActivities, ActivityCallbackSettings } from "@/components/channels/channel-activities";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -51,7 +54,7 @@ import type {
 function formatMessageTime(dateStr: string): string {
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat(getFormattingLocale(), {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -80,28 +83,28 @@ function deliveryBadgeVariant(
 function contentTypeLabel(ct: ContentType): string {
   switch (ct) {
     case "text":
-      return "Text";
+      return translateUi("Text");
     case "image":
-      return "Image";
+      return translateUi("Image");
     case "file":
-      return "File";
+      return translateUi("File");
     case "audio":
-      return "Audio";
+      return translateUi("Audio");
     case "video":
-      return "Video";
+      return translateUi("Video");
     case "location":
-      return "Location";
+      return translateUi("Location");
     case "sticker":
-      return "Sticker";
+      return translateUi("Sticker");
     case "unknown":
-      return "Unknown";
+      return translateUi("Unknown");
     default:
       return ct;
   }
 }
 
 function directionLabel(dir: MessageDirection): string {
-  return dir === "inbound" ? "Inbound" : "Outbound";
+  return dir === "inbound" ? translateUi("Inbound") : translateUi("Outbound");
 }
 
 const receiptLabels: Record<ChannelDeliveryStatus, string> = {
@@ -112,26 +115,27 @@ const receiptLabels: Record<ChannelDeliveryStatus, string> = {
 };
 
 function DeliveryDetails({ delivery }: { readonly delivery: ChannelDelivery }) {
+  useUiTranslation();
   const failed = delivery.status === "failed";
   const uncertain = delivery.status === "partial" || delivery.status === "unknown";
   return <div className="mt-2 min-w-0 space-y-2 text-13 text-muted-foreground">
     <Badge variant={failed ? "destructive" : uncertain ? "warning" : "secondary"} className="max-w-full whitespace-normal text-12">
       {receiptLabels[delivery.status]}
     </Badge>
-    {delivery.status === "legacy_final_only" && <p>Only the final component ID was recorded. Delivery of the whole reply cannot be confirmed.</p>}
-    {delivery.recipient_only && <p>These observations do not confirm delivery to every group participant.</p>}
-    {uncertain && <p>{delivery.status === "partial" ? "Only part of the reply was confirmed as accepted." : "WhatsApp acceptance could not be confirmed."} Check the conversation before sending again; some components may already have arrived.</p>}
-    {failed && <p>WhatsApp reported a failure. Review the component status and provider codes below.</p>}
-    {delivery.failure_code !== null && <p>Send error code (NyxID): {delivery.failure_code}</p>}
-    {delivery.expected_components !== null && <p>{delivery.components.length} of {delivery.expected_components} component IDs recorded.{delivery.status === "accepted" && " Acceptance does not confirm recipient delivery."}</p>}
+    {delivery.status === "legacy_final_only" && <p>{translateUi("Only the final component ID was recorded. Delivery of the whole reply cannot be confirmed.")}</p>}
+    {delivery.recipient_only && <p>{translateUi("These observations do not confirm delivery to every group participant.")}</p>}
+    {uncertain && <p>{delivery.status === "partial" ? translateUi("Only part of the reply was confirmed as accepted.") : translateUi("WhatsApp acceptance could not be confirmed.")}{translateUi(" Check the conversation before sending again; some components may already have arrived.")}</p>}
+    {failed && <p>{translateUi("WhatsApp reported a failure. Review the component status and provider codes below.")}</p>}
+    {delivery.failure_code !== null && <p>{translateUi("Send error code (NyxID): ")}{delivery.failure_code}</p>}
+    {delivery.expected_components !== null && <p>{delivery.components.length}{translateUi(" of ")}{delivery.expected_components}{translateUi(" component IDs recorded.")}{delivery.status === "accepted" && " Acceptance does not confirm recipient delivery."}</p>}
     {delivery.components.length > 0 && <details>
-      <summary className="cursor-pointer">Component receipts</summary>
+      <summary className="cursor-pointer">{translateUi("Component receipts")}</summary>
       <ol className="mt-2 space-y-3">
         {delivery.components.map((part, index) => <li key={part.platform_message_id} className="min-w-0 break-words">
-          <p>Component {index + 1}: {receiptLabels[part.status]}</p>
+          <p>{translateUi("Component ")}{index + 1}: {receiptLabels[part.status]}</p>
           <p className="break-all">{part.platform_message_id}</p>
           {([ ["Sent", part.sent_at], ["Delivered", part.delivered_at], ["Read", part.read_at], ["Played", part.played_at], ["Failed", part.failed_at] ] as const).map(([label, time]) => time && <p key={label}>{label}: <time dateTime={time}>{time}</time></p>)}
-          {part.error_codes.length > 0 && <p>WhatsApp error codes: {part.error_codes.join(", ")}</p>}
+          {part.error_codes.length > 0 && <p>{translateUi("WhatsApp error codes: ")}{part.error_codes.join(", ")}</p>}
         </li>)}
       </ol>
     </details>}
@@ -141,6 +145,7 @@ function DeliveryDetails({ delivery }: { readonly delivery: ChannelDelivery }) {
 // -- Message Card --
 
 export function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
+  useUiTranslation();
   const isInbound = message.direction === "inbound";
   const senderName =
     message.sender_display_name ?? message.sender_platform_id ?? "Unknown";
@@ -170,7 +175,7 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
             <ArrowUpRight className="h-3 w-3" />
           )}
           <span className="font-medium">
-            {isInbound ? senderName : "Agent"}
+            {isInbound ? senderName : translateUi("Agent")}
           </span>
           <span>{directionLabel(message.direction)}</span>
         </div>
@@ -181,9 +186,7 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
             {contentTypeLabel(message.content_type)}
           </Badge>
         </div>
-        <p className="text-14 italic text-muted-foreground">
-          Content is not stored in NyxID. Ask the agent for the message body.
-        </p>
+        <p className="text-14 italic text-muted-foreground">{translateUi("Content is not stored in NyxID. Ask the agent for the message body.")}</p>
 
         {/* Footer */}
         <div className="mt-2 flex flex-wrap items-center gap-2 text-12 text-muted-foreground">
@@ -193,13 +196,13 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
               variant={deliveryBadgeVariant(message.callback_status)}
               className="text-12"
             >
-              {message.callback_status === "delivered" ? "Callback accepted" : message.callback_status === "pending" ? "Callback pending" : message.callback_status === "timeout" ? "Callback timed out" : "Callback failed"}
+              {message.callback_status === "delivered" ? translateUi("Callback accepted") : message.callback_status === "pending" ? translateUi("Callback pending") : message.callback_status === "timeout" ? translateUi("Callback timed out") : translateUi("Callback failed")}
             </Badge>
           )}
-          {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-12">Platform accepted</Badge>}
+          {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-12">{translateUi("Platform accepted")}</Badge>}
         </div>
         {!isInbound && message.delivery && <DeliveryDetails delivery={message.delivery} />}
-        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-13 text-muted-foreground break-all">Platform message ID: {message.platform_message_id}. Acceptance does not confirm recipient delivery.</p>}
+        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-13 text-muted-foreground break-all">{translateUi("Platform message ID: ")}{message.platform_message_id}{translateUi(". Acceptance does not confirm recipient delivery.")}</p>}
       </div>
     </div>
   );
@@ -218,6 +221,7 @@ export function InitiatedMessageSettings({
   readonly botOwnerError?: boolean;
   readonly onRetryBotOwner?: () => void;
 }) {
+  useUiTranslation();
   const update = useUpdateChannelConversation();
   const send = useSendChannelMessage({ creditsOwnerId: botOwnerId });
   const attempt = useRef<{ text: string; key: string } | null>(null);
@@ -246,11 +250,11 @@ export function InitiatedMessageSettings({
         : null;
 
   return (
-    <DetailSection title="Agent-initiated messages">
+    <DetailSection title={translateUi("Agent-initiated messages")}>
       <div className="space-y-1 p-5 text-13 text-muted-foreground">
-        <p>Editing: {conversation.capabilities?.edit ? "Supported" : "Unavailable"}</p>
-        <p>Receive media: {conversation.capabilities?.media?.inbound.join(", ") || "None"}</p>
-        <p>Send media: {conversation.capabilities?.media?.outbound.join(", ") || "None"}</p>
+        <p>{translateUi("Editing: ")}{conversation.capabilities?.edit ? translateUi("Supported") : translateUi("Unavailable")}</p>
+        <p>{translateUi("Receive media: ")}{conversation.capabilities?.media?.inbound.join(", ") || translateUi("None")}</p>
+        <p>{translateUi("Send media: ")}{conversation.capabilities?.media?.outbound.join(", ") || translateUi("None")}</p>
       </div>
       <form
         className="space-y-4 p-5"
@@ -258,7 +262,7 @@ export function InitiatedMessageSettings({
           try {
             await update.mutateAsync({ id: conversation.id, ...values });
             settings.reset(values);
-            toast.success("Message settings saved");
+            toast.success(translateUi("Message settings saved"));
           } catch {
             /* Mutation error is displayed below. */
           }
@@ -266,16 +270,11 @@ export function InitiatedMessageSettings({
       >
         <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
           <div className="space-y-1">
-            <Label htmlFor="allow-agent-initiated">
-              Allow unprompted messages
-            </Label>
+            <Label htmlFor="allow-agent-initiated">{translateUi("Allow unprompted messages")}</Label>
             <p
               id="initiated-warning"
               className="text-14 text-muted-foreground"
-            >
-              This lets the assigned agent message this chat without anyone
-              asking first, including alerts and scheduled updates.
-            </p>
+            >{translateUi("This lets the assigned agent message this chat without anyone asking first, including alerts and scheduled updates.")}</p>
           </div>
           <Switch
             id="allow-agent-initiated"
@@ -297,9 +296,7 @@ export function InitiatedMessageSettings({
             variant="primary"
             isLoading={update.isPending}
             disabled={!settings.formState.isDirty || Boolean(unavailable)}
-          >
-            Save
-          </Button>
+          >{translateUi("Save")}</Button>
         </div>
       </form>
       {supported && addressable && (
@@ -319,14 +316,14 @@ export function InitiatedMessageSettings({
                 });
                 message.reset({ text: "" });
                 attempt.current = null;
-                toast.success("Platform accepted the test message");
+                toast.success(translateUi("Platform accepted the test message"));
               } catch {
                 /* Keep the delivery key for an explicit retry of the same message. */
               }
             })(event);
           }}
         >
-          <Label htmlFor="channel-test-message">Send test message</Label>
+          <Label htmlFor="channel-test-message">{translateUi("Send test message")}</Label>
           <Input
             id="channel-test-message"
             {...message.register("text")}
@@ -336,22 +333,18 @@ export function InitiatedMessageSettings({
               !conversation.is_active ||
               !botOwnerId
             }
-            placeholder="Your test message"
+            placeholder={translateUi("Your test message")}
           />
           {!botOwnerId && botOwnerError ? (
             <ErrorBanner
-              message="This bot's details could not be loaded, so test messages can't be sent."
+              message={translateUi("This bot's details could not be loaded, so test messages can't be sent.")}
               onRetry={onRetryBotOwner}
             />
           ) : !conversation.allow_agent_initiated ? (
-            <p className="text-14 text-muted-foreground">
-              Save the setting above before sending a test message.
-            </p>
+            <p className="text-14 text-muted-foreground">{translateUi("Save the setting above before sending a test message.")}</p>
           ) : (
             !botOwnerId && (
-              <p className="text-14 text-muted-foreground">
-                Sending is available once this bot&apos;s details load.
-              </p>
+              <p className="text-14 text-muted-foreground">{translateUi("Sending is available once this bot's details load.")}</p>
             )
           )}
           {message.formState.errors.text && (
@@ -370,9 +363,7 @@ export function InitiatedMessageSettings({
                 !botOwnerId ||
                 !message.formState.isValid
               }
-            >
-              Send test message
-            </Button>
+            >{translateUi("Send test message")}</Button>
           </div>
         </form>
       )}
@@ -383,6 +374,7 @@ export function InitiatedMessageSettings({
 // -- Page --
 
 export function ChannelConversationDetailPage() {
+  useUiTranslation();
   const { botId, conversationId } = useParams({ strict: false }) as {
     botId: string;
     conversationId: string;
@@ -435,17 +427,15 @@ export function ChannelConversationDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={activities.length ? "Channel activity" : "Messages"}
-        description={activities.length ? `Conversation ${conversationId.slice(0, 12)}…` : `Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
+        title={activities.length ? translateUi("Channel activity") : translateUi("Messages")}
+        description={activities.length ? translateUi("Conversation {{value1}}…", { value1: conversationId.slice(0, 12) }) : translateUi("Conversation {{id}}... -- {{count}} messages", { id: conversationId.slice(0, 12), count: total })}
         actions={
           <Button
             variant="outline"
             onClick={() =>
               void navigate({ to: `/channel-bots/${botId}` as string })
             }
-          >
-            Back to Bot
-          </Button>
+          >{translateUi("Back to Bot")}</Button>
         }
       />
 
@@ -453,7 +443,7 @@ export function ChannelConversationDetailPage() {
       {bot && (
         <div className="flex flex-wrap items-center gap-2 text-14 text-muted-foreground">
           <Badge variant="secondary">{bot.platform}</Badge>
-          <span>Conversation ID:</span>
+          <span>{translateUi("Conversation ID:")}</span>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-14">
             {conversationId.slice(0, 16)}
           </code>
@@ -461,7 +451,7 @@ export function ChannelConversationDetailPage() {
       )}
 
       {conversationError && (
-        <ErrorBanner message="Failed to load conversation settings." />
+        <ErrorBanner message={translateUi("Failed to load conversation settings.")} />
       )}
       {activities.length > 0 && (
         <>
@@ -478,25 +468,21 @@ export function ChannelConversationDetailPage() {
           onRetryBotOwner={() => void refetchBot()}
         />
       )}
-      {activities.length > 0 && <h2 className="type-card-title">Message history</h2>}
+      {activities.length > 0 && <h2 className="type-card-title">{translateUi("Message history")}</h2>}
       {/* Message list */}
       {error ? (
         <ErrorBanner
-          message="Failed to load messages. Please try again."
+          message={translateUi("Failed to load messages. Please try again.")}
           onRetry={refetch}
         />
-      ) : isLoading ? <p className="text-13 text-muted-foreground">Loading message history…</p> : messages.length === 0 && activities.length > 0 ? (
-        <p className="text-13 text-muted-foreground">No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.</p>
+      ) : isLoading ? <p className="text-13 text-muted-foreground">{translateUi("Loading message history…")}</p> : messages.length === 0 && activities.length > 0 ? (
+        <p className="text-13 text-muted-foreground">{translateUi("No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.")}</p>
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="type-row-title text-muted-foreground">
-              No Messages
-            </p>
-            <p className="text-13 text-muted-foreground">
-              No messages in this conversation yet.
-            </p>
+            <p className="type-row-title text-muted-foreground">{translateUi("No Messages")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("No messages in this conversation yet.")}</p>
           </div>
         </div>
       ) : (
@@ -510,9 +496,8 @@ export function ChannelConversationDetailPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-13 text-text-tertiary">
-                Showing {String((page - 1) * perPage + 1)}-
-                {String(Math.min(page * perPage, total))} of {String(total)}
+              <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((page - 1) * perPage + 1)}-
+                {String(Math.min(page * perPage, total))}{translateUi(" of ")}{String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
@@ -522,8 +507,7 @@ export function ChannelConversationDetailPage() {
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-13 text-text-tertiary">
-                  Page {String(page)} of {String(totalPages)}
+                <span className="text-13 text-text-tertiary">{translateUi("Page ")}{String(page)}{translateUi(" of ")}{String(totalPages)}
                 </span>
                 <Button
                   variant="outline"

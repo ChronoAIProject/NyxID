@@ -1,8 +1,6 @@
 import type { PropsWithChildren, ReactNode } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -15,13 +13,10 @@ import {
   type ViewStyle,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts, radius, TOUCH_TARGET } from "../../theme/designTokens";
-import { AndroidKeyboardAvoidingView } from "./AndroidKeyboardAvoidingView";
+import { KeyboardViewport } from "./KeyboardViewport";
 import { PageScrollView } from "./ScrollEdgeFades";
 
 export function WorkspacePage({
@@ -46,7 +41,6 @@ export function WorkspacePage({
   contentStyle?: StyleProp<ViewStyle>;
 }>) {
   const { colors } = useTheme();
-  const insets = useSafeAreaInsets();
   const content = (
     <>
       {showHeading && (
@@ -112,17 +106,7 @@ export function WorkspacePage({
       edges={["bottom", "left", "right"]}
       style={[styles.fill, { backgroundColor: colors.bg }]}
     >
-      {Platform.OS === "android" ? (
-        <AndroidKeyboardAvoidingView>{body}</AndroidKeyboardAvoidingView>
-      ) : (
-        <KeyboardAvoidingView
-          style={styles.fill}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-          keyboardVerticalOffset={insets.top + 56}
-        >
-          {body}
-        </KeyboardAvoidingView>
-      )}
+      <KeyboardViewport>{body}</KeyboardViewport>
     </SafeAreaView>
   );
 }
@@ -371,7 +355,7 @@ export function Notice({
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
+  fill: { flex: 1, minHeight: 0 },
   content: { padding: 20, gap: 16, flexGrow: 1 },
   heading: { gap: 8 },
   title: {

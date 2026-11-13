@@ -1861,6 +1861,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
         chrono_probe_url: None,
+        invocation_diagnostics_enabled: false,
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
@@ -2801,6 +2802,7 @@ pub(crate) fn test_user_service(
         updated_at: chrono::Utc::now(),
         state_version: 1,
         rotation_predecessor_id: None,
+        credential_verification: None,
     }
 }
 
@@ -2922,6 +2924,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         git_http: None,
         concurrency_policy: None,
         inference_admin_modified: false,
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing: None,
         auth_notes: None,
         known_limitations: None,
@@ -3242,6 +3246,63 @@ pub async fn pause_committed_admission(db: &mongodb::Database) {
         pause.entered.notify_one();
         pause.resume.notified().await;
     }
+}
+
+/// A typed content-free row for lifecycle tests. Each test chooses the exact
+/// source references, which must round-trip through the production model.
+pub(crate) async fn seed_notification_purge_probe(
+    db: &mongodb::Database,
+    user_id: &str,
+    references: Document,
+) -> String {
+    use crate::models::assistant_notification::{
+        AssistantNotification, COLLECTION_NAME, NotificationKind, NotificationSource,
+    };
+    let id = Uuid::new_v4().to_string();
+    let mut source = doc! {"type":"conversation", "id":Uuid::new_v4().to_string()};
+    source.extend(references.clone());
+    let source: NotificationSource = bson::from_document(source).unwrap();
+    let stored_source = bson::to_document(&source).unwrap();
+    for (key, value) in references {
+        assert_eq!(stored_source.get(&key), Some(&value), "source field {key}");
+    }
+    let now = chrono::Utc::now();
+    db.collection::<AssistantNotification>(COLLECTION_NAME)
+        .insert_one(AssistantNotification {
+            id: id.clone(),
+            user_id: user_id.into(),
+            kind: NotificationKind::AgentUpdate,
+            source,
+            source_key: id.clone(),
+            coalesced: false,
+            unread: true,
+            count: 1,
+            read_at: None,
+            resolved_at: None,
+            resolution: None,
+            card_expires_at: None,
+            outcome: None,
+            reason: None,
+            push: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, present: bool) {
+    assert_eq!(
+        db.collection::<Document>("assistant_notifications")
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .is_some(),
+        present,
+        "notification {id} presence after source transition"
+    );
 }
 
 #[cfg(test)]

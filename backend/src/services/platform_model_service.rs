@@ -74,17 +74,21 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// Unlike require(), unknown/future capabilities must fail closed. Local code
-/// support and the whole observed fleet must agree before any activation.
-pub async fn require_execution_ready(db: &Database) -> AppResult<()> {
+/// Publishing or enabling model authority requires a strictly clean fleet.
+pub async fn require_activation_ready(db: &Database) -> AppResult<()> {
     for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
-        if !security_readiness_service::CAPABILITIES.contains(&capability)
-            || !security_readiness_service::report(db, capability)
-                .await?
-                .ready
-        {
+        if !security_readiness_service::CAPABILITIES.contains(&capability) {
             return Err(AppError::SecurityReadinessUnavailable);
         }
+        security_readiness_service::require_activation(db, capability).await?;
+    }
+    Ok(())
+}
+
+/// Runtime use may continue under roster warnings after durable activation.
+pub async fn require_execution_ready(db: &Database) -> AppResult<()> {
+    for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
+        security_readiness_service::require_serving(db, capability).await?;
     }
     Ok(())
 }
@@ -281,7 +285,7 @@ pub async fn update(
     }
     if input.lifecycle == Lifecycle::Active && (row.lifecycle != Lifecycle::Active || input.enabled)
     {
-        require_execution_ready(db).await?;
+        require_activation_ready(db).await?;
     }
     if let Some(id) = &input.billing_service_id
         && (row.billing_service_id != input.billing_service_id || input.enabled)
@@ -538,7 +542,7 @@ pub async fn set_routes(
     }
     // An active route edit is a new contract publication, never an unchecked swap.
     if row.lifecycle == Lifecycle::Active {
-        require_execution_ready(db).await?;
+        require_activation_ready(db).await?;
     }
     increment(&mut row, true)?;
     let route_revision = RoutingRevision {
@@ -916,7 +920,7 @@ pub async fn retail_explanations(
     ttl: u64,
     billing_enabled: bool,
 ) -> AppResult<HashMap<String, Vec<super::billing::model_tariffs::Explanation>>> {
-    use super::billing::model_tariffs;
+    use super::{billing::model_tariffs, platform_model_execution::certification};
     use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as RATES};
     let ids: Vec<&str> = models
         .iter()
@@ -965,15 +969,27 @@ pub async fn retail_explanations(
     };
     // Discovery must never fail because readiness is unconfigured or unknown;
     // image limits are simply omitted. Execution enforces readiness itself.
-    let image_ready = match security_readiness_service::report(
+    let image_ready = match security_readiness_service::serving_report(
         db,
         super::platform_model_execution::images::READINESS,
     )
     .await
     {
-        Ok(report) => report.ready,
+        Ok(report) => report.serving_ready,
         Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
         Err(error) => return Err(error),
+    };
+    let contracts_ready = if tariffs
+        .iter()
+        .any(|t| certification::family_contract(&t.contract))
+    {
+        match security_readiness_service::serving_report(db, certification::READINESS).await {
+            Ok(report) => report.serving_ready,
+            Err(AppError::SecurityReadinessUnavailable) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        true
     };
     let routing_ids: Vec<_> = models
         .iter()
@@ -1004,11 +1020,19 @@ pub async fn retail_explanations(
                                 == crate::models::platform_model_tariff::TariffLane::PlatformKey
                     })
                     .map(|mut price| {
+                        let active_tariff = tariffs
+                            .iter()
+                            .find(|t| Some(&t.id) == price.active_tariff_id.as_ref());
+                        if !contracts_ready
+                            && active_tariff
+                                .is_some_and(|t| certification::family_contract(&t.contract))
+                        {
+                            price.available = false;
+                            price.blocking_reason = Some("model_contract_fleet_not_ready".into());
+                        }
                         if price.available
                             && price.variant.is_empty()
-                            && let Some(tariff) = tariffs
-                                .iter()
-                                .find(|t| Some(&t.id) == price.active_tariff_id.as_ref())
+                            && let Some(tariff) = active_tariff
                             && let Some(routing) = routings.iter().find(|r| {
                                 Some(&r.id) == model.routing_revision_id.as_ref()
                                     && r.model_id == model.id

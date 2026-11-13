@@ -294,6 +294,7 @@ export function isWorkspaceSidebarRoot(name: string | undefined) {
       "Plugins",
       "Services",
       "Activity",
+      "Notifications",
       "WorkspaceSearch",
       "WorkspaceRecents",
     ].includes(name)

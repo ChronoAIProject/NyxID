@@ -483,7 +483,7 @@ pub async fn validate_config(
 ) -> AppResult<()> {
     if config.purpose != crate::models::downstream_service::PlatformKeyPurpose::Ordinary {
         if config.enabled {
-            super::security_readiness_service::require(
+            super::security_readiness_service::require_activation(
                 db,
                 super::platform_model_service::REGISTRY_READINESS,
             )

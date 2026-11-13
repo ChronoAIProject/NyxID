@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { MachineGrantCard } from "@/components/shared/machine-grant-card";
 import { useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
@@ -53,35 +56,28 @@ function formatExternalSubject(
 }
 
 function ServiceAccess({ consent }: { readonly consent: Consent }) {
+  useUiTranslation();
   const allowedServiceIds = consent.allowed_service_ids ?? [];
   const allowedServices = consent.allowed_services ?? [];
 
   if (consent.legacy_unrestricted) {
     return (
       <div className="space-y-1">
-        <Badge variant="warning" className="text-12">
-          Legacy grant
-        </Badge>
-        <p className="text-13 text-muted-foreground">
-          Full service access until the app asks you to sign in again.
-        </p>
+        <Badge variant="warning" className="text-12">{translateUi("Legacy grant")}</Badge>
+        <p className="text-13 text-muted-foreground">{translateUi("Full service access until the app asks you to sign in again.")}</p>
       </div>
     );
   }
 
   if (consent.allow_all_services) {
     return (
-      <Badge variant="secondary" className="text-12">
-        All services
-      </Badge>
+      <Badge variant="secondary" className="text-12">{translateUi("All services")}</Badge>
     );
   }
 
   if (allowedServiceIds.length === 0) {
     return (
-      <Badge variant="secondary" className="text-12">
-        No services
-      </Badge>
+      <Badge variant="secondary" className="text-12">{translateUi("No services")}</Badge>
     );
   }
 
@@ -94,12 +90,12 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
           className="text-12"
           title={
             service.deleted
-              ? "Deleted service"
+              ? translateUi("Deleted service")
               : service.catalog_service_name ?? service.slug ?? service.id
           }
         >
           {service.deleted
-            ? `${service.id} (deleted)`
+            ? translateUi("{{value1}} (deleted)", { value1: service.id })
             : service.catalog_service_name ?? service.label}
         </Badge>
       ))}
@@ -108,6 +104,7 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
 }
 
 export function ConsentsPage() {
+  useUiTranslation();
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
   const navigate = useNavigate();
   const currentTab = parseTab(searchParams.tab, CONSENTS_TABS, CONSENTS_TAB_DEFAULT);
@@ -121,15 +118,15 @@ export function ConsentsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Access & Authorizations"
-        description="Manage apps with access to your account and credentials held on your behalf."
+        title={translateUi("Access & Authorizations")}
+        description={translateUi("Manage apps with access to your account and credentials held on your behalf.")}
       />
 
       <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <div className="flex items-end justify-between gap-4">
           <TabsList>
-            <TabsTrigger value="apps">Authorized Apps</TabsTrigger>
-            <TabsTrigger value="authorizations">Authorizations</TabsTrigger>
+            <TabsTrigger value="apps">{translateUi("Authorized Apps")}</TabsTrigger>
+            <TabsTrigger value="authorizations">{translateUi("Authorizations")}</TabsTrigger>
           </TabsList>
           <div className="pb-1">
             <ViewToggle
@@ -151,6 +148,7 @@ export function ConsentsPage() {
 }
 
 function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
+  useUiTranslation();
   const { data, isLoading, error, refetch } = useMyConsents();
   const revokeMutation = useRevokeConsent();
   const [revokeClientId, setRevokeClientId] = useState<string | null>(null);
@@ -164,10 +162,10 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
     if (!revokeClientId) return;
     try {
       await revokeMutation.mutateAsync(revokeClientId);
-      toast.success("Consent revoked");
+      toast.success(translateUi("Consent revoked"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to revoke consent",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to revoke consent"),
       );
     } finally {
       setRevokeClientId(null);
@@ -188,7 +186,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   }
 
   if (error) {
-    return <ErrorBanner message="Failed to load consents. Please try again." onRetry={refetch} />;
+    return <ErrorBanner message={translateUi("Failed to load consents. Please try again.")} onRetry={refetch} />;
   }
 
   if (consents.length === 0) {
@@ -196,10 +194,8 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="type-row-title text-muted-foreground">No Authorized Apps</p>
-          <p className="text-13 text-muted-foreground">
-            No applications have been authorized.
-          </p>
+          <p className="type-row-title text-muted-foreground">{translateUi("No Authorized Apps")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("No applications have been authorized.")}</p>
         </div>
       </div>
     );
@@ -235,22 +231,20 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               ))}
             </div>
             <div className="mt-3 space-y-1">
-              <p className="type-secondary-emphasis text-muted-foreground">
-                Service access
-              </p>
+              <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Service access")}</p>
               <ServiceAccess consent={consent} />
-              <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>Machine permissions</Button>
+              <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>{translateUi("Machine permissions")}</Button>
             </div>
             <div className="mt-3 space-y-1">
               <p className="text-13 text-muted-foreground">
-                <span className="font-medium">Granted:</span>{" "}
+                <span className="font-medium">{translateUi("Granted:")}</span>{" "}
                 {formatDate(consent.granted_at)}
               </p>
               <p className="text-13 text-muted-foreground">
-                <span className="font-medium">Expires:</span>{" "}
+                <span className="font-medium">{translateUi("Expires:")}</span>{" "}
                 {consent.expires_at
                   ? formatDate(consent.expires_at)
-                  : "Never"}
+                  : translateUi("Never")}
               </p>
             </div>
           </div>
@@ -286,22 +280,20 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 ))}
               </div>
               <div className="mt-3 space-y-1">
-                <p className="type-secondary-emphasis text-muted-foreground">
-                  Service access
-                </p>
+                <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Service access")}</p>
                 <ServiceAccess consent={consent} />
-                <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>Machine permissions</Button>
+                <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>{translateUi("Machine permissions")}</Button>
               </div>
               <div className="mt-3 space-y-1">
                 <p className="text-13 text-muted-foreground">
-                  <span className="font-medium">Granted:</span>{" "}
+                  <span className="font-medium">{translateUi("Granted:")}</span>{" "}
                   {formatDate(consent.granted_at)}
                 </p>
                 <p className="text-13 text-muted-foreground">
-                  <span className="font-medium">Expires:</span>{" "}
+                  <span className="font-medium">{translateUi("Expires:")}</span>{" "}
                   {consent.expires_at
                     ? formatDate(consent.expires_at)
-                    : "Never"}
+                    : translateUi("Never")}
                 </p>
               </div>
             </div>
@@ -315,12 +307,12 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Application</TableHead>
-                <TableHead>Scopes</TableHead>
-                <TableHead>Service access</TableHead>
-                <TableHead>Granted</TableHead>
-                <TableHead>Expires</TableHead>
-                <TableHead className="w-[60px]">Actions</TableHead>
+                <TableHead>{translateUi("Application")}</TableHead>
+                <TableHead>{translateUi("Scopes")}</TableHead>
+                <TableHead>{translateUi("Service access")}</TableHead>
+                <TableHead>{translateUi("Granted")}</TableHead>
+                <TableHead>{translateUi("Expires")}</TableHead>
+                <TableHead className="w-[60px]">{translateUi("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -344,7 +336,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   </TableCell>
                   <TableCell>
                     <ServiceAccess consent={consent} />
-                    <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>Machine permissions</Button>
+                    <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>{translateUi("Machine permissions")}</Button>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDate(consent.granted_at)}
@@ -352,7 +344,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   <TableCell className="text-muted-foreground">
                     {consent.expires_at
                       ? formatDate(consent.expires_at)
-                      : "Never"}
+                      : translateUi("Never")}
                   </TableCell>
                   <TableCell>
                     <Button
@@ -373,7 +365,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
 
       <Dialog open={machineClientId !== null} onOpenChange={(open) => { if (!open) setMachineClientId(null); }}>
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader><DialogTitle>{consents.find((consent) => consent.client_id === machineClientId)?.client_name} · Machine permissions</DialogTitle><DialogDescription>Manage the Machine grant for this account and OAuth client.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>{consents.find((consent) => consent.client_id === machineClientId)?.client_name}{translateUi(" · Machine permissions")}</DialogTitle><DialogDescription>{translateUi("Manage the Machine grant for this account and OAuth client.")}</DialogDescription></DialogHeader>
           {machineClientId && <MachineGrantCard source={{ kind: "oauth", id: machineClientId }} allowedServiceIds={machineTarget?.allow_all_services ? undefined : machineTarget?.allowed_service_ids ?? []} />}
         </DialogContent>
       </Dialog>
@@ -385,30 +377,19 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Revoke Access</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to revoke access for{" "}
+            <DialogTitle>{translateUi("Revoke Access")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to revoke access for")}{" "}
               {revokeTarget
-                ? `"${revokeTarget.client_name}"`
-                : "this application"}
-              ? The application will need your consent again before it can
-              refresh access or use protected NyxID endpoints. Issued OAuth access
-              tokens are checked against the live consent version on each protected request.
-              Machine permissions are revoked with this consent and old consent
-              versions cannot be used to resume Machine work.
-            </DialogDescription>
+                ? translateUi("\"{{client_name}}\"", { client_name: revokeTarget.client_name })
+                : translateUi("this application")}{translateUi("? The application will need your consent again before it can refresh access or use protected NyxID endpoints. Issued OAuth access tokens are checked against the live consent version on each protected request. Machine permissions are revoked with this consent and old consent versions cannot be used to resume Machine work.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRevokeClientId(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRevokeClientId(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
-            >
-              Revoke Access
-            </Button>
+            >{translateUi("Revoke Access")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -417,6 +398,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
 }
 
 function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
+  useUiTranslation();
   const { data, isLoading, error, refetch } = useMyBrokerBindings();
   const revokeMutation = useRevokeBrokerBinding();
   const [revokeBindingHash, setRevokeBindingHash] = useState<string | null>(
@@ -432,12 +414,12 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
     if (!revokeBindingHash) return;
     try {
       await revokeMutation.mutateAsync(revokeBindingHash);
-      toast.success("Authorization revoked");
+      toast.success(translateUi("Authorization revoked"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to revoke authorization",
+          : "Failed to revoke authorization"),
       );
     } finally {
       setRevokeBindingHash(null);
@@ -458,7 +440,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   }
 
   if (error) {
-    return <ErrorBanner message="Failed to load authorizations. Please try again." onRetry={refetch} />;
+    return <ErrorBanner message={translateUi("Failed to load authorizations. Please try again.")} onRetry={refetch} />;
   }
 
   if (bindings.length === 0) {
@@ -466,10 +448,8 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <BiometricLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="type-row-title text-muted-foreground">No Authorizations</p>
-          <p className="text-13 text-muted-foreground">
-            No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
-          </p>
+          <p className="type-row-title text-muted-foreground">{translateUi("No Authorizations")}</p>
+          <p className="text-13 text-muted-foreground">{translateUi("No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.")}</p>
         </div>
       </div>
     );
@@ -515,11 +495,11 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
             </div>
             <div className="mt-3 space-y-1">
               <p className="text-13 text-muted-foreground">
-                <span className="font-medium">Created:</span>{" "}
+                <span className="font-medium">{translateUi("Created:")}</span>{" "}
                 {formatDate(binding.created_at)}
               </p>
               <p className="text-13 text-muted-foreground">
-                <span className="font-medium">Last used:</span>{" "}
+                <span className="font-medium">{translateUi("Last used:")}</span>{" "}
                 {binding.last_used_at
                   ? formatDate(binding.last_used_at)
                   : "—"}
@@ -568,11 +548,11 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               </div>
               <div className="mt-3 space-y-1">
                 <p className="text-13 text-muted-foreground">
-                  <span className="font-medium">Created:</span>{" "}
+                  <span className="font-medium">{translateUi("Created:")}</span>{" "}
                   {formatDate(binding.created_at)}
                 </p>
                 <p className="text-13 text-muted-foreground">
-                  <span className="font-medium">Last used:</span>{" "}
+                  <span className="font-medium">{translateUi("Last used:")}</span>{" "}
                   {binding.last_used_at
                     ? formatDate(binding.last_used_at)
                     : "—"}
@@ -589,12 +569,12 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Application</TableHead>
-                <TableHead>External account</TableHead>
-                <TableHead>Scopes</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead>Last used</TableHead>
-                <TableHead className="w-[60px]">Actions</TableHead>
+                <TableHead>{translateUi("Application")}</TableHead>
+                <TableHead>{translateUi("External account")}</TableHead>
+                <TableHead>{translateUi("Scopes")}</TableHead>
+                <TableHead>{translateUi("Created")}</TableHead>
+                <TableHead>{translateUi("Last used")}</TableHead>
+                <TableHead className="w-[60px]">{translateUi("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -658,27 +638,21 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Revoke Authorization</DialogTitle>
+            <DialogTitle>{translateUi("Revoke Authorization")}</DialogTitle>
             <DialogDescription>
-              {`Are you sure you want to revoke the authorization for "${
-                revokeTarget?.client_name ?? "this app"
-              }"? The app will need to ask for your consent again before it can act on your behalf.`}
+              {translateUi("Are you sure you want to revoke the authorization for \"{{value1}}\"? The app will need to ask for your consent again before it can act on your behalf.", { value1: revokeTarget?.client_name ?? "this app" })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => setRevokeBindingHash(null)}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
-            >
-              Revoke
-            </Button>
+            >{translateUi("Revoke")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

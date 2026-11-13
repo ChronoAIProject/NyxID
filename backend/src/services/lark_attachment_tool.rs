@@ -16,6 +16,10 @@ pub const COMPOSITE_PATH: &str =
 pub const FIELDS_OPERATION: &str = "bitable_fields_list";
 pub const CREATE_OPERATION: &str = "bitable_record_create";
 const MARK: &str = "x-nyxid-attachment-input";
+pub(crate) mod diagnostics;
+pub(crate) mod eligibility;
+pub(crate) mod routing;
+use eligibility::Reason;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,9 +53,7 @@ pub struct ManagedOperation {
 }
 
 pub fn refused() -> AppError {
-    AppError::Forbidden(
-        "Attachment uploads require a trusted catalog operation in a live owner chat".into(),
-    )
+    Reason::UntrustedContract.error()
 }
 
 /// The managed route is an internal invocation identity, never a provider path.
@@ -59,7 +61,7 @@ pub(crate) fn refuse_reserved_path(path: &str) -> AppResult<()> {
     let path = path.strip_prefix('/').unwrap_or(path);
     let path = path.strip_prefix("open-apis/").unwrap_or(path);
     if path.starts_with("nyxid/managed/bitable/") {
-        return Err(refused());
+        return Err(Reason::LiveExecutionRequired.error());
     }
     Ok(())
 }
@@ -96,8 +98,10 @@ pub(super) fn inputs(endpoint: &McpToolEndpoint) -> Value {
     })
 }
 
-fn validate_mark(mark: &Value, schema: &Value) -> AppResult<AttachmentInput> {
-    let contract: AttachmentInput = serde_json::from_value(mark.clone()).map_err(|_| refused())?;
+fn validate_mark(mark: &Value, schema: &Value) -> Option<AttachmentInput> {
+    // Projection is a probe, not an execution refusal. In particular the
+    // composite is probed before its dependency set installs Managed below.
+    let contract: AttachmentInput = serde_json::from_value(mark.clone()).ok()?;
     if contract.version != 1
         || contract.field != "file"
         || contract.size_field != "size"
@@ -117,9 +121,9 @@ fn validate_mark(mark: &Value, schema: &Value) -> AppResult<AttachmentInput> {
                 "file"
             ])
     {
-        return Err(refused());
+        return None;
     }
-    Ok(contract)
+    Some(contract)
 }
 
 /// Reconstruct authority from the compiled overlay and resolved SYSTEM catalog
@@ -164,8 +168,8 @@ pub fn stored_projection(
         if inputs(endpoint) != inputs(&expected) {
             return None;
         }
-        let mark = &spec["paths"][UPLOAD_PATH][expected.method.to_ascii_lowercase()][MARK];
-        let contract = validate_mark(mark, expected.request_body_schema.as_ref()?).ok()?;
+        let mark = &spec["paths"][&expected.path][expected.method.to_ascii_lowercase()][MARK];
+        let contract = validate_mark(mark, expected.request_body_schema.as_ref()?)?;
         Some(Projection::Stored(contract))
     })();
     Some(trusted.unwrap_or(candidate))
@@ -294,16 +298,25 @@ pub async fn filter_discovery(
     {
         return Ok(());
     }
-    let enabled = writes_enabled(db, chat).await?;
+    let enabled = match eligibility::require_chat(db, chat).await {
+        Ok(()) => true,
+        Err(error) if eligibility::is_refusal(&error) => false,
+        Err(error) => return Err(error),
+    };
     for service in services {
-        service.endpoints.retain(|endpoint| {
-            !is_attachment_operation(endpoint)
-                || (enabled
-                    && matches!(
-                        endpoint.attachment_input,
-                        Some(Projection::Stored(_) | Projection::Managed(_))
-                    ))
-        });
+        let mut retained = Vec::new();
+        for endpoint in std::mem::take(&mut service.endpoints) {
+            if !is_attachment_operation(&endpoint) {
+                retained.push(endpoint);
+            } else if enabled {
+                match eligibility::require_operation(db, service, &endpoint).await {
+                    Ok(_) => retained.push(endpoint),
+                    Err(error) if eligibility::is_refusal(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        service.endpoints = retained;
     }
     Ok(())
 }
@@ -316,23 +329,29 @@ pub async fn materialize(
     endpoint: &McpToolEndpoint,
     args: &Value,
 ) -> AppResult<Materialized> {
-    if !matches!(endpoint.attachment_input, Some(Projection::Stored(_)))
-        || endpoint.async_operation.is_some()
-        || !writes_enabled(db, chat).await?
-    {
-        return Err(refused());
+    eligibility::require_eligible(db, chat, service, endpoint).await?;
+    if !matches!(endpoint.attachment_input, Some(Projection::Stored(_))) {
+        return Err(Reason::UntrustedContract.error());
     }
-    let chat = chat.ok_or_else(refused)?;
-    validate_contract(db, service, endpoint).await?;
-    let id = args["attachment_id"].as_str().ok_or_else(refused)?;
-    let attachment = uploads::for_egress(db, chat, id).await?;
+    let chat = chat.ok_or_else(|| Reason::NotLive.error())?;
+    let id = args["attachment_id"].as_str().ok_or_else(|| {
+        AppError::BadRequest(
+            "attachment_write_attachment_id_required: Supply an attachment_id from this owner chat"
+                .into(),
+        )
+    })?;
+    let attachment = uploads::for_egress(db, chat, id)
+        .await
+        .map_err(|e| diagnostics::Reason::AttachmentUnreadable.error(e))?;
     let size = usize::try_from(attachment.size())
         .ok()
         .filter(|n| *n > 0 && *n <= super::attachment_extraction::MAX_BYTES)
-        .ok_or_else(refused)?;
+        .ok_or_else(|| diagnostics::Reason::AttachmentSize.error(AppError::BadRequest("attachment_write_invalid_attachment_size: Choose a nonempty attachment within upload limits".into())))?;
     let fields = multipart::fields(args, attachment.label(), size)?;
     let reservation = byte_budget::reserve(size).await?;
-    let bytes = uploads::egress_bytes(db, keys, chat, &attachment).await?;
+    let bytes = uploads::egress_bytes(db, keys, chat, &attachment)
+        .await
+        .map_err(|e| diagnostics::Reason::AttachmentUnreadable.error(e))?;
     let (body, content_type) = multipart::encode(&fields, attachment.content_type(), &bytes)?;
     Ok(Materialized {
         body,
@@ -355,11 +374,10 @@ pub async fn validate_binding(
     endpoint: &McpToolEndpoint,
     binding: &Binding,
 ) -> AppResult<()> {
-    if !writes_enabled(db, Some(&binding.chat)).await? {
-        return Err(refused());
-    }
-    validate_contract(db, service, endpoint).await?;
-    uploads::for_egress(db, &binding.chat, &binding.attachment_id).await?;
+    eligibility::require_eligible(db, Some(&binding.chat), service, endpoint).await?;
+    uploads::for_egress(db, &binding.chat, &binding.attachment_id)
+        .await
+        .map_err(|e| diagnostics::Reason::AttachmentUnreadable.error(e))?;
     Ok(())
 }
 
@@ -377,13 +395,13 @@ pub(super) async fn validate_contract(
         McpToolSource::Platform {
             downstream_service_id,
         } => downstream_service_id,
-        _ => return Err(refused()),
+        _ => return Err(Reason::ConnectionRequired.error()),
     };
     let catalog = db
         .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
         .find_one(doc! {"_id":catalog_id,"is_active":true})
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::CatalogUnavailable.error())?;
     if let McpToolSource::UserManaged {
         user_service_id, ..
     } = &service.source
@@ -394,37 +412,50 @@ pub(super) async fn validate_contract(
         )
         .find_one(doc! {"_id":user_service_id,"is_active":true,"catalog_service_id":catalog_id})
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
         let mounted = super::service_history::collection::<user_endpoint::UserEndpoint>(
             db,
             user_endpoint::COLLECTION_NAME,
         )
         .find_one(doc! {"_id":&instance.endpoint_id})
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
         if mounted.openapi_spec_url.is_some() {
-            return Err(refused());
+            return Err(Reason::SpecOverride.error());
         }
     }
     let row = db
         .collection::<service_endpoint::ServiceEndpoint>(service_endpoint::COLLECTION_NAME)
-        .find_one(doc! {"_id":&endpoint.endpoint_id,"service_id":catalog_id,"is_active":true})
+        .find_one(doc! {"_id":&endpoint.endpoint_id,"service_id":catalog_id})
         .await?
-        .ok_or_else(refused)?;
-    if row.publication != service_endpoint::PublicationState::Published {
-        return Err(refused());
+        .ok_or_else(|| Reason::MissingOperation.error())?;
+    if !row.is_active || row.publication != service_endpoint::PublicationState::Published {
+        return Err(Reason::NotPublished.error());
+    }
+    if row.operation_generation <= 0 {
+        return Err(Reason::InvalidGeneration.error());
+    }
+    if service
+        .durable_endpoint_metadata
+        .get(&row.id)
+        .is_some_and(|metadata| metadata.operation_generation != row.operation_generation)
+    {
+        return Err(Reason::GenerationChanged.error());
     }
     let mut loaded = super::mcp_service::service_endpoints_to_mcp(&[&row])
         .pop()
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::UntrustedContract.error())?;
     loaded.attachment_input = stored_projection(Some(&catalog), &loaded);
     if !matches!(
         loaded.attachment_input,
         Some(Projection::Stored(_) | Projection::Im(_))
-    ) || super::mcp_service::endpoint_contract_digest(&loaded)
+    ) {
+        return Err(Reason::UntrustedContract.error());
+    }
+    if super::mcp_service::endpoint_contract_digest(&loaded)
         != super::mcp_service::endpoint_contract_digest(endpoint)
     {
-        return Err(refused());
+        return Err(Reason::ContractChanged.error());
     }
     Ok(())
 }
@@ -443,20 +474,61 @@ pub fn input_schema(endpoint: &McpToolEndpoint) -> Value {
     schema
 }
 
+/// Typed fields-list only; generic proxy response semantics remain unchanged.
+pub(crate) fn validate_field_response(status: u16, text: &str) -> AppResult<()> {
+    use diagnostics::{self as diagnostic, Reason as Failure};
+    let body = serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+    let code = body["code"].as_i64();
+    if !(200..300).contains(&status) || code.is_some_and(|code| code != 0) {
+        diagnostic::provider_failure(Failure::FieldReadProviderError, status, code);
+        return Err(AppError::BadRequest(format!(
+            "Base field read failed (Lark code {}); verify connection scopes and Base access",
+            code.map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        )));
+    }
+    if code != Some(0) || !body["data"]["items"].is_array() {
+        diagnostic::provider_failure(Failure::FieldReadInvalidResponse, status, code);
+        return Err(AppError::BadRequest(
+            "Base field schema returned an invalid response".into(),
+        ));
+    }
+    diagnostic::success(Some(status));
+    Ok(())
+}
+
 pub fn validate_response(status: u16, text: &str) -> AppResult<()> {
+    use diagnostics::{self as diagnostic, Reason as Failure};
     let body: Value = serde_json::from_str(text).map_err(|_| {
+        diagnostic::failure(Failure::UploadInvalidResponse, Some(status), None);
         AppError::BadRequest("Attachment upload returned an invalid response".into())
     })?;
-    if !(200..300).contains(&status)
-        || body["code"].as_i64() != Some(0)
-        || body["data"]["file_token"]
-            .as_str()
-            .is_none_or(str::is_empty)
+    if (200..300).contains(&status) && body["code"].as_i64().is_none() {
+        diagnostic::failure(Failure::UploadInvalidResponse, Some(status), None);
+        return Err(AppError::BadRequest(
+            "Attachment upload returned an invalid response".into(),
+        ));
+    }
+    if !(200..300).contains(&status) || body["code"].as_i64() != Some(0) {
+        diagnostic::provider_failure(Failure::UploadProviderError, status, body["code"].as_i64());
+        return Err(AppError::BadRequest(format!(
+            "Attachment upload failed (Lark code {}); no usable file_token was returned; verify the connection scopes and Base access",
+            body["code"]
+                .as_i64()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        )));
+    }
+    if body["data"]["file_token"]
+        .as_str()
+        .is_none_or(str::is_empty)
     {
+        diagnostic::failure(Failure::UploadInvalidResponse, Some(status), Some(0));
         return Err(AppError::BadRequest(
             "Attachment upload failed; no usable file_token was returned".into(),
         ));
     }
+    diagnostic::success(Some(status));
     Ok(())
 }
 
@@ -680,8 +752,8 @@ mod tests {
         }
         assert_ne!(before, endpoint_contract_digest(&endpoint));
         let schema = endpoint.request_body_schema.as_ref().unwrap();
-        assert!(validate_mark(&json!({"field":"size","size_field":"size","filename_field":"file_name","version":1}),schema).is_err());
-        assert!(validate_mark(&json!({"field":"file","size_field":"size","filename_field":"file_name","version":2}),schema).is_err());
+        assert!(validate_mark(&json!({"field":"size","size_field":"size","filename_field":"file_name","version":1}),schema).is_none());
+        assert!(validate_mark(&json!({"field":"file","size_field":"size","filename_field":"file_name","version":2}),schema).is_none());
         assert!(schema.get(MARK).is_none());
     }
 }

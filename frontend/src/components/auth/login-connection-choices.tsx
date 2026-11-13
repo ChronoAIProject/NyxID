@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Link2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -103,6 +104,7 @@ export function LoginConnectionChoices({
   group: string;
   disabled: boolean;
 }) {
+  const { t } = useUiTranslation();
   const choices = loginConnectionChoices(selection, requested).filter(
     (c) => c.group === group,
   );
@@ -110,9 +112,9 @@ export function LoginConnectionChoices({
     <div className="mt-2 space-y-1 rounded-lg border border-border/70 bg-background/50 p-2">
       <p className="mb-2 flex items-center gap-1.5 text-10 font-medium text-muted-foreground">
         <Link2 className="size-3" />
-        {choices.length ? "Use an existing connection" : "Not connected"}
+        {choices.length ? t("Use an existing connection") : t("Not connected")}
       </p>
-      {choices.map(({ service, connection, permissions, ready, status }) => {
+      {choices.map(({ service, connection, permissions, ready, status, extras }) => {
         const implied =
           selection.allowAll || selection.impliedIds.includes(service.id);
         const checked = implied || selection.selectedIds.includes(service.id);
@@ -122,7 +124,7 @@ export function LoginConnectionChoices({
             className={`flex cursor-pointer items-start gap-2 rounded-md border p-2 ${checked ? "border-primary/30 bg-primary/5" : "border-transparent hover:bg-muted/40"}`}
           >
             <Checkbox
-              aria-label={`Grant connection ${service.name}`}
+              aria-label={t("Grant connection {{name}}", { name: service.name })}
               disabled={disabled || implied || (!ready && !checked)}
               checked={checked}
               onCheckedChange={() => selection.onToggle(service.id)}
@@ -136,12 +138,12 @@ export function LoginConnectionChoices({
                 <span
                   className={`text-10 ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
                 >
-                  {status}
+                  {status.startsWith("Matched +") ? t("Matched + {{count}} extra permissions", { count: extras }) : /^\d+ permissions?$/.test(status) ? t("{{count}} permissions", { count: permissions.length }) : t(status)}
                 </span>
               </span>
               <span className="block break-words text-10 text-muted-foreground">
                 {service.name}
-                {implied ? " · Included by your broader grant" : ""}
+                {implied ? t(" · Included by your broader grant") : ""}
               </span>
               <span className="flex flex-wrap gap-1">
                 {permissions.slice(0, 3).map((p) => (
@@ -155,13 +157,11 @@ export function LoginConnectionChoices({
                 ))}
                 {permissions.length > 3 && (
                   <span className="text-10 text-muted-foreground">
-                    +{permissions.length - 3} more
-                  </span>
+                    +{permissions.length - 3}{t(" more")}</span>
                 )}
               </span>
               {connection.node_id && (
-                <span className="block text-10 text-warning">
-                  Requires node access:{" "}
+                <span className="block text-10 text-warning">{t("Requires node access:")}{" "}
                   {selection.inventory.options.nodes.find(
                     (n) => n.id === connection.node_id,
                   )?.name ?? connection.node_id}
@@ -172,10 +172,7 @@ export function LoginConnectionChoices({
         );
       })}
       {!choices.length && (
-        <p className="text-11 text-muted-foreground">
-          Connect an account in AI Services to grant this access. You can still
-          use its permissions as filters.
-        </p>
+        <p className="text-11 text-muted-foreground">{t("Connect an account in AI Services to grant this access. You can still use its permissions as filters.")}</p>
       )}
     </div>
   );

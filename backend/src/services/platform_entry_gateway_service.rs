@@ -31,6 +31,15 @@ pub(crate) struct GatewayAuthority {
     key: ApiKey,
     bearer: Zeroizing<String>,
 }
+impl GatewayAuthority {
+    /// Verified credential owner for metadata-only provider refusal attribution.
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.row.credential_owner_id
+    }
+    pub(crate) fn binding_matches(&self, binding: &str) -> bool {
+        self.row.binding_id.as_deref() == Some(binding)
+    }
+}
 impl std::fmt::Debug for GatewayAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("GatewayAuthority([REDACTED])")

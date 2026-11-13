@@ -315,6 +315,15 @@ pub async fn active_for_conversation(
         .await?)
 }
 
+/// The account's single live call, if any. The unique partial `user_id`
+/// index over `live_slot` admits at most one, across every conversation.
+pub async fn active_for_user(db: &Database, user: &str) -> AppResult<Option<VoiceSession>> {
+    Ok(db
+        .collection::<VoiceSession>(COLLECTION_NAME)
+        .find_one(doc! {"user_id": user, "live_slot": true})
+        .await?)
+}
+
 pub async fn close(
     db: &Database,
     row: &VoiceSession,

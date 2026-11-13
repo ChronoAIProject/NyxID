@@ -7,13 +7,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
 
-vi.mock("@/hooks/use-keys", () => ({
-  useKeys: () => ({
+vi.mock("@/hooks/use-agent-grant-services", () => ({
+  useAgentGrantServices: () => ({
     isPending: false,
     data: [
-      { slug: "github", label: "GitHub", is_active: true },
-      { slug: "slack", label: "Slack", is_active: true },
-      { slug: "old-api", label: "Old API", is_active: false },
+      { slug: "github", label: "GitHub", executable: true },
+      { slug: "slack", label: "Slack", executable: true },
     ],
   }),
 }));
@@ -171,7 +170,7 @@ it("rejects an invalid name before calling the server and shows server refusals"
   expect(posts).toEqual([]);
 
   respond = () =>
-    new Response(JSON.stringify({ message: "A live agent already uses that name" }), {
+    new Response(JSON.stringify({ error: "conflict", message: "A live agent already uses that name" }), {
       status: 409,
     });
   const name = within(dialog).getByRole("textbox", { name: "Name" });

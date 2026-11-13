@@ -331,7 +331,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
   }, 8000,
 );
 
-it.each(["specialist", "automation", "voice"])(
+it.each(["specialist", "automation", "voice", "invocation"])(
   "leaves %s confirmation continuation to the server",
   async (kind) => {
     page.conversation.active_turn = null;
@@ -339,18 +339,18 @@ it.each(["specialist", "automation", "voice"])(
     page.acknowledgements = [
       {
         id: "12345678-1234-4123-8123-123456789012",
-        kind: "service",
+        kind: kind === "invocation" ? "action" : "service",
         status: "pending",
         summary: "Use GitHub",
         decider: kind === "specialist" ? "orchestrator" : "user",
         trigger_run_id: kind === "automation" ? "run-id" : null,
-        continuation_owner: kind === "voice" ? "server" : null,
-        continuation_receipt_id: kind === "voice" ? "12345678-1234-4123-8123-123456789013" : null,
+        continuation_owner: ["voice", "invocation"].includes(kind) ? "server" : null,
+        continuation_receipt_id: ["voice", "invocation"].includes(kind) ? "12345678-1234-4123-8123-123456789013" : null,
         decided_by: null,
         reason: null,
         service_slug: "github",
         service_name: "GitHub",
-        tool_name: null,
+        tool_name: kind === "invocation" ? "nyxid__delete_node" : null,
         created_at: "2026-09-17T00:00:00Z",
         decided_at: null,
         expires_at: "2026-09-17T00:15:00Z",
@@ -813,4 +813,17 @@ it("the page and the sidebar refresh the thread list once per agents change", as
   await new Promise((resolve) => setTimeout(resolve, 300));
   expect(lists()).toBe(before + 1);
   unmount();
+});
+
+it("2345 malformed history is friendly and refresh clears the query error", async () => {
+  const goodMessages = page.messages;
+  page.messages = [{ text: "private" }] as unknown as NyxAgentHistory["messages"];
+  const { result } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), threadsAgentId: NYXBOT,
+  }), { wrapper });
+  await waitFor(() => expect(result.current.error).toBe("Conversation history could not be loaded. Please try again."));
+  page.messages = goodMessages;
+  await act(() => result.current.refreshHistory());
+  await waitFor(() => expect(result.current.error).toBeUndefined());
+  expect(result.current.conversation?.id).toBe(id);
 });

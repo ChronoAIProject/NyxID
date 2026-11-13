@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, useMemo, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,6 +73,7 @@ type DatePickerProps = CommonDatePickerProps &
   );
 
 export function DatePicker(props: DatePickerProps) {
+  const { t } = useUiTranslation();
   const {
     minDate,
     placeholder = "Select date",
@@ -227,7 +229,7 @@ export function DatePicker(props: DatePickerProps) {
           <div className="flex items-center justify-between">
             <button
               type="button"
-              aria-label="Previous month"
+              aria-label={t("Previous month")}
               onClick={prevMonth}
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-overlay-strong hover:text-foreground"
             >
@@ -238,7 +240,7 @@ export function DatePicker(props: DatePickerProps) {
             </span>
             <button
               type="button"
-              aria-label="Next month"
+              aria-label={t("Next month")}
               onClick={nextMonth}
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-overlay-strong hover:text-foreground"
             >
@@ -308,7 +310,7 @@ export function DatePicker(props: DatePickerProps) {
                 }
               }}
             >
-              {multiple ? "Clear all" : "Clear"}
+              {multiple ? t("Clear all") : t("Clear")}
             </Button>
             <div className="flex items-center gap-1">
               <Button
@@ -332,18 +334,14 @@ export function DatePicker(props: DatePickerProps) {
                     setOpen(false);
                   }
                 }}
-              >
-                Today
-              </Button>
+              >{t("Today")}</Button>
               {multiple && (
                 <Button
                   type="button"
                   variant="ghost"
                   className="h-7 text-14 unthemed:text-11"
                   onClick={() => setOpen(false)}
-                >
-                  Done
-                </Button>
+                >{t("Done")}</Button>
               )}
             </div>
           </div>

@@ -143,6 +143,69 @@ async fn admit_test(
 }
 
 #[tokio::test]
+async fn activated_collaboration_create_and_membership_serve_overlap_and_reject_unsupported() {
+    use svc::security_readiness_service as readiness;
+    let (f, agent, _) = setup("collaboration_roster_overlap").await;
+    let sibling = readiness::overlapping_test_replica(&f.state.db).await;
+    let group = create(
+        &f.state.db,
+        &f.admin,
+        "Overlap",
+        std::slice::from_ref(&agent.id),
+    )
+    .await
+    .unwrap();
+    let revision = marker(&group).unwrap().membership_revision;
+    let mutation = membership::apply(
+        &f.state.db,
+        &f.admin,
+        &group.id,
+        revision,
+        Change::Invite {
+            intended_user_id: None,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let invite = mutation.invite.unwrap();
+    let joined = membership::accept_invite(&f.state.db, &f.member, &invite.token, true)
+        .await
+        .unwrap();
+    assert!(marker(&joined).unwrap().membership_revision > revision);
+    readiness::remove_test_replica_capability(&f.state.db, &sibling, READINESS).await;
+    assert!(matches!(
+        create(
+            &f.state.db,
+            &f.admin,
+            "Blocked",
+            std::slice::from_ref(&agent.id)
+        )
+        .await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(matches!(
+        membership::apply(
+            &f.state.db,
+            &f.admin,
+            &group.id,
+            marker(&joined).unwrap().membership_revision,
+            Change::Invite {
+                intended_user_id: None
+            },
+            true
+        )
+        .await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(matches!(
+        membership::accept_invite(&f.state.db, &f.outsider, &invite.token, true).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn collaboration_reader_first_classification_and_readiness_preserve_legacy() {
     let (f, agent, group) = setup("collaboration_readers").await;
     use svc::assistant_group_kind::{GroupKind, classify};
@@ -1651,6 +1714,89 @@ async fn collaboration_runtime_settlement_publishes_only_final_text_once() {
 }
 
 #[tokio::test]
+async fn real_shared_agent_settlement_notifies_only_the_requester_from_its_public_reply() {
+    use crate::{
+        models::assistant_notification::{AssistantNotification, NotificationKind, SourceType},
+        services::{
+            assistant_notification_service as feed,
+            feature_flag_service::{self as flags, FlagTarget},
+        },
+    };
+    let (f, agent, group) = setup("collaboration_real_feed_settle").await;
+    let db = &f.state.db;
+    feed::ensure_indexes(db).await.unwrap();
+    flags::set_platform_override(db, feed::FLAG_KEY, &FlagTarget::Global, true, &f.admin)
+        .await
+        .unwrap();
+    feed::reset_flag_cache(db);
+    let group = join(&f, &group, &f.member).await;
+    share(&f, &agent, &[&f.member]).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let row = &claim.conversation;
+    let result = svc::assistant_nyxagent::TurnResult {
+        text: "Public shared-agent report".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    svc::assistant_nyxagent::finish_turn(
+        db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let history = messages(db, &f.member, &group.id, None).await.unwrap();
+    let public_reply = history.last().unwrap();
+    assert_eq!(public_reply.text, result.text);
+    let notifications = db.collection::<AssistantNotification>(
+        crate::models::assistant_notification::COLLECTION_NAME,
+    );
+    let rows: Vec<_> = notifications
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].user_id, f.member);
+    assert_eq!(rows[0].kind, NotificationKind::AgentUpdate);
+    assert_eq!(rows[0].source.source_type, SourceType::CollaborationGroup);
+    assert_eq!(rows[0].source.group_id.as_deref(), Some(group.id.as_str()));
+    assert_eq!(
+        rows[0].source.message_id.as_deref(),
+        Some(public_reply.id.as_str())
+    );
+    assert!(
+        rows[0].source.conversation_id.is_none(),
+        "private execution threads must not become destinations"
+    );
+    let listed = feed::list(&f.state, &f.member, &feed::ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].preview, result.text);
+    assert!(listed.items[0].url.contains(&format!("c={}", group.id)));
+    assert_eq!(feed::summary(db, &f.admin).await.unwrap().unread_count, 0);
+    assert!(
+        svc::assistant_nyxagent::finish_turn(
+            db,
+            row,
+            &row.credential_api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &result,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn collaboration_runtime_revocation_fences_keys_and_resharing_gets_a_new_session() {
     let (f, agent, group) = setup("collaboration_runtime_revoke").await;
     let group = join(&f, &group, &f.member).await;
@@ -2293,6 +2439,12 @@ async fn collaboration_cleanup_waits_for_settlement_then_removes_requester_artif
     share(&f, &agent, &[&f.member]).await;
     let group = join(&f, &group, &f.member).await;
     let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let notification = crate::test_utils::seed_notification_purge_probe(
+        &f.state.db,
+        &f.member,
+        doc! {"conversation_id":&claim.conversation.id},
+    )
+    .await;
     change(
         &f,
         &f.admin,
@@ -2329,6 +2481,7 @@ async fn collaboration_cleanup_waits_for_settlement_then_removes_requester_artif
     .await
     .unwrap();
     cleanup::sweep(&f.state.db).await.unwrap();
+    crate::test_utils::assert_notification_probe(&f.state.db, &notification, false).await;
     for (collection, filter) in [
         (
             crate::models::assistant_conversation::COLLECTION_NAME,
@@ -3976,5 +4129,38 @@ async fn collaboration_broad_enrollment_marks_only_live_admissions() {
     .await
     .unwrap();
     assert!(request.execution_task.is_none());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notifications_follow_collaboration_departure_and_group_deletion() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let (f, _, group) = setup("notifications_collab_purge").await;
+    let group = join(&f, &group, &f.member).await;
+    let departing = seed(&f.state.db, &f.member, doc! {"group_id":&group.id}).await;
+    let remaining = seed(&f.state.db, &f.admin, doc! {"group_id":&group.id}).await;
+    let unrelated = seed(&f.state.db, &f.member, doc! {"group_id":"another-group"}).await;
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    probe(&f.state.db, &departing, false).await;
+    probe(&f.state.db, &remaining, true).await;
+    crate::handlers::assistant_group::delete_group(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.admin),
+        axum::extract::Path(group.id.clone()),
+    )
+    .await
+    .unwrap();
+    probe(&f.state.db, &remaining, false).await;
+    probe(&f.state.db, &unrelated, true).await;
     f.state.db.drop().await.unwrap();
 }

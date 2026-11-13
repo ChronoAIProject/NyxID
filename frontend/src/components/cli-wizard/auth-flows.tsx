@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 // OAuth and device-code sub-flows for the ai-key pairing panel.
 //
 // Ported from cli/src/wizard/assets/wizard.js::runOauthFlow and
@@ -562,6 +564,7 @@ export function OAuthFlow({
   onSuccess,
   onCancel,
 }: FlowProps) {
+  useUiTranslation();
   // Manage-scopes mode: re-auth an existing connection rather than minting a
   // placeholder. The credential sub-step is skipped (the connection already
   // carries its BYO creds), so we go straight to "starting".
@@ -1115,22 +1118,17 @@ export function OAuthFlow({
         <div className="flex flex-col gap-1">
           <h3 className="type-card-title text-foreground">
             {hasCopyOptions
-              ? "OAuth app credentials"
-              : "Paste your OAuth app credentials"}
+              ? translateUi("OAuth app credentials")
+              : translateUi("Paste your OAuth app credentials")}
           </h3>
-          <p className="text-14 text-muted-foreground">
-            Register your own OAuth app with the provider and paste its
-            Client ID and Client Secret.
-          </p>
+          <p className="text-14 text-muted-foreground">{translateUi("Register your own OAuth app with the provider and paste its Client ID and Client Secret.")}</p>
           {documentationUrl ? (
             <a
               href={documentationUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 type-row-title text-muted-foreground underline-offset-2 hover:underline"
-            >
-              How to create an OAuth app
-              <ExternalLink className="h-3 w-3" />
+            >{translateUi("How to create an OAuth app")}<ExternalLink className="h-3 w-3" />
             </a>
           ) : null}
         </div>
@@ -1143,9 +1141,7 @@ export function OAuthFlow({
 
         {hasCopyOptions ? (
           <div className="flex flex-col gap-2">
-            <Label>
-              Use credentials from an existing connection
-            </Label>
+            <Label>{translateUi("Use credentials from an existing connection")}</Label>
             <div className="flex flex-col gap-1.5">
               {existingConnections.map((conn) => (
                 <button
@@ -1178,9 +1174,7 @@ export function OAuthFlow({
                     ? "border-primary bg-primary/5"
                     : "border-border hover:border-primary/50"
                 }`}
-              >
-                Enter new credentials
-              </button>
+              >{translateUi("Enter new credentials")}</button>
             </div>
           </div>
         ) : null}
@@ -1188,7 +1182,7 @@ export function OAuthFlow({
         {!copyModeActive ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="pair-aikey-oauth-client-id">Client ID</Label>
+              <Label htmlFor="pair-aikey-oauth-client-id">{translateUi("Client ID")}</Label>
               <Input
                 id="pair-aikey-oauth-client-id"
                 value={clientId}
@@ -1200,9 +1194,7 @@ export function OAuthFlow({
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="pair-aikey-oauth-client-secret">
-                Client Secret
-              </Label>
+              <Label htmlFor="pair-aikey-oauth-client-secret">{translateUi("Client Secret")}</Label>
               <Input
                 id="pair-aikey-oauth-client-secret"
                 type="password"
@@ -1225,11 +1217,9 @@ export function OAuthFlow({
             !copyModeActive && (!clientId.trim() || !clientSecret.trim())
           }
         >
-          {copyModeActive ? "Continue with existing credentials" : "Save and continue"}
+          {copyModeActive ? translateUi("Continue with existing credentials") : translateUi("Save and continue")}
         </Button>
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
-          Cancel
-        </Button>
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
       </div>
     );
   }
@@ -1237,27 +1227,18 @@ export function OAuthFlow({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="type-card-title text-foreground">Complete sign-in on the provider</h3>
-        <p className="text-14 text-muted-foreground">
-          We opened a new tab where you'll authorize NyxID. When it
-          completes, come back — this page will finish automatically.
-        </p>
+        <h3 className="type-card-title text-foreground">{translateUi("Complete sign-in on the provider")}</h3>
+        <p className="text-14 text-muted-foreground">{translateUi("We opened a new tab where you'll authorize NyxID. When it completes, come back — this page will finish automatically.")}</p>
       </div>
       {phase === "checking-credentials" ? (
         <div className="flex items-center gap-2 text-14 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Checking provider credentials...
-        </div>
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Checking provider credentials...")}</div>
       ) : phase === "starting" ? (
         <div className="flex items-center gap-2 text-14 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Creating placeholder service...
-        </div>
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Creating placeholder service...")}</div>
       ) : phase === "waiting" ? (
         <div className="flex items-center gap-2 text-14 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Waiting for provider authorization...
-        </div>
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Waiting for provider authorization...")}</div>
       ) : null}
 
       {authUrl && phase === "waiting" ? (
@@ -1266,18 +1247,14 @@ export function OAuthFlow({
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 type-row-title hover:bg-muted"
-        >
-          Reopen provider sign-in
-          <ExternalLink className="h-4 w-4" />
+        >{translateUi("Reopen provider sign-in")}<ExternalLink className="h-4 w-4" />
         </a>
       ) : null}
 
       {error ? <ErrorLine message={error} /> : null}
 
       {phase !== "done" ? (
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
-          Cancel
-        </Button>
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
       ) : null}
     </div>
   );
@@ -1297,6 +1274,7 @@ export function DeviceCodeFlow({
   onSuccess,
   onCancel,
 }: FlowProps) {
+  useUiTranslation();
   const [code, setCode] = useState<string | null>(null);
   const [verifyUrl, setVerifyUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<
@@ -1695,28 +1673,20 @@ export function DeviceCodeFlow({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="type-card-title text-foreground">Authorize via device code</h3>
-        <p className="text-14 text-muted-foreground">
-          Open the verification URL, enter the code, and complete
-          sign-in on the provider. This page will finish automatically.
-        </p>
+        <h3 className="type-card-title text-foreground">{translateUi("Authorize via device code")}</h3>
+        <p className="text-14 text-muted-foreground">{translateUi("Open the verification URL, enter the code, and complete sign-in on the provider. This page will finish automatically.")}</p>
       </div>
 
       {phase === "starting" ? (
         <div className="flex items-center gap-2 text-14 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Requesting device code...
-        </div>
+          <Loader2 className="h-4 w-4 animate-spin" />{translateUi("Requesting device code...")}</div>
       ) : phase === "waiting" && code && verifyUrl ? (
         <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
           <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-13 uppercase tracking-wide text-muted-foreground">
-                Code
-              </span>
+              <span className="text-13 uppercase tracking-wide text-muted-foreground">{translateUi("Code")}</span>
               {secondsRemaining > 0 ? (
-                <span className="text-13 tabular-nums text-muted-foreground">
-                  Expires in {formatRemaining(secondsRemaining)}
+                <span className="text-13 tabular-nums text-muted-foreground">{translateUi("Expires in ")}{formatRemaining(secondsRemaining)}
                 </span>
               ) : null}
             </div>
@@ -1729,14 +1699,12 @@ export function DeviceCodeFlow({
                 onClick={() => void handleCopy()}
               >
                 <ButtonIcon><Copy className="h-3.5 w-3.5" /></ButtonIcon>
-                {copied ? "Copied" : "Copy"}
+                {copied ? translateUi("Copied") : translateUi("Copy")}
               </Button>
             </div>
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-13 uppercase tracking-wide text-muted-foreground">
-              Visit
-            </span>
+            <span className="text-13 uppercase tracking-wide text-muted-foreground">{translateUi("Visit")}</span>
             <a
               href={verifyUrl}
               target="_blank"
@@ -1748,27 +1716,19 @@ export function DeviceCodeFlow({
             </a>
           </div>
           <div className="flex items-center gap-2 text-13 text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Waiting for authorization...
-          </div>
+            <Loader2 className="h-3 w-3 animate-spin" />{translateUi("Waiting for authorization...")}</div>
         </div>
       ) : phase === "expired" ? (
         <div className="flex flex-col gap-2">
-          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
-            The device code expired before authorization completed.
-          </p>
-          <Button variant="primary" onClick={() => void startSession()}>
-            Request a new code
-          </Button>
+          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">{translateUi("The device code expired before authorization completed.")}</p>
+          <Button variant="primary" onClick={() => void startSession()}>{translateUi("Request a new code")}</Button>
         </div>
       ) : null}
 
       {error ? <ErrorLine message={error} /> : null}
 
       {phase !== "done" ? (
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
-          Cancel
-        </Button>
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
       ) : null}
     </div>
   );
@@ -1777,9 +1737,10 @@ export function DeviceCodeFlow({
 // ── helpers ──────────────────────────────────────────────────────────
 
 function ErrorLine({ message }: { readonly message: string }) {
+  useUiTranslation();
   return (
     <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
-      {message}
+      {translateUi(message)}
     </p>
   );
 }

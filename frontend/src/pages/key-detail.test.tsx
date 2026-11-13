@@ -420,7 +420,7 @@ describe("KeyDetailPage — core rendering", () => {
     // API Key card: credential type. Both the credential status badge and the
     // service-availability badge read "Active", so just assert the pair exists.
     expect(screen.getByText("Type: api_key")).toBeInTheDocument();
-    expect(screen.getAllByText("Active")).toHaveLength(2);
+    expect(screen.getAllByText("Saved, not verified")).toHaveLength(2);
 
     // Service card: auth method + auth key surfaced from the hook, and the
     // slug-derived proxy path.

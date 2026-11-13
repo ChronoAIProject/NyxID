@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useService } from "@/hooks/use-services";
 import { usePublicConfig } from "@/hooks/use-public-config";
@@ -9,6 +10,7 @@ import { ArrowLeft, Terminal, X, AlertCircle } from "lucide-react";
 import { useCallback } from "react";
 
 export function SshTerminalPage() {
+  const { t } = useUiTranslation();
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const search = useSearch({ strict: false }) as {
     principal?: string;
@@ -60,15 +62,9 @@ export function SshTerminalPage() {
     return (
       <div className="flex h-dvh flex-col items-center justify-center bg-background">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">
-          Service not found
-        </h3>
-        <p className="mb-4 text-12 text-muted-foreground">
-          The service you are looking for does not exist or has been deleted.
-        </p>
-        <Button variant="outline" onClick={handleBack}>
-          Back to AI Services
-        </Button>
+        <h3 className="mb-2 text-lg font-semibold">{t("Service not found")}</h3>
+        <p className="mb-4 text-12 text-muted-foreground">{t("The service you are looking for does not exist or has been deleted.")}</p>
+        <Button variant="outline" onClick={handleBack}>{t("Back to AI Services")}</Button>
       </div>
     );
   }
@@ -77,17 +73,13 @@ export function SshTerminalPage() {
     return (
       <div className="flex h-dvh flex-col items-center justify-center bg-background">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">
-          Terminal not available
-        </h3>
+        <h3 className="mb-2 text-lg font-semibold">{t("Terminal not available")}</h3>
         <p className="mb-4 max-w-md text-center text-12 text-muted-foreground">
           {!isSshService
-            ? "This service is not an SSH service. The web terminal is only available for SSH services."
-            : "Certificate authentication is not enabled for this SSH service. Enable it to use the web terminal."}
+            ? t("This service is not an SSH service. The web terminal is only available for SSH services.")
+            : t("Certificate authentication is not enabled for this SSH service. Enable it to use the web terminal.")}
         </p>
-        <Button variant="outline" onClick={handleBack}>
-          Back to Service
-        </Button>
+        <Button variant="outline" onClick={handleBack}>{t("Back to Service")}</Button>
       </div>
     );
   }
@@ -126,9 +118,7 @@ export function SshTerminalPage() {
           onClick={handleBack}
           className="h-7 gap-1 text-xs unthemed:text-xs text-slate-400 hover:text-slate-200"
         >
-          <X className="h-3 w-3" />
-          Close
-        </Button>
+          <X className="h-3 w-3" />{t("Close")}</Button>
       </div>
 
       {/* Terminal area */}

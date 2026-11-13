@@ -1,4 +1,4 @@
-//! Closed native-model + transport + accounting mappings. Fixture digests are
+//! Immutable historical model mappings plus versioned family/transport contracts. Fixture digests are
 //! immutable; new certification never rewrites a historical tariff's evidence.
 use super::{
     adapters::{Native, unsupported},
@@ -12,6 +12,7 @@ use crate::{
     },
 };
 use sha2::{Digest, Sha256};
+pub(crate) mod contracts;
 
 pub(super) fn image_fixture(route: &RouteTarget) -> Option<&'static str> {
     match route {
@@ -70,12 +71,13 @@ pub(super) fn image_digest(route: &RouteTarget) -> Option<String> {
     })
 }
 pub(crate) fn image_contract(c: &UsageContract) -> bool {
-    [
-        digest(include_str!("fixtures/gemini-images-v1.json")),
-        claude_image_digest(),
-        digest(include_str!("fixtures/responses-images-v1.json")),
-    ]
-    .contains(&c.fixture_sha256)
+    family_contract(c)
+        || [
+            digest(include_str!("fixtures/gemini-images-v1.json")),
+            claude_image_digest(),
+            digest(include_str!("fixtures/responses-images-v1.json")),
+        ]
+        .contains(&c.fixture_sha256)
 }
 
 pub(super) fn certify(
@@ -85,6 +87,9 @@ pub(super) fn certify(
     has_images: bool,
 ) -> AppResult<()> {
     let c = &tariff.contract;
+    if family_contract(c) {
+        return certify_family(native, route, tariff, has_images);
+    }
     let exact = match route {
         RouteTarget::VertexPublisher {
             publisher: VertexPublisher::Google,
@@ -147,6 +152,57 @@ pub(super) fn request_limits(native: Native, image: &images::Summary) -> AppResu
     // Anthropic's per-image native limit is smaller than the shared ceiling.
     if native == Native::Claude
         && (image.largest_file > 5 * 1024 * 1024 || image.largest_edge > 8000)
+    {
+        return Err(unsupported());
+    }
+    Ok(())
+}
+
+/// New digests are unreadable as executable certifications by old replicas.
+pub(crate) const READINESS: &str = "inference:platform-model-contracts-v1";
+
+pub(crate) fn family_fixture(
+    family: crate::models::platform_model_tariff::UsageFamily,
+) -> Option<&'static str> {
+    contracts::for_family(family).map(|definition| definition.fixture)
+}
+
+pub(crate) fn family_contract(c: &UsageContract) -> bool {
+    family_fixture(c.family).is_some_and(|f| c.fixture_sha256 == digest(f))
+}
+
+pub(crate) fn validate_family_tariff(t: &ModelTariff) -> AppResult<()> {
+    if !family_contract(&t.contract) {
+        return if t.contract.version.ends_with(".v2") {
+            Err(unsupported())
+        } else {
+            Ok(())
+        };
+    }
+    let prefix = format!("contract-attested-v1:{} ", t.public_model);
+    let reference = t.source.strip_prefix(&prefix).ok_or_else(unsupported)?;
+    if reference.trim().is_empty() {
+        return Err(unsupported());
+    }
+    let c = &t.contract;
+    if !contracts::for_family(c.family).is_some_and(|definition| definition.accepts(c)) {
+        return Err(unsupported());
+    }
+    Ok(())
+}
+
+fn certify_family(
+    native: Native,
+    route: &RouteTarget,
+    tariff: &ModelTariff,
+    has_images: bool,
+) -> AppResult<()> {
+    validate_family_tariff(tariff)?;
+    let transport_matches = contracts::for_family(tariff.contract.family)
+        .is_some_and(|definition| definition.accepts_route(route));
+    if !transport_matches
+        || native.family() != tariff.contract.family
+        || has_images && tariff.bounds.max_images == 0
     {
         return Err(unsupported());
     }

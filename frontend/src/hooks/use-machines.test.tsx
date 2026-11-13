@@ -289,7 +289,7 @@ describe("Remote Machine owner HTTP hooks", () => {
     const request = { body: createBody, idempotencyKey: "stable-intent" };
     await act(async () => {
       await expect(result.current.mutateAsync(request)).rejects.toThrow(
-        "connection lost",
+        "Couldn't reach NyxID. Check your connection and try again.",
       );
     });
     await act(async () => {

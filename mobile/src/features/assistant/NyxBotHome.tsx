@@ -1,5 +1,6 @@
+import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
-import { useEffect, useRef, useState, type PropsWithChildren } from "react";
+import { useRef, useState, type PropsWithChildren } from "react";
 import {
   Pressable,
   ScrollView,
@@ -8,19 +9,17 @@ import {
   type ScrollViewProps,
 } from "react-native";
 import { ChevronRight, Plus } from "lucide-react-native";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ActionButton,
-  Label,
-  Notice,
-} from "../../components/workspace/WorkspaceUI";
+import { useQuery } from "@tanstack/react-query";
+import { Label, Notice } from "../../components/workspace/WorkspaceUI";
 import { SectionBadge } from "../../components/SectionBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { agentsApi } from "../../lib/api/agentsApi";
-import { onboardingApi } from "../../lib/api/onboardingApi";
-import { FirstRunIntro } from "../onboarding/FirstRunIntro";
-import { NextStepList } from "../onboarding/NextStepList";
-import { onboardingKey, type NextStep } from "../onboarding/onboardingContracts";
+// TODO(onboarding): disabled on mobile by user decision 2026-11-06; restore together.
+// import { onboardingApi } from "../../lib/api/onboardingApi";
+// import { FirstRunIntro } from "../onboarding/FirstRunIntro";
+// import { NextStepList } from "../onboarding/NextStepList";
+// import { onboardingKey } from "../onboarding/onboardingContracts";
+import type { NextStep } from "../onboarding/onboardingContracts";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getCurrentUserProfileRequest } from "../../lib/api/http";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
@@ -72,7 +71,8 @@ export function NyxBotHome({
     // Re-enabling a stale roster syncs immediately; polling only fills gaps.
     staleTime: 0,
     refetchInterval: active ? 30_000 : false,
-    retry: false,
+    retry: (count, error) => available() && retryAgentRead(count, error),
+    retryDelay: agentReadRetryDelay,
   });
   const crews = useQuery({
     queryKey: [...groupKeys(epoch), "list"],
@@ -88,28 +88,29 @@ export function NyxBotHome({
     staleTime: 60_000,
     retry: false,
   });
-  const queryClient = useQueryClient();
-  const onboarding = useQuery({
-    queryKey: onboardingKey,
-    queryFn: ({ signal }) => onboardingApi.get(signal),
-    enabled: active && Boolean(onStartNextStep),
-    staleTime: 60_000,
-    retry: false,
-  });
-  const hideSuggestions = useMutation({
-    mutationFn: () => onboardingApi.hideSuggestions(),
-    onSuccess: (next) => queryClient.setQueryData(onboardingKey, next),
-  });
-  const [intro, setIntro] = useState<"first_run" | "home">();
-  const introShown = useRef(false);
-  useEffect(() => {
-    if (!onboarding.data?.show_intro || introShown.current) return;
-    introShown.current = true;
-    setIntro("first_run");
-  }, [onboarding.data?.show_intro]);
-  const nextSteps = onboarding.data?.suggestions_hidden
-    ? []
-    : (onboarding.data?.recommendations ?? []);
+  // TODO(onboarding): disabled on mobile by user decision 2026-11-06; restore together.
+  // const queryClient = useQueryClient();
+  // const onboarding = useQuery({
+  //   queryKey: onboardingKey,
+  //   queryFn: ({ signal }) => onboardingApi.get(signal),
+  //   enabled: active && Boolean(onStartNextStep),
+  //   staleTime: 60_000,
+  //   retry: false,
+  // });
+  // const hideSuggestions = useMutation({
+  //   mutationFn: () => onboardingApi.hideSuggestions(),
+  //   onSuccess: (next) => queryClient.setQueryData(onboardingKey, next),
+  // });
+  // const [intro, setIntro] = useState<"first_run" | "home">();
+  // const introShown = useRef(false);
+  // useEffect(() => {
+  //   if (!onboarding.data?.show_intro || introShown.current) return;
+  //   introShown.current = true;
+  //   setIntro("first_run");
+  // }, [onboarding.data?.show_intro]);
+  // const nextSteps = onboarding.data?.suggestions_hidden
+  //   ? []
+  //   : (onboarding.data?.recommendations ?? []);
   const roster = agents.data?.agents ?? [];
   const groups = crews.data ?? [];
   const latest = useRef({ roster, groups });
@@ -173,6 +174,28 @@ export function NyxBotHome({
       {!online ? (
         <Notice message="You're offline. Reconnect to refresh your agents and crews." />
       ) : null}
+      {/* TODO(onboarding): disabled on mobile by user decision 2026-11-06; restore together.
+      {onStartNextStep && onboarding.isError ? (
+        <View style={styles.group}>
+          <Notice
+            message="Your NyxBot intro could not load. Try again."
+            tone="error"
+          />
+          <ActionButton
+            label="Retry intro"
+            variant="secondary"
+            disabled={!online}
+            onPress={() => void onboarding.refetch()}
+          />
+        </View>
+      ) : null}
+      {onStartNextStep && onboarding.data && !nextSteps.length ? (
+        <ActionButton
+          label="Replay intro"
+          variant="secondary"
+          onPress={() => setIntro("home")}
+        />
+      ) : null}
       {nextSteps.length && onStartNextStep ? (
         // Its own header, like the other home groups; the steps are cards already.
         <View style={styles.group}>
@@ -214,6 +237,7 @@ export function NyxBotHome({
           onStart={onStartNextStep}
         />
       ) : null}
+      */}
       {!hasTeam &&
       !agents.isPending &&
       !crews.isPending &&
@@ -357,7 +381,9 @@ export function NyxBotHome({
                 ) : undefined
               }
               detail={`${
-                agent.kind === "nyxbot" ? "Your personal agent" : `@${agent.name}`
+                agent.kind === "nyxbot"
+                  ? "Your personal agent"
+                  : `@${agent.name}`
               }${agent.can_use === false ? " · View only" : ""} · ${
                 agent.description ||
                 (agent.kind === "nyxbot"
@@ -504,7 +530,10 @@ function HomeGroup({
           <View key={row.key ?? index}>
             {index > 0 ? (
               <View
-                style={[styles.separator, { backgroundColor: colors.borderSoft }]}
+                style={[
+                  styles.separator,
+                  { backgroundColor: colors.borderSoft },
+                ]}
               />
             ) : null}
             {row}
@@ -596,7 +625,12 @@ function HomeAction({
         pressed && !disabled && { backgroundColor: colors.navActive },
       ]}
     >
-      <Label style={[styles.actionLabel, { color: danger ? colors.danger : colors.primary }]}>
+      <Label
+        style={[
+          styles.actionLabel,
+          { color: danger ? colors.danger : colors.primary },
+        ]}
+      >
         {label}
       </Label>
     </Pressable>
@@ -637,10 +671,7 @@ function HeaderAction({
   );
 }
 
-function Quiet({
-  title,
-  children,
-}: PropsWithChildren<{ title?: string }>) {
+function Quiet({ title, children }: PropsWithChildren<{ title?: string }>) {
   return (
     <View style={styles.quiet}>
       {title ? <Label style={styles.name}>{title}</Label> : null}
@@ -665,7 +696,12 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 4,
   },
-  sectionTitle: { flex: 1, fontFamily: fonts.displaySemi, fontSize: 18, lineHeight: 24 },
+  sectionTitle: {
+    flex: 1,
+    fontFamily: fonts.displaySemi,
+    fontSize: 18,
+    lineHeight: 24,
+  },
   owner: {
     fontFamily: fonts.bodySemi,
     fontSize: 11,

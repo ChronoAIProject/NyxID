@@ -508,6 +508,8 @@ async fn hosted_request_timed(
     let source_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
     let watch = NyxbotWatch {
+        source_connect_link_id: None,
+        source_turn_id: None,
         id: watch_id.clone(),
         user_id: actor.into(),
         kind: "channel_bot".into(),

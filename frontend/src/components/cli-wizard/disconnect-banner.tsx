@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 /**
  * Dismissible-at-your-own-risk banner shown at the top of the wizard
  * when the browser has lost contact with the CLI (Mode A) or the
@@ -24,6 +25,7 @@ export function DisconnectBanner({
   context,
   pairingStatus,
 }: DisconnectBannerProps) {
+  const { t } = useWizardTranslation();
   const Icon = state === "reconnecting" ? Loader2 : WifiOff
   const title =
     state === "reconnecting"
@@ -61,8 +63,8 @@ export function DisconnectBanner({
         aria-hidden
       />
       <div className="flex flex-col gap-1">
-        <p className="font-medium">{title}</p>
-        <p className="text-muted-foreground">{body}</p>
+        <p className="font-medium">{t(title)}</p>
+        <p className="text-muted-foreground">{t(body)}</p>
       </div>
     </div>
   )

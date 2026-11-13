@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
@@ -16,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 
 export function ApprovedSignInPolicy() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const accountId = user?.id;
   const policy = user?.profile_config?.security;
@@ -47,7 +50,7 @@ export function ApprovedSignInPolicy() {
   return (
     <>
       <GroupedList
-        title="App-approved sign-ins"
+        title={translateUi("App-approved sign-ins")}
         footer={
           error ? (
             <p role="alert" className="text-destructive">
@@ -58,24 +61,15 @@ export function ApprovedSignInPolicy() {
       >
         <GroupedRow className="items-start">
           <div className="min-w-0 flex-1 space-y-1">
-            <Label htmlFor="skip-approved-sign-in-mfa">
-              Skip MFA for NyxID app sign-ins
-            </Label>
+            <Label htmlFor="skip-approved-sign-in-mfa">{translateUi("Skip MFA for NyxID app sign-ins")}</Label>
             <p
               id="skip-approved-sign-in-description"
               className="text-13 text-text-tertiary"
-            >
-              Approve QR or typed sign-in codes from a signed-in NyxID app or
-              browser without another authenticator code. Enabled by default;
-              turn this off to require MFA for these approvals. Approve only
-              codes shown on your own screen.
-              {!user?.mfa_enabled &&
+            >{translateUi("Approve QR or typed sign-in codes from a signed-in NyxID app or browser without another authenticator code. Enabled by default; turn this off to require MFA for these approvals. Approve only codes shown on your own screen.")}{!user?.mfa_enabled &&
                 " Takes effect when two-factor authentication is on."}
             </p>
             {!policy && (
-              <p className="text-13 text-text-tertiary">
-                This server does not support changing this setting yet.
-              </p>
+              <p className="text-13 text-text-tertiary">{translateUi("This server does not support changing this setting yet.")}</p>
             )}
           </div>
           <Switch
@@ -100,27 +94,18 @@ export function ApprovedSignInPolicy() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Skip MFA for app-approved sign-ins?</DialogTitle>
-            <DialogDescription>
-              Anyone with access to your signed-in NyxID app or browser can
-              approve another sign-in without an authenticator code. Review each
-              request and approve only codes shown on your own screen. You can
-              turn this off at any time.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Skip MFA for app-approved sign-ins?")}</DialogTitle>
+            <DialogDescription>{translateUi("Anyone with access to your signed-in NyxID app or browser can approve another sign-in without an authenticator code. Review each request and approve only codes shown on your own screen. You can turn this off at any time.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setConfirmAccount(null)}>
-              Cancel
-            </Button>
+            <Button variant="ghost" onClick={() => setConfirmAccount(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={() => {
                 setConfirmAccount(null);
                 void persist(true);
               }}
-            >
-              Enable for app sign-ins
-            </Button>
+            >{translateUi("Enable for app sign-ins")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useModelCredentials } from "@/hooks/use-model-credentials";
+import { credentialKinds } from "@/schemas/model-credentials";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { routeSchema, type AdminModel } from "@/schemas/platform-models";
@@ -24,12 +28,15 @@ export function RoutesEditor({
   readonly readOnly: boolean;
   readonly reload: () => void;
 }) {
+  useUiTranslation();
   const form = useAppForm<z.infer<typeof schema>>({
     resolver: zodResolver(schema),
     defaultValues: { routes: model.routes },
     mode: "onChange",
   });
   const change = usePlatformModelChange();
+  const credentials = useModelCredentials();
+  const choices = credentials.data?.pages.flatMap((p) => p.records) ?? [];
   const routes = form.watch("routes");
   function set(index: number, patch: Partial<Route>) {
     form.setValue(
@@ -53,10 +60,7 @@ export function RoutesEditor({
         })}
       >
         <p className="type-body text-muted-foreground">
-          Private routing configuration. Users see only the public model and
-          retail prices. Every route must serve the same model. Credentials are
-          managed in the service catalog; opening this page sends no provider
-          request.
+          {translateUi("Private routing configuration. Users see only the public model and retail prices. Every route must serve the same model. Credentials are managed in Platform Models → Provider credentials; opening this page sends no provider request.")}
         </p>
         <fieldset disabled={readOnly || change.isPending} className="space-y-4">
           {routes.map((route, i) => (
@@ -65,7 +69,7 @@ export function RoutesEditor({
               className="space-y-4 rounded-xl border border-border/50 p-4"
             >
               <div className="flex items-center justify-between gap-3">
-                <h4 className="type-card-title">Route {i + 1}</h4>
+                <h4 className="type-card-title">{translateUi("Route ")}{i + 1}</h4>
                 {!readOnly && (
                   <Button
                     type="button"
@@ -76,12 +80,11 @@ export function RoutesEditor({
                         routes.filter((_, n) => i !== n),
                       )
                     }
-                  >
-                    Remove route {i + 1}
+                  >{translateUi("Remove route ")}{i + 1}
                   </Button>
                 )}
               </div>
-              <Field title={`Route ${i + 1} kind`}>
+              <Field title={translateUi("Route {{value1}} kind", { value1: i + 1 })}>
                 <NativeSelect
                   value={route.target.kind}
                   onChange={(e) => {
@@ -111,25 +114,40 @@ export function RoutesEditor({
                     set(i, { target });
                   }}
                 >
-                  <option value="vertex_publisher">
-                    Vertex publisher (Gemini / Claude)
-                  </option>
-                  <option value="vertex_openapi_maas">Vertex open MaaS</option>
-                  <option value="direct_provider">
-                    Direct OpenAI / Anthropic
-                  </option>
+                  <option value="vertex_publisher">{translateUi("Vertex publisher (Gemini / Claude)")}</option>
+                  <option value="vertex_openapi_maas">{translateUi("Vertex open MaaS")}</option>
+                  <option value="direct_provider">{translateUi("Direct OpenAI / Anthropic")}</option>
                 </NativeSelect>
               </Field>
               <div className="grid gap-4 sm:grid-cols-2">
-                <Field title="Credential catalog-service ID">
-                  <Input
+                <Field title={translateUi("Credential catalog-service ID")}>
+                  <NativeSelect
                     value={route.credential_service_id}
                     onChange={(e) =>
                       set(i, { credential_service_id: e.target.value })
                     }
-                  />
+                  >
+                    <option value="">{translateUi("Choose a provider credential")}</option>
+                    {route.credential_service_id &&
+                      !choices.some(
+                        (c) => c.id === route.credential_service_id,
+                      ) && (
+                        <option value={route.credential_service_id} disabled>
+                          {translateUi("Current credential (load inventory to inspect)")}
+                        </option>
+                      )}
+                    {choices.map((c) => (
+                      <option key={c.id} value={c.id} disabled={!c.enabled}>
+                        {c.name} —{" "}
+                        {c.kind
+                          ? translateUi(credentialKinds[c.kind])
+                          : translateUi("Legacy provider credential")}
+                        {!c.enabled ? translateUi(" (disabled)") : ""}
+                      </option>
+                    ))}
+                  </NativeSelect>
                 </Field>
-                <Field title="Native model">
+                <Field title={translateUi("Native model")}>
                   <Input
                     value={route.target.native_model}
                     onChange={(e) =>
@@ -143,7 +161,7 @@ export function RoutesEditor({
                   />
                 </Field>
                 {route.target.kind === "direct_provider" ? (
-                  <Field title="Provider">
+                  <Field title={translateUi("Provider")}>
                     <NativeSelect
                       value={route.target.provider}
                       onChange={(e) =>
@@ -156,13 +174,13 @@ export function RoutesEditor({
                         })
                       }
                     >
-                      <option value="openai">OpenAI</option>
-                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">{translateUi("OpenAI")}</option>
+                      <option value="anthropic">{translateUi("Anthropic")}</option>
                     </NativeSelect>
                   </Field>
                 ) : (
                   <>
-                    <Field title="Project">
+                    <Field title={translateUi("Project")}>
                       <Input
                         value={route.target.project}
                         onChange={(e) =>
@@ -176,7 +194,7 @@ export function RoutesEditor({
                         }
                       />
                     </Field>
-                    <Field title="Location">
+                    <Field title={translateUi("Location")}>
                       <Input
                         value={route.target.location}
                         onChange={(e) =>
@@ -190,7 +208,7 @@ export function RoutesEditor({
                         }
                       />
                     </Field>
-                    <Field title="Publisher">
+                    <Field title={translateUi("Publisher")}>
                       {route.target.kind === "vertex_publisher" ? (
                         <NativeSelect
                           value={route.target.publisher}
@@ -206,8 +224,8 @@ export function RoutesEditor({
                             })
                           }
                         >
-                          <option value="google">Google</option>
-                          <option value="anthropic">Anthropic</option>
+                          <option value="google">{translateUi("Google")}</option>
+                          <option value="anthropic">{translateUi("Anthropic")}</option>
                         </NativeSelect>
                       ) : (
                         <Input
@@ -226,7 +244,7 @@ export function RoutesEditor({
                     </Field>
                   </>
                 )}
-                <Field title="Priority">
+                <Field title={translateUi("Priority")}>
                   <Input
                     type="number"
                     min="0"
@@ -237,7 +255,7 @@ export function RoutesEditor({
                     }
                   />
                 </Field>
-                <Field title="Weight">
+                <Field title={translateUi("Weight")}>
                   <Input
                     type="number"
                     min="1"
@@ -253,9 +271,7 @@ export function RoutesEditor({
                   onCheckedChange={(checked) =>
                     set(i, { enabled: checked === true })
                   }
-                />
-                Route enabled
-              </Label>
+                />{translateUi("Route enabled")}</Label>
             </div>
           ))}
           {!readOnly && (
@@ -281,11 +297,19 @@ export function RoutesEditor({
                   },
                 ])
               }
-            >
-              Add private route
-            </Button>
+            >{translateUi("Add private route")}</Button>
           )}
         </fieldset>
+        <SaveError error={credentials.error} />
+        {credentials.hasNextPage && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void credentials.fetchNextPage()}
+          >
+            {translateUi("Load more credentials")}
+          </Button>
+        )}
         <SaveError error={change.error} reload={reload} />
         <EditErrors />
         {!readOnly && (
@@ -294,9 +318,7 @@ export function RoutesEditor({
               type="button"
               variant="outline"
               onClick={() => form.reset({ routes: model.routes })}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               disabled={
@@ -304,9 +326,7 @@ export function RoutesEditor({
                 !form.formState.isValid ||
                 change.isPending
               }
-            >
-              Publish route revision
-            </Button>
+            >{translateUi("Publish route revision")}</Button>
           </div>
         )}
       </form>

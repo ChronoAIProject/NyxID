@@ -3,6 +3,8 @@ export const isCmaOperationPending = (operation: CmaOperation) =>
   ["submitting", "waiting", "cancelling"].includes(operation.state);
 export function cmaPresentation(operation: CmaOperation) {
   const { state, reason, status, kind } = operation;
+  if (!["cma_response", "cma_agent", "cma_provisioning"].includes(kind))
+    return { label: "Activity details unavailable in this app version.", tone: "muted" };
   if (state === "cancelled")
     return { label: "Tracking stopped", tone: "muted" };
   if (state === "cancelling")

@@ -1,8 +1,12 @@
+import { activityPresentationStatus } from "./assistantHistoryCompat";
+import { activityDecisionPresentation } from "./assistantActivityDecision";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
 import {
   Check,
+  CircleAlert,
+  Minus,
   ChevronDown,
   ChevronRight,
   ShieldCheck,
@@ -71,27 +75,27 @@ export function AssistantActivityDisclosure({
     activities
       .filter(
         (activity) =>
-          activity.status === "error" &&
+          !activity.decision && activity.status === "error" &&
           (confirmationActivityIds?.has(activity.id) ||
             decisions.some((row) => row.activity_id === activity.id)),
       )
       .map((activity) => activity.id),
   );
   const failed = activities.filter(
-    (activity) => activity.status === "error" && !gated.has(activity.id),
+    (activity) => activityPresentationStatus(activityDecisionPresentation(activity.decision)?.status ?? activity.status, activity.failure?.kind) === "error" && !gated.has(activity.id),
   ).length;
-  const status = activities.some((activity) => activity.status === "running")
+  const status = turnLabel === "Status unavailable" ? "unknown" : activities.some((activity) => activity.status === "running")
     ? "running"
     : failed || turnFailed
       ? "error"
-      : "completed";
+      : !turnLabel && activities.some((activity) => activity.status === "unknown") ? "unknown" : "completed";
   const total = Math.max(activities.length, activityTotal ?? 0);
   const count = `${total} ${total === 1 ? "action" : "actions"}`;
-  const label = turnLabel ?? (status === "running" ? "Working…" : "Completed");
+  const label = turnLabel ?? (status === "running" ? "Working…" : status === "unknown" ? "Status unavailable" : "Completed");
   const summary = [
     label,
     total ? count : "",
-    ...decisionSummary(countDecisions(decisions)),
+    ...decisionSummary(countDecisions(decisions, activities.flatMap((activity) => activity.decision ? [activity.decision] : []))),
     waited && metadata?.capacity_wait_ms
       ? `waited ${formatCapacityWait(metadata.capacity_wait_ms)}`
       : "",
@@ -141,13 +145,15 @@ export function AssistantActivityDisclosure({
       {open ? (
         <View style={styles.details}>
           {activities.map((activity) => {
-            const confirmation = gated.has(activity.id);
-            const description = confirmation
+            const decision = activityDecisionPresentation(activity.decision);
+            const confirmation = Boolean(decision && decision.status === "waiting") || gated.has(activity.id);
+            const status = activityPresentationStatus(decision ? decision.status === "done" ? "completed" : decision.status === "error" ? "error" : "running" : activity.status, activity.failure?.kind);
+            const description = status === "skipped" ? toolFailureCopy(activity.failure, activity.label) : status === "unknown" ? "Activity details unavailable in this app version." : decision?.label ?? (confirmation
               ? "Asked for your confirmation"
               : describeToolActivity(
                   activity.label,
                   activity.status === "completed" ? "done" : activity.status,
-                );
+                ));
             const elapsed = elapsedLabel(
               activity.started_at,
               activity.status === "running"
@@ -160,18 +166,18 @@ export function AssistantActivityDisclosure({
                 key={activity.id}
                 accessible
                 accessibilityRole="text"
-                accessibilityLabel={`${description}, ${activity.label}, ${confirmation ? "Confirmation requested" : activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running"}${elapsed ? `, ${elapsed}` : ""}`}
+                accessibilityLabel={`${description}, ${activity.label}, ${status === "skipped" ? "Skipped" : status === "unknown" ? "Status unavailable" : decision?.label ?? (confirmation ? "Confirmation requested" : activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running")}${elapsed ? `, ${elapsed}` : ""}`}
                 style={styles.activity}
               >
                 <ActivityStatusIcon
-                  status={confirmation ? "confirmation" : activity.status}
+                  status={confirmation ? "confirmation" : status}
                 />
                 <View style={styles.activityText}>
                   <Label
                     muted
                     style={[
                       styles.description,
-                      activity.status === "error" &&
+                      status === "error" &&
                         !confirmation && { color: colors.danger },
                     ]}
                   >
@@ -193,11 +199,11 @@ export function AssistantActivityDisclosure({
                         {decisionTitle(row)}
                       </Label>
                     ))}
-                  {activity.status === "error" && !confirmation ? (
+                  {decision && status !== "skipped" && status !== "unknown" ? <Label muted style={styles.description}>{decision.detail}</Label> : status === "error" && !confirmation ? (
                     <Label
                       style={[styles.description, { color: colors.danger }]}
                     >
-                      {toolFailureCopy(activity.failure)} The assistant can
+                      {toolFailureCopy(activity.failure, activity.label)} The assistant can
                       continue after a failed step.
                     </Label>
                   ) : null}
@@ -253,7 +259,7 @@ function serviceSlug(label: string): string | undefined {
 function ActivityStatusIcon({
   status,
 }: {
-  status: Activity["status"] | "confirmation";
+  status: Activity["status"] | "confirmation" | "skipped";
 }) {
   const { colors } = useTheme();
   return (
@@ -262,7 +268,11 @@ function ActivityStatusIcon({
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >
-      {status === "running" ? (
+      {status === "skipped" ? (
+        <Minus size={14} color={colors.textSecondary} />
+      ) : status === "unknown" ? (
+        <CircleAlert size={14} color={colors.textSecondary} />
+      ) : status === "running" ? (
         <ActivityIndicator size="small" color={colors.primary} />
       ) : status === "confirmation" ? (
         <ShieldCheck size={14} color={colors.textSecondary} />

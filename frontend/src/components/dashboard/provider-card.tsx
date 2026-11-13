@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type {
   ProviderConfig,
   UserProviderToken,
@@ -65,6 +67,7 @@ export function ProviderCard({
   isDisconnecting,
   isRefreshing,
 }: ProviderCardProps) {
+  useUiTranslation();
   const isConnected = token !== undefined;
   const isExpired = token?.status === "expired";
   const needsAttention =
@@ -134,19 +137,19 @@ export function ProviderCard({
               {isConnected ? (
                 <ProviderStatusBadge status={token.status} />
               ) : (
-                <Badge variant="secondary">Not Connected</Badge>
+                <Badge variant="secondary">{translateUi("Not Connected")}</Badge>
               )}
               {llmStatus?.status === "ready" && (
                 <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
               )}
               <Badge variant="secondary" className="text-12">
                 {provider.provider_type === "api_key"
-                  ? "API Key"
+                  ? translateUi("API Key")
                   : provider.provider_type === "device_code"
-                    ? "Device Code"
+                    ? translateUi("Device Code")
                     : provider.provider_type === "telegram_widget"
-                      ? "Telegram"
-                      : "OAuth"}
+                      ? translateUi("Telegram")
+                      : translateUi("OAuth")}
               </Badge>
             </div>
           </div>
@@ -167,13 +170,12 @@ export function ProviderCard({
                   )}
                   <span className="type-secondary-emphasis">
                     {token.metadata.username
-                      ? `@${token.metadata.username}`
-                      : token.metadata.first_name ?? "Telegram User"}
+                      ? translateUi("@{{username}}", { username: token.metadata.username })
+                      : token.metadata.first_name ?? translateUi("Telegram User")}
                   </span>
                 </div>
               )}
-              <span className="text-13 text-muted-foreground">
-                Connected {formatDate(token.connected_at)}
+              <span className="text-13 text-muted-foreground">{translateUi("Connected ")}{formatDate(token.connected_at)}
               </span>
               {token.label && (
                 <span className="text-13 text-text-tertiary">
@@ -186,8 +188,7 @@ export function ProviderCard({
                 </span>
               )}
               {token.expires_at && (
-                <span className="text-13 text-text-tertiary">
-                  Expires {formatDate(token.expires_at)}
+                <span className="text-13 text-text-tertiary">{translateUi("Expires ")}{formatDate(token.expires_at)}
                 </span>
               )}
             </div>
@@ -201,9 +202,7 @@ export function ProviderCard({
                     disabled={isRefreshing}
                     isLoading={isRefreshing}
                   >
-                    <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-                    Refresh
-                  </Button>
+                    <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>{translateUi("Refresh")}</Button>
                 )}
               <Button
                 variant="outline"
@@ -211,27 +210,21 @@ export function ProviderCard({
                 disabled={isDisconnecting}
                 isLoading={isDisconnecting}
               >
-                <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
-                Disconnect
-              </Button>
+                <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{translateUi("Disconnect")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-2">
-                <span className="text-13 text-muted-foreground">
-                  Not connected
-                </span>
+                <span className="text-13 text-muted-foreground">{translateUi("Not connected")}</span>
                 {provider.documentation_url && (
                   <a
                     href={provider.documentation_url}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-0.5 type-row-title text-primary-text hover:underline"
-                  >
-                    Docs
-                    <ExternalLink className="h-2.5 w-2.5" />
+                  >{translateUi("Docs")}<ExternalLink className="h-2.5 w-2.5" />
                   </a>
                 )}
               </div>
@@ -247,18 +240,14 @@ export function ProviderCard({
                   variant="outline"
                   onClick={() => onSetupCredentials(provider)}
                 >
-                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>
-                  Setup OAuth App
-                </Button>
+                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>{translateUi("Setup OAuth App")}</Button>
               )}
               {showCredentialsSetup && hasUserCredentials && (
                 <Button
                   variant="ghost"
                   onClick={() => onSetupCredentials(provider)}
                 >
-                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>
-                  Manage App
-                </Button>
+                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>{translateUi("Manage App")}</Button>
               )}
               <Button
                 variant="primary"

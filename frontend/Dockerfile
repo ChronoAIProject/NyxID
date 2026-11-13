@@ -13,6 +13,7 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 COPY frontend/ ./
+COPY shared/ /build/shared/
 
 # Public docs site source. The docs-sync plugin resolves it relative to the
 # frontend dir (`../docs/site`), so it must land at /build/docs/site.

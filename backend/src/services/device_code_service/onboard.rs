@@ -840,6 +840,7 @@ mod tests {
             updated_at: now,
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         };
         db.collection::<UserService>(USER_SERVICES)
             .insert_one(&service)

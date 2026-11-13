@@ -111,6 +111,7 @@ async fn erase_thread(
         m::assistant_message::COLLECTION_NAME,
         m::assistant_attachment::COLLECTION_NAME,
         m::assistant_resource::COLLECTION_NAME,
+        m::assistant_tool_result::COLLECTION_NAME,
         m::async_service_operation::COLLECTION_NAME,
         super::super::assistant_service_execution::COLLECTION,
         m::nyxbot_image_delivery::COLLECTION_NAME,
@@ -122,6 +123,10 @@ async fn erase_thread(
             .session(&mut *session)
             .await?;
     }
+    db.collection::<bson::Document>(m::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.conversation_id":&row.id})
+        .session(&mut *session)
+        .await?;
     db.collection::<bson::Document>(m::assistant_checkpoint::COLLECTION_NAME)
         .delete_many(doc! {"_id":&row.id})
         .session(&mut *session)

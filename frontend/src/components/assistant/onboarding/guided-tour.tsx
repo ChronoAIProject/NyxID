@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
@@ -60,6 +62,7 @@ export function GuidedTour({
   readonly steps?: readonly TourStep[];
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   // The tour opens over an already-rendered screen; read its targets once.
   const [available] = useState(() => steps.filter((step) => visibleTarget(step.target)));
   const [index, setIndex] = useState(0);
@@ -163,7 +166,7 @@ export function GuidedTour({
       {/* Clicks outside the spotlight end the tour. */}
       <button
         type="button"
-        aria-label="End tour"
+        aria-label={translateUi("End tour")}
         tabIndex={-1}
         className="absolute inset-0 cursor-default"
         onClick={() => finish(false)}
@@ -209,7 +212,7 @@ export function GuidedTour({
         }}
       >
         <p className="type-group-label uppercase tracking-[0.125em] text-text-tertiary">
-          {index + 1} of {available.length}
+          {index + 1}{translateUi(" of ")}{available.length}
         </p>
         <h2 id="guided-tour-title" className="type-card-title text-foreground">
           {step.title}
@@ -218,21 +221,17 @@ export function GuidedTour({
           {step.body}
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-1">
-          <Button variant="ghost" size="sm" onClick={() => finish(false)}>
-            End tour
-          </Button>
+          <Button variant="ghost" size="sm" onClick={() => finish(false)}>{translateUi("End tour")}</Button>
           <div className="ml-auto flex flex-wrap justify-end gap-2">
             {index > 0 ? (
-              <Button variant="outline" size="sm" onClick={() => setIndex(index - 1)}>
-                Back
-              </Button>
+              <Button variant="outline" size="sm" onClick={() => setIndex(index - 1)}>{translateUi("Back")}</Button>
             ) : null}
             <Button
               variant="primary"
               size="sm"
               onClick={() => (last ? finish(true) : setIndex(index + 1))}
             >
-              {last ? "Done" : "Next"}
+              {last ? translateUi("Done") : translateUi("Next")}
             </Button>
           </div>
         </div>

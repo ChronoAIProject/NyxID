@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApiError, apiFetch } from "@/lib/api-client";
+import { apiErrorBody } from "@/lib/api-error";
 import {
   getAssistantIdentityUserId,
   getAssistantIdentityRevision,
@@ -49,6 +50,7 @@ function request(
 ) {
   const revision = getAssistantIdentityRevision();
   return apiFetch(endpoint, {
+    errorFormat: "cma",
     signal,
     authorityGuard: () => guard(ownerId, revision),
     preserveSessionOn401: /^\/proxy\/[0-9a-f-]{36}\//i.test(endpoint),
@@ -91,7 +93,11 @@ async function json(
         throw new Error("CMA returned too much session data.");
       text += decoder.decode(value, { stream: true });
     }
-    return JSON.parse(text + decoder.decode()) as unknown;
+    try {
+      return JSON.parse(text + decoder.decode()) as unknown;
+    } catch {
+      throw new ApiError(response.status, apiErrorBody(null, response.status), response.headers);
+    }
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();

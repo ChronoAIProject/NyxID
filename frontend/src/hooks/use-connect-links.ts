@@ -100,6 +100,7 @@ export function useConnectLinkStatus(id: string, enabled = true) {
 }
 
 export interface AssistantConnectLinkInput {
+  readonly scopes?: readonly string[];
   readonly serviceSlug: string;
   /**
    * "Connect your own" pins the link to the person's own account. Plain
@@ -109,16 +110,15 @@ export interface AssistantConnectLinkInput {
 }
 
 /** Creates a hosted connect link for a user-clicked assistant setup. */
-export function useCreateAssistantConnectLink() {
-  return useMutation({
-    mutationFn: async ({ serviceSlug, personal }: AssistantConnectLinkInput) => {
-      const response = await api.post(
-        "/connect-links",
-        personal
-          ? { service_slug: serviceSlug, use_platform_key: false, assistant_personal: true }
-          : { service_slug: serviceSlug },
-      );
-      return createConnectLinkResponseSchema.parse(response).connect_url;
-    },
+export async function createAssistantConnectLink({ serviceSlug, personal, scopes }: AssistantConnectLinkInput) {
+  const response = await api.post("/connect-links", {
+    service_slug: serviceSlug,
+    ...(personal ? { use_platform_key: false, assistant_personal: true } : {}),
+    ...(scopes?.length ? { scopes } : {}),
   });
+  return createConnectLinkResponseSchema.parse(response).connect_url;
+}
+
+export function useCreateAssistantConnectLink() {
+  return useMutation({ mutationFn: createAssistantConnectLink });
 }

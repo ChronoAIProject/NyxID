@@ -148,6 +148,7 @@ pub(crate) async fn complete(
             Some("watch_operation_unavailable")
         },
         response,
+        None,
     )
     .await?;
     if next == "completed"

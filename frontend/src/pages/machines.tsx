@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactChrome } from "@/components/ui/compact-title";
 import { TEXT_STYLES } from "@/lib/typography";
 import {
@@ -56,6 +58,7 @@ function MachineCard({
   readonly onActivity: () => void;
   readonly update?: MachineUpdateStatus;
 }) {
+  useUiTranslation();
   const machine = node.machine!;
   return (
     <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
@@ -65,12 +68,11 @@ function MachineCard({
           {node.name}
         </h3>
         {update?.update_available ? (
-          <Badge variant="warning">
-            Update available ({update.target_version})
+          <Badge variant="warning">{translateUi("Update available (")}{update.target_version})
           </Badge>
         ) : null}
         <span className="text-13 text-muted-foreground">
-          v{node.metadata?.agent_version ?? "unknown"}
+          v{node.metadata?.agent_version ?? translateUi("unknown")}
         </span>
         <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
         <MachineIsolationBadge machine={machine} />
@@ -89,9 +91,9 @@ function MachineCard({
       </p>
       <p className="text-14 text-muted-foreground">
         {node.owner.display_name} ·{" "}
-        {node.is_connected ? "Connected" : "Disconnected"}
+        {node.is_connected ? translateUi("Connected") : translateUi("Disconnected")}
         {machine.computer && !machine.computer_ready
-          ? " · Computer permissions or display unavailable"
+          ? translateUi(" · Computer permissions or display unavailable")
           : ""}
       </p>
       <div className="flex flex-wrap gap-2">
@@ -101,25 +103,20 @@ function MachineCard({
               to="/assistant/machines/$nodeId/desktop"
               params={{ nodeId: node.id }}
               disabled={!node.is_connected}
-            >
-              Watch / Take over desktop
-            </Link>
+            >{translateUi("Watch / Take over desktop")}</Link>
           </Button>
         ) : null}
         <Button onClick={onActivity}>
-          <History />
-          Activity
-        </Button>
-        <Button onClick={onSettings} aria-label={`Settings for ${node.name}`}>
-          <Settings />
-          Settings
-        </Button>
+          <History />{translateUi("Activity")}</Button>
+        <Button onClick={onSettings} aria-label={translateUi("Settings for {{value1}}", { value1: node.name })}>
+          <Settings />{translateUi("Settings")}</Button>
       </div>
     </article>
   );
 }
 
 export function MachinesPage() {
+  useUiTranslation();
   return (
     <GroupedPage>
       <MachinesContent />
@@ -128,6 +125,7 @@ export function MachinesPage() {
 }
 
 function MachinesContent() {
+  useUiTranslation();
   const remoteAdmission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
@@ -184,13 +182,13 @@ function MachinesContent() {
   return (
     <div className="shell-page-stack">
       <WorkspacePageHeader
-        title="Machines"
-        description="Remote and self-hosted computers for authorized agents and clients."
+        title={translateUi("Machines")}
+        description={translateUi("Remote and self-hosted computers for authorized agents and clients.")}
         actions={
           <div className="flex flex-wrap gap-2">
             {remoteAdmission && (
               <AddCtaButton
-                label="Create remote machine"
+                label={translateUi("Create remote machine")}
                 onClick={() =>
                   void navigate({
                     to: "/assistant/machines/new",
@@ -200,7 +198,7 @@ function MachinesContent() {
               />
             )}
             <AddCtaButton
-              label="Add a machine"
+              label={translateUi("Add a machine")}
               onClick={() =>
                 void navigate({ to: "/assistant/machines/new" })
               }
@@ -218,32 +216,23 @@ function MachinesContent() {
         }
       >
         <TabsList>
-          <TabsTrigger value="machines">Machines</TabsTrigger>
-          <TabsTrigger value="logins">Saved logins</TabsTrigger>
+          <TabsTrigger value="machines">{translateUi("Machines")}</TabsTrigger>
+          <TabsTrigger value="logins">{translateUi("Saved logins")}</TabsTrigger>
         </TabsList>
         <TabsContent value="machines" className="mt-6 space-y-6">
-          <section aria-label="Remote machines" className="space-y-3">
-            <h3 className="type-card-title">Remote machines</h3>
-            <p className="text-14 text-muted-foreground">
-              Personal hosted machines with a fixed workspace and selected
-              capabilities. Resource state, runtime billing and execution
-              authorization are independent.
-            </p>
+          <section aria-label={translateUi("Remote machines")} className="space-y-3">
+            <h3 className="type-card-title">{translateUi("Remote machines")}</h3>
+            <p className="text-14 text-muted-foreground">{translateUi("Personal hosted machines with a fixed workspace and selected capabilities. Resource state, runtime billing and execution authorization are independent.")}</p>
             {!remote.isPending &&
               !remote.error &&
               !remote.discoveryComplete && (
-                <p role="status" className="text-14 text-muted-foreground">
-                  Complete remote Machine discovery is not confirmed by this
-                  server.
-                </p>
+                <p role="status" className="text-14 text-muted-foreground">{translateUi("Complete remote Machine discovery is not confirmed by this server.")}</p>
               )}
             {remote.isPending ? (
-              <p role="status" className="text-14">
-                Loading remote machines…
-              </p>
+              <p role="status" className="text-14">{translateUi("Loading remote machines…")}</p>
             ) : remote.error ? (
               <ErrorBanner
-                message="Remote machine management could not be loaded. This deployment may not expose it yet."
+                message={translateUi("Remote machine management could not be loaded. This deployment may not expose it yet.")}
                 onRetry={() => void remote.refetch()}
               />
             ) : hostedMachines.length ? (
@@ -252,19 +241,15 @@ function MachinesContent() {
                 onOpen={openRemote}
               />
             ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-14 text-muted-foreground">
-                No remote machines. Check your free slot and the configured
-                profile before creating one.
-              </p>
+              <p className="rounded-lg border border-dashed border-border p-6 text-14 text-muted-foreground">{translateUi("No remote machines. Check your free slot and the configured profile before creating one.")}</p>
             )}
           </section>
-          <h3 className="type-card-title">Self-hosted machines</h3>
+          <h3 className="type-card-title">{translateUi("Self-hosted machines")}</h3>
           {nodes.isPending || orgs.isPending ? (
-            <p role="status">Loading machines…</p>
+            <p role="status">{translateUi("Loading machines…")}</p>
           ) : null}
           {nodes.error || orgs.error ? (
-            <p role="alert" className="text-14 text-destructive">
-              Could not load machines.{" "}
+            <p role="alert" className="text-14 text-destructive">{translateUi("Could not load machines.")}{" "}
               {nodes.error?.message ?? orgs.error?.message}
             </p>
           ) : null}
@@ -273,10 +258,7 @@ function MachinesContent() {
           !nodes.error &&
           !orgs.error &&
           !machines.length ? (
-            <p className="rounded-xl border border-border/50 p-6 text-14 text-muted-foreground">
-              Add a machine to let NyxBot run commands, work with files and use
-              a desktop.
-            </p>
+            <p className="rounded-xl border border-border/50 p-6 text-14 text-muted-foreground">{translateUi("Add a machine to let NyxBot run commands, work with files and use a desktop.")}</p>
           ) : null}
           <div className="grid gap-4 xl:grid-cols-2">
             {machines.map((node) => (
@@ -305,10 +287,8 @@ function MachinesContent() {
       >
         <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
           <SheetHeader className="pr-8">
-            <SheetTitle>Remote machine details</SheetTitle>
-            <SheetDescription>
-              Lifecycle, access, work history and billing for this machine.
-            </SheetDescription>
+            <SheetTitle>{translateUi("Remote machine details")}</SheetTitle>
+            <SheetDescription>{translateUi("Lifecycle, access, work history and billing for this machine.")}</SheetDescription>
           </SheetHeader>
           {remoteDetailId ? (
             <RemoteMachineDetail
@@ -341,7 +321,7 @@ function MachinesContent() {
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>Machine activity</SheetTitle>
+            <SheetTitle>{translateUi("Machine activity")}</SheetTitle>
             <SheetDescription>
               {machines.find((node) => node.id === activityId)?.name}
             </SheetDescription>
@@ -359,10 +339,8 @@ function MachinesContent() {
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <CompactChrome><SheetHeader className="shrink-0 p-5 pr-10 [[data-compact=true]_&]:py-2">
-            <SheetTitle className="[[data-compact=true]_&]:text-15">{selected?.name} settings</SheetTitle>
-            <SheetDescription className="[[data-compact=true]_&]:hidden">
-              Control confirmations, saved-login typing and specialist access.
-            </SheetDescription>
+            <SheetTitle className="[[data-compact=true]_&]:text-15">{selected?.name}{translateUi(" settings")}</SheetTitle>
+            <SheetDescription className="[[data-compact=true]_&]:hidden">{translateUi("Control confirmations, saved-login typing and specialist access.")}</SheetDescription>
           </SheetHeader></CompactChrome>
           {selected ? (
             <MachineSettings
@@ -385,6 +363,7 @@ function RemoteMachineList({
   readonly machines: RemoteMachine[];
   readonly onOpen: (id: string) => void;
 }) {
+  useUiTranslation();
   const label = (value: string) =>
     value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
   const state = (machine: RemoteMachine) => (
@@ -400,8 +379,7 @@ function RemoteMachineList({
       >
         {label(machine.resource_state)}
       </Badge>
-      <span className="text-13 text-muted-foreground">
-        Billing: {label(machine.billing_state)} · Authorization:{" "}
+      <span className="text-13 text-muted-foreground">{translateUi("Billing: ")}{label(machine.billing_state)}{translateUi(" · Authorization:")}{" "}
         {label(machine.authorization_state)}
       </span>
     </div>
@@ -418,13 +396,9 @@ function RemoteMachineList({
               {machine.name ?? machine.sandbox_name}
             </h4>
             {state(machine)}
-            <p className="text-13 text-muted-foreground">
-              Generation {machine.runtime_generation} ·{" "}
-              {machine.profile.workspace_gib} GiB workspace
-            </p>
-            <Button onClick={() => onOpen(machine.node_id)}>
-              View details
-            </Button>
+            <p className="text-13 text-muted-foreground">{translateUi("Generation ")}{machine.runtime_generation} ·{" "}
+              {machine.profile.workspace_gib}{translateUi(" GiB workspace")}</p>
+            <Button onClick={() => onOpen(machine.node_id)}>{translateUi("View details")}</Button>
           </article>
         ))}
       </div>
@@ -432,11 +406,11 @@ function RemoteMachineList({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Machine</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Runtime</TableHead>
+              <TableHead>{translateUi("Machine")}</TableHead>
+              <TableHead>{translateUi("State")}</TableHead>
+              <TableHead>{translateUi("Runtime")}</TableHead>
               <TableHead>
-                <span className="sr-only">Details</span>
+                <span className="sr-only">{translateUi("Details")}</span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -452,20 +426,16 @@ function RemoteMachineList({
                   </div>
                 </TableCell>
                 <TableCell>{state(machine)}</TableCell>
-                <TableCell>
-                  Generation {machine.runtime_generation}
+                <TableCell>{translateUi("Generation ")}{machine.runtime_generation}
                   <br />
                   <span className="text-13 text-muted-foreground">
-                    {machine.profile.workspace_gib} GiB workspace
-                  </span>
+                    {machine.profile.workspace_gib}{translateUi(" GiB workspace")}</span>
                 </TableCell>
                 <TableCell>
                   <Button
                     onClick={() => onOpen(machine.node_id)}
-                    aria-label={`View ${machine.name ?? machine.sandbox_name}`}
-                  >
-                    Details
-                  </Button>
+                    aria-label={translateUi("View {{value1}}", { value1: machine.name ?? machine.sandbox_name })}
+                  >{translateUi("Details")}</Button>
                 </TableCell>
               </TableRow>
             ))}

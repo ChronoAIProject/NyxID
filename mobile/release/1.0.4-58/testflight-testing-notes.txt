@@ -1,0 +1,23 @@
+NyxID 1.0.4 (58) — What to Test
+
+Please test on a physical iPhone, including its built-in speaker. Sign in with the dedicated test account supplied separately. Allow microphone and speech-recognition access when prompted.
+
+Voice playback and controls
+Start a voice call from a private NyxBot chat. Ask a short question and confirm the reply is audible through the iPhone speaker at normal device volume. Test Hands-free and Hold to talk, microphone pause, speaker mute/unmute, and ending the call. If available, repeat with headphones and after disconnecting them. Check that the equalizer uses thin bars and responds to speech.
+
+Voice layout
+Watch the panel while connecting, listening, speaking, changing modes, and opening Voice preferences. It should fit its content without an oversized empty area or abrupt jumps during startup. Notices and extra content may expand it gently. It should scroll only when expanded content reaches the available height limit. Scroll the chat to minimize voice, then tap the compact row to expand it. Confirm that mode labels remain readable.
+
+Ending and restarting
+End a call, then open voice again promptly. When the previous call is still closing, the interface should explain that it is disconnecting before starting the new call. Background and reopen the app. The microphone must not reconnect just because the app returns to the foreground. Report any repeated active-call error, long wait, or silent call, with the time and steps used.
+
+Dictation
+Dictate into a normal message draft. Confirm that text grows naturally like typing, the waveform stays between cancel and confirm in the bottom control row, and the composer stays compact. Check cancel, confirm, and a permission-denied state. Confirmed text should remain editable before sending.
+
+Settings and chat
+Change the saved voice, end the call, and start a new one. Voice selection has no playable samples. Check Settings → Language in English, Simplified Chinese, and Traditional Chinese; supported settings and controls should update, while existing messages keep their language. Check Dark appearance, larger system text, message drafting, attachments, and sending a normal chat message.
+
+Account checks
+Sign out and sign in again with the review credentials. Use only the separate disposable account for Settings → Delete Account; confirm the explanation, confirmation, and sign-out after acceptance. Do not delete the main review account. Server/provider cleanup may continue after acceptance.
+
+When reporting a problem, include device model, iOS version, build 58, approximate time, audio route, and exact reproduction steps. Share account identifiers or recordings privately and exclude passwords and other sensitive information.

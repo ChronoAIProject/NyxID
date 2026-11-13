@@ -23,6 +23,10 @@ import { WizardFooter } from "./wizard-footer"
 import { formatStepLabel, type WizardStep } from "./step-label"
 import { useApplyTheme } from "@/hooks/use-theme"
 import { useScrollFades } from "@/hooks/use-scroll-fades"
+import { useWizardTranslation } from "@/i18n/wizard";
+import { cn } from "@/lib/utils";
+import { WizardLanguagePicker } from "./language-picker";
+import "./wizard.css";
 import { NyxidLogo } from "@/components/brand/nyxid-logo"
 
 export interface WizardShellProps {
@@ -44,25 +48,36 @@ export function WizardShell({
   narrow = false,
   children,
 }: WizardShellProps) {
+  const { t } = useWizardTranslation();
   useApplyTheme()
   const mainRef = useRef<HTMLElement>(null)
   useScrollFades(mainRef)
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="nyxid-wizard min-h-screen bg-background text-foreground [--radius-lg:8px] [--radius-md:6px]">
     {/*
       Header + footer chrome stays within 20% of the window: 182px from
       920px up, 134px in the `short` tier (680-919px), and 72px below that,
       where the footer is hidden entirely (see WizardFooter).
     */}
     <div
-      className={`mx-auto flex max-h-screen w-full ${narrow ? "max-w-[640px]" : "max-w-[1040px]"} flex-col px-6 pt-10 pb-6 short:pt-6 short:pb-4 very-short:pt-4 very-short:pb-4`}
+      className={`mx-auto flex max-h-screen w-full ${narrow ? "max-w-[640px]" : "max-w-[800px]"} flex-col px-4 pt-6 pb-5 sm:px-6 sm:pt-10 sm:pb-6 short:pt-6 short:pb-4 very-short:pt-4 very-short:pb-4`}
     >
-      <header className="mb-6 flex items-center justify-between short:mb-4 very-short:mb-4">
-        <div className="flex items-center">
-          <NyxidLogo className="h-9 w-auto short:h-7 very-short:h-6" />
+      <header className="mb-5 shrink-0 short:mb-4 very-short:mb-3">
+        <div className="flex items-center justify-between gap-3">
+          <NyxidLogo className="h-7 w-auto very-short:h-6" />
+          <WizardLanguagePicker />
         </div>
         {step ? (
-          <div className="text-14 text-muted-foreground">{formatStepLabel(step)}</div>
+          <div className="mt-6 flex items-center justify-between gap-4 very-short:mt-3">
+            <p className="text-14 text-muted-foreground">{formatStepLabel(step, t)}</p>
+            {step.label.startsWith("Recovery") ? null : (
+              <div aria-hidden="true" className="flex shrink-0 gap-1.5">
+                {Array.from({ length: step.total }, (_, index) => (
+                  <span key={index} className={cn("h-1 w-5 rounded-full sm:w-7", index < step.current ? "bg-primary" : "bg-border/70")} />
+                ))}
+              </div>
+            )}
+          </div>
         ) : null}
       </header>
       {/*
@@ -83,11 +98,11 @@ export function WizardShell({
       */}
       <main
         ref={mainRef}
-        className="flex min-h-[240px] flex-col overflow-hidden rounded-xl border border-border bg-card"
+        className="flex min-h-[240px] flex-col overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm"
       >
         <div
           data-scroll-fade=""
-          className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain p-8"
+          className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 sm:p-8"
         >
           {children}
         </div>

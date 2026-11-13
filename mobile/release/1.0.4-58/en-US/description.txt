@@ -1,0 +1,25 @@
+Bring your AI assistants, connected tools, and access controls together with NyxID.
+
+Chat with NyxBot, talk through a task, and keep your conversations and account controls close at hand. NyxID gives you a mobile workspace for working with AI while managing the services and permissions behind it.
+
+CHAT AND TALK
+Start a conversation with NyxBot or one of your agents. Type a message, dictate into the composer, or open a live voice conversation. Choose hands-free or hold-to-talk mode, select a voice for your next call, and return to your conversation history when you need it.
+
+CONNECT YOUR TOOLS
+Browse connectors and skills, manage supported connections, and give your assistants access to the services you choose. Some setup and advanced controls open the NyxID website.
+
+WORK WITH AGENTS AND CREWS
+Keep individual conversations and crew chats in one workspace. Follow responses, review requests, and pick up your work across your available agents.
+
+STAY IN CONTROL
+Review access requests before approving or denying them. Manage account security and active sessions, and use the account controls to sign out or request permanent account deletion.
+
+MAKE IT YOURS
+Adjust display and chat preferences. Choose English, Simplified Chinese, or Traditional Chinese for supported settings screens. Messages stay in their original language, and dictation language is configured separately.
+
+DESIGNED FOR IPHONE AND IPAD
+Use a compact workspace on iPhone and an adaptive layout on iPad, including supported rotation and multitasking.
+
+A NyxID account and an internet connection are required. Available features depend on your account, enabled services, and provider access. AI model and connected-service usage may incur charges.
+
+Support: contact@chrono-ai.fun

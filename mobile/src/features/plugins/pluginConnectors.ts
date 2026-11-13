@@ -1,3 +1,4 @@
+import { describeConnection, isSavedCredential } from "../services/connectionPresentation";
 import type {
   CatalogEntry,
   ServiceConnection,
@@ -54,6 +55,12 @@ function connectionState(
 ): Pick<ConnectorCardItem, "status" | "statusTone"> {
   if (connections.every((connection) => !connection.is_active))
     return { status: "Disabled", statusTone: "neutral" };
+  const saved = connections.filter(connection => healthy(connection) && isSavedCredential(connection));
+  if (saved.length) {
+    const health = saved.map(describeConnection);
+    const result = health.find(item => item.tone === "error") ?? health.find(item => item.tone === "warning") ?? health[0]!;
+    return { status: result.label, statusTone: result.tone === "muted" ? "neutral" : result.tone };
+  }
   if (connections.some(healthy))
     return { status: "Enabled", statusTone: "success" };
   const enabled = connections.filter((connection) => connection.is_active);
@@ -118,7 +125,7 @@ function addedItem(
     ),
   ].join(" / ");
   const count = `${connections.length} ${connections.length === 1 ? "connection" : "connections"}`;
-  const endpointDescription =
+  const endpointDescription = isSavedCredential(first) ? describeConnection(first).description :
     first.endpoint_url
       ? `Connected through the NyxID proxy (${first.endpoint_url}).`
       : "Connected through the NyxID proxy.";

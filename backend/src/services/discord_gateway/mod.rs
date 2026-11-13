@@ -212,7 +212,7 @@ async fn enabled(db: &mongodb::Database, bot: &ChannelBot) -> AppResult<bool> {
     {
         return Ok(false);
     }
-    super::security_readiness_service::require(
+    super::security_readiness_service::require_serving(
         db,
         super::feature_flag_service::DISCORD_GATEWAY_FLAG_KEY,
     )

@@ -639,6 +639,10 @@ pub(super) async fn delete(
             .session(&mut *session)
             .await?;
     }
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.group_id":&group.id})
+        .session(&mut *session)
+        .await?;
     db.collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
         .delete_many(doc! {"group_id":&group.id})
         .session(&mut *session)

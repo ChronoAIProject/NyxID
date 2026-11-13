@@ -1,3 +1,4 @@
+import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
   useCallback,
@@ -40,7 +41,6 @@ import {
   AgentOperationControls,
 } from "./AgentCollaborationPanel";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { servicesApi } from "../../lib/api/servicesApi";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { fonts } from "../../theme/designTokens";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
@@ -61,7 +61,7 @@ import {
 } from "./AgentPermissionsField";
 import { useTheme } from "../../theme/ThemeContext";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
-import type { ServiceConnection } from "../services/serviceContracts";
+import type { GrantService } from "./agentContracts";
 import {
   agentProfile,
   buildAgentPatch,
@@ -158,10 +158,12 @@ export function AgentsScreen({
         ? 5000
         : false,
   });
+  const grantOwner = !creating && detail.data?.agent.owner_kind === "org"
+    ? detail.data.agent.owner_id : undefined;
   const connections = useQuery({
-    queryKey: ["workspace", "services", "connections"],
-    queryFn: ({ signal }) => servicesApi.connections(signal),
-    enabled: focused && foreground && (creating || Boolean(selectedId)),
+    queryKey: [...ROOT, "grant-services", grantOwner ?? null],
+    queryFn: ({ signal }) => agentsApi.grantServices(grantOwner, signal),
+    enabled: focused && foreground && (creating || Boolean(detail.data?.agent.can_maintain)),
     retry: false,
   });
   const creationAtLimit =
@@ -610,6 +612,9 @@ export function AgentsScreen({
                 }
               />
             )}
+            {agent.owner_kind === "org" && agent.org_role === "admin" && maintain && alive && (
+              <OrgGuestGrantsAdoption key={`${getAuthEpoch()}:${agent.id}:guest-adoption`} agent={agent} disabled={busy} />
+            )}
             <AgentCollaborationPanel
               key={`${getAuthEpoch()}:${agent.id}:sharing:${editorVersion}`}
               agent={agent}
@@ -679,7 +684,9 @@ export function AgentsScreen({
             )}
             {!!agent.channels.length && (
               <SettingsGroup inset={false} title="Connected channels">
-                {agent.channels.map((channel) => (
+                {agent.channels.map((channel) => agent.owner_kind === "org" ? (
+                  <OrgGuestChannel key={`${getAuthEpoch()}:${channel.id}`} agent={agent} channel={channel} />
+                ) : (
                   <SettingsRow
                     key={channel.id}
                     label={channel.bot_label}
@@ -1004,7 +1011,7 @@ function CreateAgentForm({
   available,
   onDirtyChange,
 }: {
-  connections: ServiceConnection[];
+  connections: GrantService[];
   connectionsLoading: boolean;
   connectionsError: boolean;
   busy: boolean;
@@ -1087,7 +1094,7 @@ function AgentGrantsForm({
   onSave,
 }: {
   agent: AssistantAgent;
-  connections: ServiceConnection[];
+  connections: GrantService[];
   connectionsLoading: boolean;
   connectionsError: boolean;
   saveError?: string;
@@ -1116,7 +1123,7 @@ function AgentGrantsForm({
       }
       readOnly={agent.can_maintain !== true || agent.status === "destroyed"}
       allowAccountRead={agent.owner_kind !== "org"}
-      allowGuestAccess={agent.owner_kind !== "org"}
+      allowGuestAccess={agent.owner_kind !== "org" || agent.org_role === "admin"}
       connectionsLoading={connectionsLoading}
       connectionsError={connectionsError}
       saveError={saveError}

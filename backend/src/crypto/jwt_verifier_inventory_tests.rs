@@ -571,6 +571,25 @@ const ALLOWLIST: &[Verifier] = &[
         "resource-request proof JWT introspected by a confidential catalog client",
         "see resource_request_proof introspect decoding_key entry",
     ),
+    // Ornn's single-org membership callback; no account or OAuth grant.
+    v(
+        "services/agent_skill_org_access.rs",
+        "lookup",
+        "decoding_key",
+        1,
+        "Ornn org-membership capability (typ nyxid-ornn-org-read+jwt)",
+        "kid-selected RS256 key, typ, iss, exact audience, zero leeway and 60s lifetime; \
+         live actor/org/member/agent/pins/connection and runtime key/turn/invocation; \
+         no OAuth consent or token row; live authority outage/timeout -> 503",
+    ),
+    v(
+        "services/agent_skill_org_access.rs",
+        "lookup",
+        "jsonwebtoken::decode",
+        1,
+        "Ornn org-membership capability (typ nyxid-ornn-org-read+jwt)",
+        "see agent_skill_org_access lookup decoding_key entry",
+    ),
     // Refresh and token exchange.
     v(
         "services/token_service.rs",

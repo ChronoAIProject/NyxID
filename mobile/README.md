@@ -81,7 +81,7 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 
 ### Production domain migration
 
-Production builds embed the existing `PROD_API_BASE_URL`, `PROD_FRONTEND_URL` and `PROD_LEGAL_BASE_URL` plus an optional second set, `PROD_NEW_API_BASE_URL`, `PROD_NEW_FRONTEND_URL` and `PROD_NEW_LEGAL_BASE_URL` (all three HTTPS URLs or none). The NyxID admin feature flag `mobile:new-domains` (global only, default off) selects the set at every launch: before the app renders, it asks both API hosts' `/public/config` and applies the first valid answer, falling back to the last saved answer, then the original domains, within 5 seconds. Switching the flag needs no rebuild; users restart or reload the app.
+Production builds embed the existing `PROD_API_BASE_URL`, `PROD_FRONTEND_URL` and `PROD_LEGAL_BASE_URL` plus an optional second set, `PROD_NEW_API_BASE_URL`, `PROD_NEW_FRONTEND_URL` and `PROD_NEW_LEGAL_BASE_URL` (all three HTTPS URLs or none). The NyxID admin feature flag `mobile:new-domains` (global only, default off) selects the set at every launch: before the app renders, it asks both API hosts' `/public/config` and applies the flag, falling back to the last saved answer, then the original domains, within 5 seconds. If the chosen host is unreachable at launch and the other host answered, that launch uses the reachable set (the saved choice still follows the flag). Switching the flag needs no rebuild; users restart or reload the app.
 
 QR login, iOS associated domains and React Navigation accept both embedded sets. The existing `PROD_UNIVERSAL_LINK_HOST` and `PROD_UNIVERSAL_LINK_PATH_PREFIX` stay unchanged. App identifiers, signing and version numbers keep using the existing variables. See [Domain migration](docs/DOMAIN_MIGRATION.md) for the selection rules, backend requirements, rollout and rollback.
 
@@ -293,7 +293,7 @@ mobile/
 │  │  ├─ account/                 # Profile, sessions, TOTP, settings, account deletion
 │  │  └─ legal/                   # Privacy, terms
 │  ├─ components/                 # Reusable UI primitives and workspace drawer
-│  ├─ hooks/                      # useNetworkStatus, useNyxChat, etc.
+│  ├─ hooks/                      # useNetworkStatus and shared native hooks
 │  ├─ lib/
 │  │  ├─ api/                     # HTTP client (mobileApi.ts, http.ts), error mapping
 │  │  ├─ auth/                    # SecureStore session persistence, JWT parsing
@@ -374,6 +374,29 @@ assurance and upgraded replicas treat them as existing devices. Rolling back
 to v0.73.0 removes social MFA enforcement. Only environments that ran unreleased
 #1970 builds have rejecting replicas to drain. Deploy the web step-up UI only
 after all API replicas support the route.
+
+### iPad layout
+
+The iOS target is universal (iPhone and iPad). iPhone starts in portrait; iPad
+supports all orientations and resizable multitasking windows. The Expo config,
+committed Xcode target and Info.plist are checked together by
+`pnpm check:native-sync`. These native configuration changes require a new
+installed binary; an existing iPhone-only TestFlight build cannot gain iPad
+support from a JavaScript reload.
+
+Windows at least 900pt wide show a persistent 300pt sidebar beside the retained
+chat/content navigator. Narrower windows use the push drawer, capped at 360pt.
+Chat transcripts and composers keep their existing device-local reading-width
+preference and fit the available content column. Settings sheets become centered
+720×860pt maximum cards at 768pt and above; keyboard/window changes constrain the
+same mounted surface. Smaller split windows retain the phone layout. Settings
+rows wrap according to measured width and text scaling.
+
+The machine desktop viewer follows the current iPad window without requiring a
+full-screen orientation lock; iPhone retains its existing landscape entry and
+portrait restoration. Release acceptance must cover a fresh universal iPad build,
+portrait/landscape, narrow split and floating windows, keyboard changes and
+physical-device touch, in addition to focused automated layout regressions.
 
 ### Native drawer and chat display
 

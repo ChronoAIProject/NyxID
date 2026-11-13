@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
@@ -23,6 +26,7 @@ export function RateLimitCard({
   readonly rateLimitPerSecond: number | null;
   readonly rateLimitBurst: number | null;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [rps, setRps] = useState(rateLimitPerSecond?.toString() ?? "");
   const [burst, setBurst] = useState(rateLimitBurst?.toString() ?? "");
@@ -36,14 +40,14 @@ export function RateLimitCard({
       rpsNum !== null &&
       (!Number.isInteger(rpsNum) || rpsNum < 1 || rpsNum > 10000)
     ) {
-      toast.error("Rate limit per second must be an integer between 1 and 10000");
+      toast.error(translateErrorMessage("Rate limit per second must be an integer between 1 and 10000"));
       return;
     }
     if (
       burstNum !== null &&
       (!Number.isInteger(burstNum) || burstNum < 1 || burstNum > 100000)
     ) {
-      toast.error("Burst limit must be an integer between 1 and 100000");
+      toast.error(translateErrorMessage("Burst limit must be an integer between 1 and 100000"));
       return;
     }
 
@@ -55,7 +59,7 @@ export function RateLimitCard({
       },
       {
         onSuccess: () => {
-          toast.success("Rate limits updated");
+          toast.success(translateUi("Rate limits updated"));
           setEditing(false);
         },
         onError: (err) => {
@@ -63,7 +67,7 @@ export function RateLimitCard({
             err instanceof ApiError
               ? err.message
               : "Failed to update rate limits";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -80,62 +84,56 @@ export function RateLimitCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Rate Limits</CardTitle>
+          <CardTitle className="text-15">{translateUi("Rate Limits")}</CardTitle>
         </div>
-        <CardDescription>
-          Per-agent request rate limits (overrides user-level defaults)
-        </CardDescription>
+        <CardDescription>{translateUi("Per-agent request rate limits (overrides user-level defaults)")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {editing ? (
           <div className="space-y-3">
             <div className="space-y-1.5">
-              <Label>Requests per second</Label>
+              <Label>{translateUi("Requests per second")}</Label>
               <Input
                 type="number"
                 min={1}
                 value={rps}
                 onChange={(e) => setRps(e.target.value)}
-                placeholder="Use user default"
+                placeholder={translateUi("Use user default")}
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Burst limit</Label>
+              <Label>{translateUi("Burst limit")}</Label>
               <Input
                 type="number"
                 min={1}
                 value={burst}
                 onChange={(e) => setBurst(e.target.value)}
-                placeholder="Use user default"
+                placeholder={translateUi("Use user default")}
               />
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={handleCancel}>
-                Cancel
-              </Button>
+              <Button variant="outline" onClick={handleCancel}>{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending || (rps === (rateLimitPerSecond?.toString() ?? "") && burst === (rateLimitBurst?.toString() ?? ""))}
-              >
-                Save
-              </Button>
+              >{translateUi("Save")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex items-center justify-between">
             <div className="grid grid-cols-2 gap-2 text-13">
               <div>
-                <span className="text-muted-foreground">Per second: </span>
+                <span className="text-muted-foreground">{translateUi("Per second: ")}</span>
                 {rateLimitPerSecond != null
                   ? String(rateLimitPerSecond)
-                  : "User default"}
+                  : translateUi("User default")}
               </div>
               <div>
-                <span className="text-muted-foreground">Burst: </span>
+                <span className="text-muted-foreground">{translateUi("Burst: ")}</span>
                 {rateLimitBurst != null
                   ? String(rateLimitBurst)
-                  : "User default"}
+                  : translateUi("User default")}
               </div>
             </div>
             <Button

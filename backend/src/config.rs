@@ -199,6 +199,8 @@ pub struct AppConfig {
     pub base_url: String,
     /// Operator-configured chrono-probe origin; unset disables monitoring integration.
     pub chrono_probe_url: Option<String>,
+    /// Default-off automatic diagnostic issuance; startup snapshot, no hot-path reads.
+    pub invocation_diagnostics_enabled: bool,
     pub domain_aliases: domain_aliases::DomainAliases,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
@@ -1105,6 +1107,7 @@ impl AppConfig {
 
             base_url,
             chrono_probe_url: env::var("CHRONO_PROBE_URL").ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
+            invocation_diagnostics_enabled: parse_bool_env("INVOCATION_DIAGNOSTICS_ENABLED", false),
             domain_aliases: domain_aliases::DomainAliases::from_env(),
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
@@ -1950,6 +1953,7 @@ mod tests {
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),
             chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],

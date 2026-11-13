@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 
 import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
@@ -10,6 +11,7 @@ import "@/features/landing/landing.css";
 // so cross-page links work from /blog and /preview without scrolling to a
 // non-existent local anchor.
 function BlogNavbar() {
+  const { t } = useUiTranslation();
   const [scrolled, setScrolled] = useState(false);
   const logoHref = useLogoHref();
   useScroll((scrollY) => setScrolled(scrollY > 0));
@@ -25,28 +27,22 @@ function BlogNavbar() {
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
         <a href={logoHref} className="flex items-center gap-2">
           <PortalMarkLogo size={32} />
-          <span className="font-serif text-xl text-white">NyxID</span>
+          <span className="font-serif text-xl text-white">{t("NyxID")}</span>
         </a>
 
         <div className="flex items-center gap-3">
           <a
             href="/blog"
             className="hidden text-sm font-medium text-gray-300 transition-colors hover:text-white md:inline-block"
-          >
-            Field Notes
-          </a>
+          >{t("Field Notes")}</a>
           <a
             href="/login"
             className="rounded-lg border border-primary/40 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary/10"
-          >
-            Login
-          </a>
+          >{t("Login")}</a>
           <a
             href="/#beta"
             className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-nyx-400 md:inline-block"
-          >
-            Request Beta
-          </a>
+          >{t("Request Beta")}</a>
         </div>
       </div>
     </nav>

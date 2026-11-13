@@ -678,6 +678,51 @@ pub(super) struct Output {
     pub calls: Vec<Value>,
     pub finish: &'static str,
 }
+/// Modern thinking is priced in aggregate output and never exposed. Signed
+/// function continuation needs a separate opaque-state contract; do not invent
+/// a signature, strip one from a function call, or silently downgrade it.
+pub(super) fn output_contract(
+    native: Native,
+    body: &Value,
+    request_id: &str,
+    contract: &crate::models::platform_model_tariff::UsageContract,
+) -> AppResult<Output> {
+    if !super::certification::family_contract(contract) {
+        return output(native, body, request_id);
+    }
+    let mut public_body = body.clone();
+    match native {
+        Native::Claude => {
+            let parts = public_body["content"]
+                .as_array_mut()
+                .ok_or_else(invalid_response)?;
+            let thinking = parts
+                .iter()
+                .any(|p| matches!(p["type"].as_str(), Some("thinking" | "redacted_thinking")));
+            if thinking && parts.iter().any(|p| p["type"] == "tool_use") {
+                return Err(invalid_response());
+            }
+            parts.retain(|p| !matches!(p["type"].as_str(), Some("thinking" | "redacted_thinking")));
+        }
+        Native::Gemini => {
+            let parts = public_body["candidates"][0]["content"]["parts"]
+                .as_array_mut()
+                .ok_or_else(invalid_response)?;
+            for p in parts {
+                if p.get("thoughtSignature").is_some() {
+                    if !p["text"].is_string() {
+                        return Err(invalid_response());
+                    }
+                    p.as_object_mut()
+                        .ok_or_else(invalid_response)?
+                        .remove("thoughtSignature");
+                }
+            }
+        }
+        _ => {}
+    }
+    output(native, &public_body, request_id)
+}
 pub(super) fn output(native: Native, body: &Value, request_id: &str) -> AppResult<Output> {
     let mut out = Output {
         text: String::new(),

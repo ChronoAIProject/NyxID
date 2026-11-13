@@ -496,6 +496,7 @@ it("Grok relays only held PCM, pairs bounded output, and commits before mic mute
   Socket.current.snapshot();
   client.hold(true);
   expect(track.enabled).toBe(true);
+  expect(audio.volume).toBe(1);
   expect(Socket.current.send).toHaveBeenCalledWith(
     JSON.stringify({ type: "ptt_begin" }),
   );
@@ -509,6 +510,14 @@ it("Grok relays only held PCM, pairs bounded output, and commits before mic mute
   expect(mocks.enqueue).toHaveBeenCalledWith(pcm, 100);
   client.muteSpeaker(true);
   expect(track.enabled).toBe(true);
+  expect(audio.muted).toBe(true);
+  client.hold(false);
+  expect(audio.volume).toBe(1);
+  expect(audio.muted).toBe(true);
+  client.muteSpeaker(false);
+  client.hold(true);
+  expect(audio.volume).toBe(1);
+  expect(audio.muted).toBe(false);
   await client.mute(true);
   expect(Socket.current.send).toHaveBeenCalledWith(
     JSON.stringify({ type: "ptt_commit" }),

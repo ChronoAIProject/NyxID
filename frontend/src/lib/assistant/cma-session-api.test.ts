@@ -4,6 +4,7 @@ import { transitionAssistantIdentity } from "./identity";
 import {
   cmaProxyPath,
   listCmaConnections,
+  listCmaAgents,
   listActiveCmaSessions,
   resolveCmaRoutes,
   watchCmaSession,
@@ -70,6 +71,16 @@ afterEach(() => {
 });
 
 describe("read-only CMA session observation", () => {
+  it("does not expose malformed discovery response bodies in parser errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>private discovery page</html>", {
+      headers: { "X-NyxID-Trace-Id": "trace-2275" },
+    })));
+    await expect(listCmaConnections("owner", new AbortController().signal)).rejects.toMatchObject({
+      status: 200,
+      traceId: "trace-2275",
+      message: "NyxID couldn't complete this request. Please try again.",
+    });
+  });
   it("retains normal NyxID sign-out handling for a discovery 401", async () => {
     const clearUser = vi
       .spyOn(useAuthStore.getState(), "setUser")
@@ -1146,3 +1157,13 @@ it.each([403, 503, "network"] as const)(
     ).toEqual([]);
   },
 );
+
+
+it("preserves CMA problem documents through the session API proxy read", async () => {
+  const body = { status: 409, title: "invalid state", detail: "Session is not ready", code: "invalid_state", details: { retryable: true } };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json(body, { status: 409 })));
+  await expect(listCmaAgents("owner", cmaSession.connection.id, cmaSession.routes, new AbortController().signal)).rejects.toMatchObject({
+    status: 409, message: body.detail,
+    errorResponse: { ...body, error: body.code, message: body.detail },
+  });
+});

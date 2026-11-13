@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { titleCase } from "@/schemas/platform-models";
 import { useState } from "react";
 import { z } from "zod";
@@ -20,11 +22,12 @@ import { EditErrors, Field, SaveError } from "./shared";
 
 type Kind = "person" | "org" | "group";
 function GroupChoices({ choose }: { readonly choose: (id: string) => void }) {
+  useUiTranslation();
   const groups = useGroups();
   return (
-    <Field title="Select group">
+    <Field title={translateUi("Select group")}>
       <NativeSelect defaultValue="" onChange={(e) => choose(e.target.value)}>
-        <option value="">Choose a group</option>
+        <option value="">{translateUi("Choose a group")}</option>
         {groups.data?.groups.map((g) => (
           <option key={g.id} value={g.id}>
             {g.name}
@@ -41,6 +44,7 @@ function TargetPicker({
   readonly kind: Kind;
   readonly choose: (id: string) => void;
 }) {
+  useUiTranslation();
   const [search, setSearch] = useState("");
   const users = useAdminUsers(
     1,
@@ -52,21 +56,21 @@ function TargetPicker({
   if (kind === "group") return <GroupChoices choose={choose} />;
   return (
     <div className="space-y-2">
-      <Field title={`Find ${kind === "org" ? "organization" : "person"}`}>
+      <Field title={kind === "org" ? translateUi("Find organization") : translateUi("Find person")}>
         <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name"
+          placeholder={translateUi("Search by name")}
         />
       </Field>
       {users.error && <SaveError error={users.error} />}
       {users.data && (
-        <Field title="Search results">
+        <Field title={translateUi("Search results")}>
           <NativeSelect
             defaultValue=""
             onChange={(e) => choose(e.target.value)}
           >
-            <option value="">Select a result</option>
+            <option value="">{translateUi("Select a result")}</option>
             {users.data.users.map((u) => (
               <option key={u.id} value={u.id}>
                 {u.display_name || u.email}
@@ -87,6 +91,7 @@ export function AccessEditor({
   readonly readOnly: boolean;
   readonly reload: () => void;
 }) {
+  useUiTranslation();
   const form = useAppForm<z.infer<typeof entitlementsSchema>>({
     resolver: zodResolver(entitlementsSchema),
     defaultValues: model.entitlements,
@@ -116,12 +121,7 @@ export function AccessEditor({
             }
           })}
         >
-          <p className="type-body text-muted-foreground">
-            Default deny. Any matching deny wins, including over an individual
-            allow or All people. Organizations include active members who can
-            proxy; groups include direct members only. Administrator status does
-            not grant model access.
-          </p>
+          <p className="type-body text-muted-foreground">{translateUi("Default deny. Any matching deny wins, including over an individual allow or All people. Organizations include active members who can proxy; groups include direct members only. Administrator status does not grant model access.")}</p>
           <fieldset
             disabled={readOnly || change.isPending}
             className="space-y-4"
@@ -132,9 +132,7 @@ export function AccessEditor({
                 onCheckedChange={(checked) =>
                   form.setValue("all_people", checked === true)
                 }
-              />
-              Allow all authenticated people
-            </Label>
+              />{translateUi("Allow all authenticated people")}</Label>
             <ul className="divide-y divide-border/30">
               {rules.map((rule, i) => (
                 <li
@@ -142,7 +140,7 @@ export function AccessEditor({
                   className="flex flex-wrap items-center justify-between gap-2 py-3"
                 >
                   <span className="type-body break-all">
-                    {titleCase(rule.effect)} · {titleCase(rule.subject_kind)} ·{" "}
+                    {translateUi(titleCase(rule.effect))} · {translateUi(rule.subject_kind === "org" ? "Organization" : titleCase(rule.subject_kind))} ·{" "}
                     {rule.subject_id}
                   </span>
                   {!readOnly && (
@@ -155,8 +153,7 @@ export function AccessEditor({
                           rules.filter((_, n) => n !== i),
                         )
                       }
-                    >
-                      Remove {rule.effect} rule {i + 1}
+                    >{translateUi("Remove ")}{translateUi(rule.effect)}{translateUi(" rule ")}{i + 1}
                     </Button>
                   )}
                 </li>
@@ -165,7 +162,7 @@ export function AccessEditor({
             {!readOnly && (
               <div className="space-y-4 rounded-xl border border-border/50 p-4">
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <Field title="Target type">
+                  <Field title={translateUi("Target type")}>
                     <NativeSelect
                       value={kind}
                       onChange={(e) => {
@@ -173,29 +170,29 @@ export function AccessEditor({
                         setTarget("");
                       }}
                     >
-                      <option value="person">Person</option>
-                      <option value="org">Organization</option>
-                      <option value="group">Group</option>
+                      <option value="person">{translateUi("Person")}</option>
+                      <option value="org">{translateUi("Organization")}</option>
+                      <option value="group">{translateUi("Group")}</option>
                     </NativeSelect>
                   </Field>
-                  <Field title="Effect">
+                  <Field title={translateUi("Effect")}>
                     <NativeSelect
                       value={effect}
                       onChange={(e) =>
                         setEffect(e.target.value as "allow" | "deny")
                       }
                     >
-                      <option value="allow">Allow</option>
-                      <option value="deny">Deny</option>
+                      <option value="allow">{translateUi("Allow")}</option>
+                      <option value="deny">{translateUi("Deny")}</option>
                     </NativeSelect>
                   </Field>
                 </div>
                 <TargetPicker kind={kind} choose={setTarget} />
-                <Field title="Target ID">
+                <Field title={translateUi("Target ID")}>
                   <Input
                     value={target}
                     onChange={(e) => setTarget(e.target.value)}
-                    placeholder="Select a result or enter a UUID"
+                    placeholder={translateUi("Select a result or enter a UUID")}
                   />
                 </Field>
                 <Button
@@ -215,9 +212,7 @@ export function AccessEditor({
                     ]);
                     setTarget("");
                   }}
-                >
-                  Add access rule
-                </Button>
+                >{translateUi("Add access rule")}</Button>
               </div>
             )}
           </fieldset>
@@ -229,9 +224,7 @@ export function AccessEditor({
                 type="button"
                 variant="outline"
                 onClick={() => form.reset(model.entitlements)}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 disabled={
@@ -239,17 +232,15 @@ export function AccessEditor({
                   !form.formState.isValid ||
                   change.isPending
                 }
-              >
-                Save access
-              </Button>
+              >{translateUi("Save access")}</Button>
             </div>
           )}
         </form>
       </Form>
       <section className="space-y-4">
-        <h3 className="type-section-heading">Explain access for a person</h3>
+        <h3 className="type-section-heading">{translateUi("Explain access for a person")}</h3>
         <TargetPicker kind="person" choose={setPerson} />
-        <Field title="Person ID">
+        <Field title={translateUi("Person ID")}>
           <Input value={person} onChange={(e) => setPerson(e.target.value)} />
         </Field>
         <Button
@@ -261,16 +252,14 @@ export function AccessEditor({
             if (person === explainId) void explanation.refetch();
             else setExplainId(person);
           }}
-        >
-          Explain access
-        </Button>
+        >{translateUi("Explain access")}</Button>
         <SaveError error={explanation.error} />
         {explanation.data && (
           <dl className="grid gap-2 type-body">
-            <div>Policy: {titleCase(explanation.data.policy_reason)}</div>
-            <div>Model: {titleCase(explanation.data.model_reason)}</div>
-            <div>Feature: {explanation.data.flag_enabled ? "On" : "Off"}</div>
-            <div>Can execute: {explanation.data.executable ? "Yes" : "No"}</div>
+            <div>{translateUi("Policy: ")}{translateUi(titleCase(explanation.data.policy_reason))}</div>
+            <div>{translateUi("Model: ")}{translateUi(titleCase(explanation.data.model_reason))}</div>
+            <div>{translateUi("Feature: ")}{explanation.data.flag_enabled ? translateUi("On") : translateUi("Off")}</div>
+            <div>{translateUi("Can execute: ")}{explanation.data.executable ? translateUi("Yes") : translateUi("No")}</div>
           </dl>
         )}
       </section>

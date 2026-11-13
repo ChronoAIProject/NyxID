@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useContext, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CHAT_CONTENT_WIDTH, clampChatContentWidth, useThemeStore } from "@/stores/theme-store";
@@ -5,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { ChatGripSlotContext, ChatHeaderAnimateContext, ChatHeaderCompactContext } from "./chat-header-context";
 
 export function ChatContentLayout({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   const savedWidth = useThemeStore((state) => state.chatContentWidth);
   const setWidth = useThemeStore((state) => state.setChatContentWidth);
   const [preview, setPreview] = useState<number | null>(null);
@@ -148,14 +151,14 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
             >
               <div
                 role="separator"
-                aria-label={`Resize chat content from ${side}`}
+                aria-label={side === "left" ? translateUi("Resize chat content from left") : translateUi("Resize chat content from right")}
                 aria-orientation="vertical"
                 aria-valuemin={CHAT_CONTENT_WIDTH.min}
                 aria-valuemax={maximum}
                 aria-valuenow={visibleWidth}
                 aria-valuetext={`${visibleWidth} pixels`}
                 tabIndex={0}
-                title="Drag to resize chat · double-click to reset"
+                title={translateUi("Drag to resize chat · double-click to reset")}
                 className="pointer-events-auto relative h-8 w-full touch-none cursor-col-resize outline-none"
                 onPointerDown={(event) => {
                   if (event.button !== 0 || drag.current) return;

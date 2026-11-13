@@ -130,6 +130,7 @@ pub async fn publish(
                 updated_at: now,
                 state_version: 1,
                 rotation_predecessor_id: None,
+                credential_verification: None,
             };
             service_history::collection::<UserEndpoint>(
                 &db,

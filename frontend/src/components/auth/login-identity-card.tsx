@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Fingerprint, Monitor } from "lucide-react";
@@ -27,6 +29,7 @@ export function LoginIdentityCard({
   onVerified: () => void;
   disabled: boolean;
 }) {
+  useUiTranslation();
   const [keep, setKeep] = useState(false);
   const [busy, setBusy] = useState(false);
   const [appOpen, setAppOpen] = useState(false);
@@ -64,15 +67,12 @@ export function LoginIdentityCard({
   return (
     <div className="space-y-4 border-t border-border pt-4">
       <div className="space-y-1">
-        <h3 className="text-13 font-semibold">Verify your identity</h3>
-        <p className="text-12 text-muted-foreground">
-          Choose how to use this browser. You’ll choose the requesting device’s
-          access next.
-        </p>
+        <h3 className="text-13 font-semibold">{translateUi("Verify your identity")}</h3>
+        <p className="text-12 text-muted-foreground">{translateUi("Choose how to use this browser. You’ll choose the requesting device’s access next.")}</p>
       </div>
       <div
         role="group"
-        aria-label="Browser sign-in"
+        aria-label={translateUi("Browser sign-in")}
         className="grid gap-2 sm:grid-cols-2"
       >
         {[
@@ -99,17 +99,17 @@ export function LoginIdentityCard({
           >
             <span className="flex items-center gap-2 text-12 font-medium">
               <Icon className="size-4" />
-              {title}
+              {translateUi(title)}
             </span>
             <span className="mt-1 block text-11 text-muted-foreground">
-              {text}
+              {translateUi(text)}
             </span>
           </button>
         ))}
       </div>
       {error && (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       )}
       {approval.identity?.mfa_required ? (
@@ -130,15 +130,15 @@ export function LoginIdentityCard({
               name="code"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{recoveryMode ? "Recovery code" : "Authenticator code"}</FormLabel>
+                  <FormLabel>{recoveryMode ? translateUi("Recovery code") : translateUi("Authenticator code")}</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
                       inputMode="text"
                       autoComplete="one-time-code"
                       maxLength={32}
-                      placeholder={recoveryMode ? "Paste a recovery code" : "000000"}
-                      aria-label={recoveryMode ? "Recovery code" : "Authenticator code"}
+                      placeholder={recoveryMode ? translateUi("Paste a recovery code") : "000000"}
+                      aria-label={recoveryMode ? translateUi("Recovery code") : translateUi("Authenticator code")}
                       className="min-w-0 font-mono text-xs unthemed:text-xs tracking-normal sm:text-sm sm:unthemed:text-sm"
                       disabled={blocked}
                     />
@@ -153,7 +153,7 @@ export function LoginIdentityCard({
               className="h-auto p-0 text-12 unthemed:text-12"
               onClick={() => setRecoveryMode((value) => !value)}
             >
-              {recoveryMode ? "Use an authenticator code" : "Use a recovery code"}
+              {recoveryMode ? translateUi("Use an authenticator code") : translateUi("Use a recovery code")}
             </Button>
             <Button
               type="submit"
@@ -161,9 +161,7 @@ export function LoginIdentityCard({
               className="h-9 w-full rounded-md"
               isLoading={busy}
               disabled={blocked}
-            >
-              Verify & continue
-            </Button>
+            >{translateUi("Verify & continue")}</Button>
           </form>
         </Form>
       ) : (
@@ -207,7 +205,7 @@ export function LoginIdentityCard({
                   name="email"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Email</FormLabel>
+                      <FormLabel>{translateUi("Email")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
@@ -226,13 +224,11 @@ export function LoginIdentityCard({
                   render={({ field }) => (
                     <FormItem>
                       <div className="flex items-center justify-between">
-                        <FormLabel>Password</FormLabel>
+                        <FormLabel>{translateUi("Password")}</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
                           className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
-                        >
-                          Forgot password?
-                        </Link>
+                        >{translateUi("Forgot password?")}</Link>
                       </div>
                       <FormControl>
                         <Input
@@ -255,8 +251,8 @@ export function LoginIdentityCard({
                   disabled={blocked}
                 >
                   {(approval.identity?.keep_signed_in ?? keep)
-                    ? "Sign in & continue"
-                    : "Verify & continue"}
+                    ? translateUi("Sign in & continue")
+                    : translateUi("Verify & continue")}
                 </Button>
               </form>
             </Form>
@@ -275,9 +271,7 @@ export function LoginIdentityCard({
               mfa.reset();
             })
           }
-        >
-          Change verification choice
-        </Button>
+        >{translateUi("Change verification choice")}</Button>
       )}
     </div>
   );

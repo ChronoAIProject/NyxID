@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 /**
  * Top-of-page banner surfaced when the CLI's embedded wizard proxy
  * could not reach the NyxID backend on the last request — either it
@@ -28,6 +29,7 @@ export function UpstreamErrorBanner({
   kind,
   onDismiss,
 }: UpstreamErrorBannerProps) {
+  const { t } = useWizardTranslation();
   const Icon = kind === "timeout" ? Clock : WifiOff;
   const title =
     kind === "timeout"
@@ -49,13 +51,13 @@ export function UpstreamErrorBanner({
         aria-hidden
       />
       <div className="flex flex-1 flex-col gap-1">
-        <p className="font-medium">{title}</p>
-        <p className="text-muted-foreground">{body}</p>
+        <p className="font-medium">{t(title)}</p>
+        <p className="text-muted-foreground">{t(body)}</p>
       </div>
       <button
         type="button"
         onClick={onDismiss}
-        aria-label="Dismiss"
+        aria-label={t("Dismiss")}
         className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-destructive"
       >
         <X className="h-3.5 w-3.5" aria-hidden />

@@ -69,11 +69,9 @@ function openLink(url: string) {
 /** Stable message bodies avoid reparsing earlier replies on every composer edit. */
 export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
   text,
-  variant = "private",
   onLinkPress = openLink,
 }: {
   text: string;
-  variant?: "private" | "crew";
   onLinkPress?: (url: string) => boolean;
 }) {
   const { colors } = useTheme();
@@ -153,35 +151,6 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
     [colors],
   );
 
-  const crewStyle = useMemo(
-    () => ({
-      body: {
-        color: colors.textPrimary,
-        fontSize: 14,
-        lineHeight: 23,
-        fontFamily: fonts.bodyRegular,
-      },
-      paragraph: { marginTop: 0, marginBottom: 0 },
-      link: { color: colors.primaryOnTint },
-      fence: {
-        backgroundColor: colors.cardSoft,
-        color: colors.textPrimary,
-        borderColor: colors.border,
-        fontFamily: fonts.mono,
-      },
-      code_inline: {
-        backgroundColor: colors.cardSoft,
-        color: colors.textPrimary,
-      },
-      heading1: { fontSize: 22, color: colors.textPrimary },
-      heading2: { fontSize: 18, color: colors.textPrimary },
-    }),
-    [colors],
-  );
-  const combinedCrewStyle = useMemo(
-    () => ({ ...markdownStyle, ...crewStyle }),
-    [markdownStyle, crewStyle],
-  );
   const rules: RenderRules = useMemo(
     () => ({
       ...assistantSelectableMarkdown,
@@ -488,7 +457,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
     <Markdown
       markdownit={markdown}
       mergeStyle
-      style={variant === "crew" ? combinedCrewStyle : markdownStyle}
+      style={markdownStyle}
       rules={rules}
       onLinkPress={onLinkPress}
     >

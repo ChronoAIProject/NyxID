@@ -53,5 +53,8 @@ export function groupLiveRefresh(
     case "channels":
     case "channel_thread":
       return { now: [], lists: [threads, AGENTS] };
+    case "notification":
+      // The notification feed refreshes itself; crews and drawers are unchanged.
+      return { now: [], lists: [] };
   }
 }

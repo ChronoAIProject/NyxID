@@ -2,6 +2,7 @@ import { createContext, PropsWithChildren, useCallback, useContext, useEffect, u
 import { AppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { advanceAuthEpoch } from "../../lib/auth/authEpoch";
+import { getAuthAccountId, setAuthAccountId } from "../../lib/auth/authAccount";
 import {
   clearStoredAuthSession,
   authSessionGeneration,
@@ -48,6 +49,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const performSignOut = useCallback(async () => {
     if (isSigningOutRef.current) return;
     isSigningOutRef.current = true;
+    setAuthAccountId(null);
     advanceAuthEpoch();
     const expectedGeneration = authSessionGeneration();
     telemetryReset();
@@ -133,6 +135,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       .then((session) => {
         if (!active) return;
         setIsAuthenticated(Boolean(session));
+        setAuthAccountId(
+          session ? decodeJwtSub(session.accessToken) ?? session.userId ?? null : null,
+        );
         if (session) {
           // If we restored an authenticated session with a known
           // `userId` (persisted or JWT-derived by `loadStoredAuthSession`),
@@ -172,6 +177,8 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
   const value = useMemo<AuthSessionContextValue>(() => {
     const signInWithSession = async (session: StoredAuthSession) => {
+      const nextAccountId = decodeJwtSub(session.accessToken) ?? session.userId ?? null;
+      if (getAuthAccountId() !== nextAccountId) setAuthAccountId(null);
       advanceAuthEpoch();
       await queryClient.cancelQueries();
       queryClient.clear();
@@ -197,6 +204,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       }
 
       if (authSessionGeneration() !== expectedGeneration) throw new Error("auth_session_changed");
+      setAuthAccountId(nextAccountId);
       setIsAuthenticated(true);
       // Identify to telemetry as soon as the session is persisted.
       // `persistAuthSession` derives/persists userId internally but does

@@ -5,7 +5,7 @@ export async function guardedJsonTransport<T>(options: {
   guard: () => void;
   refresh: () => Promise<boolean>;
   invalidate: () => Promise<void> | void;
-  failure: (payload: unknown, status: number) => Error;
+  failure: (payload: unknown, status: number, headers?: Response["headers"]) => Error;
   requiresAuth: boolean;
   retry: boolean;
   invalidateOnAuthFailure?: boolean;
@@ -14,8 +14,13 @@ export async function guardedJsonTransport<T>(options: {
     options.guard();
     const response = await options.send();
     options.guard();
-    const payload = await options.read(response);
-    options.guard();
+    let payload: unknown;
+    try {
+      payload = await options.read(response);
+    } finally {
+      // A malformed late response still belongs to the original account.
+      options.guard();
+    }
     return { response, payload };
   };
   let { response, payload } = await receive();
@@ -32,7 +37,7 @@ export async function guardedJsonTransport<T>(options: {
       await options.invalidate();
       options.guard();
     }
-    throw options.failure(payload, response.status);
+    throw options.failure(payload, response.status, response.headers);
   }
   return payload as T;
 }

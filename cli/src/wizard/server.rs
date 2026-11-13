@@ -1971,24 +1971,13 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
     };
     match prefill {
         PrefillData::AiKey(p) => {
-            put_opt(&mut obj, "slug", &p.slug);
-            put_opt(&mut obj, "label", &p.label);
-            put_opt(&mut obj, "via_node", &p.via_node);
-            put_opt(&mut obj, "org_id", &p.org);
-            put_opt(&mut obj, "endpoint_url", &p.endpoint_url);
-            // Issue #414 — the SPA's `AiKeyConfirm` reads these to
-            // skip the catalog grid (`prefill.custom === true`) and
-            // pre-populate the custom-service form. See
-            // `frontend/src/components/cli-wizard/ai-key-confirm-panel.tsx`.
-            // `custom: false` is omitted to keep the catalog flow's
-            // bootstrap byte-identical (matches `prefill_ai_key`'s
-            // pairing-transport semantics).
-            if p.custom {
-                obj.insert("custom".to_string(), Value::Bool(true));
-            }
-            put_opt(&mut obj, "custom_slug", &p.custom_slug);
-            put_opt(&mut obj, "auth_method", &p.auth_method);
-            put_opt(&mut obj, "auth_key_name", &p.auth_key_name);
+            // Local bootstrap and remote pairing must preserve the same
+            // manage-scopes intent. Retain local omission of empty strings.
+            let Value::Object(mut prefill) = super::pairing::prefill_ai_key(p) else {
+                unreachable!("AI key prefill is an object");
+            };
+            prefill.retain(|_, value| value.as_str() != Some(""));
+            return Value::Object(prefill);
         }
         PrefillData::Rotate(p) => {
             put_str(&mut obj, "resource_id", &p.resource_id);
@@ -3141,6 +3130,35 @@ mod tests {
                 "allowlist empty for {:?}",
                 kind
             );
+        }
+    }
+
+    #[test]
+    fn local_manage_scopes_bootstrap_preserves_remote_pairing_intent() {
+        for scopes in [
+            None,
+            Some(vec![]),
+            Some(vec![
+                "repo".into(),
+                "read:project".into(),
+                "future:scope".into(),
+            ]),
+        ] {
+            let prefill = WizardPrefill {
+                slug: Some("api-github-2".into()),
+                label: Some("GitHub".into()),
+                reconnect_key_id: Some("existing-key".into()),
+                scope_override: scopes,
+                ..Default::default()
+            };
+            let local = prefill_to_json(&PrefillData::AiKey(prefill.clone()));
+            assert_eq!(local["reconnect_key_id"], "existing-key");
+            let expected_scopes = prefill
+                .scope_override
+                .as_ref()
+                .map(|scopes| serde_json::json!(scopes));
+            assert_eq!(local.get("scope_override"), expected_scopes.as_ref());
+            assert_eq!(local, super::super::pairing::prefill_ai_key(&prefill));
         }
     }
 

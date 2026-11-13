@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useRotateApiKey } from "@/hooks/use-api-keys";
@@ -23,6 +25,7 @@ export function RotateKeyDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly keyId: string;
 }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const rotateMutation = useRotateApiKey();
   const [newKeyValue, setNewKeyValue] = useState<string | null>(null);
@@ -33,7 +36,7 @@ export function RotateKeyDialog({
     try {
       const result = await rotateMutation.mutateAsync(keyId);
       if (!result.full_key) {
-        toast.success("Assistant key rotated");
+        toast.success(translateUi("Assistant key rotated"));
         onOpenChange(false);
         void navigate({ to: "/keys/api-key/$keyId", params: { keyId: result.id } });
         return;
@@ -41,7 +44,7 @@ export function RotateKeyDialog({
       setNewKeyValue(result.full_key);
       setNewKeyId(result.id);
     } catch {
-      toast.error("Failed to rotate key");
+      toast.error(translateUi("Failed to rotate key"));
     }
   }
 
@@ -52,7 +55,7 @@ export function RotateKeyDialog({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy");
+      toast.error(translateUi("Failed to copy"));
     }
   }
 
@@ -78,10 +81,8 @@ export function RotateKeyDialog({
         {newKeyValue ? (
           <>
             <DialogHeader>
-              <DialogTitle>New API Key</DialogTitle>
-              <DialogDescription>
-                Copy your new API key now. You will not be able to see it again.
-              </DialogDescription>
+              <DialogTitle>{t("New API Key")}</DialogTitle>
+              <DialogDescription>{t("Copy your new API key now. You will not be able to see it again.")}</DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
               <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-14 break-all select-all">
@@ -100,29 +101,22 @@ export function RotateKeyDialog({
               </Button>
             </div>
             <DialogFooter>
-              <Button variant="primary" onClick={handleClose}>Done</Button>
+              <Button variant="primary" onClick={handleClose}>{t("Done")}</Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
-              <DialogTitle>Rotate API Key</DialogTitle>
-              <DialogDescription>
-                This will generate a new key and invalidate the old one. Any
-                applications using the current key will stop working.
-              </DialogDescription>
+              <DialogTitle>{t("Rotate API Key")}</DialogTitle>
+              <DialogDescription>{t("This will generate a new key and invalidate the old one. Any applications using the current key will stop working.")}</DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              <Button variant="outline" onClick={handleClose}>
-                Cancel
-              </Button>
+              <Button variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={() => void handleRotate()}
                 disabled={rotateMutation.isPending}
-              >
-                Rotate Key
-              </Button>
+              >{t("Rotate Key")}</Button>
             </DialogFooter>
           </>
         )}

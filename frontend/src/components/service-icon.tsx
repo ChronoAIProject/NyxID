@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { SERVICE_ICONS, FallbackIcon } from "@/components/service-icons";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
@@ -66,6 +67,7 @@ export function ServiceIcon({
   readonly size?: ServiceIconSize;
   readonly className?: string;
 }) {
+  useUiTranslation();
   const imageUrl = iconUrl ? safeIconUrl(iconUrl) : null;
   if (imageUrl) {
     return (

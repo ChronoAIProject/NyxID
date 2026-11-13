@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -99,6 +101,7 @@ export function AssistantKeyDeleteDialog({
   readonly params: AssistantKeyDeleteParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -198,19 +201,19 @@ export function AssistantKeyDeleteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultKeyId ? "API key deleted" : "Delete API key"}
+            {resultKeyId ? translateUi("API key deleted") : translateUi("Delete API key")}
           </DialogTitle>
           <DialogDescription>
             {resultKeyId
-              ? "NyxID retired this exact agent identity. The assistant receives only the safe key reference."
-              : "This permanently retires the agent identity. NyxID asks you to confirm every time."}
+              ? translateUi("NyxID retired this exact agent identity. The assistant receives only the safe key reference.")
+              : translateUi("This permanently retires the agent identity. NyxID asks you to confirm every time.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultKeyId ? (
           <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Key</span>
+              <span className="text-muted-foreground">{translateUi("Key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -218,40 +221,31 @@ export function AssistantKeyDeleteDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-13 text-muted-foreground">
-              Deletion cannot be remembered or pre-approved. Confirm this exact
-              key every time.
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("Deletion cannot be remembered or pre-approved. Confirm this exact key every time.")}</p>
           </div>
         ) : null}
 
         {error ? (
           <p role="alert" className="text-13 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-13 text-success">
-            Authorization evidence is absent.
-          </p>
+          <p className="text-13 text-success">{translateUi("Authorization evidence is absent.")}</p>
         ) : null}
 
         <DialogFooter>
           {!resultKeyId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void deleteKey()}
-              >
-                Delete key
-              </Button>
+              >{translateUi("Delete key")}</Button>
             </>
           ) : (
             <>
@@ -262,9 +256,7 @@ export function AssistantKeyDeleteDialog({
                   isLoading={verifying}
                   onClick={() => void verifyDeleted(resultKeyId)}
                 >
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -275,7 +267,7 @@ export function AssistantKeyDeleteDialog({
                   close();
                 }}
               >
-                {replayed ? "Report deleted key" : "Done"}
+                {replayed ? translateUi("Report deleted key") : translateUi("Done")}
               </Button>
             </>
           )}

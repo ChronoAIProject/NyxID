@@ -59,7 +59,7 @@ pub(crate) async fn fence_resume(
     {
         return Err(AppError::ClientDisconnected);
     }
-    crate::services::security_readiness_service::require(db, READINESS).await?;
+    crate::services::security_readiness_service::require_serving(db, READINESS).await?;
     let row = db
         .collection::<ApprovalRequest>(REQUESTS)
         .find_one(doc! {"_id":&resume.request_id})
@@ -95,7 +95,7 @@ pub(super) async fn claim_inner(
     {
         return Ok(None);
     }
-    crate::services::security_readiness_service::require(db, READINESS).await?;
+    crate::services::security_readiness_service::require_serving(db, READINESS).await?;
     let raw = Zeroizing::new(
         keys.decrypt_with_aad(
             &p.payload.as_ref().ok_or_else(conflict)?.bytes,
@@ -209,6 +209,12 @@ pub(super) async fn complete_response(
     match outcome {
         Ok(response) if dispatched => {
             let (parts, body) = response.into_parts();
+            // Native MCP uses HTTP 200 for tool failures. This trusted server
+            // marker, not provider JSON, distinguishes the operation outcome.
+            let tool_error = parts
+                .extensions
+                .get::<nyxid_permissions::server::McpToolOutcome>()
+                .map(|outcome| outcome.is_error);
             let state = state.clone();
             let row = row.clone();
             let resume = resume.clone();
@@ -226,7 +232,7 @@ pub(super) async fn complete_response(
                 while let Some(next)=stream.next().await {
                     match next {
                         Ok(chunk)=>{if !partial && bytes.len()+chunk.len()+4096<=MAX_PAYLOAD{bytes.extend_from_slice(&chunk);}else{partial=true;}yield Ok::<_,axum::Error>(chunk);}
-                        Err(error)=>{let _=finish(&state,&row,&resume,"unknown",Some("response_unavailable"),None).await;yield Err(error);return;}
+                        Err(error)=>{let _=finish(&state,&row,&resume,"unknown",Some("response_unavailable"),None,None).await;yield Err(error);return;}
                     }
                 }
                 let body = match String::from_utf8(bytes) {
@@ -234,7 +240,7 @@ pub(super) async fn complete_response(
                     Err(_) => { partial = true; String::new() }
                 };
                 let result=ExecutionResult{status,headers,body,partial};
-                let _=finish(&state,&row,&resume,"completed",partial.then_some("response_partial"),Some(result)).await;
+                let _=finish(&state,&row,&resume,"completed",partial.then_some("response_partial"),Some(result),tool_error).await;
             };
             Ok(Some(Response::from_parts(
                 parts,
@@ -279,6 +285,7 @@ pub(super) async fn complete_response(
                 "not_sent",
                 Some("operation_not_sent"),
                 None,
+                None,
             )
             .await?;
             Ok(None)
@@ -295,6 +302,7 @@ pub(super) async fn complete_response(
                 resume,
                 if dispatched { "unknown" } else { "not_sent" },
                 Some(code),
+                None,
                 None,
             )
             .await?;
@@ -313,7 +321,15 @@ pub(super) async fn finish(
     state_name: &str,
     code: Option<&str>,
     result: Option<ExecutionResult>,
+    tool_error: Option<bool>,
 ) -> AppResult<()> {
+    let activity_outcome = result.as_ref().map(|r| {
+        if (200..300).contains(&r.status) && tool_error != Some(true) {
+            "completed"
+        } else {
+            "failed"
+        }
+    });
     let mut code = code;
     let encrypted = if let Some(result) = result {
         let raw = Zeroizing::new(serde_json::to_vec(&result).map_err(encoding)?);
@@ -333,7 +349,7 @@ pub(super) async fn finish(
     };
     let mut session = state.db.client().start_session().await?;
     session.start_transaction().await?;
-    if state.db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&row.id,"execution_proposal.v2.claim_id":&resume.claim_id,"execution_proposal.v2.delivery_abandoned":{"$ne":true},"execution_proposal.v2.state":{"$in":["preparing","dispatched"]}},doc!{"$set":{"execution_proposal.v2.state":state_name,"execution_proposal.v2.failure_code":code,"execution_proposal.v2.result":bson::to_bson(&encrypted).map_err(encoding)?},"$unset":{"execution_proposal.v2.payload":""}}).session(&mut session).await?.matched_count==1{super::super::lifecycle::retire_operations(&state.db,&mut session,std::slice::from_ref(&row.id)).await?;}
+    if state.db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&row.id,"execution_proposal.v2.claim_id":&resume.claim_id,"execution_proposal.v2.delivery_abandoned":{"$ne":true},"execution_proposal.v2.state":{"$in":["preparing","dispatched"]}},doc!{"$set":{"activity_outcome":activity_outcome,"execution_proposal.v2.state":state_name,"execution_proposal.v2.failure_code":code,"execution_proposal.v2.result":bson::to_bson(&encrypted).map_err(encoding)?},"$unset":{"execution_proposal.v2.payload":""}}).session(&mut session).await?.matched_count==1{super::super::lifecycle::retire_operations(&state.db,&mut session,std::slice::from_ref(&row.id)).await?;}
     session.commit_transaction().await?;
     Ok(())
 }

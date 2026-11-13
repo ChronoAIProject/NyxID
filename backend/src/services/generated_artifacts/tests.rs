@@ -1809,3 +1809,5 @@ async fn generated_live_retention_enforces_both_materialization_policy_orderings
     }
     db.drop().await.unwrap();
 }
+
+include!("writer_cutover_tests.rs");

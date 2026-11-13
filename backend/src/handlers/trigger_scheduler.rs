@@ -486,6 +486,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        title_language: None,
         automation_work: None,
         automation_parent: None,
         execution_enrollment: false,

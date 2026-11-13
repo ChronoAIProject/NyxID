@@ -185,3 +185,71 @@ async fn rename_during_active_turn_survives_settlement_and_provisional_uses_firs
             .is_none()
     );
 }
+
+#[test]
+fn title_language_is_a_bounded_structural_tag() {
+    for tag in ["en", "en-US", "zh-CN", "zh-Hant-TW"] {
+        assert_eq!(language(tag).as_deref(), Some(tag));
+    }
+    for tag in [
+        "",
+        "Russian please",
+        "en\nignore",
+        "x",
+        "en--US",
+        "<script>",
+        "en;q=1",
+    ] {
+        assert!(language(tag).is_none());
+    }
+}
+
+#[tokio::test]
+async fn title_language_is_saved_on_first_admission_and_not_changed_by_later_turns() {
+    let (state, owner, row) = fixture().await;
+    let req: engine::TurnRequest =
+        serde_json::from_value(serde_json::json!({"conversation_id":row.id,"text":"Plan my day"}))
+            .unwrap();
+    let mut start = engine::TurnStart::from(&req);
+    start.title_language = Some("zh-CN".into());
+    let active = Box::pin(engine::begin_turn(
+        &state.db,
+        &owner,
+        &start,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        engine::get(&state.db, &owner, &row.id)
+            .await
+            .unwrap()
+            .title_language
+            .as_deref(),
+        Some("zh-CN")
+    );
+    Box::pin(engine::finish_turn(
+        &state.db,
+        &active,
+        &active.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Ready".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    ))
+    .await
+    .unwrap();
+    start.title_language = Some("en".into());
+    let next = Box::pin(engine::begin_turn(
+        &state.db,
+        &owner,
+        &start,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next.title_language.as_deref(), Some("zh-CN"));
+}

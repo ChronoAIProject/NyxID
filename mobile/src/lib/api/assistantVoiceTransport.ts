@@ -2,6 +2,7 @@ import { z } from "zod";
 import { conversationIdSchema } from "../../features/assistant/assistantTypes";
 import {
   activeVoiceSessionSchema,
+  accountActiveVoiceSessionSchema,
   voiceControlRequestSchema,
   voiceIdentitySchema,
   voiceOptionsSchema,
@@ -132,6 +133,80 @@ export function createAssistantVoiceApi(
           signal,
         }),
       );
+    },
+    async accountActive(conversationId: string, signal?: AbortSignal) {
+      const current = conversationIdSchema.parse(conversationId);
+      const assertActive = () => {
+        if (signal?.aborted)
+          throw Object.assign(new Error("Voice request was cancelled."), {
+            name: "AbortError",
+          });
+      };
+      assertActive();
+      try {
+        return accountActiveVoiceSessionSchema.parse(
+          await request(`${ROOT}/voice/active`, { signal }),
+        );
+      } catch (error) {
+        const status =
+          error && typeof error === "object" && "statusCode" in error
+            ? error.statusCode
+            : undefined;
+        if (status !== 404 && status !== 405) throw error;
+      }
+      // Compatibility with servers without GET /voice/active: metadata only, at
+      // most ten other recent conversations, two reads in flight. Never read history.
+      const read = async (id: string) => {
+        assertActive();
+        try {
+          return activeVoiceSessionSchema.parse(
+            await request(`${assistantVoiceSessionsPath(id)}/active`, {
+              signal,
+            }),
+          ).session;
+        } catch (error) {
+          // Recent chats include threads that can never hold a call (automation,
+          // channel and group threads answer 403; deleted ones 404). They hold
+          // no call; any other failure still leaves the scan unverified.
+          const status =
+            error && typeof error === "object" && "statusCode" in error
+              ? error.statusCode
+              : undefined;
+          if (id !== current && (status === 403 || status === 404)) return null;
+          throw error;
+        }
+      };
+      const own = await read(current);
+      if (own) return { session: own, conversation_id: current };
+      assertActive();
+      const index = z
+        .object({
+          conversations: z
+            .array(z.object({ id: conversationIdSchema }))
+            .max(50),
+          next_cursor: z.string().nullable(),
+        })
+        .parse(await request(`${ROOT}/conversations?limit=10`, { signal }));
+      const ids = [...new Set(index.conversations.map((row) => row.id))]
+        .filter((id) => id !== current)
+        .slice(0, 10);
+      for (let offset = 0; offset < ids.length; offset += 2) {
+        assertActive();
+        const results = await Promise.all(
+          ids.slice(offset, offset + 2).map(async (id) => ({
+            session: await read(id),
+            conversation_id: id,
+          })),
+        );
+        const live = results.find((result) => result.session);
+        if (live) return live;
+      }
+      // The server admits one live call per person, and a live call keeps its
+      // chat among the most recent (captions, receipt; calls are time-limited
+      // and idle out). An empty bounded scan therefore clears local recovery;
+      // a fresh Start is still fenced by server admission. An "unknown" that
+      // could never clear would block voice for anyone with more chats.
+      return { session: null, conversation_id: null };
     },
     async status(
       conversationId: string,

@@ -69,7 +69,15 @@ name). They resolve ownership and recheck the maintaining person's authority;
 specialists cannot maintain other agents or self-escalate. Widening operation
 scopes and adding/re-pinning skills retain one-use cards decided by the requesting
 maintainer, bound to the exact agent and change. Destruction retains confirmation.
-Ornn search, pinning and reads use the managing/acting person's own access.
+Ornn search and pinning use the managing person's own visibility. Attached
+previews and runtime reads keep the acting person as Ornn's signed principal,
+but use only the owning organization's accessible Ornn connection. Ornn decides
+content visibility for that person, including creator and direct-user access;
+NyxID does not require an additional org grant. Ornn's private org grants receive
+a purpose-limited, live-checked membership callback;
+no member's personal connection or general account token is borrowed. See
+[Agent skills](AGENT_SKILLS.md#storage-and-authority). Preview success is specific
+to the testing person; runtime additionally enforces the key, turn and policy.
 
 The acting person's personal NyxBot may discover and delegate to an organization
 specialist that person can use when `assistant:org-agents` is enabled for that

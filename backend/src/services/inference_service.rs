@@ -1,7 +1,7 @@
 use crate::errors::AppResult;
 use crate::models::downstream_service::{
     COLLECTION_NAME, DownstreamService, InferenceWireProtocol, ServiceCapabilities,
-    ServiceInference, VoiceInference,
+    ServiceInference, VoiceChoice, VoiceInference,
 };
 use crate::models::service_billing::{BillingMetric, LanePricing, PricingSyncStatus};
 use mongodb::bson::{self, doc};
@@ -109,6 +109,24 @@ pub fn default_inference(slug: &str) -> Option<ServiceInference> {
     })
 }
 
+/// Frozen original seed, including its labels and order. Only that exact list
+/// receives appended choices automatically; an edited catalog remains the
+/// admin's choice.
+fn legacy_openai_voice_choices() -> Vec<VoiceChoice> {
+    [
+        "marin", "alloy", "ash", "aube", "ballad", "beacon", "bossa", "brise", "cedar", "cinder",
+        "coral", "delta", "echo", "flitz", "gleam", "harema", "juni", "meridian", "nira", "noeul",
+        "nuri", "quartz", "ripple", "sage", "shimmer", "shitan", "sillage", "stone", "tempo",
+        "verse", "vesper", "willow",
+    ]
+    .into_iter()
+    .map(|id| VoiceChoice {
+        id: id.into(),
+        label: format!("{}{}", id[..1].to_uppercase(), &id[1..]),
+    })
+    .collect()
+}
+
 pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
     for slug in [
         "llm-openai",
@@ -125,6 +143,35 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
             doc! { "$set": { "inference": bson::to_bson(&default_inference(slug)).expect("inference serialization") } },
         ).await?;
         if let Some(voice) = super::inference_voice::default_voice(slug) {
+            if slug == "llm-openai" {
+                // Additive only: append the seed's new choices to the exact
+                // historical array (labels/order included), so a concurrent
+                // admin edit invalidates the predicate and no stored choice is
+                // ever removed or reordered. Sibling metadata is untouched.
+                let legacy = legacy_openai_voice_choices();
+                let appended: Vec<_> = voice
+                    .voices
+                    .iter()
+                    .filter(|choice| !legacy.iter().any(|old| old.id == choice.id))
+                    .collect();
+                if !appended.is_empty() {
+                    db.collection::<DownstreamService>(COLLECTION_NAME)
+                        .update_many(
+                            doc! {
+                                "slug": slug,
+                                "inference.voice.protocol": "openai_live",
+                                "inference_admin_modified": { "$ne": true },
+                                "inference.voice.voices": bson::to_bson(&legacy)
+                                    .expect("legacy voice choices serialization"),
+                            },
+                            doc! { "$push": { "inference.voice.voices": {
+                                "$each": bson::to_bson(&appended)
+                                    .expect("voice choices serialization"),
+                            } } },
+                        )
+                        .await?;
+                }
+            }
             // Do not replace an existing inference block or resurrect an admin clear.
             db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
                 doc! { "slug": slug, "inference": { "$type": "object" }, "inference.voice": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },

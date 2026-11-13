@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import {
   Link,
@@ -32,9 +34,10 @@ function setupUrl(platform: ChannelPlatform) {
 }
 
 function SetupLoading() {
+  useUiTranslation();
   return (
     <div role="status" className="space-y-4">
-      <span className="sr-only">Loading channel setup...</span>
+      <span className="sr-only">{translateUi("Loading channel setup...")}</span>
       <Skeleton className="h-8 w-48" />
       <Skeleton className="h-64 w-full rounded-xl" />
     </div>
@@ -42,6 +45,7 @@ function SetupLoading() {
 }
 
 export function ChannelBotSetupLinksPage() {
+  useUiTranslation();
   const catalog = useChannelPlatformViews();
   const platforms =
     catalog.data?.platforms.filter((platform) => platform.enabled) ?? [];
@@ -50,14 +54,12 @@ export function ChannelBotSetupLinksPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Channel setup links"
-        description="Open a channel's setup page or share its link as part of bot onboarding."
+        title={translateUi("Channel setup links")}
+        description={translateUi("Open a channel's setup page or share its link as part of bot onboarding.")}
         actions={
           <Button variant="outline" asChild>
             <Link to="/channel-bots">
-              <ArrowLeft aria-hidden="true" />
-              Channel Bots
-            </Link>
+              <ArrowLeft aria-hidden="true" />{translateUi("Channel Bots")}</Link>
           </Button>
         }
       />
@@ -65,13 +67,11 @@ export function ChannelBotSetupLinksPage() {
         <SetupLoading />
       ) : catalog.isError ? (
         <ErrorBanner
-          message="Unable to load supported channels."
+          message={translateUi("Unable to load supported channels.")}
           onRetry={catalog.refetch}
         />
       ) : platforms.length === 0 ? (
-        <p className="text-13 text-muted-foreground">
-          No channels are currently available for setup.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("No channels are currently available for setup.")}</p>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {platforms.map((platform) => (
@@ -83,15 +83,14 @@ export function ChannelBotSetupLinksPage() {
                 {platform.display_name}
               </h3>
               <CopyableUrlCallout
-                label={`${platform.display_name} setup link`}
+                label={translateUi("{{value1}} setup link", { value1: platform.display_name })}
                 url={setupUrl(platform.platform)}
               />
               <Button variant="outline" asChild className="self-start">
                 <Link
                   to="/channel-bots/connect/$platform"
                   params={{ platform: platform.platform }}
-                >
-                  Set up {platform.display_name}
+                >{translateUi("Set up ")}{platform.display_name}
                   <ArrowRight aria-hidden="true" />
                 </Link>
               </Button>
@@ -104,6 +103,7 @@ export function ChannelBotSetupLinksPage() {
 }
 
 export function ChannelBotSetupPage() {
+  useUiTranslation();
   const { platform } = useParams({
     from: "/channel-bots/connect/$platform",
   });
@@ -113,6 +113,7 @@ export function ChannelBotSetupPage() {
 }
 
 function ChannelSetupConnection({ platform }: { readonly platform: string }) {
+  useUiTranslation();
   const catalog = useChannelPlatformViews();
   const email = useAuthStore((state) => state.user?.email);
   const [complete, setComplete] = useState(false);
@@ -140,30 +141,30 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
     >
       {returnTo && !complete ? (
         <Button variant="outline" asChild>
-          <Link to="/assistant" search={returnTo.startsWith("nyxg-") ? { g: returnTo } : { c: returnTo }}>Back to chat</Link>
+          <Link to="/assistant" search={returnTo.startsWith("nyxg-") ? { g: returnTo } : { c: returnTo }}>{translateUi("Back to chat")}</Link>
         </Button>
       ) : null}
       {catalog.isPending ? (
         <SetupLoading />
       ) : catalog.isError ? (
         <ErrorBanner
-          message="Unable to load channel setup."
+          message={translateUi("Unable to load channel setup.")}
           onRetry={catalog.refetch}
         />
       ) : !descriptor?.enabled ? (
         <div className="space-y-4 text-center">
           <p role="status" className="text-13 text-muted-foreground">
             {descriptor
-              ? `${descriptor.display_name} setup is currently unavailable.`
-              : "This channel is not supported."}
+              ? translateUi("{{value1}} setup is currently unavailable.", { value1: descriptor.display_name })
+              : translateUi("This channel is not supported.")}
           </p>
           <Button variant="outline" asChild>
-            <Link to="/channel-bots/connect">Choose another channel</Link>
+            <Link to="/channel-bots/connect">{translateUi("Choose another channel")}</Link>
           </Button>
         </div>
       ) : (
         <section
-          aria-label={`${descriptor.display_name} setup`}
+          aria-label={translateUi("{{value1}} setup", { value1: descriptor.display_name })}
           className="space-y-5"
         >
           <PrefilledChannelBotSetup
@@ -186,6 +187,7 @@ function PrefilledChannelBotSetup({
   readonly returnTo?: string;
   readonly onComplete: () => void;
 }) {
+  useUiTranslation();
   const searchStr = useRouterState({
     select: (state) => state.location.searchStr,
   });
@@ -228,7 +230,7 @@ function PrefilledChannelBotSetup({
           ? search.label.slice(0, 128)
           : labelIsOptional(descriptor.platform)
             ? ""
-            : `${descriptor.display_name} bot`
+            : translateUi("{{value1}} bot", { value1: descriptor.display_name })
       }
       defaultOrgId={search.target_org_id ?? null}
       prefill={prefill}

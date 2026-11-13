@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ChannelBotStatus } from "@/types/channels";
 import { getStatusMeta } from "@/lib/status-contract";
 
@@ -36,11 +37,11 @@ export function statusLabel(status: ChannelBotStatus): string {
 export function conversationTypeLabel(t: string): string {
   switch (t) {
     case "private":
-      return "Private";
+      return translateUi("Private");
     case "group":
-      return "Group";
+      return translateUi("Group");
     case "channel":
-      return "Channel";
+      return translateUi("Channel");
     default:
       return t;
   }

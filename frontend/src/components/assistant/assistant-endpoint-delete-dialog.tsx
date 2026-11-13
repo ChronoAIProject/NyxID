@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -50,6 +52,7 @@ export function AssistantEndpointDeleteDialog({
   readonly params: AssistantEndpointDeleteParams;
   readonly onComplete: (endpointId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -131,19 +134,19 @@ export function AssistantEndpointDeleteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? "Endpoint already deleted" : "Delete endpoint"}
+            {result?.replayed ? translateUi("Endpoint already deleted") : translateUi("Delete endpoint")}
           </DialogTitle>
           <DialogDescription>
             {result
-              ? "NyxID verified the endpoint is gone through its authorization evidence returning 404. This action is never remembered."
-              : "This permanently deletes the endpoint. Confirm every time — NyxID will not remember this choice."}
+              ? translateUi("NyxID verified the endpoint is gone through its authorization evidence returning 404. This action is never remembered.")
+              : translateUi("This permanently deletes the endpoint. Confirm every time — NyxID will not remember this choice.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
           <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Endpoint</span>
+              <span className="text-muted-foreground">{translateUi("Endpoint")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -156,31 +159,25 @@ export function AssistantEndpointDeleteDialog({
 
         {error ? (
           <p role="alert" className="text-13 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-13 text-success">
-            Endpoint absence verified.
-          </p>
+          <p className="text-13 text-success">{translateUi("Endpoint absence verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!result ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void deleteEndpoint()}
-              >
-                Delete endpoint
-              </Button>
+              >{translateUi("Delete endpoint")}</Button>
             </>
           ) : (
             <>
@@ -193,9 +190,7 @@ export function AssistantEndpointDeleteDialog({
                     void verifyAbsence(result.resource.endpointId)
                   }
                 >
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -205,9 +200,7 @@ export function AssistantEndpointDeleteDialog({
                   onComplete(result.resource.endpointId);
                   close();
                 }}
-              >
-                Report deletion
-              </Button>
+              >{translateUi("Report deletion")}</Button>
             </>
           )}
         </DialogFooter>

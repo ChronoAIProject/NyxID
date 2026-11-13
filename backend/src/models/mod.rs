@@ -41,6 +41,7 @@ pub mod connect_link;
 pub mod consent;
 #[allow(dead_code)]
 pub mod coordination;
+pub mod credential_verification;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
@@ -62,6 +63,7 @@ pub mod feature_flag_override;
 pub mod group;
 pub(crate) mod hmac_keyset;
 pub mod invite_code;
+pub mod invocation_diagnostic;
 pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;
@@ -111,6 +113,7 @@ pub mod pushed_authorization_request;
 pub mod refresh_token;
 pub mod reply_token_use;
 pub mod role;
+pub mod security_capability_activation;
 pub mod security_replica;
 pub mod service_account;
 pub mod service_account_key_read_grant;
@@ -148,12 +151,15 @@ pub mod assistant_agent_learning;
 pub mod assistant_attachment;
 pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
+pub mod assistant_cma_agent;
+pub mod assistant_cma_sandbox;
 pub mod assistant_conversation;
 pub mod assistant_direct_handoff;
 pub mod assistant_group;
 pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
+pub mod assistant_notification;
 pub mod assistant_onboarding;
 pub mod assistant_platform_model;
 pub mod assistant_profile_route;
@@ -253,6 +259,7 @@ pub mod discord_gateway;
 
 pub mod assistant_delegated_image;
 
+pub mod assistant_cma_creation;
 pub mod cma_session_origin;
 pub mod org_channel;
 pub mod voice_responses;
@@ -264,3 +271,5 @@ pub mod platform_model;
 pub mod platform_model_tariff;
 
 pub mod execution_permission_channel;
+
+pub mod assistant_tool_result;

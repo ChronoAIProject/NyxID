@@ -1,4 +1,5 @@
 import "./lib/zod-csp";
+import { appLanguageReady } from "./i18n";
 import "./lib/platform-personal-handoff";
 import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
@@ -185,10 +186,10 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-createRoot(rootElement).render(
+void appLanguageReady.then(() => createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <Root />
     </QueryClientProvider>
   </StrictMode>,
-);
+));

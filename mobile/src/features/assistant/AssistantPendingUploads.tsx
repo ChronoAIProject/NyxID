@@ -1,18 +1,20 @@
 import { OverflowScrollView } from "../../components/workspace/ScrollEdgeFades";
 import { useEffect, useState } from "react";
 import {
-  ActivityIndicator,
   Image,
   Pressable,
   StyleSheet,
   View,
+  useWindowDimensions,
 } from "react-native";
-import { Check, FileText, X } from "lucide-react-native";
+import { FileText, X } from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
 import { AssistantImagePreview } from "./AssistantImagePreview";
+import { assistantUploadStatus } from "./assistantUploadStatus";
+import { AssistantUploadProgress } from "./AssistantUploadProgress";
 
 export function AssistantPendingUploads({
   files,
@@ -26,6 +28,11 @@ export function AssistantPendingUploads({
   showMentionHandles?: boolean;
 }) {
   const { colors } = useTheme();
+  const { fontScale } = useWindowDimensions();
+  const chipHeight = Math.max(
+    56,
+    12 + (showMentionHandles ? 62 : 48) * fontScale,
+  );
   const [preview, setPreview] = useState<PendingAssistantUpload>();
   useEffect(() => {
     if (preview && !files.some((row) => row === preview)) setPreview(undefined);
@@ -48,15 +55,7 @@ export function AssistantPendingUploads({
               !row.error &&
               (row.kind === "image" ||
                 /\.(png|jpe?g|gif|webp)$/i.test(row.file.name));
-            const status =
-              row.error ??
-              (row.item
-                ? "Ready"
-                : row.progress >= 99
-                  ? "Checking file…"
-                  : row.progress > 0
-                    ? `Uploading ${row.progress}%`
-                    : "Waiting to upload…");
+            const status = assistantUploadStatus(row);
             return (
               <View
                 key={row.key}
@@ -65,25 +64,28 @@ export function AssistantPendingUploads({
                   {
                     backgroundColor: colors.cardSoft,
                     borderColor: colors.border,
+                    height: chipHeight,
                   },
                 ]}
               >
-                {image ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Preview ${row.file.name}`}
-                    onPress={() => setPreview(row)}
-                  >
-                    <Image
-                      source={{ uri: row.file.uri }}
-                      style={styles.thumbnail}
-                    />
-                  </Pressable>
-                ) : (
-                  <FileText size={23} color={colors.textSecondary} />
-                )}
+                <View style={styles.media}>
+                  {image ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Preview ${row.file.name}`}
+                      onPress={() => setPreview(row)}
+                    >
+                      <Image
+                        source={{ uri: row.file.uri }}
+                        style={styles.thumbnail}
+                      />
+                    </Pressable>
+                  ) : (
+                    <FileText size={23} color={colors.textSecondary} />
+                  )}
+                </View>
                 <View style={styles.fill}>
-                  {showMentionHandles ? (
+                  {showMentionHandles && !row.item ? (
                     <Label
                       style={[styles.handle, { color: colors.primaryOnTint }]}
                     >
@@ -93,22 +95,19 @@ export function AssistantPendingUploads({
                   <Label numberOfLines={1}>
                     {row.item?.label ?? row.file.name}
                   </Label>
-                  <Label
-                    muted
-                    numberOfLines={2}
-                    style={[
-                      styles.status,
-                      row.error ? { color: colors.danger } : undefined,
-                    ]}
-                  >
-                    {status}
-                  </Label>
+                  {status.text ? (
+                    <Label
+                      muted
+                      numberOfLines={2}
+                      style={[
+                        styles.status,
+                        row.error ? { color: colors.danger } : undefined,
+                      ]}
+                    >
+                      {status.text}
+                    </Label>
+                  ) : null}
                 </View>
-                {row.item ? (
-                  <Check size={16} color={colors.primary} />
-                ) : !row.error ? (
-                  <ActivityIndicator size="small" color={colors.primary} />
-                ) : null}
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={`Remove ${row.file.name}`}
@@ -119,6 +118,7 @@ export function AssistantPendingUploads({
                 >
                   <X size={18} color={colors.textSecondary} />
                 </Pressable>
+                <AssistantUploadProgress status={status} />
               </View>
             );
           })}
@@ -135,10 +135,11 @@ export function AssistantPendingUploads({
 }
 const styles = StyleSheet.create({
   fill: { flex: 1, minWidth: 0 },
-  list: { flexGrow: 0, maxHeight: 100 },
+  list: { flexGrow: 0 },
   content: { gap: 8, padding: 4 },
   card: {
     width: 260,
+    overflow: "hidden",
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
@@ -146,6 +147,12 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderWidth: 1,
     borderRadius: radius.md,
+  },
+  media: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
   },
   thumbnail: { width: 36, height: 36, borderRadius: 6 },
   handle: { fontSize: 11 },

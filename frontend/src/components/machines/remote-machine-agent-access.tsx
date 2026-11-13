@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import { useState } from "react";
@@ -48,6 +50,7 @@ export function RemoteMachineAgentAccess({
   readonly node?: NodeInfo;
   readonly machineId: string;
 }) {
+  useUiTranslation();
   const agents = useNyxBotAgents();
   const userId = useAuthStore((s) => s.user?.id);
   const [agentId, setAgentId] = useState<string>();
@@ -67,37 +70,32 @@ export function RemoteMachineAgentAccess({
           <OwnerConfirmation node={node} />
         ) : (
           <GroupedList
-            title="Owner confirmation"
-            footer="Confirmation settings will be available when the Node record can be loaded."
+            title={translateUi("Owner confirmation")}
+            footer={translateUi("Confirmation settings will be available when the Node record can be loaded.")}
           >
-            <GroupedRow title="Node record unavailable" />
+            <GroupedRow title={translateUi("Node record unavailable")} />
           </GroupedList>
         )}
         {agents.error ? (
           <GroupedList footer={<ErrorBanner
-            message="Agent assignments could not be loaded."
+            message={translateUi("Agent assignments could not be loaded.")}
             onRetry={() => void agents.refetch()}
           />} />
         ) : agents.isPending ? (
-          <GroupedList><GroupedRow role="status" title="Loading agents…" /></GroupedList>
+          <GroupedList><GroupedRow role="status" title={translateUi("Loading agents…")} /></GroupedList>
         ) : (
           <>
             <GroupedList
-              title="Agent access"
+              title={translateUi("Agent access")}
               footer={
-                <>
-                  NyxBot and specialist access uses the existing Agent
-                  assignment policy. It remains bound to an owner turn; guests
-                  cannot use this machine. A grant does not bypass a paused
-                  runtime or funding requirement.
-                  {!options.length && (
-                    <p>No eligible personal agents are available.</p>
+                <>{translateUi("NyxBot and specialist access uses the existing Agent assignment policy. It remains bound to an owner turn; guests cannot use this machine. A grant does not bypass a paused runtime or funding requirement.")}{!options.length && (
+                    <p>{translateUi("No eligible personal agents are available.")}</p>
                   )}
                 </>
               }
             >
               <GroupedRow
-                title="Agent"
+                title={translateUi("Agent")}
                 accessory={
                   <Select
                     value={selected?.id ?? ""}
@@ -109,8 +107,8 @@ export function RemoteMachineAgentAccess({
                         setAgentId(id);
                     }}
                   >
-                    <SelectTrigger aria-label="Agent for machine access">
-                      <SelectValue placeholder="Choose an existing agent" />
+                    <SelectTrigger aria-label={translateUi("Agent for machine access")}>
+                      <SelectValue placeholder={translateUi("Choose an existing agent")} />
                     </SelectTrigger>
                     <SelectContent>
                       {options.map((agent) => (
@@ -138,14 +136,15 @@ export function RemoteMachineAgentAccess({
 }
 
 function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
+  useUiTranslation();
   return (
     <GroupedList
-      title="Owner confirmation"
-      aria-label="Remote machine owner confirmation"
-      footer="Read from the current Node record. This hosted machine detail view does not save confirmation settings; applicable Assistant confirmation rules still apply to each operation."
+      title={translateUi("Owner confirmation")}
+      aria-label={translateUi("Remote machine owner confirmation")}
+      footer={translateUi("Read from the current Node record. This hosted machine detail view does not save confirmation settings; applicable Assistant confirmation rules still apply to each operation.")}
     >
       <GroupedRow
-        title="Owner confirmation policy"
+        title={translateUi("Owner confirmation policy")}
         accessory={
           node.machine_confirm === "changes"
             ? "Confirm changes"
@@ -167,6 +166,7 @@ function AgentAssignment({
   readonly agent: AssistantAgent;
   readonly machineId: string;
 }) {
+  useUiTranslation();
   const mutation = useSetNyxBotAgentGrants();
   const query = useMachineAccess(agent.id);
   const assigned = agent.machines?.includes(machineId) ?? false;
@@ -219,45 +219,32 @@ function AgentAssignment({
       <div className="space-y-6">
         {agent.kind === "nyxbot" ? (
           <GroupedList
-            title="Machine membership"
-            footer="NyxBot has owner machine membership. Its capability policy and the live owner-turn gate still apply."
+            title={translateUi("Machine membership")}
+            footer={translateUi("NyxBot has owner machine membership. Its capability policy and the live owner-turn gate still apply.")}
           >
-            <GroupedRow title="Owner machine membership" />
+            <GroupedRow title={translateUi("Owner machine membership")} />
           </GroupedList>
         ) : (
           <form
             className="space-y-3"
-            aria-label="Specialist machine membership"
+            aria-label={translateUi("Specialist machine membership")}
             onSubmit={save}
           >
             <GroupedList
-              title="Machine membership"
+              title={translateUi("Machine membership")}
               footer={
                 <>
-                  <p>
-                    With capability editing enabled, new assignments start with
-                    capabilities off. Review the current policy after assigning.
-                    Removing membership cancels this agent’s work on this
-                    machine.
-                  </p>
+                  <p>{translateUi("With capability editing enabled, new assignments start with capabilities off. Review the current policy after assigning. Removing membership cancels this agent’s work on this machine.")}</p>
                   {error ? (
                     <p role="alert" className="text-14 text-destructive">
-                      {error}
+                      {translateUi(error)}
                     </p>
                   ) : null}
                   {membershipSaved && !error ? (
-                    <p role="status" className="text-14 text-success">
-                      Machine assignment saved. Review the capability state below; a
-                      capability save is a separate operation and does not roll back
-                      this assignment.
-                    </p>
+                    <p role="status" className="text-14 text-success">{translateUi("Machine assignment saved. Review the capability state below; a capability save is a separate operation and does not roll back this assignment.")}</p>
                   ) : null}
                   {membershipSaved && capabilitySaveFailed ? (
-                    <p role="alert" className="text-14 text-warning">
-                      Assignment succeeded, but capability changes failed. The
-                      assignment remains in place; reload the current capability state
-                      and retry editing when it is available.
-                    </p>
+                    <p role="alert" className="text-14 text-warning">{translateUi("Assignment succeeded, but capability changes failed. The assignment remains in place; reload the current capability state and retry editing when it is available.")}</p>
                   ) : null}
                 </>
               }
@@ -271,15 +258,14 @@ function AgentAssignment({
                       form.setValue("assigned", value === true)
                     }
                   />
-                  <span className="min-w-0 flex-1">
-                    Assign this machine to {agent.display_name ?? agent.name}
+                  <span className="min-w-0 flex-1">{translateUi("Assign this machine to ")}{agent.display_name ?? agent.name}
                   </span>
                 </Label>
               </GroupedRow>
             </GroupedList>
             <GroupedFormActions
           changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "assigned", label: "Machine membership" }])}
-              label="machine membership"
+              label={translateUi("machine membership")}
               dirty={form.formState.isDirty}
               pending={mutation.isPending}
               disabled={agent.can_maintain === false}
@@ -288,13 +274,13 @@ function AgentAssignment({
                 form.reset();
                 setError(undefined);
               }}
-              saveLabel="Save assignment"
+              saveLabel={translateUi("Save assignment")}
             />
           </form>
         )}
         {query.error ? (
           <ErrorBanner
-            message="Could not load the current capability revision."
+            message={translateUi("Could not load the current capability revision.")}
             onRetry={() => void query.refetch()}
           />
         ) : assignment ? (
@@ -310,8 +296,8 @@ function AgentAssignment({
             }}
           />
         ) : (
-          <GroupedList title="Capabilities">
-            <GroupedRow title="Capabilities are not yet available from this Node." />
+          <GroupedList title={translateUi("Capabilities")}>
+            <GroupedRow title={translateUi("Capabilities are not yet available from this Node.")} />
           </GroupedList>
         )}
         <GroupedFormBar />
@@ -331,30 +317,24 @@ function HostedCapabilities({
   readonly onSaveError?: () => void;
   readonly onSaveSuccess?: () => void;
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   return (
-    <section aria-label="Hosted agent capabilities" className="space-y-3">
+    <section aria-label={translateUi("Hosted agent capabilities")} className="space-y-3">
       <GroupedList
-        title="Capability policy"
+        title={translateUi("Capability policy")}
         footer={
-          <p>
-            Saving cancels this agent’s current work on this machine. Browser is
-            required for Computer and Developer browser. Turning off Browser
-            also removes Computer and Developer browser; other grants are
-            preserved. External OAuth and Agent Key clients remain restricted to
-            their existing shell/file tools and do not gain Browser or Computer
-            access here.
-          </p>
+          <p>{translateUi("Saving cancels this agent’s current work on this machine. Browser is required for Computer and Developer browser. Turning off Browser also removes Computer and Developer browser; other grants are preserved. External OAuth and Agent Key clients remain restricted to their existing shell/file tools and do not gain Browser or Computer access here.")}</p>
         }
       >
         <GroupedRow
-          title="Policy revision"
+          title={translateUi("Policy revision")}
           accessory={String(machine.revision)}
         />
       </GroupedList>
       {!enabled || !machine.protocol_v2 ? (
-        <GroupedList footer="Capability editing is unavailable until the account feature and Node protocol support are enabled.">
-          <GroupedRow role="status" title="Capability editing unavailable" />
+        <GroupedList footer={translateUi("Capability editing is unavailable until the account feature and Node protocol support are enabled.")}>
+          <GroupedRow role="status" title={translateUi("Capability editing unavailable")} />
         </GroupedList>
       ) : null}
       <MachineCapabilityForm
@@ -365,8 +345,8 @@ function HostedCapabilities({
         onSaveSuccess={onSaveSuccess}
       />
       {machine.revocation_pending ? (
-        <GroupedList footer="Revocation delivery is pending; this is not proof of physical runtime stop.">
-          <GroupedRow role="status" title="Revocation pending" />
+        <GroupedList footer={translateUi("Revocation delivery is pending; this is not proof of physical runtime stop.")}>
+          <GroupedRow role="status" title={translateUi("Revocation pending")} />
         </GroupedList>
       ) : null}
     </section>

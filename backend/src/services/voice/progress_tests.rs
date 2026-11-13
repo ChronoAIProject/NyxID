@@ -517,6 +517,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
         );
         active.heartbeat_at = Some(Utc::now());
         active.activities = vec![crate::models::assistant_conversation::TurnActivity {
+            decision: None,
             id: "a".into(),
             label: "internal__tool".into(),
             digest: None,

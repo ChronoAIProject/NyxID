@@ -13,6 +13,9 @@ pub const MAX_REPLY_PARTS: usize = 64;
 
 pub struct Delivery {
     id: String,
+    bot_id: String,
+    inbound_id: String,
+    telegram: bool,
     parts: Vec<ReplyPart>,
     trace: Option<crate::turn_trace::TurnContext>,
     operations: Vec<Option<crate::turn_trace::Operation>>,
@@ -39,6 +42,7 @@ impl Delivery {
             complete: false,
             parts: vec![
                 ReplyPart {
+                    formatting_fallback: None,
                     status: PartStatus::NotAttempted,
                     platform_message_ids: Vec::new(),
                     outbound_message_id: None,
@@ -54,6 +58,9 @@ impl Delivery {
         let trace = crate::turn_trace::TurnContext::current();
         Ok(Self {
             id: record.id,
+            bot_id: bot.id.clone(),
+            inbound_id: original.id.clone(),
+            telegram: matches!(bot.platform.as_str(), "telegram" | "telegram-new"),
             parts: record.parts,
             trace,
             operations: if trace.is_some() {
@@ -62,6 +69,15 @@ impl Delivery {
                 Vec::new()
             },
         })
+    }
+
+    pub fn formatting_receipt(&self, index: usize) -> super::telegram_formatting::Receipt {
+        super::telegram_formatting::Receipt {
+            collection: COLLECTION_NAME,
+            filter: doc! {"_id": &self.id, "complete":false, format!("parts.{index}.status"): "uncertain"},
+            field: format!("parts.{index}.formatting_fallback"),
+            plain: false,
+        }
     }
 
     pub async fn attempting(&mut self, db: &mongodb::Database, index: usize) -> AppResult<()> {
@@ -81,6 +97,7 @@ impl Delivery {
         outbound_message_id: &str,
     ) -> AppResult<()> {
         self.parts[index] = ReplyPart {
+            formatting_fallback: None,
             status: PartStatus::Accepted,
             platform_message_ids: ids,
             outbound_message_id: Some(outbound_message_id.into()),
@@ -99,7 +116,9 @@ impl Delivery {
         error: &AppError,
     ) -> AppResult<()> {
         let part = &mut self.parts[index];
-        if part.status == PartStatus::NotAttempted {
+        if part.status == PartStatus::NotAttempted
+            || (self.telegram && super::telegram_formatting::definite_refusal(error))
+        {
             part.status = PartStatus::Failed;
         }
         part.failure_code = Some(error.error_code());
@@ -114,7 +133,12 @@ impl Delivery {
                 Some(error.error_code()),
             );
         }
-        self.save_part(db, index).await
+        self.save_part(db, index).await?;
+        if self.telegram {
+            super::channel_reply_notice::failed(db, &self.id, &self.bot_id, &self.inbound_id)
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn observed(
@@ -130,11 +154,16 @@ impl Delivery {
     }
 
     async fn save_part(&self, db: &mongodb::Database, index: usize) -> AppResult<()> {
+        let fields = bson::to_document(&self.parts[index]).map_err(|_| unconfirmed())?;
+        let fields: bson::Document = fields
+            .into_iter()
+            .map(|(key, value)| (format!("parts.{index}.{key}"), value))
+            .collect();
         let result = db
             .collection::<ChannelReplyDelivery>(COLLECTION_NAME)
             .update_one(
                 doc! {"_id": &self.id, "complete": false},
-                doc! {"$set": {format!("parts.{index}"): bson::to_bson(&self.parts[index]).map_err(|_| unconfirmed())?}},
+                doc! {"$set": fields},
             )
             .await?;
         if result.matched_count != 1 {
@@ -220,9 +249,22 @@ pub async fn send_parts(
                 ));
             }
             delivery.attempting(db, index).await?;
-            let mut outcome = adapter
-                .send_bound_reply_outcome(db, http, bot, original, credentials, chat, &part, None)
-                .await?;
+            let mut outcome = super::telegram_formatting::scope(
+                db,
+                delivery.formatting_receipt(index),
+                Some(&bot.id),
+                adapter.send_bound_reply_outcome(
+                    db,
+                    http,
+                    bot,
+                    original,
+                    credentials,
+                    chat,
+                    &part,
+                    None,
+                ),
+            )
+            .await?;
             if let Some(record) = &mut outcome.observation {
                 record.waba_id = bot.app_id.clone();
             }

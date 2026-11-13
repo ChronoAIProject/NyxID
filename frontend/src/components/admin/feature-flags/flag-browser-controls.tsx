@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import type { ReactNode } from "react";
 import { Folder, Search, SlidersHorizontal, Tag } from "lucide-react";
@@ -34,6 +36,7 @@ export function FlagBrowserControls({
   sunsetCount: number;
   visibleCount: number;
 }) {
+  useUiTranslation();
   const { search, lifecycle, tag, group: groupFilter, groupBy } = filters;
   const q = search.trim();
   return (
@@ -47,19 +50,19 @@ export function FlagBrowserControls({
           <Input
             value={search}
             onChange={(e) => onChange({ search: e.target.value })}
-            placeholder="Search flags, groups, tags or owners"
+            placeholder={translateUi("Search flags, groups, tags or owners")}
             className="h-8 pl-9 text-14"
-            aria-label="Search feature flags"
+            aria-label={translateUi("Search feature flags")}
           />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <FilterSelect
             icon={<Folder className="size-3.5 shrink-0" aria-hidden />}
-            label="Filter by group"
+            label={translateUi("Filter by group")}
             value={groupFilter}
             onChange={(value) => onChange({ group: value })}
           >
-            <option value="">All groups</option>
+            <option value="">{translateUi("All groups")}</option>
             {groups.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -68,11 +71,11 @@ export function FlagBrowserControls({
           </FilterSelect>
           <FilterSelect
             icon={<Tag className="size-3.5 shrink-0" aria-hidden />}
-            label="Filter by tag"
+            label={translateUi("Filter by tag")}
             value={tag}
             onChange={(value) => onChange({ tag: value })}
           >
-            <option value="">All tags</option>
+            <option value="">{translateUi("All tags")}</option>
             {tags.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -83,23 +86,22 @@ export function FlagBrowserControls({
             icon={
               <SlidersHorizontal className="size-3.5 shrink-0" aria-hidden />
             }
-            label="Group flags by"
+            label={translateUi("Group flags by")}
             value={groupBy}
             onChange={(value) =>
               onChange({ groupBy: value as FlagFilters["groupBy"] })
             }
           >
-            <option value="group">By group</option>
-            <option value="owner">By owner</option>
-            <option value="none">No grouping</option>
+            <option value="group">{translateUi("By group")}</option>
+            <option value="owner">{translateUi("By owner")}</option>
+            <option value="none">{translateUi("No grouping")}</option>
           </FilterSelect>
         </div>
       </div>
       <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-13 text-text-tertiary">
         <span>
-          {visibleCount} of {totalCount} flags
-          {lifecycle === "active" && sunsetCount > 0
-            ? ` · ${sunsetCount} sunset ${sunsetCount === 1 ? "flag hidden" : "flags hidden"}`
+          {visibleCount}{translateUi(" of ")}{totalCount}{translateUi(" flags")}{lifecycle === "active" && sunsetCount > 0
+            ? translateUi(" · {{count}} sunset flags hidden", { count: sunsetCount })
             : ""}
         </span>
         {(q || tag || groupFilter) && (
@@ -108,9 +110,7 @@ export function FlagBrowserControls({
             size="sm"
             className="h-7"
             onClick={() => onChange({ search: "", tag: "", group: "" })}
-          >
-            Clear filters
-          </Button>
+          >{translateUi("Clear filters")}</Button>
         )}
       </div>
     </div>
@@ -131,6 +131,7 @@ function FilterSelect({
   onChange: (value: string) => void;
   children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <Label className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-hairline px-2.5 text-text-tertiary transition-colors hover:border-hairline-strong has-[select:focus-visible]:ring-2 has-[select:focus-visible]:ring-ring">
       {icon}

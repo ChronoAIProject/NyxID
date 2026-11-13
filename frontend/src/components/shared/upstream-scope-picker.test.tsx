@@ -49,6 +49,26 @@ function Harness({
 }
 
 describe("UpstreamScopePicker", () => {
+  it("retains locked grants in emitted selections even when omitted from value", async () => {
+    const onChange = vi.fn();
+    render(<Harness initial={[]} defaultScopes={[]} lockedScopes={["repo"]} grantedScopes={["repo"]} onChangeSpy={onChange} />);
+    expect(screen.getByRole("button", { name: /repo/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/Removing:/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Read posts/ }));
+    expect(onChange).toHaveBeenLastCalledWith(["tweet.read", "repo"]);
+  });
+
+  it("shows a blocked requested scope without silently removing it", async () => {
+    const onChange = vi.fn();
+    render(<Harness initial={["tweet.read", "future:scope"]} platformAllowlist={["tweet.read"]} onChangeSpy={onChange} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("future:scope");
+    expect(screen.getByRole("alert")).toHaveTextContent("own OAuth app");
+    expect(onChange).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Remove requested permission: future:scope" }));
+    expect(onChange).toHaveBeenLastCalledWith(["tweet.read"]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("locks required permissions and retains them when other scopes change", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -212,7 +232,10 @@ describe("UpstreamScopePicker", () => {
       <Harness defaultScopes={[]} initial={["tweet.read"]} lockedScopes={["tweet.read"]} />,
     );
     expect(screen.getByText(/already authorized and locked/i)).toBeInTheDocument();
-    expect(screen.getByText(/can.t be removed here/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/removing older access requires managing the grant at the provider/i),
+    ).toBeInTheDocument();
+    expect(screen.getByTitle(/can.t be removed here/i)).toBeInTheDocument();
   });
 
   // Declarative edit mode (NyxID#917 follow-up): grantedScopes drives a
@@ -245,8 +268,7 @@ describe("UpstreamScopePicker", () => {
     );
     await user.click(screen.getByRole("button", { name: /Upload media/i }));
     expect(screen.getByText(/Removing:/i)).toBeInTheDocument();
-    expect(screen.getByText(/stop any app that relies on it/i)).toBeInTheDocument();
-    expect(screen.getByText(/Twitter \/ X/)).toBeInTheDocument();
+    expect(screen.getByText(/may stop apps that rely on it/i)).toBeInTheDocument();
   });
 
   it("allows deselecting a granted scope when it is not locked", async () => {

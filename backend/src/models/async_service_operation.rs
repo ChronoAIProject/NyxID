@@ -45,6 +45,14 @@ pub struct CmaOperation {
     pub seen_working: bool,
     pub kind: CmaOperationKind,
     pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_ref_id: Option<String>,
+    #[serde(default)]
+    pub response_id: Option<String>,
+    /// Only bounded identifiers and a frozen event-page cursor. Approval
+    /// descriptions and task content never enter this plaintext projection.
+    #[serde(default)]
+    pub approval_scan: Option<CmaApprovalScan>,
     /// CMA-supplied browser destination, never a webhook or polling target.
     #[serde(default)]
     pub callback_url: Option<String>,
@@ -53,6 +61,27 @@ pub struct CmaOperation {
     pub phase: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub checked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CmaApprovalScan {
+    pub revision: i64,
+    pub turn_sequence: i64,
+    pub incarnation: Option<String>,
+    pub cursor: Option<String>,
+    pub complete: bool,
+    pub pending: Vec<CmaPendingApproval>,
+    /// Ordered replay binds unbound approval events only after the exact turn start.
+    #[serde(default)]
+    pub active_turn: bool,
+    #[serde(default)]
+    pub last_sequence: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CmaPendingApproval {
+    pub approval_id: String,
+    pub notified: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

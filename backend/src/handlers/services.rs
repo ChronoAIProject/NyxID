@@ -175,6 +175,8 @@ pub struct XChannelBillingResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub credential_verification:
+        Option<crate::models::credential_verification::CredentialVerificationCheck>,
     /// Server-owned provenance marker; lets clients mirror Catalog Manager
     /// own-row field rules (for example `auth_scheme`). Not an authority grant.
     pub catalog_manager_created: bool,
@@ -499,6 +501,14 @@ impl std::ops::DerefMut for BillingUpdate {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceRequest {
+    /// Trusted, authenticated read-only verification operation. Null disables it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_verification:
+        Option<Option<crate::models::credential_verification::CredentialVerificationCheck>>,
     /// Omitted preserves the catalog scheme; null clears it to Bearer.
     #[serde(
         default,
@@ -623,6 +633,7 @@ impl UpdateServiceRequest {
     /// billing editor shares this handler's write path and audit.
     pub(crate) fn billing_only(billing: BillingUpdate) -> Self {
         Self {
+            credential_verification: None,
             auth_scheme: None,
             service_category: None,
             offering_kind: None,
@@ -1960,6 +1971,8 @@ async fn create_service_inner(
         inference: body.inference.clone(),
         concurrency_policy: None,
         inference_admin_modified: body.inference.is_some(),
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing: body.billing.clone(),
         auth_notes: body.auth_notes.clone(),
         known_limitations: body.known_limitations.clone(),
@@ -2337,7 +2350,20 @@ pub(crate) async fn update_service_inner(
     auth_user: AuthUser,
     tele: TelemetryContext,
     service_id: String,
+    body: UpdateServiceRequest,
+) -> AppResult<Json<ServiceResponse>> {
+    update_service_at_revision(state, auth_user, tele, service_id, body, None).await
+}
+
+/// Optional caller revision uses the existing catalog transaction's update predicate.
+/// Ordinary catalog callers retain their existing behavior.
+pub(crate) async fn update_service_at_revision(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    service_id: String,
     mut body: UpdateServiceRequest,
+    expected_updated_at: Option<chrono::DateTime<Utc>>,
 ) -> AppResult<Json<ServiceResponse>> {
     // Keep large transaction and billing futures out of this handler's state.
     // Direct callers and debug tests must fit the default thread stack too.
@@ -2357,6 +2383,13 @@ pub(crate) async fn update_service_inner(
             .map_err(|_| AppError::Internal("Cannot fingerprint service update".into()))?,
     );
     let service = fetch_service(&state, &service_id).await?;
+    if expected_updated_at.is_some_and(|expected| {
+        expected.timestamp_millis() != service.updated_at.timestamp_millis()
+    }) {
+        return Err(AppError::Conflict(
+            "Credential changed; reload before retrying".into(),
+        ));
+    }
     let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
     if crate::services::platform_key_service::model_only(&service) {
         super::login_client_context::require_first_party_human(&auth_user)?;
@@ -2746,6 +2779,17 @@ pub(crate) async fn update_service_inner(
                 subtype: bson::spec::BinarySubtype::Generic,
                 bytes: encrypted,
             },
+        );
+    }
+    if let Some(check) = &body.credential_verification {
+        if let Some(check) = check {
+            crate::services::credential_verification::validate_declaration(check)?;
+        }
+        set_doc.insert("credential_verification_admin_modified", true);
+        set_doc.insert(
+            "credential_verification",
+            bson::to_bson(check)
+                .map_err(|_| AppError::Internal("Verification metadata encoding failed".into()))?,
         );
     }
     if let Some(inference) = &body.inference {
@@ -3366,7 +3410,9 @@ pub(crate) async fn update_service_inner(
     let identity_fields = identity_update_fields(&body);
     let identity_changed = !identity_fields.is_empty();
     let mut now = Utc::now();
-    if identity_changed && now.timestamp_millis() <= service.updated_at.timestamp_millis() {
+    if (identity_changed || expected_updated_at.is_some())
+        && now.timestamp_millis() <= service.updated_at.timestamp_millis()
+    {
         now = service.updated_at + chrono::Duration::milliseconds(1);
     }
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
@@ -3415,6 +3461,10 @@ pub(crate) async fn update_service_inner(
     // Always unset the legacy api_spec_url alias to prevent duplicate-field
     // deserialization errors on documents created before the field was renamed.
     let mut catalog_filter = doc! { "_id": &service_id };
+    if let Some(expected) = expected_updated_at {
+        catalog_filter.insert("updated_at", bson::DateTime::from_chrono(expected));
+    }
+
     if body.platform_key.is_some() {
         // Fence a stale ordinary update against a concurrent route-only cutover.
         let purpose = service
@@ -3547,6 +3597,17 @@ pub(crate) async fn update_service_inner(
         ))
         .await?
     };
+
+    if body.base_url.is_some()
+        || body.openapi_spec_url.is_some()
+        || service.base_url != committed_service.base_url
+        || service.openapi_spec_url != committed_service.openapi_spec_url
+    {
+        crate::services::catalog_endpoint_service::spawn_reconcile(
+            state.db.clone(),
+            Some(service_id.clone()),
+        );
+    }
 
     if body.credential.is_some() || body.clear_credential {
         audit_service::log_for_user(
@@ -3724,6 +3785,12 @@ async fn complete_replayed_skill_update(
     current: &DownstreamService,
     body: &UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    if body.base_url.is_some() || body.openapi_spec_url.is_some() {
+        crate::services::catalog_endpoint_service::spawn_reconcile(
+            state.db.clone(),
+            Some(current.id.clone()),
+        );
+    }
     if body.billing.is_some() {
         Box::pin(state.billing.sync_service_price(current)).await?;
     }

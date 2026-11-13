@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   useCallback,
   useEffect,
@@ -136,6 +138,7 @@ export function ChatComposer({
   draftKey,
   ...props
 }: ChatComposerProps) {
+  useUiTranslation();
   return (
     <DraftedChatComposer
       {...props}
@@ -264,6 +267,7 @@ function DraftedChatComposer({
   voiceActive = false,
   voiceActivity,
 }: ChatComposerProps) {
+  useUiTranslation();
   const tokens: ComposerToken[] = [
     ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: agent.kind === "person" ? "person" as const : "agent" as const })),
     ...(attachmentMentions ?? []).map((file) => ({ id: `attachment:${file.handle}`, handle: file.handle, label: file.handle, kind: file.kind })),
@@ -974,9 +978,7 @@ function DraftedChatComposer({
             <p
               data-steering-hint
               className="mb-1.5 text-13 text-muted-foreground"
-            >
-              Still replying. What you send now steers this reply; Stop ends it.
-            </p>
+            >{translateUi("Still replying. What you send now steers this reply; Stop ends it.")}</p>
           ) : null}
           <div
             data-composer-input
@@ -1066,13 +1068,13 @@ function DraftedChatComposer({
             {expanded && (
               <div
                 role="separator"
-                aria-label="Resize composer"
+                aria-label={translateUi("Resize composer")}
                 aria-orientation="horizontal"
                 aria-valuemin={heightRange.min}
                 aria-valuemax={heightRange.max}
                 aria-valuenow={heightRange.current}
                 tabIndex={0}
-                title="Drag to set maximum height for all chats. Double-click to reset."
+                title={translateUi("Drag to set maximum height for all chats. Double-click to reset.")}
                 className="group absolute -top-1.5 left-1/2 z-20 flex h-3 w-12 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onPointerDown={(event) => {
                   if (event.button !== 0 || resizeStartRef.current) return;
@@ -1126,9 +1128,7 @@ function DraftedChatComposer({
               <div
                 role="status"
                 className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 type-row-title"
-              >
-                Drop files to attach
-              </div>
+              >{translateUi("Drop files to attach")}</div>
             )}
             {attachments}
             {dictation.review}
@@ -1158,10 +1158,10 @@ function DraftedChatComposer({
                     role="listbox"
                     aria-label={
                       mentions?.some((m) => m.kind === "person")
-                        ? "Mention a person, agent or attachment"
+                        ? translateUi("Mention a person, agent or attachment")
                         : attachmentMentions?.length
-                        ? "Mention an agent or attachment"
-                        : "Mention an agent"
+                        ? translateUi("Mention an agent or attachment")
+                        : translateUi("Mention an agent")
                     }
                     className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
                   >
@@ -1193,9 +1193,9 @@ function DraftedChatComposer({
                                 ) : null}
                               </span>
                               <span className="shrink-0 text-12 text-text-tertiary">
-                                {option.agent.kind === "person" ? "Person" : option.agent.shared ? `Shared agent${option.agent.owner_name ? ` · ${option.agent.owner_name}` : ""}` : option.agent.kind === "nyxbot"
-                                  ? "Personal agent"
-                                  : "Specialist"}
+                                {option.agent.kind === "person" ? translateUi("Person") : option.agent.shared ? translateUi("Shared agent{{value1}}", { value1: option.agent.owner_name ? ` · ${option.agent.owner_name}` : "" }) : option.agent.kind === "nyxbot"
+                                  ? translateUi("Personal agent")
+                                  : translateUi("Specialist")}
                               </span>
                             </>
                           ) : (
@@ -1293,12 +1293,12 @@ function DraftedChatComposer({
                     style={{ transitionDuration: resizing ? "0ms" : undefined }}
                     placeholder={
                       locked
-                        ? "Assistant is working..."
+                        ? translateUi("Assistant is working...")
                         : disabled
-                          ? "This conversation is read-only."
+                          ? translateUi("This conversation is read-only.")
                           : allowActiveInput
-                            ? (activePlaceholder ?? "Steer active task...")
-                            : (placeholder ?? "Message NyxID Assistant...")
+                            ? (activePlaceholder ?? translateUi("Steer active task..."))
+                            : (placeholder ?? translateUi("Message NyxID Assistant..."))
                     }
                     className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 type-composer text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
                   />
@@ -1396,7 +1396,7 @@ function DraftedChatComposer({
                           flushDraft();
                           onVoice?.();
                         }}
-                        aria-label="Open voice call"
+                        aria-label={translateUi("Open voice call")}
                         aria-pressed={voiceActive}
                       >
                         <AudioLines />
@@ -1409,8 +1409,8 @@ function DraftedChatComposer({
                         size="icon"
                         onClick={() => void onStop()}
                         disabled={stopDisabled}
-                        aria-label="Stop assistant turn"
-                        title="Stop this reply"
+                        aria-label={translateUi("Stop assistant turn")}
+                        title={translateUi("Stop this reply")}
                       >
                         <Square className="fill-current" />
                       </Button>
@@ -1422,7 +1422,7 @@ function DraftedChatComposer({
                         size="icon"
                         onClick={() => void onStop()}
                         disabled={stopDisabled}
-                        aria-label="Stop assistant turn"
+                        aria-label={translateUi("Stop assistant turn")}
                       >
                         <Square className="fill-current" />
                       </Button>
@@ -1437,7 +1437,7 @@ function DraftedChatComposer({
                         }
                         title={
                           active && allowActiveInput
-                            ? "Steer this reply"
+                            ? translateUi("Steer this reply")
                             : undefined
                         }
                         disabled={
@@ -1451,12 +1451,12 @@ function DraftedChatComposer({
                         aria-label={
                           sendLabel ??
                           (allowActiveInput
-                            ? "Send steering instruction"
-                            : "Send message")
+                            ? translateUi("Send steering instruction")
+                            : translateUi("Send message"))
                         }
                       >
                         <ArrowUp />
-                        {active && allowActiveInput ? "Steer" : null}
+                        {active && allowActiveInput ? translateUi("Steer") : null}
                       </Button>
                     ) : null}
                   </div>

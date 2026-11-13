@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { GroupedFooter, GroupedRow } from "@/components/ui/grouped-list";
@@ -16,6 +19,7 @@ export function GroupAgentAccessRequest({
   readonly member: AssistantGroupMember;
   readonly grouped?: boolean;
 }) {
+  useUiTranslation();
   const mutation = useCollaborationGuestRequest(group.id);
   const policy = group.collaboration?.guest_access.find(
     (row) => row.agent_id === member.id,
@@ -27,8 +31,8 @@ export function GroupAgentAccessRequest({
       <>
         {request?.status === "pending" ? (
           <GroupedRow
-            title="Owner approval pending"
-            description={`Expires ${new Date(request.expires_at).toLocaleDateString()}`}
+            title={translateUi("Owner approval pending")}
+            description={translateUi("Expires {{value1}}", { value1: new Date(request.expires_at).toLocaleDateString(getFormattingLocale()) })}
             accessory={
               request.can_cancel ? (
                 <Button
@@ -38,9 +42,7 @@ export function GroupAgentAccessRequest({
                   onClick={() =>
                     mutation.mutate({ agent: member.id, cancelRequest: request.id })
                   }
-                >
-                  Cancel request
-                </Button>
+                >{translateUi("Cancel request")}</Button>
               ) : undefined
             }
           />
@@ -49,7 +51,7 @@ export function GroupAgentAccessRequest({
             {(request?.status === "expired" ||
               request?.status === "cancelled") && (
               <GroupedFooter>
-                <p>Previous request {request.status}.</p>
+                <p>{translateUi("Previous request ")}{request.status}.</p>
               </GroupedFooter>
             )}
             <GroupedRow asChild interactive>
@@ -57,9 +59,7 @@ export function GroupAgentAccessRequest({
                 type="button"
                 disabled={mutation.isPending}
                 onClick={() => mutation.mutate({ agent: member.id })}
-              >
-                Ask {member.owner_name ?? "owner"} to allow participants
-              </button>
+              >{translateUi("Ask ")}{member.owner_name ?? translateUi("owner")}{translateUi(" to allow participants")}</button>
             </GroupedRow>
           </>
         ) : null}
@@ -76,9 +76,8 @@ export function GroupAgentAccessRequest({
     <div className="space-y-1 text-14">
       {request?.status === "pending" ? (
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary">Owner approval pending</Badge>
-          <span className="text-muted-foreground">
-            Expires {new Date(request.expires_at).toLocaleDateString()}
+          <Badge variant="secondary">{translateUi("Owner approval pending")}</Badge>
+          <span className="text-muted-foreground">{translateUi("Expires ")}{new Date(request.expires_at).toLocaleDateString(getFormattingLocale())}
           </span>
           {request.can_cancel ? (
             <Button
@@ -87,25 +86,20 @@ export function GroupAgentAccessRequest({
               onClick={() =>
                 mutation.mutate({ agent: member.id, cancelRequest: request.id })
               }
-            >
-              Cancel request
-            </Button>
+            >{translateUi("Cancel request")}</Button>
           ) : null}
         </div>
       ) : policy.can_request ? (
         <>
           {request?.status === "expired" || request?.status === "cancelled" ? (
-            <p className="text-muted-foreground">
-              Previous request {request.status}.
+            <p className="text-muted-foreground">{translateUi("Previous request ")}{request.status}.
             </p>
           ) : null}
           <Button
             size="sm"
             isLoading={mutation.isPending}
             onClick={() => mutation.mutate({ agent: member.id })}
-          >
-            Ask {member.owner_name ?? "owner"} to allow participants
-          </Button>
+          >{translateUi("Ask ")}{member.owner_name ?? translateUi("owner")}{translateUi(" to allow participants")}</Button>
         </>
       ) : null}
       {mutation.error ? (

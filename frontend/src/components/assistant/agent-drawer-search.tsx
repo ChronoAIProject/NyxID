@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactScroll } from "@/components/ui/compact-title";
 import {
   useCallback,
@@ -34,6 +36,7 @@ export function DrawerSearchProvider({
   readonly children: ReactNode;
   readonly query: string;
 }) {
+  useUiTranslation();
   const [entries, setEntries] = useState<
     ReadonlyMap<string, readonly DrawerSearchEntry[]>
   >(new Map());
@@ -87,6 +90,7 @@ function Match({
   readonly text: string;
   readonly query: string;
 }) {
+  useUiTranslation();
   let position = 0;
   const parts: ReactNode[] = [];
   for (const [start, end] of drawerMatchRanges(text, query)) {
@@ -125,6 +129,7 @@ export function AgentDrawerSearch({
   readonly selectTab: (tab: DrawerSearchTab) => void;
   readonly container: HTMLElement | null;
 }) {
+  useUiTranslation();
   const context = useContext(DrawerSearchResultsContext)!;
   const searchLabel = `Search ${title} agent details`;
   const input = useRef<HTMLInputElement>(null);
@@ -304,16 +309,16 @@ export function AgentDrawerSearch({
               }}
               className="min-h-8 min-w-0 flex-1 border-0 bg-transparent py-1 type-body shadow-none outline-none placeholder:text-text-tertiary [&::-webkit-search-cancel-button]:appearance-none"
             />
-            {query && <Button type="button" variant="ghost" size="icon" aria-label="Clear agent search" className="size-6" onClick={() => { setQuery(""); input.current?.focus(); }}><X aria-hidden className="size-3" /></Button>}
+            {query && <Button type="button" variant="ghost" size="icon" aria-label={translateUi("Clear agent search")} className="size-6" onClick={() => { setQuery(""); input.current?.focus(); }}><X aria-hidden className="size-3" /></Button>}
           </div>
         </div>, host)}
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-        {searching ? `${matches.length}${matches.length === 80 ? " or more" : ""} ${matches.length === 1 ? "result" : "results"} for ${query}` : ""}
+        {searching ? matches.length === 80 ? translateUi("80 or more results for {{query}}", { query }) : translateUi("{{count}} results for {{query}}", { count: matches.length, query }) : ""}
       </p>
       {searching && (
         <CompactScroll level={100}
           data-drawer-search-results=""
-          aria-label="Agent search results"
+          aria-label={translateUi("Agent search results")}
           className="assistant-scrollbar order-2 min-h-0 flex-1 space-y-6 overflow-y-auto px-4 pb-4"
           onKeyDown={(event) => {
             if (event.key === "Escape") {
@@ -325,13 +330,12 @@ export function AgentDrawerSearch({
           }}
         >
           {!matches.length ? (
-            <p className="px-4 py-6 text-14 text-text-tertiary">
-              No results for “{query}”.
+            <p className="px-4 py-6 text-14 text-text-tertiary">{translateUi("No results for “")}{query}”.
             </p>
           ) : (
             groups.map(({ label, rows }) => (
               <GroupedList key={label} title={label}>
-                <ul aria-label={`${label} search results`}>
+                <ul aria-label={translateUi("{{value1}} search results", { value1: label })}>
                   {rows.map((entry) => (
                     <GroupedRow
                       key={entry.id}

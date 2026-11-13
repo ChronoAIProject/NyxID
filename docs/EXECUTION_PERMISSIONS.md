@@ -6,6 +6,12 @@ for enrolled private owner, shared-recipient and collaboration chat turns using
 MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
 mapping is not included. Unmarked traffic gains no preparation or database reads.
 
+Platform rollout enables and clear-that-enables require strict activation readiness.
+After activation is recorded, proposal creation/decisions, version selection,
+channel-source admission and worker execution use serving readiness and tolerate
+supported roster overlaps. Hard readiness loss retains the existing refusals and
+legacy fallbacks. See the exhaustive [clean-roster action list](SECURITY_ROLLOUT_READINESS.md#activation-versus-serving-entry-points).
+
 ## Representation and scope
 
 An existing `ApprovalGrant` may carry an optional `execution` block. There is no

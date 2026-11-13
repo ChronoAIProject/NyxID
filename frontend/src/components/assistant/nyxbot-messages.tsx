@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -34,6 +36,7 @@ const TONE: Record<EventNoticeTone, string> = {
 };
 
 function NoticeIcon({ notice }: { readonly notice: EventNotice }) {
+  useUiTranslation();
   const className = cn("h-3.5 w-3.5 shrink-0", TONE[notice.tone]);
   switch (notice.kind) {
     case "reply":
@@ -70,6 +73,7 @@ function EventRow({
   readonly icon?: ReactNode;
   readonly action?: ReactNode;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const head = (
     <>
@@ -78,7 +82,7 @@ function EventRow({
     </>
   );
   return (
-    <div role="note" aria-label={`NyxID event: ${notice.summary}`}>
+    <div role="note" aria-label={translateUi("NyxID event: {{value1}}", { value1: notice.summary })}>
       {notice.detail ? (
         <button
           type="button"
@@ -109,12 +113,13 @@ function EventRow({
 
 /** The message an automation run starts with: its name, the instruction on demand. */
 function AutomationNotice({ message }: { readonly message: ChatMessage }) {
+  useUiTranslation();
   // A webhook automation records the event payload as its own message.
   const payload = message.id.startsWith("trigger-event:");
   const label = message.automation?.label;
   const summary = `${payload ? "Webhook event" : "Automation"}${label ? ` · ${label}` : " run"}`;
   return (
-    <div role="group" aria-label="NyxID updates" className={cn(ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
+    <div role="group" aria-label={translateUi("NyxID updates")} className={cn(ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
       <EventRow
         notice={{ kind: "notice", tone: "neutral", summary, detail: message.content.trim() || undefined }}
         icon={<CalendarClock aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />}
@@ -122,9 +127,7 @@ function AutomationNotice({ message }: { readonly message: ChatMessage }) {
           <Link
             to="/assistant/automations"
             className="mt-2 inline-block type-row-title text-muted-foreground underline hover:text-foreground"
-          >
-            Open Automations
-          </Link>
+          >{translateUi("Open Automations")}</Link>
         }
       />
     </div>
@@ -139,6 +142,7 @@ function AutomationNotice({ message }: { readonly message: ChatMessage }) {
  * rather than a bubble.
  */
 export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }) {
+  useUiTranslation();
   if (message.origin === "trigger" || message.automation) {
     return <AutomationNotice message={message} />;
   }
@@ -146,7 +150,7 @@ export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }
   return (
     <div
       role="group"
-      aria-label="NyxID updates"
+      aria-label={translateUi("NyxID updates")}
       className={cn(ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL, "divide-y divide-hairline")}
     >
       {notices.map((notice, index) => (
@@ -165,12 +169,11 @@ const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 
 /** An instruction NyxBot sent to this specialist: shaped like a user turn, labelled as NyxBot's. */
 export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
+  useUiTranslation();
   return (
-    <article aria-label="Message from NyxBot" className="group/message flex flex-col items-end gap-1">
+    <article aria-label={translateUi("Message from NyxBot")} className="group/message flex flex-col items-end gap-1">
       <div className="flex items-center gap-1.5 text-12 text-text-tertiary">
-        <AgentAvatar agent={NYXBOT_MARK} size="xs" />
-        From NyxBot
-      </div>
+        <AgentAvatar agent={NYXBOT_MARK} size="xs" />{translateUi("From NyxBot")}</div>
       <div className="ml-auto max-w-[90%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-16 text-foreground [overflow-wrap:anywhere] sm:max-w-[78%]">
         {message.content}
       </div>

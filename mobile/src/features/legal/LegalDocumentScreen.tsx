@@ -62,7 +62,10 @@ export function LegalDocumentScreen({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
-  const markdownStyles = useMemo(() => createLegalMarkdownStyles(colors), [colors]);
+  const markdownStyles = useMemo(
+    () => createLegalMarkdownStyles(colors),
+    [colors],
+  );
 
   const [url, setUrl] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
@@ -93,7 +96,9 @@ export function LegalDocumentScreen({
         setContent(withoutH1);
         // The canonical raw document includes a readable date for Markdown
         // consumers. Render the metadata date only when the body lacks it.
-        setEffectiveDate(date && body.includes(`**Effective date: ${date}**`) ? null : date);
+        setEffectiveDate(
+          date && body.includes(`**Effective date: ${date}**`) ? null : date,
+        );
       })
       .catch((e) => {
         if (cancelled) return;
@@ -107,16 +112,21 @@ export function LegalDocumentScreen({
   return (
     <ScreenContainer>
       {!inWorkspaceSheet && (
-        <View style={styles.stickyBack}>
-          <BlurBackButton
-            onPress={() => {
-              capture({
-                name: "ui.mobile_nav_target_opened",
-                props: { target: telemetryBackTarget, source: "back" },
-              });
-              onBack();
-            }}
-          />
+        <View pointerEvents="box-none" style={styles.stickyBack}>
+          <View
+            pointerEvents="box-none"
+            style={[styles.rootContent, styles.backContent]}
+          >
+            <BlurBackButton
+              onPress={() => {
+                capture({
+                  name: "ui.mobile_nav_target_opened",
+                  props: { target: telemetryBackTarget, source: "back" },
+                });
+                onBack();
+              }}
+            />
+          </View>
         </View>
       )}
       <ScrollView
@@ -124,6 +134,7 @@ export function LegalDocumentScreen({
         contentContainerStyle={[
           flowStyles.scrollContent,
           styles.scrollContentExtra,
+          !inWorkspaceSheet && styles.rootContent,
           inWorkspaceSheet && { paddingTop: spacing.xxl },
           { paddingHorizontal: spacing.xxl },
         ]}
@@ -169,9 +180,18 @@ const createStyles = (c: ThemeColors) =>
     stickyBack: {
       position: "absolute",
       top: spacing.xxl,
-      left: spacing.xxl,
+      left: 0,
+      right: 0,
       zIndex: 10,
     } satisfies ViewStyle,
+    rootContent: {
+      width: "100%",
+      maxWidth: 720,
+      alignSelf: "center",
+    },
+    backContent: {
+      paddingHorizontal: spacing.xxl,
+    },
     scrollContentExtra: {
       paddingTop: 64,
       paddingBottom: spacing.xxxl,

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { AllowanceBundle } from "./allowance-bundles";
 import { useFieldArray, type UseFormReturn } from "react-hook-form";
 import {
@@ -58,17 +60,15 @@ export function GrantDialog({
   readonly pending: boolean;
   readonly onSubmit: (value: IssueGrantForm) => Promise<void>;
 }) {
+  useUiTranslation();
   const allServices = form.watch("all_services");
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent scrollMode="body" className="md:max-w-2xl">
         <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>Issue credit grant</DialogTitle>
-          <DialogDescription>
-            Issue wallet currency to billing owners. Credits are not service
-            units such as tokens, requests, or bytes.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Issue credit grant")}</DialogTitle>
+          <DialogDescription>{translateUi("Issue wallet currency to billing owners. Credits are not service units such as tokens, requests, or bytes.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
@@ -80,7 +80,7 @@ export function GrantDialog({
                     name="amount_credits"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Wallet credits per owner</FormLabel>
+                        <FormLabel>{translateUi("Wallet credits per owner")}</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
@@ -92,10 +92,7 @@ export function GrantDialog({
                             }
                           />
                         </FormControl>
-                        <FormDescription className="text-13">
-                          A credit is wallet currency, not a metered service
-                          unit.
-                        </FormDescription>
+                        <FormDescription className="text-13">{translateUi("A credit is wallet currency, not a metered service unit.")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -105,7 +102,7 @@ export function GrantDialog({
                     name="expires_at"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Expiry (optional)</FormLabel>
+                        <FormLabel>{translateUi("Expiry (optional)")}</FormLabel>
                         <FormControl>
                           <Input type="datetime-local" {...field} />
                         </FormControl>
@@ -115,19 +112,15 @@ export function GrantDialog({
                   />
                 </div>
                 <RecipientTargetFields />
-                <p className="text-13 text-muted-foreground">
-                  Recipients are captured when credits are issued.
-                </p>
+                <p className="text-13 text-muted-foreground">{translateUi("Recipients are captured when credits are issued.")}</p>
                 <FormField
                   control={form.control}
                   name="all_services"
                   render={({ field }) => (
                     <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                       <div>
-                        <FormLabel>All services</FormLabel>
-                        <p className="text-13 text-muted-foreground">
-                          Allow this wallet balance to fund any service.
-                        </p>
+                        <FormLabel>{translateUi("All services")}</FormLabel>
+                        <p className="text-13 text-muted-foreground">{translateUi("Allow this wallet balance to fund any service.")}</p>
                       </div>
                       <FormControl>
                         <Switch
@@ -144,7 +137,7 @@ export function GrantDialog({
                     name="service_refs"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Service scope</FormLabel>
+                        <FormLabel>{translateUi("Service scope")}</FormLabel>
                         <FormControl>
                           <ServicePicker
                             services={services}
@@ -153,10 +146,7 @@ export function GrantDialog({
                             multiple
                           />
                         </FormControl>
-                        <FormDescription className="text-13">
-                          Metrics identify each service&apos;s usage unit; they
-                          do not change this grant&apos;s credit amount.
-                        </FormDescription>
+                        <FormDescription className="text-13">{translateUi("Metrics identify each service's usage unit; they do not change this grant's credit amount.")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -167,12 +157,12 @@ export function GrantDialog({
                   name="reason"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Reason / note</FormLabel>
+                      <FormLabel>{translateUi("Reason / note")}</FormLabel>
                       <FormControl>
                         <textarea
                           rows={3}
                           className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-14 outline-none focus:border-input-focus"
-                          placeholder="Why these credits are being issued"
+                          placeholder={translateUi("Why these credits are being issued")}
                           {...field}
                         />
                       </FormControl>
@@ -187,12 +177,8 @@ export function GrantDialog({
                 type="button"
                 variant="ghost"
                 onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" variant="primary" isLoading={pending}>
-                Issue credits
-              </Button>
+              >{translateUi("Cancel")}</Button>
+              <Button type="submit" variant="primary" isLoading={pending}>{translateUi("Issue credits")}</Button>
             </DialogFooter>
           </form>
         </Form>
@@ -218,6 +204,7 @@ export function AllowanceDialog({
   readonly editingAllowance: AllowanceBundle | null;
   readonly onSubmit: (value: AllowanceForm) => Promise<void>;
 }) {
+  useUiTranslation();
   const serviceRef = form.watch("service_ref");
   const units = form.watch("units");
   const { fields, append, remove, replace } = useFieldArray({
@@ -239,11 +226,9 @@ export function AllowanceDialog({
       <DialogContent scrollMode="body" className="md:max-w-2xl">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>
-            {editingAllowance ? "Edit allowance" : "Create allowance"}
+            {editingAllowance ? translateUi("Edit allowance") : translateUi("Create allowance")}
           </DialogTitle>
-          <DialogDescription>
-            Grant free metered service usage before wallet credits are charged.
-          </DialogDescription>
+          <DialogDescription>{translateUi("Grant free metered service usage before wallet credits are charged.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
@@ -254,7 +239,7 @@ export function AllowanceDialog({
                   name="service_ref"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Service</FormLabel>
+                      <FormLabel>{translateUi("Service")}</FormLabel>
                       <FormControl>
                         <ServicePicker
                           services={
@@ -287,8 +272,8 @@ export function AllowanceDialog({
                       </FormControl>
                       <FormDescription className="text-13">
                         {editingAllowance
-                          ? "To change the service, create a new allowance bundle."
-                          : "Choose a service, then add its free billing units."}
+                          ? translateUi("To change the service, create a new allowance bundle.")
+                          : translateUi("Choose a service, then add its free billing units.")}
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
@@ -305,7 +290,7 @@ export function AllowanceDialog({
                         name={`units.${index}.metric`}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>Unit</FormLabel>
+                            <FormLabel>{translateUi("Unit")}</FormLabel>
                             <Select
                               value={field.value}
                               onValueChange={field.onChange}
@@ -334,7 +319,7 @@ export function AllowanceDialog({
                         name={`units.${index}.quantity`}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>Free quantity</FormLabel>
+                            <FormLabel>{translateUi("Free quantity")}</FormLabel>
                             <FormControl>
                               <Input
                                 type="number"
@@ -355,7 +340,7 @@ export function AllowanceDialog({
                         name={`units.${index}.recurrence`}
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>Recurrence</FormLabel>
+                            <FormLabel>{translateUi("Recurrence")}</FormLabel>
                             <Select
                               value={field.value}
                               onValueChange={field.onChange}
@@ -376,7 +361,7 @@ export function AllowanceDialog({
                                 ).map((value) => (
                                   <SelectItem key={value} value={value}>
                                     {value === "one_time"
-                                      ? "One time"
+                                      ? translateUi("One time")
                                       : value.charAt(0).toUpperCase() +
                                         value.slice(1)}
                                   </SelectItem>
@@ -393,9 +378,7 @@ export function AllowanceDialog({
                         className="self-end"
                         disabled={fields.length === 1}
                         onClick={() => remove(index)}
-                      >
-                        Remove unit
-                      </Button>
+                      >{translateUi("Remove unit")}</Button>
                     </div>
                   ))}
                   <Button
@@ -411,9 +394,7 @@ export function AllowanceDialog({
                           recurrence: "monthly",
                         });
                     }}
-                  >
-                    Add unit
-                  </Button>
+                  >{translateUi("Add unit")}</Button>
                   <p className="text-13 text-muted-foreground">
                     {units
                       .map(
@@ -427,20 +408,15 @@ export function AllowanceDialog({
                       .join(" · ")}
                   </p>
                   {editingAllowance && (
-                    <p className="text-13 text-muted-foreground">
-                      Removing a unit disables its allowance when you save.
-                      Existing consumption is retained.{" "}
+                    <p className="text-13 text-muted-foreground">{translateUi("Removing a unit disables its allowance when you save. Existing consumption is retained.")}{" "}
                       {editingAllowance.rows.some((row) => row.is_active)
-                        ? "Disabled units stay disabled unless you add them again. Use Enable to restore all units."
-                        : "All units are disabled, so they are loaded for editing. Saving re-enables the listed units."}
+                        ? translateUi("Disabled units stay disabled unless you add them again. Use Enable to restore all units.")
+                        : translateUi("All units are disabled, so they are loaded for editing. Saving re-enables the listed units.")}
                     </p>
                   )}
                 </div>
                 <RecipientTargetFields />
-                <p className="text-13 text-muted-foreground">
-                  Organization and group allowances follow live membership.
-                  People who leave stop receiving new free usage.
-                </p>
+                <p className="text-13 text-muted-foreground">{translateUi("Organization and group allowances follow live membership. People who leave stop receiving new free usage.")}</p>
               </div>
             </DialogBody>
             <DialogFooter className="pt-4 md:pt-4">
@@ -448,9 +424,7 @@ export function AllowanceDialog({
                 type="button"
                 variant="ghost"
                 onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -459,7 +433,7 @@ export function AllowanceDialog({
                   (!!editingAllowance && !form.formState.isDirty) || !serviceRef
                 }
               >
-                {editingAllowance ? "Save changes" : "Create allowance"}
+                {editingAllowance ? translateUi("Save changes") : translateUi("Create allowance")}
               </Button>
             </DialogFooter>
           </form>

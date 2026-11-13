@@ -5,8 +5,29 @@ import * as scrollFollower from "./assistantTranscriptScroll";
 import { hookHarness } from "./assistantHookTestHarness";
 import type { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 
+function animationClock() {
+  let id = 0;
+  const pending = new Map<number, () => void>();
+  return {
+    globals: {
+      requestAnimationFrame: (callback: () => void) => {
+        pending.set(++id, callback);
+        return id;
+      },
+      cancelAnimationFrame: (key: number) => pending.delete(key),
+    },
+    frame: () => {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      callbacks.forEach((callback) => callback());
+    },
+  };
+}
+
 function harness() {
   let scope = "conversation-1";
+  let focused = true;
+  const follower = scrollFollower.createTranscriptScrollFollower();
   const offsets: number[] = [];
   const list = {
     current: {
@@ -16,20 +37,33 @@ function harness() {
     },
   };
   const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>({
-    "./assistantTranscriptScroll": scrollFollower,
+    "./assistantTranscriptScroll": {
+      ...scrollFollower,
+      createTranscriptScrollFollower: () => follower,
+    },
   });
   const hook = h.load(
     fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
   ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
-  h.mount(() => hook(list, scope));
+  h.mount(() => hook(list, scope, { focused }));
   return {
     h,
     offsets,
+    follower,
+    focus: (next: boolean) => {
+      focused = next;
+      return h.render();
+    },
     switchChat: (next = "conversation-2") => {
       scope = next;
       return h.render();
     },
   };
+}
+
+async function restoreFrame(x: ReturnType<typeof harness>) {
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  x.h.flush();
 }
 
 const layout = (height: number) => ({ nativeEvent: { layout: { height } } });
@@ -126,6 +160,251 @@ test("reopening a chat still rejects its previous list instance's callbacks", ()
   assert.equal(x.h.flush().following, true);
 });
 
+test("opening chat details ignores the offscreen native scroll to zero and restores latest", async () => {
+  const x = harness();
+  const visible = x.h.value();
+  visible.listProps.onLayout(layout(811));
+  visible.listProps.onContentSizeChange(1000, 6332);
+  visible.listProps.onScroll(scroll(6332, 811, 5521));
+  const before = x.offsets.length;
+  const hidden = x.focus(false);
+  for (const props of [visible.listProps, hidden.listProps]) {
+    for (const offset of [2622, 102, 0])
+      props.onScroll(scroll(6332, 811, offset));
+    props.onLayout(layout(0));
+    props.onContentSizeChange(1000, 0);
+    props.onScrollBeginDrag();
+    props.onScrollEndDrag(scroll(6332, 811, 0));
+    props.onMomentumScrollBegin();
+    props.onMomentumScrollEnd(scroll(6332, 811, 0));
+  }
+  hidden.pause();
+  hidden.follow();
+  await restoreFrame(x);
+  assert.equal(
+    x.offsets.length,
+    before,
+    "hidden chat must not issue scroll commands",
+  );
+  x.focus(true);
+  await restoreFrame(x);
+  assert.equal(x.offsets.at(-1), 5521);
+  assert.equal(x.h.value().following, true);
+  x.h.unmount();
+});
+
+test("returning to a history reader restores the saved offset using current geometry", async () => {
+  const x = harness();
+  const props = x.h.value().listProps;
+  props.onLayout(layout(500));
+  props.onContentSizeChange(1000, 4000);
+  props.onScrollBeginDrag();
+  props.onScrollEndDrag(scroll(4000, 500, 1800));
+  x.h.flush();
+  assert.equal(x.h.value().following, false);
+  x.focus(false).listProps.onScroll(scroll(4000, 500, 0));
+  const returning = x.focus(true);
+  returning.listProps.onLayout(layout(600));
+  returning.listProps.onContentSizeChange(1000, 2000);
+  // The return frame can receive a passive native zero before restoration.
+  returning.listProps.onScroll(scroll(2000, 600, 0));
+  await restoreFrame(x);
+  assert.equal(
+    x.offsets.at(-1),
+    1400,
+    "saved offset clamps to the actual shorter chat",
+  );
+  assert.equal(
+    x.h.value().following,
+    false,
+    "reaching a clamped end does not change reading intent",
+  );
+  x.h.unmount();
+});
+
+test("bottom followers use the new end when return layout and messages change", async () => {
+  const x = harness();
+  const props = x.h.value().listProps;
+  props.onLayout(layout(500));
+  props.onContentSizeChange(1000, 3000);
+  props.onScroll(scroll(3000, 500, 2500));
+  x.focus(false);
+  const returning = x.focus(true);
+  const before = x.offsets.length;
+  returning.listProps.onContentSizeChange(1000, 4000);
+  returning.listProps.onLayout(layout(700));
+  assert.equal(
+    x.offsets.length,
+    before,
+    "wait for return geometry before one restoration",
+  );
+  await restoreFrame(x);
+  assert.equal(x.offsets.length, before + 1);
+  assert.equal(x.offsets.at(-1), 3300);
+  assert.equal(x.h.value().following, true);
+  x.h.unmount();
+});
+
+test("keyboard dismissal while chat details is open updates return geometry without scrolling the hidden chat", async () => {
+  const x = harness();
+  const visible = x.h.value().listProps;
+  visible.onLayout(layout(337));
+  visible.onContentSizeChange(1000, 6332);
+  visible.onScroll(scroll(6332, 337, 5995));
+  const before = x.offsets.length;
+  const hidden = x.focus(false).listProps;
+  hidden.onLayout(layout(811));
+  hidden.onContentSizeChange(1000, 6332);
+  hidden.onScroll(scroll(6332, 811, 0));
+  // Collapsing native dimensions and previous-cycle callbacks cannot replace
+  // the valid keyboard-dismissed geometry or the saved visible position.
+  hidden.onLayout(layout(0));
+  hidden.onContentSizeChange(1000, 0);
+  visible.onLayout(layout(337));
+  visible.onContentSizeChange(1000, 9000);
+  assert.equal(x.offsets.length, before);
+  assert.equal(x.follower.isFollowing(), true);
+  x.focus(true);
+  // Native keeps the 811-point layout and sends no further layout on Back.
+  await restoreFrame(x);
+  assert.equal(x.offsets.at(-1), 5521);
+  assert.equal(x.follower.distanceToEnd(), 0);
+  assert.equal(x.h.value().following, true);
+  x.h.unmount();
+});
+
+test("hidden positive content and keyboard geometry preserve a history reader's offset and intent", async () => {
+  const x = harness();
+  const visible = x.h.value().listProps;
+  visible.onLayout(layout(337));
+  visible.onContentSizeChange(1000, 6332);
+  visible.onScrollBeginDrag();
+  visible.onScrollEndDrag(scroll(6332, 337, 1400));
+  x.h.flush();
+  const before = x.offsets.length;
+  const hidden = x.focus(false).listProps;
+  hidden.onLayout(layout(811));
+  hidden.onContentSizeChange(1000, 7000);
+  hidden.onScroll(scroll(7000, 811, 0));
+  assert.equal(x.offsets.length, before);
+  assert.equal(x.follower.isFollowing(), false);
+  x.focus(true);
+  await restoreFrame(x);
+  assert.equal(x.offsets.at(-1), 1400);
+  assert.equal(x.follower.distanceToEnd(), 4789);
+  assert.equal(x.h.value().following, false);
+  x.h.unmount();
+});
+
+test("previous focus-cycle callbacks cannot overwrite a restored history position", async () => {
+  const x = harness();
+  const stale = x.h.value();
+  stale.listProps.onLayout(layout(500));
+  stale.listProps.onContentSizeChange(1000, 4000);
+  stale.listProps.onScrollBeginDrag();
+  stale.listProps.onScrollEndDrag(scroll(4000, 500, 1400));
+  x.h.flush();
+  x.focus(false);
+  x.focus(true);
+  await restoreFrame(x);
+  const restored = x.offsets.length;
+  stale.listProps.onLayout(layout(900));
+  stale.listProps.onContentSizeChange(1000, 8000);
+  stale.listProps.onScroll(scroll(4000, 500, 0));
+  stale.follow();
+  stale.pause();
+  assert.equal(x.offsets.length, restored);
+  x.focus(false);
+  x.focus(true);
+  await restoreFrame(x);
+  assert.equal(x.offsets.at(-1), 1400);
+  assert.equal(x.h.value().following, false);
+  x.h.unmount();
+});
+
+test("chat changes, renewed blur and unmount cancel a queued position restoration", async () => {
+  for (const boundary of ["chat", "blur", "unmount"] as const) {
+    const x = harness();
+    const props = x.h.value().listProps;
+    props.onLayout(layout(500));
+    props.onContentSizeChange(1000, 4000);
+    props.onScroll(scroll(4000, 500, 3500));
+    x.focus(false);
+    x.focus(true);
+    const before = x.offsets.length;
+    if (boundary === "chat") x.switchChat();
+    else if (boundary === "blur") x.focus(false);
+    else x.h.unmount();
+    await restoreFrame(x);
+    assert.equal(x.offsets.length, before, boundary);
+    if (boundary !== "unmount") x.h.unmount();
+  }
+});
+
+test("a deliberate return-frame gesture cancels restoration and keeps the reader in control", async () => {
+  const x = harness();
+  const props = x.h.value().listProps;
+  props.onLayout(layout(500));
+  props.onContentSizeChange(1000, 4000);
+  props.onScroll(scroll(4000, 500, 3500));
+  x.focus(false);
+  const returning = x.focus(true);
+  const before = x.offsets.length;
+  returning.listProps.onScrollBeginDrag();
+  returning.listProps.onScrollEndDrag(scroll(4000, 500, 1200));
+  await restoreFrame(x);
+  assert.equal(x.offsets.length, before);
+  assert.equal(x.h.value().following, false);
+  x.h.unmount();
+});
+
+test("hidden mounting and hidden chat switches do not wait for a nonexistent visible snapshot", async () => {
+  for (const boundary of ["mount", "chat"] as const) {
+    let focused = boundary === "chat";
+    let scope = "chat-1";
+    const offsets: number[] = [];
+    const follower = scrollFollower.createTranscriptScrollFollower();
+    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>({
+      "./assistantTranscriptScroll": {
+        ...scrollFollower,
+        createTranscriptScrollFollower: () => follower,
+      },
+    });
+    const hook = h.load(
+      fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
+    ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
+    const list = {
+      current: {
+        scrollToOffset: ({ offset }: { offset: number }) =>
+          offsets.push(offset),
+      },
+    };
+    h.mount(() => hook(list, scope, { focused }));
+    if (boundary === "chat") {
+      h.value().listProps.onLayout(layout(500));
+      h.value().listProps.onContentSizeChange(1000, 4000);
+      focused = false;
+      h.render();
+      scope = "chat-2";
+      h.render();
+    }
+    h.value().listProps.onLayout(layout(500));
+    h.value().listProps.onContentSizeChange(1000, 4000);
+    focused = true;
+    h.render();
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    h.flush();
+    // A retained native screen need not repeat its hidden layout on focus.
+    // The first visible scroll must still reach the follower immediately.
+    h.value().listProps.onContentSizeChange(1000, 4000);
+    h.value().listProps.onScroll(scroll(4000, 500, 1400));
+    assert.equal(follower.distanceToEnd(), 2100, boundary);
+    h.value().listProps.onLayout(layout(500));
+    assert.equal(offsets.at(-1), 3500, boundary);
+    h.unmount();
+  }
+});
+
 test("native fling metadata prevents content corrections between drag release and momentum begin", () => {
   for (const nativeRelease of [
     { velocity: { y: -0.5 } },
@@ -182,13 +461,22 @@ test("jump only appears away from latest, and resumes follow after explicit acti
   x.h.unmount();
 });
 
-test("corrections glide: jump and small growth animate, large jumps and Reduce Motion stay instant", () => {
+test("corrections glide after opening: jump and small growth animate, large jumps and Reduce Motion stay instant", () => {
   for (const reducedMotion of [false, true]) {
     const calls: { offset: number; animated: boolean }[] = [];
-    const list = { current: { scrollToOffset: (call: { offset: number; animated: boolean }) => calls.push(call) } };
-    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>({
-      "./assistantTranscriptScroll": scrollFollower,
-    });
+    const list = {
+      current: {
+        scrollToOffset: (call: { offset: number; animated: boolean }) =>
+          calls.push(call),
+      },
+    };
+    const clock = animationClock();
+    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>(
+      {
+        "./assistantTranscriptScroll": scrollFollower,
+      },
+      clock.globals,
+    );
     const hook = h.load(
       fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
     ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
@@ -196,18 +484,159 @@ test("corrections glide: jump and small growth animate, large jumps and Reduce M
     const p = h.value().listProps;
     p.onLayout(layout(400));
     p.onContentSizeChange(300, 4000);
-    assert.equal(calls.at(-1)!.animated, false, "opening a long chat jumps straight to the end");
+    assert.equal(
+      calls.at(-1)!.animated,
+      false,
+      "opening a long chat jumps straight to the end",
+    );
     p.onScroll(scroll(4000, 400, 3600));
+    clock.frame();
+    clock.frame();
+    h.flush();
     p.onContentSizeChange(300, 4200);
-    assert.equal(calls.at(-1)!.animated, !reducedMotion, "a growing reply is followed smoothly");
+    assert.equal(
+      calls.at(-1)!.animated,
+      !reducedMotion,
+      "a growing reply is followed smoothly",
+    );
     p.onScroll(scroll(4200, 400, 3800));
     p.onContentSizeChange(300, 6000);
-    assert.equal(calls.at(-1)!.animated, false, "a jump of several screens is instant");
+    assert.equal(
+      calls.at(-1)!.animated,
+      false,
+      "a jump of several screens is instant",
+    );
     p.onScrollBeginDrag();
     p.onScrollEndDrag(scroll(6000, 400, 100));
     p.onScroll(scroll(6000, 400, 100));
     h.value().follow();
-    assert.equal(calls.at(-1)!.animated, !reducedMotion, "jump to latest glides");
+    assert.equal(
+      calls.at(-1)!.animated,
+      !reducedMotion,
+      "jump to latest glides",
+    );
     h.unmount();
+  }
+});
+
+test("opening stays hidden through loading and geometry changes until native latest is acknowledged", () => {
+  let loading = true;
+  const clock = animationClock();
+  const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>(
+    { "./assistantTranscriptScroll": scrollFollower },
+    clock.globals,
+  );
+  const hook = h.load(
+    fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
+  ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
+  const calls: { offset: number; animated: boolean }[] = [];
+  h.mount(() =>
+    hook({ current: { scrollToOffset: (c) => calls.push(c) } }, "chat", {
+      loading,
+    }),
+  );
+  let p = h.value().listProps;
+  p.onLayout(layout(400));
+  p.onContentSizeChange(300, 1000);
+  p.onScroll(scroll(1000, 400, 600));
+  clock.frame();
+  clock.frame();
+  assert.equal(h.flush().ready, false);
+  loading = false;
+  h.render();
+  p = h.value().listProps;
+  p.onContentSizeChange(300, 1600);
+  p.onLayout(layout(300));
+  clock.frame();
+  clock.frame();
+  assert.equal(
+    h.flush().ready,
+    false,
+    "the requested offset alone cannot reveal the list",
+  );
+  assert.equal(calls.at(-1)!.offset, 1300);
+  p.onScroll(scroll(1600, 300, 1300));
+  clock.frame();
+  clock.frame();
+  assert.equal(h.flush().ready, true);
+  assert.equal(
+    calls.some((c) => c.animated),
+    false,
+  );
+  h.unmount();
+});
+
+test("opening reveals by 800ms despite loading, no native acknowledgement or changing geometry", () => {
+  for (const condition of ["loading", "no-ack", "changing-geometry"]) {
+    let now = 0,
+      id = 0;
+    const timers = new Map<number, { at: number; callback: () => void }>();
+    const clock = animationClock();
+    let scope = "first";
+    let historyError = false;
+    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>(
+      { "./assistantTranscriptScroll": scrollFollower },
+      {
+        ...clock.globals,
+        setTimeout: (callback: () => void, delay: number) => {
+          timers.set(++id, { at: now + delay, callback });
+          return id;
+        },
+        clearTimeout: (key: number) => timers.delete(key),
+      },
+    );
+    const advance = (ms: number) => {
+      now += ms;
+      for (const [key, timer] of [...timers])
+        if (timer.at <= now) {
+          timers.delete(key);
+          timer.callback();
+        }
+      h.flush();
+    };
+    const hook = h.load(
+      fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
+    ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
+    h.mount(() =>
+      hook({ current: { scrollToOffset: () => {} } }, scope, {
+        loading: condition === "loading",
+        historyError,
+      }),
+    );
+    h.value().listProps.onLayout(layout(400));
+    h.value().listProps.onContentSizeChange(300, 2000);
+    advance(799);
+    if (condition === "changing-geometry") {
+      for (let i = 0; i < 10; i++) {
+        h.value().listProps.onContentSizeChange(300, 2000 + i * 10);
+        clock.frame();
+      }
+    }
+    assert.equal(h.value().ready, false, condition);
+    advance(1);
+    assert.equal(h.value().ready, true, condition);
+    assert.equal(timers.size, 0);
+    scope = "second";
+    h.render();
+    assert.equal(h.value().ready, false);
+    assert.equal(timers.size, 1);
+    advance(400);
+    scope = "third";
+    h.render();
+    advance(400);
+    assert.equal(
+      h.value().ready,
+      false,
+      "the prior scope's deadline is cancelled",
+    );
+    historyError = true;
+    h.render();
+    assert.equal(h.value().ready, true, "history errors reveal immediately");
+    assert.equal(timers.size, 0);
+    scope = "fourth";
+    historyError = false;
+    h.render();
+    h.unmount();
+    assert.equal(timers.size, 0, "unmount clears deadline");
   }
 });

@@ -38,6 +38,7 @@ async function harness() {
   const agentList = { agents: [agent] };
   let hold: "history" | "index" | undefined;
   let held = false;
+  let historyError: Error | undefined;
   const refresh = deferred<AssistantHistory>();
   const indexRefresh = deferred<{ conversations: []; next_cursor: null }>();
   const streams: {
@@ -86,6 +87,7 @@ async function harness() {
       streamAssistantTurn: stream,
       assistantApi: {
         history: async (id: string) => {
+          if (historyError) throw historyError;
           if (hold === "history" && id === A) {
             hold = undefined;
             held = true;
@@ -113,6 +115,7 @@ async function harness() {
   return {
     h,
     streams,
+    setHistoryError: (error?: Error) => { historyError = error; },
     hold: (phase: "history" | "index") => {
       hold = phase;
     },
@@ -392,4 +395,20 @@ test("returning home from another page while a chat was selected does not leave 
   assert.equal(h.value().conversationId, undefined);
   assert.equal(h.value().loading, false);
   h.unmount();
+});
+
+test("2345 malformed history never leaks validation JSON or creates a recovery lock", async () => {
+  const x = await harness();
+  x.setHistoryError(Object.assign(new Error('[{"path":["private"],"code":"invalid_value"}]'), { name: "ZodError" }));
+  await x.h.value().recover();
+  await x.h.settle();
+  assert.equal(x.h.value().error, "Conversation history could not be loaded. Please try again.");
+  assert.equal(x.h.value().loading, false);
+  assert.equal(x.h.value().recoveryRequired, false);
+  assert.equal(x.h.value().history?.conversation.id, A);
+  x.setHistoryError();
+  await x.h.value().recover();
+  await x.h.settle();
+  assert.equal(x.h.value().error, undefined);
+  x.h.unmount();
 });

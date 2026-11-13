@@ -1,3 +1,4 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
 export interface UsageBucketLabelInput {
   readonly date: string;
   readonly request_count: number;
@@ -16,7 +17,7 @@ export function formatBucketDate(iso: string): string {
     return iso;
   }
   const date = new Date(year, month - 1, day);
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return date.toLocaleDateString(getFormattingLocale(), { month: "short", day: "numeric" });
 }
 
 export function formatBucketLabel(bucket: UsageBucketLabelInput): string {

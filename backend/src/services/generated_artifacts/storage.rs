@@ -11,12 +11,31 @@ fn validate(row: &PendingArtifact, bytes: &[u8]) -> AppResult<()> {
         || row.size as usize > sandbox::FILE_BYTES
         || bytes.len() != row.size as usize
         || hex::encode(Sha256::digest(bytes)) != row.sha256
-        || row.secret_context_versions.len() != 1
-        || row.secret_context_versions.get("data_encrypted") != Some(&3)
+        || row
+            .secret_context_versions
+            .iter()
+            .any(|(field, version)| field != "data_encrypted" || *version != 3)
     {
         return Err(invalid());
     }
     Ok(())
+}
+/// Select the format only from the stored marker, never from ciphertext bytes.
+pub(super) async fn decrypt(
+    keys: &EncryptionKeys,
+    row: &PendingArtifact,
+) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
+    let path = context_path(row);
+    let context = RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?;
+    let bytes = super::super::record_field_service::decrypt_context(
+        keys,
+        &context,
+        row.secret_context_versions.get("data_encrypted").copied(),
+        row.data_encrypted.as_deref().ok_or_else(invalid)?,
+    )
+    .await?;
+    validate(row, &bytes)?;
+    Ok(bytes)
 }
 pub(crate) async fn verify(keys: &EncryptionKeys, source: &Document) -> AppResult<()> {
     let row = decode(source)?;
@@ -31,6 +50,9 @@ pub(crate) async fn verify(keys: &EncryptionKeys, source: &Document) -> AppResul
             Err(invalid())
         };
     };
+    if row.secret_context_versions.get("data_encrypted") != Some(&3) {
+        return Err(invalid());
+    }
     let path = context_path(&row);
     let context = RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?;
     keys.authenticate_current_record(ciphertext, &context)
@@ -43,21 +65,23 @@ pub(crate) async fn rewrap(
     keys: &EncryptionKeys,
     source: &Document,
 ) -> AppResult<bool> {
+    if !keys.contextual_record_writes() {
+        return Err(AppError::Conflict(
+            "Contextual writer cutover is required before migration".into(),
+        ));
+    }
     if verify(keys, source).await.is_ok() {
         return Ok(false);
     }
     let row = decode(source)?;
     let path = context_path(&row);
     let context = RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?;
-    let plain = keys
-        .decrypt_record(row.data_encrypted.as_deref().ok_or_else(invalid)?, &context)
-        .await?;
-    validate(&row, &plain)?;
+    let plain = decrypt(keys, &row).await?;
     let ciphertext = keys.encrypt_record(&plain, &context).await?;
     keys.authenticate_current_record(&ciphertext, &context)
         .await?;
     Ok(db.collection::<Document>(ARTIFACTS)
         .update_one(super::super::record_storage::exact_document_predicate(source),
-            doc! {"$set":{"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext}}})
+            doc! {"$set":{"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext},"secret_context_versions":{"data_encrypted":3}}})
         .await?.matched_count == 1)
 }

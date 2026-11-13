@@ -79,7 +79,7 @@ beforeEach(() => {
       writes.push({ endpoint, body });
       if (fail)
         return new Response(
-          JSON.stringify({ message: "Could not change this chat." }),
+          JSON.stringify({ error: "conflict", message: "Could not change this chat." }),
           { status: 409 },
         );
       return new Response(

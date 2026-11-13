@@ -35,6 +35,16 @@ macro_rules! collect_billing_route_specs {
     }};
 }
 
+macro_rules! model_contract_metadata_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router; (
+            "/platform-models/contracts", "/api/v1/admin/platform-models/contracts",
+            "handlers::platform_models::certified_contracts", get(handlers::platform_models::certified_contracts),
+            crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("Certified contract metadata; no downstream request")
+        ))
+    };
+}
+
 macro_rules! llm_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -277,7 +287,7 @@ macro_rules! assistant_direct_billing_routes {
     };
 }
 
-macro_rules! codex_connection_billing_routes {
+macro_rules! credential_check_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
@@ -285,6 +295,15 @@ macro_rules! codex_connection_billing_routes {
                 "/api/v1/providers/codex-connection/verify",
                 "handlers::codex_connection::verify",
                 post(handlers::codex_connection::verify),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/keys/{key_id}/verify",
+                "/api/v1/keys/{key_id}/verify",
+                "handlers::credential_verification::check",
+                post(handlers::credential_verification::check),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                     crate::services::billing::BillingIngress::Proxy
                 )
@@ -546,7 +565,11 @@ macro_rules! oracle_billing_routes {
 pub(crate) fn mounted_billing_route_inventory()
 -> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
     let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
-    routes.extend(codex_connection_billing_routes!(
+    routes.extend(model_contract_metadata_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
+    routes.extend(credential_check_billing_routes!(
         collect_billing_route_specs,
         ()
     ));
@@ -1066,7 +1089,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             put(handlers::admin_sa_connections::update_sa_connection_credential),
         );
 
-    let admin_routes = Router::new()
+    let admin_routes = model_contract_metadata_routes!(register_billing_routes, Router::new())
+        .route(
+            "/platform-models/credentials",
+            get(handlers::platform_models::credentials::list)
+                .post(handlers::platform_models::credentials::create_request),
+        )
+        .route(
+            "/platform-models/credentials/{id}",
+            get(handlers::platform_models::credentials::get)
+                .put(handlers::platform_models::credentials::update_request),
+        )
+        .route(
+            "/platform-models/offerings",
+            get(handlers::platform_models::credentials::offerings)
+                .post(handlers::platform_models::credentials::create_offering),
+        )
         .route(
             "/platform-models/{id}/tariffs/{tariff_id}/retire",
             post(handlers::platform_models::retire_tariff),
@@ -2076,7 +2114,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Org metadata accepts general API keys. Handlers apply membership or
     // Direct-owner read access; service accounts remain rejected as before.
     let org_read_routes = Router::new()
-        .route("/", get(handlers::orgs::list_orgs))
+        .route("/", get(handlers::agent_skills::org_membership_lookup))
         .route("/{org_id}", get(handlers::orgs::get_org))
         .route(
             "/{org_id}/authorization",
@@ -2259,6 +2297,24 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/reply/update", post(handlers::channel_relay::update_reply))
         .route(
+            "/reply/commonmark",
+            post(handlers::channel_relay_request::commonmark_reply).layer(DefaultBodyLimit::max(
+                crate::services::channel_reply_delivery::MAX_REPLY_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/thread-reply/commonmark",
+            post(handlers::channel_relay_request::commonmark_thread_reply).layer(
+                DefaultBodyLimit::max(
+                    crate::services::channel_reply_delivery::MAX_REPLY_REQUEST_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/reply/update/commonmark",
+            post(handlers::channel_relay_request::commonmark_update),
+        )
+        .route(
             "/messages/{conversation_id}",
             get(handlers::channel_relay::list_messages),
         )
@@ -2440,6 +2496,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route(
+            "/monitoring/invocation-diagnostics",
+            post(handlers::invocation_diagnostics::redeem).layer(DefaultBodyLimit::max(256)),
+        )
         .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
@@ -2642,6 +2702,56 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     ));
     let assistant_routes = Router::new()
         .route(
+            "/nyxagent/sandboxes",
+            get(handlers::assistant_cma_sandboxes::list),
+        )
+        .route(
+            "/nyxagent/sandboxes/{id}",
+            get(handlers::assistant_cma_sandboxes::detail)
+                .patch(handlers::assistant_cma_sandboxes::label)
+                .delete(handlers::assistant_cma_sandboxes::retire),
+        )
+        .route(
+            "/nyxagent/sandboxes/{id}/commands",
+            post(handlers::assistant_cma_sandboxes::commands),
+        )
+        .route(
+            "/nyxagent/sandboxes/{id}/events",
+            get(handlers::assistant_cma_sandboxes::events),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}",
+            get(handlers::assistant_cma_agents::detail),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/transcript",
+            get(handlers::assistant_cma_agents::transcript),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/events/snapshot",
+            get(handlers::assistant_cma_agents::snapshot),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/events",
+            get(handlers::assistant_cma_agents::events),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/responses/{response_id}",
+            get(handlers::assistant_cma_agents::response),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/responses/{response_id}/events",
+            get(handlers::assistant_cma_agents::response_events),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/desktop",
+            get(handlers::assistant_cma_agents::desktop),
+        )
+        .route(
+            "/nyxagent/cma-agents/{id}/desktop/ws",
+            get(handlers::assistant_cma_agents::desktop_ws),
+        )
+        .route(
             "/nyxagent/invocations/{key}",
             get(handlers::assistant_invocations::show),
         )
@@ -2725,6 +2835,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}/access-mode",
             patch(handlers::assistant_nyxagent::change_access_mode),
+        )
+        .route(
+            "/nyxagent/grant-services",
+            get(handlers::assistant_team::grant_services),
         )
         .route(
             "/nyxagent/agents",
@@ -2875,9 +2989,25 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::update_settings),
         )
         .route(
+            "/nyxagent/notifications",
+            get(handlers::assistant_notifications::list),
+        )
+        .route(
+            "/nyxagent/notifications/summary",
+            get(handlers::assistant_notifications::summary),
+        )
+        .route(
+            "/nyxagent/notifications/read",
+            post(handlers::assistant_notifications::read),
+        )
+        .route(
             "/nyxagent/onboarding",
             get(handlers::assistant_onboarding::get_onboarding)
                 .put(handlers::assistant_onboarding::save_onboarding),
+        )
+        .route(
+            "/nyxagent/onboarding/suggestions/{id}",
+            get(handlers::assistant_onboarding::suggestion_setup),
         )
         .route(
             "/nyxagent/onboarding/suggestions/hide",
@@ -2980,6 +3110,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/agents/{id}/org-guest-grants",
+            get(handlers::org_specialist_channels::adoption_preview)
+                .post(handlers::org_specialist_channels::adopt_grants),
         )
         .route(
             "/nyxagent/channels/{id}/org-specialist",
@@ -3307,6 +3442,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_voice::options),
         )
         .route(
+            "/assistant/nyxagent/voice/active",
+            get(handlers::assistant_voice::account_active_session),
+        )
+        .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
             post(handlers::assistant_voice::start)
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
@@ -3488,7 +3627,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/providers/codex-connection",
             get(handlers::codex_connection::status).post(handlers::codex_connection::import),
         )
-        .merge(codex_connection_billing_routes!(
+        .merge(credential_check_billing_routes!(
             register_billing_routes,
             Router::new()
         ))

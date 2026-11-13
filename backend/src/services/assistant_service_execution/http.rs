@@ -9,6 +9,8 @@ pub struct HttpProjection {
     pub extra_headers: Vec<(String, String)>,
     /// Server-only marker for an exact attached Ornn package read.
     pub(crate) skill_read: bool,
+    /// Purpose-limited Ornn org membership callback, never a user bearer.
+    pub(crate) org_skill_lookup: bool,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
 }
 impl Default for HttpProjection {
@@ -19,6 +21,7 @@ impl Default for HttpProjection {
             base_url: None,
             extra_headers: Vec::new(),
             skill_read: false,
+            org_skill_lookup: false,
             machine_git: None,
         }
     }
@@ -34,6 +37,9 @@ impl HttpProjection {
     }
 
     pub fn apply(&self, target: &mut crate::services::proxy_service::ProxyTarget) {
+        if self.org_skill_lookup {
+            target.service.forward_access_token = true;
+        }
         if let Some(base) = &self.base_url {
             target.base_url.clone_from(base);
             target.target_id = None;

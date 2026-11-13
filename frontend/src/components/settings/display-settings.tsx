@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { RangeControl } from "@/components/ui/range-control";
 import { Label, FieldHelp } from "@/components/ui/label";
 import { useState, type ReactNode } from "react";
@@ -50,14 +52,14 @@ const THEME_OPTIONS: readonly {
   label: string;
   icon: LucideIcon;
 }[] = [
-  { value: "system", label: "System", icon: Monitor },
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
+  { value: "system", get label() { return translateUi("System"); }, icon: Monitor },
+  { value: "light", get label() { return translateUi("Light"); }, icon: Sun },
+  { value: "dark", get label() { return translateUi("Dark"); }, icon: Moon },
 ];
 
 const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
-  { value: "system", label: "Follow system" },
-  { value: "reduce", label: "Reduce" },
+  { value: "system", get label() { return translateUi("Follow system"); } },
+  { value: "reduce", get label() { return translateUi("Reduce"); } },
 ];
 
 const COLOR_MODE_OPTIONS: readonly {
@@ -65,8 +67,8 @@ const COLOR_MODE_OPTIONS: readonly {
   label: string;
   icon: LucideIcon;
 }[] = [
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
+  { value: "light", get label() { return translateUi("Light"); }, icon: Sun },
+  { value: "dark", get label() { return translateUi("Dark"); }, icon: Moon },
 ];
 
 function SegmentedChoice<T extends string | number>({
@@ -80,6 +82,7 @@ function SegmentedChoice<T extends string | number>({
   readonly value: T;
   readonly onChange: (value: T) => void;
 }) {
+  useUiTranslation();
   return (
     <div
       role="radiogroup"
@@ -128,7 +131,7 @@ function SegmentedChoice<T extends string | number>({
         >
           {Icon ? <Icon aria-hidden="true" /> : null}
           <span className="min-w-0 [overflow-wrap:anywhere]">
-            {option.label}
+            {translateUi(option.label)}
           </span>
         </button>
       ))}
@@ -145,6 +148,7 @@ function SettingRow({
   readonly description: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <GroupedRow>
       <div className="min-w-0 flex-1 basis-[18em]">
@@ -168,6 +172,7 @@ function HexField({
   readonly value: string;
   readonly onCommit: (value: string) => void;
 }) {
+  useUiTranslation();
   const [draft, setDraft] = useState(value);
   const [synced, setSynced] = useState(value);
   if (value !== synced) {
@@ -179,7 +184,7 @@ function HexField({
 
   return (
     <Input
-      aria-label={`${label} hex value`}
+      aria-label={translateUi("{{value1}} hex value", { value1: label })}
       aria-invalid={invalid || undefined}
       value={draft}
       maxLength={7}
@@ -200,9 +205,9 @@ function HexField({
 }
 
 const SIDEBAR_MODE_OPTIONS: readonly { value: SidebarMode; label: string }[] = [
-  { value: "expanded", label: "Expanded" },
-  { value: "collapsed", label: "Collapsed" },
-  { value: "hover", label: "Expand on hover" },
+  { value: "expanded", get label() { return translateUi("Expanded"); } },
+  { value: "collapsed", get label() { return translateUi("Collapsed"); } },
+  { value: "hover", get label() { return translateUi("Expand on hover"); } },
 ];
 
 function SidebarWidthControl({
@@ -212,6 +217,7 @@ function SidebarWidthControl({
   readonly sidebar: SidebarId;
   readonly label: string;
 }) {
+  useUiTranslation();
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   return (
@@ -219,8 +225,8 @@ function SidebarWidthControl({
       label={label}
       description={
         sidebar === "dashboard"
-          ? "Used when the main sidebar is expanded."
-          : "The agents and chats list in the assistant."
+          ? translateUi("Used when the main sidebar is expanded.")
+          : translateUi("The agents and chats list in the assistant.")
       }
       saved={width}
       onChange={(value) => setSidebarWidth(sidebar, value)}
@@ -244,6 +250,7 @@ function ScaleControl({
   readonly scale: number;
   readonly onChange: (value: number) => void;
 }) {
+  useUiTranslation();
   return (
     <RangeControl
       label={label}
@@ -260,31 +267,32 @@ function ScaleControl({
 }
 
 function SidebarSettings() {
+  useUiTranslation();
   const sidebarMode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
   return (
     <GroupedList
-      title="Sidebar"
-      footer="Choose how navigation opens and how much space it uses. You can also drag a sidebar’s edge to resize it."
+      title={translateUi("Sidebar")}
+      footer={translateUi("Choose how navigation opens and how much space it uses. You can also drag a sidebar’s edge to resize it.")}
     >
       <SettingRow
-        title="Main sidebar"
-        description="Expanded, icons only, or icons that expand on hover."
+        title={translateUi("Main sidebar")}
+        description={translateUi("Expanded, icons only, or icons that expand on hover.")}
       >
         <SegmentedChoice
-          label="Main sidebar"
+          label={translateUi("Main sidebar")}
           options={SIDEBAR_MODE_OPTIONS}
           value={sidebarMode}
           onChange={setSidebarMode}
         />
       </SettingRow>
       <GroupedRow>
-        <SidebarWidthControl sidebar="dashboard" label="Main sidebar width" />
+        <SidebarWidthControl sidebar="dashboard" label={translateUi("Main sidebar width")} />
       </GroupedRow>
       <GroupedRow>
         <SidebarWidthControl
           sidebar="assistant"
-          label="Assistant sidebar width"
+          label={translateUi("Assistant sidebar width")}
         />
       </GroupedRow>
     </GroupedList>
@@ -292,6 +300,7 @@ function SidebarSettings() {
 }
 
 function ColorEditor() {
+  useUiTranslation();
   const resolved = useResolvedTheme();
   const setMode = useThemeStore((s) => s.setMode);
   const customColors = useThemeStore((s) => s.customColors);
@@ -306,26 +315,24 @@ function ColorEditor() {
   return (
     <div className="space-y-6">
       <GroupedList
-        title="Colors"
-        footer="Make each theme your own. Preview changes below and check that your text stays readable."
+        title={translateUi("Colors")}
+        footer={translateUi("Make each theme your own. Preview changes below and check that your text stays readable.")}
       >
         <GroupedRow>
           <SegmentedChoice
-            label="Theme to edit"
+            label={translateUi("Theme to edit")}
             options={COLOR_MODE_OPTIONS}
             value={editMode}
             onChange={setEditMode}
           />
           {editMode !== resolved && (
-            <Button variant="ghost" size="sm" onClick={() => setMode(editMode)}>
-              Switch to {editMode} theme to preview
-            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setMode(editMode)}>{translateUi("Switch to ")}{translateUi(editMode)}{translateUi(" theme to preview")}</Button>
           )}
         </GroupedRow>
       </GroupedList>
 
       <section
-        aria-label="Chat appearance preview"
+        aria-label={translateUi("Chat appearance preview")}
         className="space-y-3 rounded-xl border p-4"
         style={{
           backgroundColor: color("background"),
@@ -333,25 +340,21 @@ function ColorEditor() {
           borderColor: color("border"),
         }}
       >
-        <p className="type-row-title">Chat preview · {editMode}</p>
+        <p className="type-row-title">{translateUi("Chat preview · ")}{translateUi(editMode)}</p>
         <UserMessageBubble
           className="ml-auto w-fit max-w-[85%] text-16"
           style={{
             backgroundColor: color("chat-bubble"),
             color: color("chat-bubble-foreground"),
           }}
-        >
-          Show me the services I have connected.
-        </UserMessageBubble>
-        <p className="text-16">
-          You can manage your connected services in Plugins.
-        </p>
+        >{translateUi("Show me the services I have connected.")}</UserMessageBubble>
+        <p className="text-16">{translateUi("You can manage your connected services in Plugins.")}</p>
       </section>
 
       <GroupedList
-        title={`${editMode === "light" ? "Light" : "Dark"} theme colors`}
+        title={editMode === "light" ? translateUi("Light theme colors") : translateUi("Dark theme colors")}
       >
-        <ul aria-label={`${editMode} theme colors`}>
+        <ul aria-label={translateUi("{{value1}} theme colors", { value1: editMode })}>
           {EDITABLE_COLORS.map(({ key, label }) => {
             const value = color(key);
             const customized = key in overrides;
@@ -360,17 +363,15 @@ function ColorEditor() {
                 <li>
                   <Label asChild>
                     <span className="min-w-0 flex-1">
-                      {label}
+                      {translateUi(label)}
                       {customized && (
-                        <FieldHelp className="ml-2 text-text-tertiary">
-                          Customized
-                        </FieldHelp>
+                        <FieldHelp className="ml-2 text-text-tertiary">{translateUi("Customized")}</FieldHelp>
                       )}
                     </span>
                   </Label>
                   <input
                     type="color"
-                    aria-label={`${label} color`}
+                    aria-label={translateUi("{{value1}} color", { value1: label })}
                     value={value.toLowerCase()}
                     onChange={(e) =>
                       setCustomColor(editMode, key, e.target.value)
@@ -378,15 +379,15 @@ function ColorEditor() {
                     className="h-7 w-9 cursor-pointer rounded-md border-0 bg-transparent p-0.5"
                   />
                   <HexField
-                    label={label}
+                    label={translateUi(label)}
                     value={value}
                     onCommit={(next) => setCustomColor(editMode, key, next)}
                   />
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label={`Reset ${label}`}
-                    title="Reset to default"
+                    aria-label={translateUi("Reset {{value1}}", { value1: label })}
+                    title={translateUi("Reset to default")}
                     disabled={!customized}
                     onClick={() => resetCustomColors(editMode, key)}
                     className={cn(!customized && "invisible")}
@@ -400,8 +401,8 @@ function ColorEditor() {
         </ul>
       </GroupedList>
 
-      <GroupedList title="Readability">
-        <ul aria-label="Contrast checks">
+      <GroupedList title={translateUi("Readability")}>
+        <ul aria-label={translateUi("Contrast checks")}>
           {CONTRAST_CHECKS.map((check) => {
             const ratio = contrastRatio(color(check.fg), color(check.bg));
             const ok = ratio >= check.target;
@@ -422,7 +423,7 @@ function ColorEditor() {
                     />
                   )}
                   <span className="flex-1 text-muted-foreground">
-                    {check.label}
+                    {translateUi(check.label)}
                   </span>
                   <span
                     className={cn(
@@ -430,7 +431,7 @@ function ColorEditor() {
                       ok ? "text-muted-foreground" : "text-warning",
                     )}
                   >
-                    {ratio.toFixed(1)}:1 {ok ? "" : `(needs ${check.target}:1)`}
+                    {ratio.toFixed(1)}:1 {ok ? "" : translateUi("(needs {{value1}}:1)", { value1: check.target })}
                   </span>
                 </li>
               </GroupedRow>
@@ -447,9 +448,7 @@ function ColorEditor() {
             disabled={customizedCount === 0}
             onClick={() => resetCustomColors(editMode)}
           >
-            <RotateCcw className="size-3" />
-            Reset {editMode} colors
-          </Button>
+            <RotateCcw className="size-3" />{translateUi("Reset ")}{translateUi(editMode)}{translateUi(" colors")}</Button>
         </GroupedRow>
       </GroupedList>
     </div>
@@ -457,6 +456,7 @@ function ColorEditor() {
 }
 
 export function DisplaySettings() {
+  useUiTranslation();
   const mode = useThemeStore((s) => s.mode);
   const setMode = useThemeStore((s) => s.setMode);
   const textScale = useThemeStore((s) => s.textScale);
@@ -470,15 +470,15 @@ export function DisplaySettings() {
   return (
     <div className="space-y-6">
       <GroupedList
-        title="Display"
-        footer="Make NyxID comfortable to read. Your choices are saved in this browser."
+        title={translateUi("Display")}
+        footer={translateUi("Make NyxID comfortable to read. Your choices are saved in this browser.")}
       >
         <SettingRow
-          title="Theme"
-          description="System follows your device's light or dark setting."
+          title={translateUi("Theme")}
+          description={translateUi("System follows your device's light or dark setting.")}
         >
           <SegmentedChoice
-            label="Theme"
+            label={translateUi("Theme")}
             options={THEME_OPTIONS}
             value={mode}
             onChange={setMode}
@@ -486,26 +486,26 @@ export function DisplaySettings() {
         </SettingRow>
         <GroupedRow>
           <ScaleControl
-            label="Text size"
-            description="Resize text and icons together. Controls adapt to keep them readable."
+            label={translateUi("Text size")}
+            description={translateUi("Resize text and icons together. Controls adapt to keep them readable.")}
             scale={textScale}
             onChange={setTextScale}
           />
         </GroupedRow>
         <GroupedRow>
           <ScaleControl
-            label="Spacing"
-            description="Choose how much room sits between controls and content."
+            label={translateUi("Spacing")}
+            description={translateUi("Choose how much room sits between controls and content.")}
             scale={density}
             onChange={setDensity}
           />
         </GroupedRow>
         <SettingRow
-          title="Motion"
-          description="Follow your device preference or use fewer animations."
+          title={translateUi("Motion")}
+          description={translateUi("Follow your device preference or use fewer animations.")}
         >
           <SegmentedChoice
-            label="Motion"
+            label={translateUi("Motion")}
             options={MOTION_OPTIONS}
             value={motion}
             onChange={setMotion}
@@ -513,14 +513,12 @@ export function DisplaySettings() {
         </SettingRow>
         <GroupedRow className="justify-end">
           <Button variant="ghost" size="sm" onClick={resetDisplay}>
-            <RotateCcw className="size-3" />
-            Reset display settings
-          </Button>
+            <RotateCcw className="size-3" />{translateUi("Reset display settings")}</Button>
         </GroupedRow>
       </GroupedList>
       <GroupedList
-        title="Chat layout"
-        footer="Set a comfortable reading width and writing area for all your chats."
+        title={translateUi("Chat layout")}
+        footer={translateUi("Set a comfortable reading width and writing area for all your chats.")}
       >
         <GroupedRow>
           <ChatWidthControl />

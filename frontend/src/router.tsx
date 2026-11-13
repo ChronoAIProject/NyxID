@@ -202,7 +202,7 @@ const loginRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string; code?: string; enable_email?: true } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
       : {}),
@@ -210,6 +210,9 @@ const loginRoute = createRoute({
     search.code.length > 0 &&
     search.code.length <= 64
       ? { code: search.code }
+      : {}),
+    ...(search.enable_email === true || search.enable_email === "true"
+      ? { enable_email: true as const }
       : {}),
   }),
   component: LoginPage,
@@ -750,6 +753,29 @@ const assistantMachinesRoute = createRoute({
   component: () => <AssistantPage view="machines" />,
 });
 
+const assistantSandboxesRoute = createRoute({
+  path: "/assistant/sandboxes",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="sandboxes" />,
+});
+const assistantSandboxDetailRoute = createRoute({
+  path: "/assistant/sandboxes/$sandboxId",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="sandbox-detail" />,
+});
+const assistantCmaAgentRoute = createRoute({
+  path: "/assistant/cma-agents/$agentId",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: (search: Record<string, unknown>): { response?: string; tab?: "desktop" } => ({
+    ...(typeof search.response === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(search.response) ? { response: search.response } : {}),
+    ...(search.tab === "desktop" ? { tab: "desktop" as const } : {}),
+  }),
+  component: () => <AssistantPage view="cma-agent" />,
+});
+
 const triggersRoute = createRoute({
   path: "/triggers",
   getParentRoute: () => dashboardLayout,
@@ -1282,6 +1308,9 @@ const routeTree = rootRoute.addChildren([
   assistantApprovalsRoute,
   assistantAutomationsRoute,
   assistantMachinesRoute,
+  assistantSandboxesRoute,
+  assistantSandboxDetailRoute,
+  assistantCmaAgentRoute,
   automationsRoute,
   machineSetupRoute,
   machinePairRoute,

@@ -1,3 +1,4 @@
+import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useMfaStepUp } from "./useMfaStepUp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
@@ -33,7 +34,8 @@ import { resolveAuthDeviceErrorMessage } from "../../lib/api/errorMessages";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
 import { spacing } from "../../theme/designTokens";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme as useTheme } from "./useAuthTheme";
+import { AuthTextInput } from "./AuthTextInput";
 import { DeviceCodeScanner } from "./DeviceCodeScanner";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import {
@@ -279,8 +281,9 @@ function ManualCodeModal({
 
           <View style={styles.modalField}>
             <Text style={styles.inputLabel}>Login code</Text>
-            <TextInput
+            <AuthTextInput
               ref={inputRef}
+              invalid={!!errorMessage}
               accessibilityLabel="Login code"
               accessibilityHint="Eight-character code shown on the requesting device"
               value={value}
@@ -308,7 +311,7 @@ function ManualCodeModal({
             ) : null}
           </View>
 
-          <PrimaryButton
+          <AuthSubmitButton loading={isPending}
             label={isPending ? "Checking..." : "Continue"}
             disabled={isPending || !normalizedCode}
             onPress={onSubmit}
@@ -582,7 +585,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     const approved = terminal === "approved";
     return (
       <ScreenContainer>
-        <View style={styles.terminalScreen}>
+        <View
+          style={[
+            styles.terminalScreen,
+            !inWorkspaceSheet && styles.rootContent,
+          ]}
+        >
           {approved ? (
             <MagicKeyIllustration
               size={COMPLETION_MARK_SIZE}
@@ -599,7 +607,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           <Text style={styles.terminalTitle}>
             {approved ? "Login approved" : "Request denied"}
           </Text>
-          <PrimaryButton label="Done" onPress={handleBack} />
+          <AuthSubmitButton label="Done" onPress={handleBack} />
         </View>
       </ScreenContainer>
     );
@@ -613,7 +621,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <ScrollView
-            contentContainerStyle={styles.content}
+            contentContainerStyle={[
+              styles.content,
+              !inWorkspaceSheet && styles.rootContent,
+            ]}
             keyboardShouldPersistTaps="handled"
           >
             {stepUp.prompt}
@@ -629,7 +640,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            !inWorkspaceSheet && styles.rootContent,
+          ]}
           keyboardShouldPersistTaps="handled"
         >
           {!inWorkspaceSheet && (
@@ -661,7 +675,8 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           {!preview ? (
             <View style={styles.inputSection}>
               <Text style={styles.inputLabel}>Login code</Text>
-              <TextInput
+              <AuthTextInput
+                invalid={!!errorMessage}
                 accessibilityLabel="Login code"
                 value={userCode}
                 onChangeText={(value) => {
@@ -691,7 +706,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   {errorMessage}
                 </Text>
               ) : null}
-              <PrimaryButton
+              <AuthSubmitButton loading={isPreviewing}
                 label={isPreviewing ? "Checking request..." : "Continue"}
                 onPress={() => void runPreview(userCode)}
                 disabled={isPending || !normalizeAuthDeviceUserCode(userCode)}
@@ -910,7 +925,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                     />
                   </View>
                   <View style={styles.decisionButton}>
-                    <PrimaryButton
+                    <AuthSubmitButton loading={decisionPending === "approve"}
                       label={
                         decisionPending === "approve"
                           ? "Approving..."
@@ -926,7 +941,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   <Text style={styles.signInText}>
                     Sign in to approve or reject this request.
                   </Text>
-                  <PrimaryButton
+                  <AuthSubmitButton
                     label="Sign in"
                     onPress={() => navigation.navigate("Auth")}
                   />

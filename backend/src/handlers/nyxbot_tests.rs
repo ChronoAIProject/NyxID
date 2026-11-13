@@ -11,6 +11,9 @@ use axum::{Router, response::sse::Event, routing::post};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[path = "nyxbot_provider_refusal_tests.rs"]
+mod provider_refusal_tests;
+
 #[path = "nyxbot_private_posts_tests.rs"]
 mod private_posts_tests;
 #[path = "nyxbot_transport_tests.rs"]
@@ -25,6 +28,9 @@ mod routing_tests;
 
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
+
+#[path = "nyxbot_notification_cleanup_tests.rs"]
+mod notification_cleanup_tests;
 
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
@@ -308,6 +314,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: None,
         gateway_source: None,
@@ -316,6 +323,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         gateway_native_activation_detail: None,
         gateway_native_activation_operation: None,
         gateway_native_delivery: None,
+        gateway_intake: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -566,11 +574,35 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
             .iter()
             .any(|refusal| refusal["field"] == "model")
     );
+    let bound_epoch = load_channel(&state, OWNER, &row.id)
+        .await
+        .unwrap()
+        .notification_epoch;
+    assert_eq!(bound_epoch, row.notification_epoch);
     // Re-binding the same ID is idempotent; another ID conflicts.
     let again = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1").await;
     assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .notification_epoch,
+        bound_epoch
+    );
     let conflict = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_2").await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let same_channel = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":&row.id},
+    )
+    .await;
+    let retained = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":Uuid::new_v4().to_string()},
+    )
+    .await;
     let deleted = delete_binding(
         State(state.clone()),
         Path("bnd_1".into()),
@@ -579,8 +611,61 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     .await;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
-    assert!(saved.binding_id.is_none());
+    assert_eq!(saved.binding_id.as_deref(), Some("bnd_1"));
+    assert_eq!(saved.status, "active");
+    // Unbinding keeps the link and purges nothing, so the notification epoch is unchanged.
+    assert_eq!(saved.notification_epoch, bound_epoch);
+    assert!(
+        key_service::validate_api_key(&state.db, &agent_key)
+            .await
+            .is_ok()
+    );
+    let route = state
+        .db
+        .collection::<ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&saved.route_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(route.is_active);
+    let observed = state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(observed.get_datetime("gateway_binding_unbound_at").is_ok());
+    let (first, second) = tokio::join!(
+        delete_binding(
+            State(state.clone()),
+            Path("bnd_1".into()),
+            bearer(&agent_key)
+        ),
+        delete_binding(
+            State(state.clone()),
+            Path("bnd_1".into()),
+            bearer(&agent_key)
+        ),
+    );
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
+    assert_eq!(second.status(), StatusCode::NO_CONTENT);
+    let repeated = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        repeated.execution_policy_revision,
+        saved.execution_policy_revision
+    );
+    assert_eq!(repeated.agent_api_key_id, saved.agent_api_key_id);
+    // CMA may reconcile a retained record with the same provider binding.
+    assert_eq!(
+        bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1")
+            .await
+            .status(),
+        StatusCode::OK
+    );
     assert!(!format!("{saved:?}").contains(&agent_key));
+    crate::test_utils::assert_notification_probe(&state.db, &same_channel, true).await;
+    crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;
     server.abort();
 }
 
@@ -1083,6 +1168,8 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
     .unwrap();
     let changed = link(&state, OWNER, &row.id, &specialist).await.unwrap();
     assert_eq!(changed["changed"], true);
+    let linked = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(ChannelAgentResponse::from(&linked).private_chats, "owner");
     let second =
         body_text(respond(&state, &agent_key, &event("Hi", "7", "evt-2"), "evt_2").await).await;
     assert!(second.contains("Here is your answer"), "{second}");
@@ -1315,6 +1402,33 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
             .unwrap()
             .ends_with(&format!("/assistant?c={}", home.id))
     );
+    // The owner answered only the channel question. Setup must not erase the other question.
+    for (seq, role, text, turn) in [
+        (
+            1_i64,
+            "assistant",
+            "Which channel will customers use, and what are your store hours and menu?",
+            "questions",
+        ),
+        (2_i64, "user", "Telegram", "onboarding-source"),
+    ] {
+        state
+            .db
+            .collection::<bson::Document>("assistant_messages")
+            .insert_one(doc! {
+                "_id":Uuid::new_v4().to_string(),"conversation_id":&home.id,"user_id":OWNER,
+                "seq":seq,"turn_id":turn,"role":role,"text":text,"status":"completed",
+                "error_code":null,"created_at":bson::DateTime::now()
+            })
+            .await
+            .unwrap();
+    }
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&home.id}, doc! {"$set":{"message_count":2_i64}})
+        .await
+        .unwrap();
     let (lark, _) = setup_link_tool(
         &state,
         OWNER,
@@ -1322,7 +1436,11 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         "lark",
         None,
         &team,
-        LEGACY_PROVENANCE,
+        crate::services::nyxbot_watch_service::ReportProvenance {
+            source_turn_id: Some("onboarding-source".into()),
+            version: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
+            ..LEGACY_PROVENANCE
+        },
     )
     .await
     .unwrap();
@@ -1403,7 +1521,16 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .unwrap()
         .expect("the new bot is linked");
     assert_eq!(channel.agent_id.as_deref(), Some(team.id.as_str()));
+    assert_eq!(ChannelAgentResponse::from(&channel).private_chats, "owner");
     let event = wait_for_event(&state, &home.id, "now linked to").await;
+    assert!(
+        event.contains("store hours and menu") && event.contains("Telegram"),
+        "{event}"
+    );
+    assert!(
+        event.contains("Keep unanswered questions pending"),
+        "{event}"
+    );
     // Untrusted names reach the model only as sanitized identifiers.
     assert!(
         event.contains("Supportdesk") && event.contains("owner-verification"),
@@ -2798,6 +2925,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
@@ -3327,6 +3455,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            notification_epoch: 0,
             execution_policy_revision: 0,
             org_specialist: None,
             gateway_source: None,
@@ -3335,6 +3464,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             gateway_native_activation_detail: None,
             gateway_native_activation_operation: None,
             gateway_native_delivery: None,
+            gateway_intake: None,
             gateway_bot_mentions: Default::default(),
             gateway_threads: Default::default(),
             follow_capacity_revision: 0,
@@ -3876,6 +4006,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
@@ -7167,3 +7298,223 @@ async fn relay_gateway_recovery_flag_off_preserves_live_stream_without_discovery
 
 #[path = "nyxbot_execution_permission_tests.rs"]
 mod execution_permission_tests;
+
+#[test]
+fn intake_diagnostics_do_not_claim_a_delivery_failure_in_direct_responses() {
+    use crate::services::channel_bot_health::discord;
+    for code in [
+        discord::NATIVE_UNCONFIRMED,
+        discord::RELAY_STOPPED,
+        discord::RELAY_BLOCKED,
+        discord::RELAY_UNCONFIRMED,
+    ] {
+        let text = status::failure_reason(code, "gateway");
+        assert_ne!(text, "it could not be delivered");
+        assert!(!text.contains("refused"));
+    }
+    assert!(
+        status::failure_reason(discord::NATIVE_UNCONFIRMED, "gateway")
+            .contains("no authenticated native event")
+    );
+}
+
+#[tokio::test]
+async fn onboarding_2318_resume_context_is_source_bound_and_legacy_reset_safe() {
+    use crate::services::nyxbot_watch_service::{ReportProvenance, onboarding_context};
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("onboarding2318_context")
+            .await;
+    let provenance = ReportProvenance::from_channel_setup_chat(&f.chat);
+    assert_eq!(provenance.source_turn_id, f.chat.turn_id);
+    let mut stopped = f.chat.clone();
+    stopped.turn_stopped = true;
+    assert!(
+        ReportProvenance::from_channel_setup_chat(&stopped)
+            .source_turn_id
+            .is_none()
+    );
+    let watch: NyxbotWatch = bson::from_document(doc! {
+        "_id":"watch","user_id":&f.owner,"kind":"channel_bot","conversation_id":&f.row.id,
+        "status":"pending","created_at":bson::DateTime::now(),"expires_at":bson::DateTime::now()
+    })
+    .unwrap();
+    assert!(watch.source_turn_id.is_none());
+    assert!(watch_snapshot(&watch).contains_key("source_turn_id"));
+    let mut machine_watch = watch.clone();
+    machine_watch.kind = "machine_setup".into();
+    assert!(!watch_snapshot(&machine_watch).contains_key("source_turn_id"));
+    assert!(!watch_snapshot(&machine_watch).contains_key("source_connect_link_id"));
+    assert!(
+        onboarding_context(&f.state.db, &watch)
+            .await
+            .unwrap()
+            .contains("context is unavailable")
+    );
+    let mut watch = watch;
+    watch.source_turn_id = Some("source-turn".into());
+    watch.source_connect_link_id = Some("exact-link".into());
+    watch.connect_link_id = watch.source_connect_link_id.clone();
+    let messages = f
+        .state
+        .db
+        .collection::<bson::Document>("assistant_messages");
+    for (seq, turn, role, text) in [
+        (10_i64, "prior", "assistant", "What is your menu?"),
+        (11, "source-turn", "user", "Telegram"),
+        (12, "later", "user", "Later unrelated private data"),
+    ] {
+        messages.insert_one(doc! {"_id":Uuid::new_v4().to_string(),"user_id":&f.owner,"conversation_id":&f.row.id,"turn_id":turn,"seq":seq,"role":role,"text":text}).await.unwrap();
+    }
+    let context = onboarding_context(&f.state.db, &watch).await.unwrap();
+    assert!(context.contains("What is your menu?") && context.contains("Telegram"));
+    assert!(!context.contains("Later unrelated"));
+    let noisy = "\"\\\n".repeat(2_000);
+    messages
+        .update_one(
+            doc! {"conversation_id":&f.row.id,"turn_id":"source-turn"},
+            doc! {"$set":{"text":noisy}},
+        )
+        .await
+        .unwrap();
+    let bounded = onboarding_context(&f.state.db, &watch).await.unwrap();
+    assert!(bounded.len() < 3600);
+    let encoded = bounded.split_once("approval): ").unwrap().1;
+    assert!(
+        serde_json::from_str::<Vec<Value>>(encoded).is_ok(),
+        "context must remain complete JSON"
+    );
+
+    let mut replaced = watch.clone();
+    replaced.connect_link_id = Some("replacement-from-old-replica".into());
+    assert!(
+        onboarding_context(&f.state.db, &replaced)
+            .await
+            .unwrap()
+            .contains("context is unavailable")
+    );
+    let mut foreign = watch.clone();
+    foreign.user_id = Uuid::new_v4().to_string();
+    assert!(
+        !onboarding_context(&f.state.db, &foreign)
+            .await
+            .unwrap()
+            .contains("What is your menu?")
+    );
+    let mut wrong = watch.clone();
+    wrong.source_turn_id = Some("wrong".into());
+    assert!(
+        onboarding_context(&f.state.db, &wrong)
+            .await
+            .unwrap()
+            .contains("context is unavailable")
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"active_turn":null}})
+        .await
+        .unwrap();
+    engine::reset_context(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert!(
+        !onboarding_context(&f.state.db, &watch)
+            .await
+            .unwrap()
+            .contains("What is your menu?")
+    );
+    messages
+        .delete_many(doc! {"conversation_id":&f.row.id})
+        .await
+        .unwrap();
+    assert!(
+        onboarding_context(&f.state.db, &watch)
+            .await
+            .unwrap()
+            .contains("context is unavailable")
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn onboarding_2318_human_patch_reports_the_final_linked_agent() {
+    let (state, _, server) = setup("onboarding2318_patch").await;
+    let (channel, _) = channel(&state, "gateway").await;
+    let (specialist, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "merchant".into(),
+            description: "Private merchant instructions".into(),
+            display_name: None,
+            persona: Some("Private persona".into()),
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Json(result) = link_channel(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Path(channel.id.clone()),
+        Json(LinkRequest {
+            agent_id: Some(specialist.id.clone()),
+            private_chats: Some("everyone".into()),
+            private_chat_posts: None,
+            apply_to_existing: false,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["private_chats"], "everyone");
+    assert_eq!(
+        result["audience_readiness"]["configuration"]["instructions_present"],
+        true
+    );
+    assert_eq!(
+        result["audience_readiness"]["configuration"]["persona_present"],
+        true
+    );
+    assert!(
+        !result.to_string().contains("Private merchant")
+            && !result.to_string().contains("Private persona")
+    );
+    assert_eq!(
+        load_channel(&state, OWNER, &channel.id)
+            .await
+            .unwrap()
+            .agent_id,
+        Some(specialist.id)
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[test]
+fn provider_conversation_delete_keeps_its_status_vocabulary() {
+    // A binding that changed after the handler's own check answers like that
+    // check (bare 404), never with a new 409.
+    assert_eq!(
+        conversation_delete_response(Ok(())).status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Conflict("Channel binding changed".into())))
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Internal("unavailable".into()))).status(),
+        AppError::Internal("unavailable".into())
+            .into_response()
+            .status()
+    );
+}

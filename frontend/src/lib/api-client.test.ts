@@ -380,3 +380,42 @@ describe("api convenience methods", () => {
     expect(config.method).toBe("DELETE");
   });
 });
+
+describe("safe upstream error boundary (#2275)", () => {
+  it.each([[503, "<html><center>nginx</center></html>"], [502, "private upstream"], [504, ""], [503, '{"error":']])(
+    "sanitizes HTTP %s and retains diagnostic headers", async (status, body) => {
+      mockFetch.mockResolvedValueOnce(new Response(body as string, { status: status as number, headers: {
+        "x-request-id": "request-2275", "X-NyxID-Trace-Id": "trace-2275",
+      } }));
+      await expect(apiClient("/assistant/nyxagent/agents")).rejects.toMatchObject({
+        status, message: "NyxID is temporarily unavailable. Try again in a moment.", requestId: "request-2275", traceId: "trace-2275",
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  it.each([null, [], "<html>nginx</html>", { message: "private proxy body" }, { error: { message: "upstream" } }])(
+    "rejects malformed JSON error envelopes", async (body) => {
+      mockFetch.mockResolvedValueOnce(jsonResponse(body, 503));
+      await expect(apiClient("/broken")).rejects.toThrow("NyxID is temporarily unavailable. Try again in a moment.");
+    });
+  it("preserves real API errors, legacy symbols and diagnostics", async () => {
+    const body = { error: "bad_request", error_code: 1000, message: "Choose a valid name.", details: { field: "name" } };
+    mockFetch.mockResolvedValueOnce(jsonResponse(body, 400));
+    await expect(apiClient("/edit", { method: "POST" })).rejects.toMatchObject({ status: 400, message: body.message, errorResponse: body });
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "not_found" }, 404));
+    await expect(apiClient("/gone")).rejects.toThrow("not_found");
+  });
+  it("maps network errors without replaying mutations and preserves cancellation", async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed: private address"));
+    const request = api.post("/write", {});
+    await expect(request).rejects.toBeInstanceOf(TypeError);
+    await expect(request).rejects.toMatchObject({ status: 0, message: "Couldn't reach NyxID. Check your connection and try again." });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const abort = new DOMException("Cancelled", "AbortError");
+    mockFetch.mockRejectedValueOnce(abort);
+    await expect(api.get("/cancelled")).rejects.toBe(abort);
+  });
+  it("never displays a successful response's malformed JSON parser snippet", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("<html>private proxy page</html>", { status: 200 }));
+    await expect(api.get("/broken")).rejects.toMatchObject({ status: 200, message: "NyxID couldn't complete this request. Please try again." });
+  });
+});

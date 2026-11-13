@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Area, AreaChart } from "recharts";
 import { useApiKeysUsage } from "@/hooks/use-api-keys";
@@ -36,11 +38,10 @@ function MiniLineChart({
     readonly error_count: number;
   }[];
 }) {
+  useUiTranslation();
   if (buckets.length === 0) {
     return (
-      <p className="text-13 text-muted-foreground">
-        No recent activity.
-      </p>
+      <p className="text-13 text-muted-foreground">{translateUi("No recent activity.")}</p>
     );
   }
 
@@ -76,6 +77,7 @@ export function ApiKeyUsageDashboard({
 }: {
   readonly viewMode?: "grid" | "table";
 } = {}) {
+  useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useApiKeysUsage(7);
 
@@ -84,7 +86,7 @@ export function ApiKeyUsageDashboard({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="type-card-title text-foreground">Agent Activity</h3>
+          <h3 className="type-card-title text-foreground">{translateUi("Agent Activity")}</h3>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }, (_, index) => (
@@ -100,9 +102,9 @@ export function ApiKeyUsageDashboard({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="type-card-title text-foreground">Agent Activity</h3>
+          <h3 className="type-card-title text-foreground">{translateUi("Agent Activity")}</h3>
         </div>
-        <ErrorBanner message="Failed to load agent activity." onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load agent activity.")} onRetry={refetch} />
       </div>
     );
   }
@@ -115,7 +117,7 @@ export function ApiKeyUsageDashboard({
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-4 w-4 text-muted-foreground" />
-        <h3 className="type-card-title text-foreground">Agent Activity</h3>
+        <h3 className="type-card-title text-foreground">{translateUi("Agent Activity")}</h3>
       </div>
 
       {viewMode === "table" ? (
@@ -123,11 +125,11 @@ export function ApiKeyUsageDashboard({
           <Table>
             <TableHeader>
               <TableRow className="border-border/50 hover:bg-transparent">
-                <TableHead className="w-[25%]">Agent</TableHead>
-                <TableHead className="w-[15%]">Platform</TableHead>
-                <TableHead className="w-[15%]">Requests</TableHead>
-                <TableHead className="w-[30%]">Trend</TableHead>
-                <TableHead className="w-[15%]">Last Used</TableHead>
+                <TableHead className="w-[25%]">{translateUi("Agent")}</TableHead>
+                <TableHead className="w-[15%]">{translateUi("Platform")}</TableHead>
+                <TableHead className="w-[15%]">{translateUi("Requests")}</TableHead>
+                <TableHead className="w-[30%]">{translateUi("Trend")}</TableHead>
+                <TableHead className="w-[15%]">{translateUi("Last Used")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -144,7 +146,7 @@ export function ApiKeyUsageDashboard({
                   </TableCell>
                   <TableCell>
                     <Badge variant="secondary">
-                      {usage.platform ?? "agent"}
+                      {usage.platform ?? translateUi("agent")}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-foreground font-normal">
@@ -156,7 +158,7 @@ export function ApiKeyUsageDashboard({
                   <TableCell className="text-muted-foreground">
                     {usage.last_used_at
                       ? formatRelativeTime(usage.last_used_at)
-                      : "never"}
+                      : translateUi("never")}
                   </TableCell>
                 </TableRow>
               ))}
@@ -178,7 +180,7 @@ export function ApiKeyUsageDashboard({
                       {usage.api_key_name}
                     </p>
                     <Badge variant={usage.platform ? "secondary" : "secondary"}>
-                      {usage.platform ?? "agent"}
+                      {usage.platform ?? translateUi("agent")}
                     </Badge>
                   </div>
 
@@ -186,16 +188,15 @@ export function ApiKeyUsageDashboard({
                     <span className="break-all type-metric text-foreground">
                       {usage.request_count}
                     </span>
-                    <span className="text-13 text-muted-foreground">requests</span>
+                    <span className="text-13 text-muted-foreground">{translateUi("requests")}</span>
                   </div>
 
                   <MiniLineChart buckets={usage.daily_buckets} />
 
-                  <p className="text-13 text-muted-foreground">
-                    Last used{" "}
+                  <p className="text-13 text-muted-foreground">{translateUi("Last used")}{" "}
                     {usage.last_used_at
                       ? formatRelativeTime(usage.last_used_at)
-                      : "never"}
+                      : translateUi("never")}
                   </p>
                 </CardContent>
               </Card>

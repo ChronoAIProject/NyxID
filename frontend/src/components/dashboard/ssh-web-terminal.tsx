@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { computedTextSize, computedTextLineHeight } from "@/lib/typography";
 import { Terminal } from "@xterm/xterm";
@@ -60,6 +62,7 @@ export function SshWebTerminal({
   nodeWsUrl,
   onDisconnect,
 }: SshWebTerminalProps) {
+  useUiTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -396,9 +399,7 @@ export function SshWebTerminal({
             type="button"
             onClick={connect}
             className="ml-auto rounded px-2 py-0.5 type-row-title text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
-          >
-            Reconnect
-          </button>
+          >{translateUi("Reconnect")}</button>
         )}
       </div>
 

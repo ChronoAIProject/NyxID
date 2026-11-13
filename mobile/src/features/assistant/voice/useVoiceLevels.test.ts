@@ -10,6 +10,7 @@ type Levels = {
   input: { value: Timed | number };
   output: { value: Timed | number };
   speaking: boolean;
+  subscribeLevel: (listener: (level: number) => void) => () => void;
 };
 
 function fakeMedia() {
@@ -101,4 +102,19 @@ test("a new media engine resets the meters and drops the old subscription", () =
   f.setMedia(null);
   assert.equal(second.listeners.size, 0);
   f.harness.unmount();
+});
+
+test("the dictation waveform subscription receives live mic and playback levels and releases its listener", () => {
+  const media = fakeMedia();
+  const f = setup(media);
+  const samples: number[] = [];
+  const unsubscribe = f.value().subscribeLevel((level) => samples.push(level));
+  media.emit({ type: "level", input: 0.7, output: 0.2 });
+  media.emit({ type: "level", input: 0.1, output: 0.8 });
+  assert.deepEqual(samples, [0.7, 0.8]);
+  unsubscribe();
+  media.emit({ type: "level", input: 1, output: 1 });
+  assert.deepEqual(samples, [0.7, 0.8]);
+  f.harness.unmount();
+  assert.equal(media.listeners.size, 0);
 });

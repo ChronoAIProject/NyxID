@@ -2242,7 +2242,7 @@ async fn previously_acknowledged_quiet_policy_is_revoked_by_unconfirmed_replacem
 }
 
 #[tokio::test]
-async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports_write_failure() {
+async fn binding_quiet_proof_survives_unbind_but_resets_on_replacement_and_reports_write_failure() {
     let (state, _, server) = setup("external_binding_quiet_proof").await;
     let (mut row, key) = channel(&state, "gateway").await;
     row.binding_id = Some("quiet-binding".into());
@@ -2272,7 +2272,7 @@ async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports
     state
         .db
         .run_command(doc! {"collMod": CHANNELS, "validationLevel": "strict",
-        "validator": {"binding_id": "quiet-binding"}})
+        "validator": {"gateway_binding_unbound_at": {"$exists": false}}})
         .await
         .unwrap();
     assert_eq!(
@@ -2308,12 +2308,29 @@ async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports
         .status(),
         StatusCode::NO_CONTENT
     );
+    // Provider DELETE is not proof of terminal deletion. The same live
+    // binding retains its confirmed quiet policy across unbind/rebind.
+    let unbound = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(unbound.binding_id.as_deref(), Some("quiet-binding"));
+    assert!(unbound.gateway_no_progress);
+    assert_eq!(put().await.status(), StatusCode::OK);
     assert!(
-        !load_channel(&state, OWNER, &row.id)
+        load_channel(&state, OWNER, &row.id)
             .await
             .unwrap()
             .gateway_no_progress
     );
+    // A new setup with no binding still must discard proof from the previous
+    // binding. Seed that state independently of nonterminal provider DELETE.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"binding_id": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
     state
         .db
         .run_command(doc! {"collMod": CHANNELS, "validationLevel": "strict",

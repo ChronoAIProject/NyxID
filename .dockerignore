@@ -10,6 +10,7 @@ docs/
 !docs/AI_AGENT_PLAYBOOK.md
 !docs/assistant
 !docs/assistant/CHANNEL_SETUP_GUIDE.md
+!docs/assistant/CMA_WORKER_GUIDE.md
 !docs/examples
 !docs/examples/nyxbot-voice-service.template.json
 # The public docs site (docs/site/**) is the build-time source for the

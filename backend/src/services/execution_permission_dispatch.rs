@@ -250,8 +250,8 @@ impl RequestContext {
                 native.check(&drain.db, None).await?;
             }
             require_enrolled(&drain.db, &self.actor, None).await?;
-            super::security_readiness_service::require(&drain.db, READINESS).await?;
-            super::security_readiness_service::require(
+            super::security_readiness_service::require_serving(&drain.db, READINESS).await?;
+            super::security_readiness_service::require_serving(
                 &drain.db,
                 super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
             )
@@ -392,8 +392,8 @@ impl RequestContext {
         }
         self.snapshot.get_or_try_init(|| async {
             require_enrolled(db, &self.actor, None).await?;
-            super::security_readiness_service::require(db, READINESS).await?;
-            super::security_readiness_service::require(db, super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY).await?;
+            super::security_readiness_service::require_serving(db, READINESS).await?;
+            super::security_readiness_service::require_serving(db, super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY).await?;
             let rows: Vec<ApprovalGrant> = db.collection::<ApprovalGrant>("approval_grants")
                 .find(doc! {"execution.version":{"$exists":true},"execution.v1.subject.actor_user_id": &self.actor, "execution.v1.binding.connection_id":connection,
                     "execution.v1.subject.principal": bson::to_bson(&self.principal).map_err(encoding)?})
@@ -1050,6 +1050,15 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
+            super::assistant_activity_decision::bind(
+                db,
+                chat,
+                "approval",
+                &request.id,
+                false,
+                None,
+            )
+            .await?;
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
@@ -1077,7 +1086,29 @@ pub(crate) fn prepare<'a>(
         )
         .await?
         {
+            if let Some(chat) = chat {
+                super::assistant_activity_decision::bind(
+                    db,
+                    chat,
+                    "approval",
+                    &request.id,
+                    false,
+                    None,
+                )
+                .await?;
+            }
             if proposals::v2::blocking::wait(state, context, &request).await? {
+                if let Some(chat) = chat {
+                    super::assistant_activity_decision::bind(
+                        db,
+                        chat,
+                        "approval",
+                        &request.id,
+                        true,
+                        None,
+                    )
+                    .await?;
+                }
                 return prepare(state, Some(context), chat, key, effect).await;
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));
@@ -1101,8 +1132,8 @@ impl Permit {
                 native.check(&self.db, None).await?;
             }
             require_enrolled(&self.db, &self.subject.actor_user_id, None).await?;
-            super::security_readiness_service::require(&self.db, READINESS).await?;
-            super::security_readiness_service::require(
+            super::security_readiness_service::require_serving(&self.db, READINESS).await?;
+            super::security_readiness_service::require_serving(
                 &self.db,
                 super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
             )

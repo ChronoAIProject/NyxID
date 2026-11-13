@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type CSSProperties } from "react";
 import {
   Tooltip,
@@ -38,6 +39,7 @@ export function StackedMeter({
   stack: Stack;
   label: string;
 }) {
+  const { t } = useUiTranslation();
   const [focused, setFocused] = useState(false);
   const segments = stack.entries.filter((entry) => entry.share > 0);
   return (
@@ -48,7 +50,7 @@ export function StackedMeter({
             className="stack-track"
             role="meter"
             tabIndex={0}
-            aria-label={`${label} used`}
+            aria-label={t("{{label}} used", { label: label })}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={stack.overall}

@@ -254,3 +254,10 @@ describe("parseBackendSSEStream", () => {
     ]);
   });
 });
+
+it("never exposes an HTML error body from the SSE response boundary", async () => {
+  const stream = parseBackendSSEStream(new Response("<html>nginx</html>", {
+    status: 503, headers: { "X-NyxID-Trace-Id": "trace-2275" },
+  }));
+  await expect(stream.next()).rejects.toMatchObject({ status: 503, traceId: "trace-2275", message: "NyxID is temporarily unavailable. Try again in a moment." });
+});

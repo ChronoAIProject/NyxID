@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import {
   createLucideIcon,
   type IconNode,
@@ -87,6 +88,7 @@ export function PoolStrategyIcon({
   strategy = "priority",
   ...props
 }: LucideProps & { readonly strategy?: PoolStrategy }) {
+  useUiTranslation();
   const Icon = strategyIcons[strategy];
   return <Icon {...props} aria-hidden="true" focusable="false" />;
 }

@@ -1,3 +1,4 @@
+mod contract_tests;
 pub(crate) mod images_tests;
 use super::adapters::Native;
 use super::*;
@@ -791,13 +792,17 @@ async fn expired_attempt_diagnosed_once_without_releasing_and_known_intent_wins(
 
 #[tokio::test]
 async fn paid_provider_evidence_uses_exact_funding_tax_and_one_durable_settlement() {
-    paid_provider_evidence(false).await;
+    paid_provider_evidence(false, false).await;
 }
 #[tokio::test]
 async fn paid_image_evidence_uses_exact_funding_tax_ledger_lago_and_recovery() {
-    paid_provider_evidence(true).await;
+    paid_provider_evidence(true, false).await;
 }
-async fn paid_provider_evidence(images: bool) {
+#[tokio::test]
+async fn paid_family_contract_uses_existing_exact_funding_ledger_lago_and_recovery() {
+    paid_provider_evidence(false, true).await;
+}
+async fn paid_provider_evidence(images: bool, family: bool) {
     use crate::models::{
         billing_rate_cache::BillingRateCache,
         billing_target::BillingTargetKind,
@@ -810,6 +815,15 @@ async fn paid_provider_evidence(images: bool) {
         request = images_tests::image_plan(&mut plan, false);
         crate::services::security_readiness_service::ready_test_replica(&state.db).await;
     }
+    if family {
+        contract_tests::upgrade(&mut plan, "gpt-6-astra");
+        request.body["model"] = json!(plan.model.public_id);
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    }
+    let mut response: Value = serde_json::from_str(Native::Responses.fixture()).unwrap();
+    if family {
+        response["usage"]["input_tokens_details"]["cache_write_tokens"] = json!(0);
+    }
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/subscriptions/subscription/entitlements"))
@@ -820,10 +834,7 @@ async fn paid_provider_evidence(images: bool) {
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(Native::Responses.fixture(), "application/json"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .expect(1)
         .mount(&server)
         .await;

@@ -1,12 +1,16 @@
 import { requestJson } from "./http";
 import {
   onboardingSchema,
+  suggestionSetupSchema,
   type OnboardingAnswers,
 } from "../../features/onboarding/onboardingContracts";
 
 const ROOT = "/assistant/nyxagent/onboarding";
 
 export const onboardingApi = {
+  async suggestionSetup(id: string) {
+    return suggestionSetupSchema.parse(await requestJson(`${ROOT}/suggestions/${encodeURIComponent(id)}`));
+  },
   async get(signal?: AbortSignal) {
     return onboardingSchema.parse(await requestJson(ROOT, { signal }));
   },

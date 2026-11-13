@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, LoaderCircle } from "lucide-react";
 import { copyMessage, type MessageCopyFormat } from "@/lib/assistant/message-clipboard";
@@ -9,6 +11,7 @@ export function MessageCopyAction({ text, format = "plain", mentions }: {
   readonly format?: MessageCopyFormat;
   readonly mentions?: readonly InlineMention[];
 }) {
+  useUiTranslation();
   if (!text.trim()) return null;
   // A body/format change owns a fresh attempt, even A → B → A. Old promises
   // cannot update the replacement control or resurrect an earlier success.
@@ -16,6 +19,7 @@ export function MessageCopyAction({ text, format = "plain", mentions }: {
 }
 
 function CopyButton({ text, format, mentions }: { readonly text: string; readonly format: MessageCopyFormat; readonly mentions?: readonly InlineMention[] }) {
+  useUiTranslation();
   const [state, setState] = useState<"idle" | "copying" | "copied" | "failed">("idle");
   const attempt = useRef(0);
   useEffect(() => {
@@ -41,10 +45,10 @@ function CopyButton({ text, format, mentions }: { readonly text: string; readonl
           })();
         }}>
         <Icon aria-hidden="true" className="size-3.5" />
-        {state === "copied" ? <span>Copied</span> : null}
+        {state === "copied" ? <span>{translateUi("Copied")}</span> : null}
       </button>
       {state === "failed" || state === "copied" ? <span role="status" aria-live="polite" className={state === "failed" ? "text-destructive" : "sr-only"}>
-        {state === "failed" ? "Copy failed. Try Copy message again." : state === "copied" ? "Message copied." : ""}
+        {state === "failed" ? translateUi("Copy failed. Try Copy message again.") : state === "copied" ? translateUi("Message copied.") : ""}
       </span> : null}
     </span>
   );

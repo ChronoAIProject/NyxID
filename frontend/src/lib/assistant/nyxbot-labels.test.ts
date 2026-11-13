@@ -29,6 +29,11 @@ describe("eventNotices", () => {
 
 /** Texts as the backend writes them (handlers/assistant_team.rs, handlers/nyxbot.rs). */
 describe("describeEventNotice", () => {
+  it("separates cancelled work from a tracker deadline and completed work", () => {
+    expect(describeEventNotice("Asynchronous service operation finished: operation_cancelled. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "neutral", summary: "Background task cancelled" });
+    expect(describeEventNotice("Asynchronous service operation finished: timeout. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "warning", summary: "Background tracking timed out" });
+    expect(describeEventNotice("Asynchronous service operation finished: completed. Its result is quoted in this turn's context.")).toMatchObject({ kind: "task", tone: "success", summary: "Background task finished" });
+  });
   it("summarises a specialist's reply and keeps the excerpt as detail", () => {
     expect(
       describeEventNotice(
@@ -257,4 +262,13 @@ it("keeps group response display names independent of the viewer's inventory", (
   expect(withDisplayName(ref, []).display_name).toBe("Office Agent");
   expect(withDisplayName(ref, [{ id: "agent", display_name: "Stale" }]).display_name).toBe("Office Agent");
   expect(withDisplayName({ ...ref, display_name: null }, [{ id: "agent", display_name: "Stale" }]).display_name).toBeNull();
+});
+
+it("renders a retained-operation batch as one notice after history reload", () => {
+  const text = "NyxID events (authored by NyxID):\n- Retained operation updates for 6 distinct permission requests. Results appear in the reply.";
+  const restored = JSON.parse(JSON.stringify({ role: "event", text })) as { text: string };
+  const notices = eventNotices(restored.text).map(describeEventNotice);
+  expect(notices).toHaveLength(1);
+  expect(notices[0]?.summary).toBe("Retained operation updates for 6 distinct permission requests");
+  expect(notices[0]?.detail).not.toContain("Do not reconstruct");
 });

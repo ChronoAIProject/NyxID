@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useApiKeys } from "@/hooks/use-api-keys";
@@ -49,6 +51,7 @@ interface AgentKeyPickerProps {
  *   never the raw secret, so it is safe to interpolate into rendered HTML.
  */
 export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
+  useUiTranslation();
   const { data: apiKeys, isLoading } = useApiKeys();
   const activeKeys = useMemo(
     () => (apiKeys ?? []).filter((k) => k.is_active !== false),
@@ -102,17 +105,14 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
 
   if (isLoading) {
     return (
-      <p className="text-14 text-muted-foreground">Loading keys…</p>
+      <p className="text-14 text-muted-foreground">{translateUi("Loading keys…")}</p>
     );
   }
 
   if (!activeKeys.length) {
     return (
-      <p className="text-14 text-muted-foreground">
-        No Agent Keys yet.{" "}
-        <Link to="/keys" search={{ tab: "nyxid" }} className="underline">
-          Create your first Agent Key →
-        </Link>
+      <p className="text-14 text-muted-foreground">{translateUi("No Agent Keys yet.")}{" "}
+        <Link to="/keys" search={{ tab: "nyxid" }} className="underline">{translateUi("Create your first Agent Key →")}</Link>
       </p>
     );
   }
@@ -120,7 +120,7 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
   return (
     <Select value={selectedId ?? undefined} onValueChange={setUserOverride}>
       <SelectTrigger className="w-full max-w-sm">
-        <SelectValue placeholder="Select an Agent Key" />
+        <SelectValue placeholder={translateUi("Select an Agent Key")} />
       </SelectTrigger>
       <SelectContent>
         {activeKeys.map((k) => (

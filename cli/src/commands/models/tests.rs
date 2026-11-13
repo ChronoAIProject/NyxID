@@ -304,11 +304,15 @@ fn tariff_create_and_retire_keep_exact_prices_and_model_revision() {
             .mount(&server)
             .await;
         run_admin(AdminModelCommands::Prices {
-            command: PriceCommands::Create(SetArgs {
-                model: ID.into(),
-                revision: 8,
-                file: file.path().into(),
-                auth: mock_auth(server.uri()),
+            command: PriceCommands::Create(contracts::PriceCreateArgs {
+                contract: None,
+                attest: None,
+                args: SetArgs {
+                    model: ID.into(),
+                    revision: 8,
+                    file: file.path().into(),
+                    auth: mock_auth(server.uri()),
+                },
             }),
         })
         .await
@@ -388,6 +392,28 @@ fn parsed_fields(command: &Commands) -> (&'static str, Value, &AuthArgs) {
         Commands::Admin {
             command: crate::cli::AdminCommands::Models { command },
         } => match command {
+            AdminModelCommands::Contracts {
+                command: contracts::ContractCommands::List { auth },
+            } => ("contracts list", json!({}), auth),
+            AdminModelCommands::Credentials { command } => match command {
+                credentials::CredentialCommands::List { auth } => {
+                    ("credentials list", json!({}), auth)
+                }
+                credentials::CredentialCommands::Add {
+                    kind, name, auth, ..
+                } => ("credentials add", json!({"kind":kind,"name":name}), auth),
+                credentials::CredentialCommands::Rotate { id, auth, .. } => {
+                    ("credentials rotate", json!({"id":id}), auth)
+                }
+                credentials::CredentialCommands::Disable { id, auth } => {
+                    ("credentials disable", json!({"id":id}), auth)
+                }
+            },
+            AdminModelCommands::Offering { command } => match command {
+                credentials::OfferingCommands::Create { name, auth } => {
+                    ("offering create", json!({"name":name}), auth)
+                }
+            },
             AdminModelCommands::List(args) => ("admin list", page(args), &args.auth),
             AdminModelCommands::Show(args) => ("admin show", model(args), &args.auth),
             AdminModelCommands::Create { file, auth } => {
@@ -416,7 +442,7 @@ fn parsed_fields(command: &Commands) -> (&'static str, Value, &AuthArgs) {
             },
             AdminModelCommands::Prices { command } => match command {
                 PriceCommands::List(args) => ("prices list", model(args), &args.auth),
-                PriceCommands::Create(args) => ("prices create", set(args), &args.auth),
+                PriceCommands::Create(args) => ("prices create", set(&args.args), &args.args.auth),
                 PriceCommands::Publish(args) => ("prices publish", model(args), &args.auth),
                 PriceCommands::Resync(args) => ("prices resync", model(args), &args.auth),
                 PriceCommands::Verify(args) => ("prices verify", model(args), &args.auth),
@@ -443,6 +469,107 @@ fn every_model_subcommand_parses_its_arguments_and_flattened_auth() {
     let target = json!({"model":ID});
     let set = json!({"model":ID,"revision":7,"file":contract});
     let cases = [
+        (
+            vec!["admin", "models", "contracts", "list"],
+            "contracts list",
+            json!({}),
+        ),
+        (
+            vec!["admin", "models", "credentials", "list"],
+            "credentials list",
+            json!({}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "credentials",
+                "add",
+                "--kind",
+                "gcp-service-account",
+                "--name",
+                "Vertex",
+                "--file",
+                "key.json",
+            ],
+            "credentials add",
+            json!({"kind":"gcp-service-account","name":"Vertex"}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "credentials",
+                "add",
+                "--kind",
+                "openai",
+                "--name",
+                "OpenAI",
+                "--key-env",
+                "MODEL_TEST_KEY",
+            ],
+            "credentials add",
+            json!({"kind":"openai","name":"OpenAI"}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "credentials",
+                "add",
+                "--kind",
+                "anthropic",
+                "--name",
+                "Anthropic",
+                "--key-env",
+                "MODEL_TEST_KEY",
+            ],
+            "credentials add",
+            json!({"kind":"anthropic","name":"Anthropic"}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "credentials",
+                "rotate",
+                ID,
+                "--file",
+                "key.json",
+            ],
+            "credentials rotate",
+            json!({"id":ID}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "credentials",
+                "rotate",
+                ID,
+                "--key-env",
+                "MODEL_TEST_KEY",
+            ],
+            "credentials rotate",
+            json!({"id":ID}),
+        ),
+        (
+            vec!["admin", "models", "credentials", "disable", ID],
+            "credentials disable",
+            json!({"id":ID}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "offering",
+                "create",
+                "--name",
+                "Billing identity",
+            ],
+            "offering create",
+            json!({"name":"Billing identity"}),
+        ),
         (
             vec!["models", "list", "--limit", "100", "--after", "nyxid/last"],
             "list",

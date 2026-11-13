@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import * as SheetPrimitive from "@radix-ui/react-dialog";
@@ -70,7 +71,7 @@ const SheetContent = React.forwardRef<
       {children}
       {showCloseButton && <SheetPrimitive.Close data-icon-button="" className="inline-flex min-h-control min-w-control items-center justify-center absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
         <X className="h-4 w-4" />
-        <span className="sr-only">Close</span>
+        <span className="sr-only">{translateUi("Close")}</span>
       </SheetPrimitive.Close>}
     </SheetPrimitive.Content>
   </SheetPortal>

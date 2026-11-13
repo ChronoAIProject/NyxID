@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 mod lifecycle;
+mod presentation;
 mod resume;
 pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
+pub(crate) use presentation::delivery_notice;
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
 use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
@@ -271,7 +273,7 @@ pub(super) async fn create(
         );
         return Ok(None);
     }
-    super::super::security_readiness_service::require(db, READINESS).await?;
+    super::super::security_readiness_service::require_serving(db, READINESS).await?;
     let task = chat.execution_task.as_ref().ok_or_else(refused)?.clone();
     if task.actor_user_id != chat.user_id || task.audience != audience {
         return Err(refused());
@@ -437,6 +439,8 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
         execution_proposal: Some(version.envelope(p)),
         assistant_group: group_binding,
         id,
@@ -477,7 +481,7 @@ pub(super) async fn create(
         let result:AppResult<ApprovalRequest>=async {
             require_enrolled(db,&chat.user_id,Some(session)).await?;
             let p=proposal(request)?;
-            AssistantVersion::of(request)?.require(db).await?;
+            AssistantVersion::of(request)?.require_serving(db).await?;
             tasks::fence(db,session,&p.task).await?;
             let (row,_,_)=Box::pin(acks::fence(db,chat,session)).await?;
             super::super::assistant_access_policy::require_same_live_turn(chat,&row)?;
@@ -555,9 +559,9 @@ pub(crate) async fn decide(
             "A bounded decision idempotency key is required".into(),
         ));
     }
-    super::super::security_readiness_service::require(&state.db, READINESS).await?;
-    super::super::security_readiness_service::require(&state.db, super::READINESS).await?;
-    super::super::security_readiness_service::require(
+    super::super::security_readiness_service::require_serving(&state.db, READINESS).await?;
+    super::super::security_readiness_service::require_serving(&state.db, super::READINESS).await?;
+    super::super::security_readiness_service::require_serving(
         &state.db,
         super::super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
     )
@@ -577,7 +581,7 @@ pub(crate) async fn decide(
     }
     let p = proposal(&row)?;
     let version = AssistantVersion::of(&row)?;
-    version.require(&state.db).await?;
+    version.require_serving(&state.db).await?;
     if row.status != "pending" {
         return replay(&row, input);
     }
@@ -616,7 +620,7 @@ pub(crate) async fn decide(
             let mut row=collection.find_one(doc!{"_id":*id,"user_id":*actor}).session(&mut *session).await?.ok_or_else(missing)?;
             let p=proposal(&row)?.clone();
             let version=AssistantVersion::of(&row)?;
-            version.require(db).await?;
+            version.require_serving(db).await?;
             if row.status!="pending" {
                 return replay(&row,input);
             }

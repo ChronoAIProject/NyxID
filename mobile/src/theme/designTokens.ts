@@ -144,6 +144,13 @@ export const typeScale = {
     lineHeight: 14,
     fontWeight: "500" as const,
   },
+  // Compact counters leave the bell glyph visible at three digits.
+  countBadge: {
+    fontFamily: fonts.bodySemi,
+    fontSize: 10,
+    lineHeight: 10,
+    fontWeight: "600" as const,
+  },
   // 9px — sidebar group labels (uppercase, tracking 1.5px). Rarely used on mobile.
   microLabel: {
     fontFamily: fonts.body,

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { historySchema } from "./assistantTypes";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -38,6 +40,8 @@ function setup(file: string, name: string, props: Record<string, any>) {
     },
     "lucide-react-native": {
       Check: "Check",
+      CircleAlert: "CircleAlert",
+      Minus: "Minus",
       ShieldCheck: "ShieldCheck",
       X: "X",
       ChevronDown: "ChevronDown",
@@ -265,5 +269,62 @@ test("real failure UI discloses metadata and original request without retrying u
   await x.h.settle();
   assert.equal(x.copies[1], "Original request");
   assert.match(x.text(), /Request copied/);
+  x.h.unmount();
+});
+
+for (const [state, label, count] of [
+  ["waiting", "Waiting for approval", "1 waiting"],
+  ["allowed", "Allowed — waiting for execution", "1 allowed"],
+  ["completed", "Completed after approval", "1 allowed"],
+  ["denied", "Declined", "1 denied"],
+  ["expired", "Approval expired", "1 expired"],
+  ["cancelled", "Cancelled", "1 cancelled"],
+  ["unavailable", "Approval outcome unavailable", "1 outcome unavailable"],
+  ["failed", "Failed after approval", "1 allowed"],
+]) {
+  test(`server decision ${state} renders with truthful counts`, () => {
+    const activity = activitySchema.parse({ id: "gated", label: "nyxid__draft_agent_skill", status: "error", started_at: at, ended_at: at,
+      failure: { kind: "tool_error" }, decision: { kind: "acknowledgement", id: "card", state } });
+    const x = setup("./AssistantActivityDisclosure.tsx", "AssistantActivityDisclosure", { activities: [activity], onToggle: () => {} });
+    assert.ok(x.text().includes(count!));
+    const summary = `Turn details: Completed · 1 action · ${count}${state === "failed" ? " · 1 failed" : ""}`;
+    x.press(summary);
+    assert.ok(x.text().includes(label!));
+    assert.doesNotMatch(x.text(), /The tool reported an error|continue after a failed step/);
+    x.h.unmount();
+  });
+}
+
+test("2345 completed duplicate and future activity render neutrally, with no success or failure claim", () => {
+  for (const [kind, copy] of [
+    ["retry_duplicate_action", "Already done in the previous attempt; skipped this time."],
+    ["future_kind", "Activity details unavailable in this app version."],
+  ]) {
+    const activity = activitySchema.parse({ id: "tool", label: "api-lark-2__bitable_record_create", status: "completed", started_at: at, failure: { kind } });
+    const x = setup("./AssistantActivityDisclosure.tsx", "AssistantActivityDisclosure", { activities: [activity], onToggle: () => {} });
+    x.press("Turn details: Completed · 1 action");
+    assert.ok(x.text().includes(copy!));
+    const row = x.nodes().find((node) => node.props.accessibilityRole === "text");
+    assert.ok(row);
+    assert.doesNotMatch(row.props.accessibilityLabel, /Succeeded|Failed|Running/);
+    assert.doesNotMatch(x.text(), /failed step|1 failed/);
+    x.h.unmount();
+  }
+});
+
+test("2345 the reported active-turn fragment renders among all 13 actions", () => {
+  const wire = JSON.parse(readFileSync(new URL("../../../../frontend/src/lib/assistant/__fixtures__/retry-duplicate-history.json", import.meta.url), "utf8"));
+  const page = historySchema.parse(wire);
+  const x = setup("./AssistantActivityDisclosure.tsx", "AssistantActivityDisclosure", { activities: page.conversation.active_turn!.activities, onToggle: () => {} });
+  x.press("Turn details: Working… · 13 actions");
+  assert.match(x.text(), /Already done in the previous attempt; skipped this time/);
+  assert.equal(x.nodes().filter((node) => node.props.accessibilityRole === "text").length, 13);
+  x.h.unmount();
+});
+
+test("2345 unknown CMA kind stays generic instead of claiming an agent is ready", () => {
+  const x = setup("./AssistantCmaOperation.tsx", "AssistantCmaOperation", { operation: { kind: "future_kind", status: "ready", reason: "completed" } });
+  assert.match(x.text(), /Activity details unavailable in this app version/);
+  assert.doesNotMatch(x.text(), /Agent ready|Result ready/);
   x.h.unmount();
 });

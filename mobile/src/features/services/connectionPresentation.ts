@@ -88,6 +88,21 @@ export function describeConnection(
           tone: "muted",
         };
       }
+      if (isSavedCredential(connection)) {
+        const verification = connection.credential_verification;
+        if (verification?.state === "verified") return {
+          label: "Verified", tone: "success",
+          description: "The provider accepted this credential at the last check. Other operations may require more permissions.",
+        };
+        if (verification?.state === "rejected") return {
+          label: "Rejected by provider", tone: "error",
+          description: verification.reason_code === "provider_forbidden"
+            ? "The provider refused this check. Review the credential's permissions; this does not necessarily mean the key is invalid."
+            : "The provider rejected authentication. Check or replace the credential, then check again.",
+        };
+        return { label: "Saved, not verified", tone: "warning",
+          description: "NyxID saved this credential. Provider authentication has not been verified." };
+      }
       return {
         label: "Credential available",
         description:
@@ -165,4 +180,9 @@ export function reconnectScopeOverride(
         .map((scope) => scope.scope),
     ]),
   ];
+}
+
+export function isSavedCredential(connection: ServiceConnection): boolean {
+  return ["api_key", "bearer"].includes(connection.credential_type)
+    && connection.credential_binding !== "platform" && !connection.node_id && !connection.has_node_binding;
 }

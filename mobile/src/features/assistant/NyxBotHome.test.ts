@@ -68,6 +68,13 @@ function setup() {
     agentsError: false,
     crewsError: false,
   };
+  const onboarding: any = {
+    data: undefined,
+    isError: false,
+    refetch: async () => {
+      calls.push(["retry-intro"]);
+    },
+  };
   const calls: unknown[][] = [];
   const queries = new Map<string, Record<string, any>>();
   const harness = hookHarness<Element>({
@@ -96,7 +103,10 @@ function setup() {
       useQueryClient: () => ({ setQueryData: () => undefined }),
       useMutation: () => ({ mutate: () => undefined }),
       useQuery: (options: Record<string, any>) => {
-        if (options.queryKey.includes("onboarding")) return { data: undefined };
+        if (options.queryKey.includes("onboarding")) {
+          calls.push(["onboarding-query"]);
+          return onboarding;
+        }
         const name = options.queryKey.includes("agents")
           ? "agents"
           : options.queryKey.includes("groups")
@@ -143,7 +153,9 @@ function setup() {
     "../../lib/api/onboardingApi": { onboardingApi: {} },
     "../onboarding/FirstRunIntro": { FirstRunIntro: "FirstRunIntro" },
     "../onboarding/NextStepList": { NextStepList: "NextStepList" },
-    "../onboarding/onboardingContracts": { onboardingKey: ["assistant", "onboarding"] },
+    "../onboarding/onboardingContracts": {
+      onboardingKey: ["assistant", "onboarding"],
+    },
     "../../lib/api/http": {
       getCurrentUserProfileRequest: (signal: AbortSignal) =>
         calls.push(["profile-api", signal]),
@@ -173,6 +185,7 @@ function setup() {
     onOpenCrew: (id: string) => calls.push(["crew", id]),
     onNewAgent: () => calls.push(["new-agent"]),
     onNewCrew: () => calls.push(["new-crew"]),
+    onStartNextStep: (step: unknown) => calls.push(["next-step", step]),
   };
   harness.mount(() => Home(props));
   const elements = (node: Element): Element[] =>
@@ -211,7 +224,7 @@ function setup() {
     assert.ok(found, `Expected ${name}`);
     return found.props;
   };
-  return { state, calls, queries, harness, all, text, button };
+  return { state, calls, queries, harness, all, text, button, onboarding };
 }
 
 test("home renders real requests, completed replies, owner sections and crews with exact navigation", () => {
@@ -364,4 +377,24 @@ test("revocation, removed requests and inactive views fence retained callbacks a
   h.harness.render();
   assert.equal(h.queries.get("agents")!.refetchInterval, 30_000);
   h.harness.unmount();
+});
+
+// TODO(onboarding): disabled on mobile by user decision 2026-11-06; restore the
+// retry/replay/intro coverage together with the NyxBotHome entry points.
+test("onboarding is disabled on mobile: no request, intro, replay, retry or suggestions", () => {
+  const f = setup();
+  f.onboarding.isError = true;
+  f.onboarding.data = {
+    show_intro: true,
+    suggestions_hidden: false,
+    recommendations: [{ id: "step", title: "Step", description: "", prompt: "Do it", icon: "star" }],
+  };
+  f.harness.render();
+  f.harness.flush();
+  assert.equal(f.calls.some((call) => call[0] === "onboarding-query"), false);
+  for (const label of ["Retry intro", "Replay intro", "Hide"])
+    assert.equal(f.all().some((n) => n.props.label === label), false, label);
+  assert.equal(f.all().some((n) => n.type === "FirstRunIntro" || n.type === "NextStepList"), false);
+  assert.equal(f.text().includes("Suggested for you"), false);
+  f.harness.unmount();
 });

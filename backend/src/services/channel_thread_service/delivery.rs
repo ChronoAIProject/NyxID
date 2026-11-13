@@ -58,8 +58,11 @@ pub async fn send_reply(
                 return Err(unavailable());
             }
             delivery.attempting(db, index).await?;
-            let outcome = adapter
-                .send_bound_reply_outcome(
+            let outcome = crate::services::telegram_formatting::scope(
+                db,
+                delivery.formatting_receipt(index),
+                Some(&bot.id),
+                adapter.send_bound_reply_outcome(
                     db,
                     &http,
                     bot,
@@ -68,8 +71,9 @@ pub async fn send_reply(
                     &target.facts.chat_id,
                     &part,
                     Some(target),
-                )
-                .await?;
+                ),
+            )
+            .await?;
             let kinds = outcome
                 .delivered_kinds
                 .clone()

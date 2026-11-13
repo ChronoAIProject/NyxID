@@ -1465,17 +1465,9 @@ pub async fn for_egress(
         return Err(missing());
     }
     super::assistant_resource_service::require_live(db, chat).await?;
-    let key = db
-        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
-        .find_one(doc! {"_id":&chat.api_key_id,"user_id":&chat.user_id,"is_active":true})
-        .await?
-        .ok_or_else(missing)?;
-    if key.expires_at.is_some_and(|at| at <= Utc::now()) {
+    if !eligible_egress_key(db, chat).await? {
         return Err(missing());
     }
-    if db.collection::<bson::Document>("assistant_agent_credentials")
-        .find_one(doc! {"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id})
-        .projection(doc! {"_id":1}).await?.is_none() { return Err(missing()); }
     let row = db
         .collection::<bson::Document>(COLLECTION_NAME)
         .find_one(doc! {"_id":id})
@@ -1493,6 +1485,23 @@ pub async fn for_egress(
         ))),
         _ => Err(missing()),
     }
+}
+
+/// Shared with capability discovery; this never reads attachment bytes.
+pub(crate) async fn eligible_egress_key(db: &Database, chat: &ChatAuthority) -> AppResult<bool> {
+    let key = db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&chat.api_key_id,"user_id":&chat.user_id,"is_active":true})
+        .await?;
+    let Some(key) = key else {
+        return Ok(false);
+    };
+    if key.expires_at.is_some_and(|at| at <= Utc::now()) {
+        return Ok(false);
+    }
+    Ok(db.collection::<bson::Document>("assistant_agent_credentials")
+        .find_one(doc! {"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id})
+        .projection(doc! {"_id":1}).await?.is_some())
 }
 
 /// The caller already holds a reservation for exactly this authorized size.

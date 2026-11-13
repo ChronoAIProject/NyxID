@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   useEffect,
   useLayoutEffect,
@@ -58,6 +60,7 @@ export function FirstRunIntro({
   /** Close the intro and start the on-screen tour. */
   readonly onTour?: () => void;
 }) {
+  useUiTranslation();
   const save = useSaveOnboarding();
   const firstName = useAuthStore((auth) => auth.user?.display_name?.trim().split(/\s+/)[0]);
   // Only a first-timer is greeted; a replay starts at the questions.
@@ -232,19 +235,19 @@ export function FirstRunIntro({
               <Welcome firstName={firstName} onStart={next} onSkip={skip} />
             ) : step === "interests" ? (
               <StepHeading
-                title="Let's set NyxBot up for you"
-                description="Tell us who it's for and what it should help with. We'll tailor your first suggestions and NyxBot will remember. You can skip this."
+                title={translateUi("Let's set NyxBot up for you")}
+                description={translateUi("Tell us who it's for and what it should help with. We'll tailor your first suggestions and NyxBot will remember. You can skip this.")}
               >
-                <Overline>Who is it for?</Overline>
+                <Overline>{translateUi("Who is it for?")}</Overline>
                 <ChoiceGrid
-                  label="Who is it for"
+                  label={translateUi("Who is it for")}
                   choices={state.work_styles}
                   selected={workStyle ? [workStyle] : []}
                   onToggle={chooseWorkStyle}
                 />
-                <Overline>What should it help with?</Overline>
+                <Overline>{translateUi("What should it help with?")}</Overline>
                 <ChoiceGrid
-                  label="Topics"
+                  label={translateUi("Topics")}
                   choices={state.topics}
                   shown={offered}
                   exiting={exiting}
@@ -255,13 +258,13 @@ export function FirstRunIntro({
               </StepHeading>
             ) : step === "chief" ? (
               <StepHeading
-                title="Meet NyxBot, your chief of staff"
-                description="Ask in plain words. NyxBot works across the apps you connect, keeps track of what matters and remembers how you like things done."
+                title={translateUi("Meet NyxBot, your chief of staff")}
+                description={translateUi("Ask in plain words. NyxBot works across the apps you connect, keeps track of what matters and remembers how you like things done.")}
               >
                 <LiveReplay
                   kind="chief-of-staff"
                   topics={topics}
-                  label="Example: the owner asks NyxBot a question about their day and NyxBot answers from their connected apps."
+                  label={translateUi("Example: the owner asks NyxBot a question about their day and NyxBot answers from their connected apps.")}
                 />
                 <Points
                   items={[
@@ -272,12 +275,12 @@ export function FirstRunIntro({
               </StepHeading>
             ) : step === "specialists" ? (
               <StepHeading
-                title="Specialists: experts with one job"
-                description="Think of specialists as people who are great at one thing. Give each a fixed role and scope, so it does that job better than anyone. Work with them directly, or let NyxBot hand them the work."
+                title={translateUi("Specialists: experts with one job")}
+                description={translateUi("Think of specialists as people who are great at one thing. Give each a fixed role and scope, so it does that job better than anyone. Work with them directly, or let NyxBot hand them the work.")}
               >
                 <LiveReplay
                   kind="specialists"
-                  label="Example: the owner asks for urgent issues; NyxBot hands the job to the Research specialist, which reports back, and NyxBot answers."
+                  label={translateUi("Example: the owner asks for urgent issues; NyxBot hands the job to the Research specialist, which reports back, and NyxBot answers.")}
                 />
                 <Points
                   items={[
@@ -288,19 +291,19 @@ export function FirstRunIntro({
               </StepHeading>
             ) : step === "control" ? (
               <StepHeading
-                title="You stay in control"
-                description="NyxBot asks before it does anything sensitive. You choose how often it asks, and you can change it any time in NyxBot settings."
+                title={translateUi("You stay in control")}
+                description={translateUi("NyxBot asks before it does anything sensitive. You choose how often it asks, and you can change it any time in NyxBot settings.")}
               >
                 <LiveReplay
                   kind="control"
-                  label="Example: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
+                  label={translateUi("Example: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion.")}
                 />
                 <AccessModesPreview />
               </StepHeading>
             ) : (
               <StepHeading
-                title="Pick your first step"
-                description="One click and NyxBot takes it from there. These stay on your home page until you're done with them. New here? Take a quick tour of the screen first."
+                title={translateUi("Pick your first step")}
+                description={translateUi("One click and NyxBot takes it from there. These stay on your home page until you're done with them. New here? Take a quick tour of the screen first.")}
               >
                 <NextStepCards steps={nextSteps ?? state.recommendations} onStart={start} />
               </StepHeading>
@@ -309,29 +312,21 @@ export function FirstRunIntro({
           {step === "welcome" ? null : (
           <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-border/50 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:px-6">
             {index < LAST ? (
-              <Button variant="ghost" size="sm" onClick={skip}>
-                Skip intro
-              </Button>
+              <Button variant="ghost" size="sm" onClick={skip}>{translateUi("Skip intro")}</Button>
             ) : null}
             <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
               {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
-                <Button variant="outline" size="sm" onClick={back}>
-                  Back
-                </Button>
+                <Button variant="outline" size="sm" onClick={back}>{translateUi("Back")}</Button>
               ) : null}
               {index < LAST ? (
                 <Button variant="primary" size="sm" onClick={next}>
-                  {step === "interests" ? (topics.length || workStyle ? "Continue" : "Continue without picking") : "Next"}
+                  {step === "interests" ? (topics.length || workStyle ? translateUi("Continue") : translateUi("Continue without picking")) : translateUi("Next")}
                 </Button>
               ) : (
                 <>
-                  <Button variant="outline" size="sm" onClick={skip}>
-                    Explore on my own
-                  </Button>
+                  <Button variant="outline" size="sm" onClick={skip}>{translateUi("Explore on my own")}</Button>
                   {onTour ? (
-                    <Button variant="primary" size="sm" onClick={tour}>
-                      Show me around
-                    </Button>
+                    <Button variant="primary" size="sm" onClick={tour}>{translateUi("Show me around")}</Button>
                   ) : null}
                 </>
               )}
@@ -354,6 +349,7 @@ function Welcome({
   readonly onStart: () => void;
   readonly onSkip: () => void;
 }) {
+  useUiTranslation();
   const points = [
     { icon: Sparkles, text: "A chief of staff that works across your apps" },
     { icon: UsersRound, text: "Specialists with one job each, under your rules" },
@@ -373,11 +369,9 @@ function Welcome({
         style={{ animationDelay: "120ms" }}
       >
         <DialogTitle className="type-compact-page-title text-foreground sm:type-page-title" style={{ letterSpacing: "-0.03em" }}>
-          {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
+          {firstName ? translateUi("Welcome, {{value1}}", { value1: firstName }) : translateUi("Welcome to NyxBot")}
         </DialogTitle>
-        <DialogDescription className="text-14 text-muted-foreground">
-          I'm NyxBot, your personal chief of staff. Give me a minute and I'll show you how we'll work together.
-        </DialogDescription>
+        <DialogDescription className="text-14 text-muted-foreground">{translateUi("I'm NyxBot, your personal chief of staff. Give me a minute and I'll show you how we'll work together.")}</DialogDescription>
       </div>
       <GroupedList className="w-full max-w-sm text-left">
         {points.map(({ icon: Icon, text }, position) => (
@@ -394,12 +388,8 @@ function Welcome({
         className="flex flex-col items-center gap-2 animate-in fade-in-0 duration-500 fill-mode-both motion-reduce:animate-none"
         style={{ animationDelay: "560ms" }}
       >
-        <Button variant="primary" onClick={onStart}>
-          Let's get started
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onSkip}>
-          Skip for now
-        </Button>
+        <Button variant="primary" onClick={onStart}>{translateUi("Let's get started")}</Button>
+        <Button variant="ghost" size="sm" onClick={onSkip}>{translateUi("Skip for now")}</Button>
       </div>
     </div>
   );
@@ -421,14 +411,15 @@ function Progress({
   readonly index: number;
   readonly onSelect: (position: number) => void;
 }) {
+  useUiTranslation();
   return (
-    <nav aria-label="Intro steps" className="-mx-0.75 flex items-center pt-1 md:mx-0 md:px-5.25 md:pt-4">
+    <nav aria-label={translateUi("Intro steps")} className="-mx-0.75 flex items-center pt-1 md:mx-0 md:px-5.25 md:pt-4">
       {STEPS.map((step, position) => (
         <button
           key={step}
           type="button"
           title={STEP_LABELS[step]}
-          aria-label={`Step ${position + 1} of ${STEPS.length}: ${STEP_LABELS[step]}`}
+          aria-label={translateUi("Step {{value1}} of {{value2}}: {{value3}}", { value1: position + 1, value2: STEPS.length, value3: STEP_LABELS[step] })}
           aria-current={position === index ? "step" : undefined}
           onClick={() => onSelect(position)}
           data-icon-button=""
@@ -460,6 +451,7 @@ function StepHeading({
   readonly description: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <>
       <div className="space-y-1 pr-8 md:pr-6">
@@ -474,6 +466,7 @@ function StepHeading({
 }
 
 function Points({ items }: { readonly items: readonly string[] }) {
+  useUiTranslation();
   return (
     <ul className="space-y-1.5">
       {items.map((item) => (
@@ -509,6 +502,7 @@ function ChoiceGrid({
   readonly onToggle: (id: string) => void;
   readonly multi?: boolean;
 }) {
+  useUiTranslation();
   const visible = shown ? choices.filter((choice) => shown.has(choice.id)) : choices;
   const nodes = useRef(new Map<string, HTMLElement>());
   const places = useRef(new Map<string, { x: number; y: number }>());
@@ -573,6 +567,7 @@ function ChoiceGrid({
 
 /** The next-step cards' icon tile, sized for a chip. */
 function ChoiceIcon({ name, active }: { readonly name: string; readonly active: boolean }) {
+  useUiTranslation();
   return (
     <span
       aria-hidden="true"
@@ -587,6 +582,7 @@ function ChoiceIcon({ name, active }: { readonly name: string; readonly active: 
 }
 
 function Overline({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   return (
     <p className="pt-1 type-group-label uppercase tracking-[0.125em] text-text-tertiary">{children}</p>
   );

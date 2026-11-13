@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
@@ -35,6 +37,7 @@ function stripFrontMatter(md: string): { content: string; effectiveDate: string 
 }
 
 export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
+  useUiTranslation();
   useApplyTheme();
   const logoHref = useLogoHref();
   const [content, setContent] = useState<string>("");
@@ -82,7 +85,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           </Link>
           <h1 className="type-compact-page-title sm:type-page-title text-foreground">{title}</h1>
           {effectiveDate && (
-            <p className="text-13 text-text-tertiary">Effective date: {effectiveDate}</p>
+            <p className="text-13 text-text-tertiary">{translateUi("Effective date: ")}{effectiveDate}</p>
           )}
         </div>
 
@@ -91,9 +94,8 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           data-doc-key={docKey}
         >
           {error ? (
-            <p className="text-14 text-destructive">
-              Failed to load the {title.toLowerCase()}: {error}.{" "}
-              <a href={mdPath} className="underline">View source</a>.
+            <p className="text-14 text-destructive">{translateUi("Failed to load the ")}{title.toLowerCase()}: {translateUi(error)}.{" "}
+              <a href={mdPath} className="underline">{translateUi("View source")}</a>.
             </p>
           ) : content ? (
             <ReactMarkdown
@@ -132,7 +134,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
               {content}
             </ReactMarkdown>
           ) : (
-            <p className="text-14 text-muted-foreground">Loading…</p>
+            <p className="text-14 text-muted-foreground">{translateUi("Loading…")}</p>
           )}
         </div>
 
@@ -141,9 +143,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
             to="/"
             className="flex items-center gap-1.5 type-row-title text-foreground underline transition-colors hover:text-muted-foreground"
           >
-            <ArrowLeft className="h-3 w-3" />
-            Back to NyxID
-          </Link>
+            <ArrowLeft className="h-3 w-3" />{translateUi("Back to NyxID")}</Link>
         </div>
       </div>
     </div>

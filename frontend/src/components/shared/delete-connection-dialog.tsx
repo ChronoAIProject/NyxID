@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,6 +50,7 @@ export function DeleteConnectionDialog({
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : onCancel())}>
       <DialogContent className="max-w-md">
@@ -58,11 +60,11 @@ export function DeleteConnectionDialog({
               <AlertTriangle className="h-4 w-4" />
             </span>
             <div className="space-y-1.5">
-              <DialogTitle>Delete {providerName} connection?</DialogTitle>
+              <DialogTitle>{t("Delete ")}{providerName}{t(" connection?")}</DialogTitle>
               <DialogDescription>
                 {revokesGrant
                   ? grantRevocationDescription(providerName)
-                  : `NyxID deletes its stored credential. Access you granted at ${providerName} stays active until you remove it there.`}
+                  : t("NyxID deletes its stored credential. Access you granted at {{providerName}} stays active until you remove it there.", { providerName: providerName })}
               </DialogDescription>
             </div>
           </div>
@@ -70,30 +72,22 @@ export function DeleteConnectionDialog({
 
         <div className="space-y-2 text-14">
           {connectionLabel && (
-            <p className="text-muted-foreground">
-              Connection:{" "}
+            <p className="text-muted-foreground">{t("Connection:")}{" "}
               <span className="font-medium text-foreground">
                 {connectionLabel}
               </span>
             </p>
           )}
-          <p className="text-text-tertiary">
-            The assistant loses access to this service immediately, and this
-            cannot be undone. To stop it temporarily instead, disable it.
-          </p>
+          <p className="text-text-tertiary">{t("The assistant loses access to this service immediately, and this cannot be undone. To stop it temporarily instead, disable it.")}</p>
         </div>
 
         <DialogFooter>
-          <Button variant="outline" disabled={isPending} onClick={onCancel}>
-            Cancel
-          </Button>
+          <Button variant="outline" disabled={isPending} onClick={onCancel}>{t("Cancel")}</Button>
           <Button
             variant="destructive"
             isLoading={isPending}
             onClick={onConfirm}
-          >
-            Delete
-          </Button>
+          >{t("Delete")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

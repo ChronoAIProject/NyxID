@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +62,7 @@ export function AssistantAccountProfileUpdateDialog({
   readonly params: AssistantAccountProfileUpdateParams;
   readonly onComplete: (userId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [verified, setVerified] = useState(false);
@@ -126,24 +129,24 @@ export function AssistantAccountProfileUpdateDialog({
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{resultUserId ? "Profile updated" : "Update account profile"}</DialogTitle>
+          <DialogTitle>{resultUserId ? translateUi("Profile updated") : translateUi("Update account profile")}</DialogTitle>
           <DialogDescription>
             {resultUserId
-              ? "The account projection confirms this exact profile update."
-              : "Review the display changes before they are saved."}
+              ? translateUi("The account projection confirms this exact profile update.")
+              : translateUi("Review the display changes before they are saved.")}
           </DialogDescription>
         </DialogHeader>
         {!resultUserId ? (
           <div className="space-y-2 border-y border-border py-4 text-14">
             {params.displayName !== undefined ? (
               <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">Display name</span>
+                <span className="text-muted-foreground">{translateUi("Display name")}</span>
                 <span className="max-w-[65%] truncate font-medium">{params.displayName}</span>
               </div>
             ) : null}
             {params.avatarUrl !== undefined ? (
               <div className="flex items-center justify-between gap-4">
-                <span className="text-muted-foreground">Avatar URL</span>
+                <span className="text-muted-foreground">{translateUi("Avatar URL")}</span>
                 <Badge variant="secondary" className="max-w-[65%] truncate font-mono">
                   {params.avatarUrl}
                 </Badge>
@@ -151,20 +154,16 @@ export function AssistantAccountProfileUpdateDialog({
             ) : null}
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
-        {verified ? <p className="text-13 text-success">Account profile verified.</p> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{translateUi(error)}</p> : null}
+        {verified ? <p className="text-13 text-success">{translateUi("Account profile verified.")}</p> : null}
         <DialogFooter>
           {!resultUserId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-              <Button type="button" variant="primary" isLoading={submitting} disabled={submitting} onClick={() => void submit()}>
-                Update profile
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
+              <Button type="button" variant="primary" isLoading={submitting} disabled={submitting} onClick={() => void submit()}>{translateUi("Update profile")}</Button>
             </>
           ) : (
-            <Button type="button" variant="primary" onClick={() => { onComplete(resultUserId); close(); }}>
-              Done
-            </Button>
+            <Button type="button" variant="primary" onClick={() => { onComplete(resultUserId); close(); }}>{translateUi("Done")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

@@ -33,8 +33,9 @@ a replay starts at the questions. It then has three parts:
      at one thing. The owner gives each a fixed role and scope, and works with
      them directly or through NyxBot.
 3. **Next steps and the tour.** One-click cards ranked by the answers. Clicking
-   a card sends its prompt to NyxBot as the user's message. NyxBot then does
-   the work with its normal tools, connect links and confirmations. The same
+   a connection card opens live provider choices and hosted setup first (below);
+   other cards send their prompt to NyxBot as the user's message. NyxBot then
+   does the work with its normal tools and confirmations. The same
    cards stay in **Suggested for you** on the NyxBot home until each step is
    done. The section's **Hide** hides them all until the intro is retaken;
    cards have no individual dismiss. On web, **Show me around** starts a
@@ -63,7 +64,7 @@ a replay starts at the questions. It then has three parts:
   hidden-suggestions mark.
 - **`POST /api/v1/assistant/nyxagent/onboarding/suggestions/hide`** hides the
   home's suggestions and returns the refreshed state.
-- **Access:** all three routes are human-only (first-party sessions) and
+- **Access:** all onboarding routes are human-only (first-party sessions) and
   follow the NyxAgent engine flag, like the other `/assistant/nyxagent` routes.
 
 ## When the intro shows
@@ -108,3 +109,42 @@ recommendations are requested.
 Funnel events reuse the consent-gated dialog events
 (`ui.dialog_*` / `ui.mobile_dialog_*`) with `dialog_id: "nyxbot_intro"`; the
 web tour uses `dialog_id: "nyxbot_tour"`.
+
+### Connection suggestions
+
+New clients treat `RecommendationResponse.connect: true` as a provider-choice
+setup before starting the chat. On selection, the human-only
+`GET /assistant/nyxagent/onboarding/suggestions/{id}` reads current catalog and
+personal connection state. It returns `connected`, `choices` (catalog slug,
+name and capability-specific OAuth scopes), and a follow-up `prompt`. This read
+never mints a token, connects an account or changes agent grants.
+
+If the account is not connected and no provider choices are available, web and
+mobile close the chooser and start the chat with the suggestion's original
+prompt. NyxBot can guide the person through setting up their own provider app.
+This also applies when the last provider disappears on a later recheck; it
+never mints a link or substitutes the connected-account follow-up prompt.
+The onboarding list itself adds no per-person provider-availability reads.
+
+Calendar offers Google Calendar and Microsoft 365 only when their live public
+catalog service and hosted OAuth configuration are usable. An unconfigured
+Microsoft Entra app is not offered as a working calendar connection. Inbox,
+documents, GitHub, X, team chat and Stripe suggestions use the same flow. OAuth
+requires usable configured client credentials (platform or this person's own);
+API-key services use the existing secure hosted credential form. A selected
+provider calls the existing `POST /connect-links` and opens hosted setup; no
+provider button merely inserts chat text. Microsoft calendar links explicitly
+request `Calendars.ReadWrite`; inbox links request mail read/write/send scopes.
+
+The chooser refreshes before minting a link and after setup. Only an active
+same-person credential counts as connected; a provisioned `pending_auth` row
+does not. A connected account skips the link and starts NyxBot with the setup's
+follow-up prompt to use that account. Native embeds the existing hosted form
+inside the chooser, including during the first-run intro, and continues after
+verified completion. If setup opens in an external browser, Continue rechecks
+the connection on return. Other suggestions retain the normal conversation
+flow. Older clients/servers keep the original prompt-only behavior.
+
+Web chooser controls, status, errors and accessible labels follow the active
+Studio/NyxBot language (English, Simplified Chinese or Traditional Chinese).
+Provider names and the original suggestion prompt are retained as authored.

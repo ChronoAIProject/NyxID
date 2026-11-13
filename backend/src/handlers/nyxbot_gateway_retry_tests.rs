@@ -144,7 +144,7 @@ async fn retry_2183_rejection_and_connect_fallback_report_real_transport_and_bou
             api["gateway_fallback_reason"]
                 .as_str()
                 .unwrap()
-                .starts_with("Working on NyxID relay.")
+                .starts_with("NyxID relay selected; check channel health")
         );
         assert!(api["gateway_next_retry_at"].is_string());
         assert!(api["gateway_retry_available_at"].is_string());

@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub const TOOL_NAMES: &[&str] = &[
+    "list_notifications",
     "create_schedule",
     "list_schedules",
     "update_schedule",
@@ -167,6 +168,7 @@ pub fn read_only(name: &str) -> bool {
     matches!(
         name,
         "task_status"
+            | "list_notifications"
             | "get_agent_sharing"
             | "list_schedules"
             | "wait_for_subagents"
@@ -260,6 +262,15 @@ pub fn schema(name: &str) -> Value {
             )
         }
         "list_schedules" => (json!({}), vec![]),
+        "list_notifications" => (
+            json!({
+                "since": {"type":"string","format":"date-time","maxLength":64,"description":"Only activity updated at or after this RFC3339 timestamp."},
+                "kinds": {"type":"array","maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["automation_result","automation_problem","needs_decision","agent_update","chat_update","group_mention"]}},
+                "unread_only": {"type":"boolean","default":true},
+                "limit": {"type":"integer","minimum":1,"maximum":50,"default":20}
+            }),
+            vec![],
+        ),
         "delete_schedule" | "run_schedule_now" => (json!({"id":string(64)}), vec!["id"]),
         "spawn_subagent" => (
             json!({
@@ -466,7 +477,7 @@ pub fn schema(name: &str) -> Value {
                 "members": {"type": "string", "enum": ["everyone", "owner", "default"],
                     "description": "Groups and channels: whether members other than the \
                     user may talk to the agent, as guests; default lets them once the user \
-                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
+                    has talked to the bot there. Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means model setup is pending; ready means the model route is ready, not that business information or customer testing is complete"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -478,7 +489,7 @@ pub fn schema(name: &str) -> Value {
         "update_channel_access" => (
             json!({"channel_agent_id": string(64),
                 "org_guests":{"type":"object","additionalProperties":false,
-                    "description":"Organization-specialist guest settings, admins only. Read guest_revision from list_channel_agents and pass it as expected_revision. Omitted budget/services keep their saved values; first enable defaults to one credit per UTC day. Enabling guests also admits private guest chats; groups retain their own permissions. Cannot be combined with private_chats or posting fields.",
+                    "description":"Organization-specialist guest settings, admins only. Read guest_revision from list_channel_agents and pass it as expected_revision. Once org guest Grants readiness is complete, daily_credits and service_ids are deprecated and ignored. Guests are paid by the organization; service access follows specialist Grants after an explicit human adoption there. Existing bindings retain their old service limits until adoption. Enabling guests also admits private guest chats; groups retain their own permissions. Cannot be combined with private_chats or posting fields.",
                     "properties":{"enabled":{"type":"boolean"},"daily_credits":string(64),
                         "service_ids":{"type":"array","maxItems":100,"items":string(64)},
                         "expected_revision":{"type":"string","maxLength":64}},
@@ -486,7 +497,7 @@ pub fn schema(name: &str) -> Value {
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
-                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means wait, ready means ready for visitors"},
+                    thread). Report returned guest_readiness and its fix when not_ready; saving everyone starts automatic model setup; setting_up means model setup is pending; ready means the model route is ready, not that business information or customer testing is complete"},
                 "private_chat_posts": {"type":"boolean","description":"Allow new private customer chats to start with posting enabled. Default false. Groups, channels and topics still need per-chat opt-in. Turning off changes only future chats unless apply_to_existing is true."},
                 "apply_to_existing": {"type":"boolean","default":false,"description":"Also set existing private chats of this channel to private_chat_posts (required with this option). At most 1000 changed chats; over the cap nothing changes. Per-chat off remains effective until explicitly applied again."}}),
             vec!["channel_agent_id"],
@@ -643,6 +654,9 @@ pub(crate) fn description(name: &str) -> &'static str {
         }
         "create_schedule" => {
             "Schedule owner-requested work for NyxBot or a specialist. Use the owner's timezone from settings; ask if unknown. Confirm the returned next runs in plain words. Prefer deliver_to for requested pushed results."
+        }
+        "list_notifications" => {
+            "Read the owner's Notifications with bounded previews and links. When the owner asks what they missed, or a NyxBot automation asks for a digest, call this tool. Defaults to unread activity; optional kinds, since and limit narrow the results. Since selects rows by their latest update; a coalesced count covers its entire unread window, starting at created_at, and may include older activity. Reading never marks notifications as seen. Available only in the owner's NyxBot threads, including scheduled NyxBot turns."
         }
         "list_schedules" => {
             "List the owner's schedules and assistant webhook automations, including confirmation policy, timezone and next runs."
@@ -824,7 +838,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
             Telegram, bot creation inside Telegram when available). Secrets are entered on that \
             page, never in chat. Once the bot exists NyxID links it to you or the named \
-            personal specialist automatically and tells you. For an organization specialist, use an existing same-org bot with connect_channel_bot."
+            personal specialist automatically and tells you. New bots stay owner-only; linking is not customer readiness or consent to open access. Keep unanswered onboarding questions pending when setup resumes. For an organization specialist, use an existing same-org bot with connect_channel_bot."
         }
         "connect_channel_bot" => {
             "Link a channel bot to you or to one of the user's personal specialists: the \
@@ -891,7 +905,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             specialist when its members need a service."
         }
         "update_channel_access" => {
-            "Change who can talk to a bot. For organization specialists, use org_guests with the current guest_revision from list_channel_agents: only organization admins may enable guests, set the daily organization-paid budget or delegate currently granted services. Verified members use their own permissions and billing. For personal bindings, guests use the owner's billing and the specialist's per-service guest access controls their services. Set who may talk in private chats: only the user \
+            "Change who can talk to a bot. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Opening on an explicit owner request is allowed; report audience_readiness and unresolved questions, including in Full access. Model ready is not business readiness. For organization specialists, use org_guests with the current guest_revision from list_channel_agents: only organization admins may enable guests, set the daily organization-paid budget or delegate currently granted services. Verified members use their own permissions and billing. For personal bindings, guests use the owner's billing and the specialist's per-service guest access controls their services. Set who may talk in private chats: only the user \
             (default) or anyone, each in their own thread as a guest (no account actions and \
             nothing private to the user; NyxBot uses no tools for them). Also set private_chat_posts to allow new private customer chats to receive agent-initiated posts, optionally apply_to_existing. This does not open the audience or change group/channel/topic permissions."
         }
@@ -971,7 +985,12 @@ fn input_rules_schema() -> Value {
 /// Strict validation mirroring the schemas: unknown keys, wrong types and
 /// out-of-range values are rejected before any state is read.
 pub fn validate(name: &str, args: &Value) -> AppResult<()> {
-    let schema = schema(name);
+    validate_against(name, args, &schema(name))
+}
+
+/// [`validate`] against an already-extended schema, such as the skill tools'
+/// outline arguments (`skill_outline::extend_schema`).
+pub fn validate_against(name: &str, args: &Value, schema: &Value) -> AppResult<()> {
     let invalid = || AppError::ValidationError(format!("Invalid arguments for nyxid__{name}"));
     let object = args.as_object().ok_or_else(invalid)?;
     let properties = schema["properties"].as_object().ok_or_else(invalid)?;
@@ -990,7 +1009,7 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
         }
         super::assistant_team_service::validate_memory_text(text)?;
     }
-    validate_input_rules(name, object, &schema)?;
+    validate_input_rules(name, object, schema)?;
     for (key, value) in object {
         let spec = properties.get(key).ok_or_else(invalid)?;
         if !matches_spec(value, spec) {
@@ -1207,6 +1226,54 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_digest_arguments_are_bounded_and_read_only() {
+        assert!(validate("list_notifications", &json!({})).is_ok());
+        assert!(
+            validate(
+                "list_notifications",
+                &json!({
+                    "since":"2026-11-10T00:00:00Z",
+                    "kinds":["automation_result","needs_decision"],
+                    "unread_only":false,
+                    "limit":50
+                })
+            )
+            .is_ok()
+        );
+        for args in [
+            json!({"limit":0}),
+            json!({"limit":51}),
+            json!({"limit":1.5}),
+            json!({"kinds":["private_message"]}),
+            json!({"unread_only":"true"}),
+            json!({"user_id":"another-person"}),
+            json!({"mark_read":true}),
+        ] {
+            assert!(validate("list_notifications", &args).is_err(), "{args}");
+        }
+        assert_eq!(
+            crate::services::assistant_acknowledgement_service::known_action_class(
+                "nyxid__list_notifications",
+                &json!({})
+            ),
+            Some(crate::services::assistant_acknowledgement_service::OwnerActionClass::Read)
+        );
+        assert!(!is_agent_tool("list_notifications"));
+        let annotations =
+            crate::services::mcp_service::tool_annotations("nyxid__list_notifications", &[])
+                .unwrap();
+        assert_eq!(
+            annotations,
+            json!({
+                "title":"Read NyxBot notifications",
+                "readOnlyHint":true,
+                "destructiveHint":false,
+                "openWorldHint":false
+            })
+        );
+    }
 
     #[test]
     fn operation_discovery_pagination_schema_advertises_real_recovery_parameters() {

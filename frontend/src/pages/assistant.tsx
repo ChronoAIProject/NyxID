@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
@@ -34,6 +37,10 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
 
+const AssistantCmaSandboxesPage = lazy(() => import("./assistant-cma-sandboxes").then((module) => ({ default: module.AssistantCmaSandboxesPage })));
+const AssistantCmaSandboxDetailPage = lazy(() => import("./assistant-cma-sandbox-detail").then((module) => ({ default: module.AssistantCmaSandboxDetailPage })));
+const AssistantCmaAgentPage = lazy(() => import("./assistant-cma-agent").then((module) => ({ default: module.AssistantCmaAgentPage })));
+
 const MockScenariosAction = import.meta.env.DEV
   ? lazy(() =>
       import("@/components/assistant/mock-scenarios-action").then((module) => ({
@@ -69,6 +76,7 @@ export function AssistantHeaderActions({
   readonly scenarioAction?: ScenarioActionComponent | null;
   readonly activeConversationId?: string | null;
 } = {}) {
+  useUiTranslation();
   const ScenarioAction = scenarioAction;
   return (
     <>
@@ -112,6 +120,9 @@ type WorkspaceView =
   | "approvals"
   | "automations"
   | "machines"
+  | "sandboxes"
+  | "sandbox-detail"
+  | "cma-agent"
   | "machine-setup"
   | "machine-pair";
 
@@ -120,26 +131,30 @@ const workspaceTitles: Record<WorkspaceView, string> = {
   approvals: "Approvals",
   automations: "Automations",
   machines: "Machines",
+  sandboxes: "Sandboxes",
+  "sandbox-detail": "Sandbox",
+  "cma-agent": "Cloud assistant",
   "machine-setup": "Add a machine",
   "machine-pair": "Pair a machine",
 };
 
 function workspaceActiveView(view: WorkspaceView) {
+  if (view === "sandbox-detail" || view === "cma-agent") return "sandboxes";
   return view === "machine-setup" || view === "machine-pair"
     ? "machines"
     : view;
 }
 
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
+  useUiTranslation();
   return (
     <div
-      className="h-full overflow-y-auto shell-page-content"
+      className={`h-full shell-page-content ${view === "cma-agent" ? "overflow-hidden" : "overflow-y-auto"}`}
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
       <Suspense
         fallback={
-          <p role="status" className="text-14 text-text-tertiary">
-            Loading {workspaceTitles[view]}...
+          <p role="status" className="text-14 text-text-tertiary">{translateUi("Loading ")}{workspaceTitles[view]}...
           </p>
         }
       >
@@ -151,6 +166,12 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
           <AutomationsPage />
         ) : view === "machines" ? (
           <MachinesPage />
+        ) : view === "sandboxes" ? (
+          <AssistantCmaSandboxesPage />
+        ) : view === "sandbox-detail" ? (
+          <AssistantCmaSandboxDetailPage />
+        ) : view === "cma-agent" ? (
+          <AssistantCmaAgentPage />
         ) : view === "machine-setup" ? (
           <MachineSetupPage />
         ) : (
@@ -168,6 +189,7 @@ function AssistantWorkspacePage({
   readonly view: WorkspaceView;
   readonly directEnabled: boolean;
 }) {
+  useUiTranslation();
   const navigate = useNavigate();
   const noopAdoption = useCallback(() => undefined, []);
   const actorChat = useAssistantChat({
@@ -213,7 +235,7 @@ function AssistantWorkspacePage({
         await actorChat.deleteConversation(conversationId);
       }
     } catch (error) {
-      toast.error("Could not delete the chat", {
+      toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error
             ? error.message
@@ -257,6 +279,7 @@ function AssistantWorkspacePage({
  * groups), and none of the earlier engines' chat lists are fetched.
  */
 function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
+  useUiTranslation();
   const navigate = useNavigate();
   function openAssistant(search: { c?: string } = {}) {
     void navigateWithBuildUpdate(() => navigate({ to: "/assistant", search: search }));
@@ -287,6 +310,7 @@ export function AssistantPage({
 }: {
   readonly view?: "chat" | WorkspaceView;
 }) {
+  useUiTranslation();
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const selectedConversationId = useRouterState({

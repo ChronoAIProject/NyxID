@@ -22,6 +22,8 @@ pub struct ChannelTextDelivery {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TextPart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatting_fallback: Option<String>,
     pub state: TextPartState,
     pub attempt_id: Option<String>,
     pub platform_message_id: Option<String>,

@@ -837,6 +837,14 @@ async fn channel_model_turns_for(
                 .await
                 .unwrap()
         };
+        if !group {
+            assert_eq!(result["private_chats"], "everyone");
+            assert!(result["audience_readiness"]["configuration"].is_object());
+            assert_eq!(
+                result["audience_readiness"]["guest_readiness"],
+                result["guest_readiness"]
+            );
+        }
         assert!(matches!(
             if group {
                 result["chat"]["guest_readiness"]["status"].as_str()
@@ -1356,6 +1364,31 @@ async fn channel_model_turns_for(
             assert!(note["text"].as_str().unwrap().contains("/assistant?agent="));
             assert!(!note["text"].as_str().unwrap().contains("@helper_bot hello"));
         }
+    }
+    if matches!(scenario, Scenario::EnabledVisitors) && !group {
+        // Explicit owner opening of a prepared agent stays immediate and does not
+        // add a readiness veto or a second setup/model invocation.
+        let ready = crate::services::assistant_service_execution::guest_readiness(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            Some(&specialist.id),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ready.status, "ready");
+        chats::set_private_chats(&state, OWNER, &channel.id, "owner")
+            .await
+            .unwrap();
+        let result = chats::set_private_chats(&state, OWNER, &channel.id, "everyone")
+            .await
+            .unwrap();
+        assert_eq!(result["private_chats"], "everyone");
+        assert_eq!(
+            result["audience_readiness"]["guest_readiness"]["status"],
+            "ready"
+        );
     }
     let seen = seen.lock().await.clone();
     assert_eq!(

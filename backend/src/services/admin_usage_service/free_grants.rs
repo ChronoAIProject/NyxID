@@ -1,6 +1,6 @@
 //! Immutable grant issuance and consumption, grouped by financial owner.
 //! Shared grants have no service issuance allocation; service rows report usage only.
-use super::{AdminUsageQuery, QUERY_TIMEOUT, UsageWindow, query_error};
+use super::{AdminUsageQuery, MAX_READ_ATTEMPTS, QUERY_TIMEOUT, UsageWindow, query_error};
 use crate::{
     errors::{AppError, AppResult},
     models::credits::Credits,
@@ -18,7 +18,6 @@ use utoipa::{IntoParams, ToSchema};
 const PER_PAGE: u64 = 50;
 
 #[derive(Default, Deserialize, IntoParams)]
-#[cfg_attr(test, derive(Clone))]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
@@ -121,8 +120,7 @@ pub async fn report(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Re
         ]};
         let account_group = doc! {"$group": {"_id": "$owner_id", "issued": {"$sum": "$issued"}, "used": {"$sum": "$used"}, "grants": {"$sum": "$grants"}}};
         let service_group = doc! {"$group": {"_id": "$service_slug", "used": {"$sum": "$used"}}};
-        let rows: Vec<Document> = db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME)
-            .aggregate(vec![
+        let pipeline = vec![
                 doc! {"$match": filter},
                 doc! {"$project": {
                     "owner_id": 1, "service_slug": {"$ifNull": ["$service_slug", Bson::Null]},
@@ -143,9 +141,16 @@ pub async fn report(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Re
                     "service_count": [{"$match": {"is_issuance": false}}, service_group, {"$count": "count"}],
                     "trend": [{"$group": {"_id": "$day", "issued": {"$sum": "$issued"}, "used": {"$sum": "$used"}}}, {"$sort": {"_id": 1}}],
                 }},
-            ]).max_time(QUERY_TIMEOUT).allow_disk_use(true)
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .await.map_err(query_error)?.try_collect().await.map_err(query_error)?;
+            ];
+        let rows: Vec<Document> = retry_snapshot_read(|| {
+            let pipeline = pipeline.clone();
+            async move {
+                db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME)
+                    .aggregate(pipeline).max_time(QUERY_TIMEOUT).allow_disk_use(true)
+                    .read_concern(mongodb::options::ReadConcern::snapshot())
+                    .await?.try_collect().await
+            }
+        }).await?;
         let root = rows.first().ok_or_else(|| AppError::Internal("Missing grant report".into()))?;
         let totals = documents(root, "totals")?.next();
         let accounts: Vec<&Document> = documents(root, "accounts")?.collect();
@@ -192,6 +197,30 @@ pub async fn report(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Re
         })
     }).await.map_err(|_| AppError::AdminUsageQueryTimeout)?
 }
+
+async fn retry_snapshot_read<T, F, Fut>(mut read: F) -> AppResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = mongodb::error::Result<T>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match read().await {
+            // Snapshot history can advance before an aggregate or its cursor
+            // finishes. Restart the complete snapshot read within the report's
+            // original outer deadline; never return a partial or ordinary read.
+            Err(error)
+                if attempt < MAX_READ_ATTEMPTS
+                    && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            result => return result.map_err(query_error),
+        }
+    }
+}
+
 fn documents<'a>(row: &'a Document, key: &str) -> AppResult<impl Iterator<Item = &'a Document>> {
     Ok(row
         .get_array(key)
@@ -214,22 +243,87 @@ fn money(row: &Document, key: &str) -> AppResult<Credits> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use uuid::Uuid;
 
-    /// CI runs MongoDB with `minSnapshotHistoryWindowInSeconds=0`, so this
-    /// report's snapshot read can transiently fail (e.g. SnapshotTooOld) while
-    /// parallel tests write. Retry only database errors, a bounded number of
-    /// times; validation and timeout outcomes are returned unchanged.
-    async fn report_retrying(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Response> {
-        for _ in 0..20 {
-            match report(db, q.clone(), now).await {
-                Err(AppError::DatabaseError(_)) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
-                }
-                other => return other,
+    fn command_error(code: i32) -> mongodb::error::Error {
+        let command: mongodb::error::CommandError =
+            bson::from_document(doc! {"code": code}).unwrap();
+        mongodb::error::ErrorKind::Command(command).into()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_grants_snapshot_read_retries_only_expired_or_unavailable_snapshots() {
+        for code in [239, 246] {
+            let attempts = Cell::new(0);
+            let rows = retry_snapshot_read(|| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(if attempts.get() == 1 {
+                    Err(command_error(code))
+                } else {
+                    Ok(vec![doc! {"issued": 7_i64}])
+                })
+            })
+            .await
+            .unwrap();
+            assert_eq!(attempts.get(), 2);
+            assert_eq!(rows, vec![doc! {"issued": 7_i64}]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_grants_snapshot_read_exhaustion_preserves_the_database_error() {
+        for code in [239, 246] {
+            let attempts = Cell::new(0);
+            let result = retry_snapshot_read(|| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Err::<(), _>(command_error(code)))
+            })
+            .await;
+            assert_eq!(attempts.get(), 8);
+            assert!(matches!(result, Err(AppError::DatabaseError(error))
+                if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == code)));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_grants_snapshot_read_does_not_retry_other_errors_or_change_timeout_mapping() {
+        for code in [50, 13] {
+            let attempts = Cell::new(0);
+            let result = retry_snapshot_read(|| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Err::<(), _>(command_error(code)))
+            })
+            .await;
+            assert_eq!(attempts.get(), 1);
+            if code == 50 {
+                assert!(matches!(result, Err(AppError::AdminUsageQueryTimeout)));
+            } else {
+                assert!(matches!(result, Err(AppError::DatabaseError(error))
+                    if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == code)));
             }
         }
-        report(db, q, now).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_grants_snapshot_retries_share_the_callers_deadline() {
+        let attempts = Cell::new(0);
+        let budget = std::time::Duration::from_millis(25);
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            budget,
+            retry_snapshot_read(|| {
+                attempts.set(attempts.get() + 1);
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    Err::<(), _>(command_error(239))
+                }
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(attempts.get() < MAX_READ_ATTEMPTS);
+        assert!(started.elapsed() <= budget + std::time::Duration::from_millis(1));
     }
 
     #[test]
@@ -294,8 +388,8 @@ mod tests {
             owners,
             ..Default::default()
         };
-        let first = report_retrying(&db, query(1, None), now).await.unwrap();
-        let second = report_retrying(&db, query(2, None), now).await.unwrap();
+        let first = report(&db, query(1, None), now).await.unwrap();
+        let second = report(&db, query(2, None), now).await.unwrap();
         assert_eq!(first.issued.to_string(), "55.500000000053");
         assert_eq!(second.issued, first.issued);
         assert_eq!(first.used.to_string(), "100");
@@ -308,15 +402,13 @@ mod tests {
                 .iter()
                 .any(|a| second.accounts.iter().any(|b| a.owner_id == b.owner_id))
         );
-        let p = report_retrying(&db, query(1, Some(person.clone())), now)
+        let p = report(&db, query(1, Some(person.clone())), now)
             .await
             .unwrap();
         assert_eq!(p.issued.to_string(), "3.500000000001");
         assert_eq!(p.used.to_string(), "100");
         assert_eq!(p.accounts[0].account_kind, "person");
-        let o = report_retrying(&db, query(1, Some(org)), now)
-            .await
-            .unwrap();
+        let o = report(&db, query(1, Some(org)), now).await.unwrap();
         assert_eq!(o.issued, c);
         assert_eq!(o.accounts[0].account_kind, "org");
         assert!(report(&db, query(0, None), now).await.is_err());
@@ -455,8 +547,8 @@ mod tests {
             owners,
             ..Default::default()
         };
-        let first = report_retrying(&db, query(1, 1, None), to).await.unwrap();
-        let second = report_retrying(&db, query(2, 2, None), to).await.unwrap();
+        let first = report(&db, query(1, 1, None), to).await.unwrap();
+        let second = report(&db, query(2, 2, None), to).await.unwrap();
         assert_eq!(first.issued.to_string(), "3.750000000001");
         assert_eq!(first.used.to_string(), "67.625000000054");
         assert_eq!(
@@ -524,7 +616,7 @@ mod tests {
                 .to_string(),
             "3.125000000002"
         );
-        let repeated = report_retrying(&db, query(1, 1, None), to).await.unwrap();
+        let repeated = report(&db, query(1, 1, None), to).await.unwrap();
         assert_eq!(
             first
                 .accounts
@@ -537,7 +629,7 @@ mod tests {
                 .map(|a| &a.owner_id)
                 .collect::<Vec<_>>()
         );
-        let p = report_retrying(&db, query(1, 2, Some(person.clone())), to)
+        let p = report(&db, query(1, 2, Some(person.clone())), to)
             .await
             .unwrap();
         assert_eq!((p.total_accounts, p.total_services), (1, 3));
@@ -547,10 +639,10 @@ mod tests {
         assert_eq!(p.accounts[0].account_kind, "person");
         let mut late = query(1, 1, Some(person));
         late.from = Some(later.to_rfc3339());
-        let late = report_retrying(&db, late, to).await.unwrap();
+        let late = report(&db, late, to).await.unwrap();
         assert_eq!(late.issued, Credits::ZERO);
         assert_eq!(late.used, p.used);
-        let empty = report_retrying(&db, query(1, 1, Some(Uuid::new_v4().to_string())), to)
+        let empty = report(&db, query(1, 1, Some(Uuid::new_v4().to_string())), to)
             .await
             .unwrap();
         assert_eq!(

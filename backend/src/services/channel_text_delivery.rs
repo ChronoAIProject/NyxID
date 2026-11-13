@@ -64,6 +64,7 @@ pub async fn begin_with_notice(
         retry_at: None,
         parts: vec![
             TextPart {
+                formatting_fallback: None,
                 state: TextPartState::Pending,
                 attempt_id: None,
                 platform_message_id: None,
@@ -196,6 +197,20 @@ pub async fn defer(
 
 pub fn unconfirmed() -> AppError {
     AppError::ChannelPlatformError(UNCERTAIN.into())
+}
+
+/// The original claim remains Sending throughout a formatting retry.
+pub fn formatting_receipt(
+    row: &ChannelTextDelivery,
+    index: usize,
+    attempt: &str,
+) -> super::telegram_formatting::Receipt {
+    super::telegram_formatting::Receipt {
+        collection: COLLECTION_NAME,
+        filter: doc! {"_id": &row.id, format!("parts.{index}.state"): "sending", format!("parts.{index}.attempt_id"): attempt},
+        field: format!("parts.{index}.formatting_fallback"),
+        plain: row.parts[index].formatting_fallback.is_some(),
+    }
 }
 
 #[cfg(test)]

@@ -31,6 +31,7 @@ export type ThemeColors = {
   info: string;          // informational badges, auth events
   infoSoft: string;
   warning: string;       // expiring tokens, pending approvals
+  onWarning: string;     // foreground on a solid warning counter
   warningSoft: string;
   danger: string;        // expired, failed, denied
   dangerSoft: string;
@@ -141,6 +142,7 @@ export const darkColors: ThemeColors = {
   info: INFO_DARK,
   infoSoft: "rgba(96, 165, 250, 0.18)",
   warning: WARNING_DARK,
+  onWarning: "#0A0A0A",
   warningSoft: "rgba(245, 158, 11, 0.18)",
   danger: "#FCA5A5",
   dangerSoft: "#fca5a5",
@@ -206,6 +208,7 @@ export const lightColors: ThemeColors = {
   info: INFO_LIGHT,
   infoSoft: "rgba(59, 130, 246, 0.18)",
   warning: WARNING_LIGHT,
+  onWarning: "#FFFFFF",
   warningSoft: "rgba(217, 119, 6, 0.18)",
   danger: DANGER_LIGHT,
   dangerSoft: DANGER_LIGHT,

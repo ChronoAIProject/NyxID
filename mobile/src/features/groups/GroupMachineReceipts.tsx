@@ -20,6 +20,7 @@ export function GroupMachineReceipts({
           <MachineToolCard
             key={a.id}
             receipt={a.machine!}
+            decision={a.decision}
             groupId={groupId}
             attachments={message.attachments}
           />

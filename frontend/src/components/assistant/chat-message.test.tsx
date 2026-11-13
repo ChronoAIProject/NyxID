@@ -1713,3 +1713,62 @@ it("never renders unrecognized memory diagnostic text", () => {
   expect(screen.getByText(/The tool reported an error/)).toBeVisible();
   expect(screen.queryByText(/untrusted secret/)).toBeNull();
 });
+
+describe("approval-gated step outcomes", () => {
+  it.each([
+    ["waiting", "Waiting for approval", "1 waiting"],
+    ["allowed", "Allowed — waiting for execution", "1 allowed"],
+    ["completed", "Completed after approval", "1 allowed"],
+    ["denied", "Declined", "1 denied"],
+    ["expired", "Approval expired", "1 expired"],
+    ["cancelled", "Cancelled", "1 cancelled"],
+    ["unavailable", "Approval outcome unavailable", "1 outcome unavailable"],
+    ["failed", "Failed after approval", "1 allowed"],
+  ])("renders %s from server evidence without treating the initial refusal as a failure", (state, label, count) => {
+    render(<ChatMessageBubble message={{ ...BASE, toolCalls: [{
+      id: "gated", name: "api-google-sheets__sheets_update_values", status: "error", startedAt: 1,
+      failure: { kind: "tool_error" }, decision: { kind: "acknowledgement", id: "card", state },
+    }] }} />);
+    const summary = screen.getByRole("button", { name: /Turn details:/ });
+    expect(summary).toHaveTextContent(count);
+    if (state === "failed") expect(summary).toHaveTextContent("1 failed");
+    else expect(summary).not.toHaveTextContent("failed");
+    fireEvent.click(summary);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/The tool reported an error/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/continue after a failed step/)).not.toBeInTheDocument();
+  });
+  it("keeps a genuine failure separate from a successfully approved operation", () => {
+    render(<ChatMessageBubble message={{ ...BASE, toolCalls: [
+      { id: "a", name: "write", status: "error", startedAt: 1, decision: { kind: "approval", id: "card", state: "completed" } },
+      { id: "b", name: "broken", status: "error", startedAt: 1, failure: { kind: "tool_error" } },
+    ] }} />);
+    expect(screen.getByRole("button", { name: /Turn details:/ })).toHaveAttribute("aria-label", "Turn details: Completed, 2 actions, 1 allowed, 1 failed");
+  });
+});
+
+it.each([
+  ["service_status", "The service returned an error. No HTTP status is available."],
+  ["tool_error", "The tool reported an error."],
+  ["refused", "NyxID refused this call."],
+  ["internal", "NyxID could not complete this call."],
+  ["resource_unavailable", "A resource needed for this step is unavailable."],
+  ["future_kind", "This step did not complete. No additional error details are available."],
+])("2345 retains per-step error presentation for %s", (kind, copy) => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "error", name: "tool", status: "error", startedAt: 1, failure: { kind } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByLabelText("Failed")).toBeVisible();
+  expect(screen.getByText(`${copy} The assistant can continue after a failed step.`)).toBeVisible();
+});
+
+it.each(["field_read_transport", "field_missing", "eligibility:flag_off", "ledger:uncertain"])("shows a closed Lark attachment diagnostic %s", (reason) => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "lark", name: "api-lark-bot-3__bitable_record_create_with_attachments", status: "error", startedAt: 1, failure: { kind: "tool_error", reason } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByText(new RegExp(`Lark attachment write: ${reason}`))).toBeVisible();
+});
+it("does not expose arbitrary Lark failure text", () => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "lark", name: "api-lark-bot-3__bitable_media_upload", status: "error", startedAt: 1, failure: { kind: "tool_error", reason: "field_missing:private field" } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByText(/The tool reported an error/)).toBeVisible();
+  expect(screen.queryByText(/private field/)).toBeNull();
+});

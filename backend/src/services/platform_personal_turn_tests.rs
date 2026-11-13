@@ -1358,3 +1358,217 @@ async fn platform_execution_claim_records_actual_worker_and_remains_single_use()
     );
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn personal_platform_settlement_notifies_only_the_linked_person_when_enabled() {
+    use crate::models::assistant_notification::{
+        AssistantNotification, NotificationKind, SourceType,
+    };
+    use crate::services::{assistant_notification_service as feed, feature_flag_service as flags};
+    for on in [false, true] {
+        let (state, admitted) = fixture(if on {
+            "personal_notifications_on"
+        } else {
+            "personal_notifications_off"
+        })
+        .await;
+        let db = &state.db;
+        feed::ensure_indexes(db).await.unwrap();
+        flags::set_platform_override(
+            db,
+            flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            on,
+            "admin",
+        )
+        .await
+        .unwrap();
+        let service = personal(state.clone());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let contract::PersonalTurnStart::Started { turn, .. } = service
+            .start_personal_turn(
+                db,
+                &admitted,
+                contract::TurnInput {
+                    channel_uploads: Vec::new(),
+                    text: "hello from my linked chat".into(),
+                },
+                sender,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("personal turn must start")
+        };
+        let contract::ExecutionEvent::ReplyReady(reply) =
+            tokio::time::timeout(Duration::from_secs(15), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("durable reply must settle")
+        };
+        assert_eq!(reply.turn, turn);
+        let rows = db.collection::<AssistantNotification>(
+            crate::models::assistant_notification::COLLECTION_NAME,
+        );
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), u64::from(on));
+        if on {
+            let row = rows.find_one(doc! {}).await.unwrap().unwrap();
+            assert_eq!(row.user_id, admitted.authority.user_id);
+            assert_eq!(row.kind, NotificationKind::ChatUpdate);
+            assert_eq!(row.source.source_type, SourceType::ChannelChat);
+            assert_eq!(row.source.id, turn.conversation_id);
+            assert_eq!(
+                row.source.message_id.as_deref(),
+                Some(reply.reply_id.as_str())
+            );
+            let page = feed::list(
+                &state,
+                &row.user_id,
+                &feed::ListQuery {
+                    limit: 30,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].kind, "chat_update");
+            assert!(
+                !page.items[0].preview.is_empty(),
+                "saved upstream failure produces a useful preview"
+            );
+            assert_eq!(
+                page.items[0].url,
+                crate::services::assistant_links::AssistantPage::Conversation {
+                    conversation: &turn.conversation_id
+                }
+                .url(&state.config.frontend_url)
+            );
+            assert_eq!(
+                feed::summary(db, &row.user_id).await.unwrap().unread_count,
+                1
+            );
+            engine::delete(db, &row.user_id, &turn.conversation_id)
+                .await
+                .unwrap();
+            assert_eq!(rows.count_documents(doc! {}).await.unwrap(), 0);
+        }
+        db.drop().await.unwrap();
+    }
+}
+
+struct SettledNotificationBinding;
+#[async_trait::async_trait]
+impl super::super::platform_personal_binding_service::PersonalLifecycleEffects
+    for SettledNotificationBinding
+{
+    async fn capture_stop(
+        &self,
+        _: &Database,
+        _: &mut ClientSession,
+        _: &crate::models::platform_personal_binding::PersonalActiveTurn,
+    ) -> AppResult<Option<super::super::platform_personal_binding_service::CapturedPersonalStop>>
+    {
+        panic!("the notification fixture must finish its turn before unlink");
+    }
+    async fn revoke_public_sender(
+        &self,
+        _: &Database,
+        _: &mut ClientSession,
+        _: &PlatformPersonalBinding,
+    ) -> AppResult<()> {
+        panic!("unlinking a personal binding must not invoke public routing");
+    }
+}
+
+#[tokio::test]
+async fn personal_platform_notifications_ignore_web_continuations_and_purge_on_unlink() {
+    use super::super::{assistant_notification_service as feed, feature_flag_service as flags};
+    let (state, admitted) = fixture("personal_notification_unlink").await;
+    let db = &state.db;
+    feed::ensure_indexes(db).await.unwrap();
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        "admin",
+    )
+    .await
+    .unwrap();
+    let claim = claimed_input(&state, &admitted).await;
+    finish_claim(&state, &claim).await;
+    let owner = &claim.conversation.user_id;
+    let id = &claim.conversation.id;
+    let rows =
+        db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME);
+    assert_eq!(rows.count_documents(doc! {}).await.unwrap(), 1);
+    let request = engine::parse_turn(
+        &serde_json::to_vec(
+            &serde_json::json!({"text":"continue in the app", "conversation_id":id}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let web = engine::begin_turn(
+        db,
+        owner,
+        engine::TurnStart::from(&request),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert!(web.active_turn.as_ref().unwrap().platform_origin.is_none());
+    let credential = super::super::assistant_agent_credential_service::load_for_conversation(
+        db,
+        &state.encryption_keys,
+        owner,
+        id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    finish_claim(
+        &state,
+        &engine::OwnerTurnClaim {
+            trace_sources: Vec::new(),
+            reclaimed: None,
+            conversation: web,
+            credential,
+        },
+    )
+    .await;
+    let row = rows.find_one(doc! {}).await.unwrap().unwrap();
+    assert_eq!(row.get_i64("count").unwrap(), 1);
+    let binding = db
+        .collection::<PlatformPersonalBinding>(BINDINGS)
+        .find_one(doc! {"_id": &admitted.authority.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(binding.active_turn.is_none());
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        super::super::platform_personal_binding_service::revoke_binding_in_session(
+            db,
+            &mut session,
+            &binding,
+            crate::models::platform_personal_binding::PersonalRevocationReason::Unlinked,
+            &SettledNotificationBinding,
+            None
+        )
+        .await
+        .unwrap()
+    );
+    session.commit_transaction().await.unwrap();
+    assert_eq!(rows.count_documents(doc! {}).await.unwrap(), 0);
+    assert!(
+        engine::get(db, owner, id).await.is_ok(),
+        "unlink retains saved conversation history"
+    );
+    assert_eq!(feed::summary(db, owner).await.unwrap().unread_count, 0);
+    db.drop().await.unwrap();
+}

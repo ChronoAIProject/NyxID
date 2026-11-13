@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { BillingAllowanceBenefits } from "./billing-allowance-benefits";
 import { useId, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
@@ -40,6 +43,7 @@ export function AvailableBenefits({
   ownerId?: string;
   actions?: ReactNode;
 }) {
+  useUiTranslation();
   const breakdownId = useId();
   const [expanded, setExpanded] = useState(false);
   const [page, setPage] = useState(1);
@@ -49,12 +53,12 @@ export function AvailableBenefits({
     return (
       <Card
         className="mt-6"
-        aria-label="Current available benefits"
+        aria-label={translateUi("Current available benefits")}
         aria-busy="true"
       >
         <CardContent className="flex flex-wrap items-start justify-between gap-3 p-4">
           <Skeleton
-            aria-label="Loading available credits"
+            aria-label={translateUi("Loading available credits")}
             className="h-20 min-w-32 flex-1"
           />
           {actions}
@@ -94,26 +98,24 @@ export function AvailableBenefits({
   return (
     <Card
       className="benefits-container mt-6"
-      aria-label="Current available benefits"
+      aria-label={translateUi("Current available benefits")}
       aria-busy={benefits.isFetching || wallet.isFetching}
     >
       <CardContent className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="type-secondary text-muted-foreground">
-              Available credits
-            </h2>
+            <h2 className="type-secondary text-muted-foreground">{translateUi("Available credits")}</h2>
             <p
               className="mt-1 break-words font-display type-metric tabular-nums"
               title={total ?? undefined}
             >
               {total === null ? (
-                "Unavailable"
+                translateUi("Unavailable")
               ) : (
                 <>
                   {formatExactCredits(total)}{" "}
                   <span className="type-secondary text-muted-foreground">
-                    {money(total).endsWith(" credits") ? "credits" : "credit"}
+                    {money(total).endsWith(" credits") ? translateUi("credits") : translateUi("credit")}
                   </span>
                 </>
               )}
@@ -126,7 +128,7 @@ export function AvailableBenefits({
                 onClick={() => setExpanded(!expanded)}
                 className="mt-2 flex min-h-6 items-center gap-1 type-row-title text-muted-foreground transition-colors hover:text-foreground"
               >
-                {expanded ? "Hide breakdown" : "View breakdown"}
+                {expanded ? translateUi("Hide breakdown") : translateUi("View breakdown")}
                 <ChevronDown
                   aria-hidden="true"
                   className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
@@ -137,30 +139,23 @@ export function AvailableBenefits({
           {actions}
         </div>
         {noWallet && (
-          <p role="status" className="mt-2 type-secondary text-warning">
-            No wallet provisioned. Provision a wallet to use your credits and
-            free usage.
-          </p>
+          <p role="status" className="mt-2 type-secondary text-warning">{translateUi("No wallet provisioned. Provision a wallet to use your credits and free usage.")}</p>
         )}
         {suspended && (
-          <p role="alert" className="mt-2 type-secondary-emphasis text-warning">
-            Usage is suspended until billing is restored.
-          </p>
+          <p role="alert" className="mt-2 type-secondary-emphasis text-warning">{translateUi("Usage is suspended until billing is restored.")}</p>
         )}
         {stale && (
           <ErrorBanner
             message={
               complete
-                ? "Showing previously loaded balances. Refresh failed."
-                : "Could not load complete available balances."
+                ? translateUi("Showing previously loaded balances. Refresh failed.")
+                : translateUi("Could not load complete available balances.")
             }
             onRetry={retry}
           />
         )}
         {!stale && (benefits.isFetching || wallet.isFetching) && (
-          <p role="status" className="type-secondary text-text-tertiary">
-            Updating balances…
-          </p>
+          <p role="status" className="type-secondary text-text-tertiary">{translateUi("Updating balances…")}</p>
         )}
 
         {data && (
@@ -169,14 +164,9 @@ export function AvailableBenefits({
             hidden={!expanded}
             className="mt-4 space-y-4 border-t border-border pt-4"
           >
-            <p className="type-secondary text-muted-foreground">
-              Wallet and eligible grants contribute to available credits. Free
-              allowances are additional usage in their own units. Current
-              balances are independent of usage filters.
-            </p>
+            <p className="type-secondary text-muted-foreground">{translateUi("Wallet and eligible grants contribute to available credits. Free allowances are additional usage in their own units. Current balances are independent of usage filters.")}</p>
             {complete && blocked && (
-              <p className="type-secondary text-muted-foreground">
-                Balance before billing restrictions:{" "}
+              <p className="type-secondary text-muted-foreground">{translateUi("Balance before billing restrictions:")}{" "}
                 {money(
                   availableCreditTotal(
                     walletAvailable!,
@@ -187,10 +177,9 @@ export function AvailableBenefits({
               </p>
             )}
             {wallet.data && <BillingWalletBreakdown wallet={wallet.data} />}
-            <section aria-label="Grant balances">
-              <h3 className="type-secondary-strong">Grants</h3>
-              <p className="mt-1 type-secondary">
-                Available: {money(data.summary.unreserved)}
+            <section aria-label={translateUi("Grant balances")}>
+              <h3 className="type-secondary-strong">{translateUi("Billing grants")}</h3>
+              <p className="mt-1 type-secondary">{translateUi("Available: ")}{money(data.summary.unreserved)}
               </p>
               <dl className="my-3 grid gap-2 type-secondary sm:grid-cols-2">
                 {(
@@ -209,19 +198,16 @@ export function AvailableBenefits({
                   ] as const
                 ).map(([label, value]) => (
                   <div key={label}>
-                    <dt className="text-muted-foreground">{label}</dt>
+                    <dt className="text-muted-foreground">{translateUi(label)}</dt>
                     <dd className="tabular-nums">{money(value)}</dd>
                   </div>
                 ))}
               </dl>
             </section>
-            <h3 className="type-secondary-strong">Individual grants</h3>
+            <h3 className="type-secondary-strong">{translateUi("Individual grants")}</h3>
             <p className="my-1 type-secondary text-text-tertiary">
-              {data.total_grants.toLocaleString()}{" "}
-              {data.total_grants === 1 ? "grant" : "grants"} · page {data.page}.
-              The available total includes every eligible grant, across all
-              pages.
-            </p>
+              {data.total_grants.toLocaleString(getFormattingLocale())}{" "}
+              {data.total_grants === 1 ? translateUi("credit grant") : translateUi("credit grants")}{translateUi(" · page ")}{data.page}{translateUi(". The available total includes every eligible grant, across all pages. ")}</p>
             <ul className="divide-y divide-border/50">
               {data.grants.map((g) => (
                 <li
@@ -230,43 +216,38 @@ export function AvailableBenefits({
                 >
                   <div className="flex flex-wrap justify-between gap-2">
                     <strong className="min-w-0 break-all">
-                      {g.reason || "Credit grant"}
+                      {g.reason || translateUi("Credit grant")}
                     </strong>
                     <span className="capitalize text-muted-foreground">
                       {grantState(g)}
                     </span>
                   </div>
-                  <p className="tabular-nums">
-                    Available:{" "}
+                  <p className="tabular-nums">{translateUi("Available:")}{" "}
                     {money(
                       grantState(g) === "active" ? (g.available ?? "0") : "0",
-                    )}{" "}
-                    · Held:{" "}
+                    )}{" "}{translateUi("· Held:")}{" "}
                     {money(
                       g.held ??
                         exactCredits(g.reserved, g.reserved_micros) ??
                         "0",
-                    )}{" "}
-                    · Remaining:{" "}
+                    )}{" "}{translateUi("· Remaining:")}{" "}
                     {money(
                       exactCredits(g.remaining, g.remaining_micros) ?? "0",
                     )}
                   </p>
-                  <p className="type-secondary text-muted-foreground">
-                    Granted{" "}
-                    {money(exactCredits(g.amount, g.amount_micros) ?? "0")} ·
-                    Issued {timestamp(g.created_at)}
+                  <p className="type-secondary text-muted-foreground">{translateUi("Granted")}{" "}
+                    {money(exactCredits(g.amount, g.amount_micros) ?? "0")}{translateUi(" · Issued ")}{timestamp(g.created_at)}
                   </p>
                   <p className="text-muted-foreground">
                     {g.scope.all_services
-                      ? "All services"
+                      ? translateUi("All services")
                       : g.scope.service_slugs
                           .map((s) => serviceName(catalog, s))
                           .join(", ")}{" "}
                     ·{" "}
                     {g.expires_at
-                      ? `Expires ${timestamp(g.expires_at)}`
-                      : "No expiry"}
+                      ? translateUi("Expires {{value1}}", { value1: timestamp(g.expires_at) })
+                      : translateUi("No expiry")}
                   </p>
                   {g.service_limits?.map((r) => (
                     <p
@@ -277,17 +258,14 @@ export function AvailableBenefits({
                         r.service_slugs
                           .map((s) => serviceName(catalog, s))
                           .join(", ")}
-                      : {money(r.limit)} limit · {money(r.consumed)} used ·{" "}
-                      {money(r.held ?? r.reserved)} held
-                    </p>
+                      : {money(r.limit)}{translateUi(" limit · ")}{money(r.consumed)}{translateUi(" used ·")}{" "}
+                      {money(r.held ?? r.reserved)}{translateUi(" held")}</p>
                   ))}
                 </li>
               ))}
             </ul>
             {!data.grants.length && (
-              <p className="py-3 type-secondary text-muted-foreground">
-                No grants on this page.
-              </p>
+              <p className="py-3 type-secondary text-muted-foreground">{translateUi("No grants on this page.")}</p>
             )}
             {data.total_grants > data.per_page && (
               <div className="my-3 flex gap-2">
@@ -295,9 +273,7 @@ export function AvailableBenefits({
                   variant="outline"
                   disabled={page === 1 || benefits.isFetching}
                   onClick={() => setPage(page - 1)}
-                >
-                  Previous grants
-                </Button>
+                >{translateUi("Previous grants")}</Button>
                 <Button
                   variant="outline"
                   disabled={
@@ -305,20 +281,15 @@ export function AvailableBenefits({
                     benefits.isFetching
                   }
                   onClick={() => setPage(page + 1)}
-                >
-                  Next grants
-                </Button>
+                >{translateUi("Next grants")}</Button>
               </div>
             )}
-            <h3 className="mt-4 type-secondary-strong">Free allowances</h3>
+            <h3 className="mt-4 type-secondary-strong">{translateUi("Free allowances")}</h3>
             <BillingAllowanceBenefits
               allowances={data.allowances}
               catalog={catalog}
             />
-            <p className="mt-3 type-secondary text-text-tertiary">
-              Benefits refreshed {timestamp(data.summary.generated_at)}.
-              Allowances apply first, then eligible grants, then wallet credits.
-            </p>
+            <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}{translateUi(". Allowances apply first, then eligible grants, then wallet credits. ")}</p>
           </div>
         )}
       </CardContent>

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 /**
  * Scope chip row — 9 pill-style checkboxes for the NyxID API-key scope
  * set. Ported from Mode A's `.wizard-scope-chip-row` in
@@ -15,6 +17,7 @@
  */
 
 import { API_KEY_SCOPES, type ApiKeyScope } from "@/schemas/api-keys"
+import { Check } from "lucide-react";
 import { Label } from "@/components/ui/label"
 
 export interface ScopePickerProps {
@@ -34,6 +37,7 @@ export function ScopePicker({
   label = "Scopes",
   hint = "Must match the backend's allowed scope set. Pick at least one.",
 }: ScopePickerProps) {
+  useUiTranslation();
   function toggle(scope: ApiKeyScope) {
     const next = new Set(value)
     if (next.has(scope)) {
@@ -47,17 +51,17 @@ export function ScopePicker({
   const isEmpty = value.size === 0
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
+    <div className="flex flex-col gap-2.5">
+      <Label>{translateUi(label)}</Label>
       <div
         role="group"
-        aria-label="Scopes"
+        aria-label={translateUi("Scopes")}
         aria-invalid={isEmpty}
         className={
-          "flex flex-wrap gap-2 rounded-lg p-2 transition-colors duration-300 " +
+          "flex flex-wrap gap-2 rounded-md transition-colors sm:grid sm:grid-cols-3 " +
           (isEmpty
-            ? "border border-destructive"
-            : "border border-transparent")
+            ? "ring-1 ring-destructive ring-offset-4 ring-offset-card"
+            : "")
         }
       >
         {API_KEY_SCOPES.map((scope) => (
@@ -76,7 +80,7 @@ export function ScopePicker({
           isEmpty ? "text-13 text-destructive" : "text-13 text-muted-foreground"
         }
       >
-        {isEmpty ? "At least one scope is required." : hint}
+        {isEmpty ? translateUi("At least one scope is required.") : hint}
       </p>
     </div>
   )
@@ -91,13 +95,14 @@ function ScopeChip({
   readonly checked: boolean
   readonly onToggle: () => void
 }) {
+  useUiTranslation();
   return (
     <Label
       className={
-        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 transition-colors duration-300 " +
+        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-md border px-2.5 py-2 transition-colors duration-300 " +
         (checked
-          ? "border-primary bg-primary/15 text-foreground"
-          : "border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted/40")
+          ? "border-primary/60 bg-primary/10 text-foreground"
+          : "border-border/70 bg-transparent text-muted-foreground hover:border-border hover:bg-muted/40")
       }
     >
       <input
@@ -107,7 +112,8 @@ function ScopeChip({
         onChange={onToggle}
         value={scope}
       />
-      <span>{scope}</span>
+      <Check aria-hidden="true" className={`size-3 shrink-0 text-primary-text ${checked ? "opacity-100" : "opacity-0"}`} />
+      <span className="font-mono">{scope}</span>
     </Label>
   )
 }

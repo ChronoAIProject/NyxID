@@ -50,9 +50,9 @@ pub async fn require_ready(db: &Database) -> AppResult<()> {
     registry::require_execution_ready(db).await?;
     for capability in [READINESS, execution::images::READINESS] {
         if !super::security_readiness_service::CAPABILITIES.contains(&capability)
-            || !super::security_readiness_service::report(db, capability)
+            || !super::security_readiness_service::serving_report(db, capability)
                 .await?
-                .ready
+                .serving_ready
         {
             return Err(AppError::SecurityReadinessUnavailable);
         }

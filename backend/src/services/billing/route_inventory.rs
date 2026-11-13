@@ -140,6 +140,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::credential_verification::check",
+        route: "/api/v1/keys/{key_id}/verify",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::codex_connection::verify",
         route: "/api/v1/providers/codex-connection/verify",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
@@ -153,6 +158,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         handler: "handlers::llm_gateway::llm_proxy_request",
         route: "/api/v1/llm/{provider_slug}/v1/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmProvider),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_models::certified_contracts",
+        route: "/api/v1/admin/platform-models/contracts",
+        policy: BillingRoutePolicy::Exempt("Certified contract metadata; no downstream request"),
     },
     BillingRouteSpec {
         handler: "handlers::platform_models::public_list",

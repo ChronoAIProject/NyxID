@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { AuthFlow } from "@/components/auth/auth-flow";
 import { MfaVerifyForm } from "@/components/auth/mfa-verify-form";
@@ -6,6 +8,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
 
 export function LoginPage() {
+  useUiTranslation();
   const mfaRequired = useAuthStore((s) => s.mfaRequired);
   const [appLoginOpen, setAppLoginOpen] = useState(false);
 
@@ -16,7 +19,7 @@ export function LoginPage() {
   const inviteCode = params.get("code") ?? undefined;
 
   if (import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1") {
-    return <div className="space-y-4"><h1 className="type-metric">View your real connections</h1><p className="text-14 text-muted-foreground">Sign in on NyxID, then return here to explore the local routing proposal with your production account data.</p><Button asChild><a href="/__routing-preview/login">Continue to NyxID</a></Button></div>;
+    return <div className="space-y-4"><h1 className="type-metric">{translateUi("View your real connections")}</h1><p className="text-14 text-muted-foreground">{translateUi("Sign in on NyxID, then return here to explore the local routing proposal with your production account data.")}</p><Button asChild><a href="/__routing-preview/login">{translateUi("Continue to NyxID")}</a></Button></div>;
   }
 
   // Keep QR mounted while profile restoration clears the pending MFA state,
@@ -27,9 +30,7 @@ export function LoginPage() {
         {!appLoginOpen && (
           <>
             <MfaVerifyForm returnTo={returnTo} cookieChallenge={cookieMfaRequired} />
-            <p className="border-t border-border pt-6 text-center text-14 text-muted-foreground">
-              You can also sign in by approving from your NyxID app.
-            </p>
+            <p className="border-t border-border pt-6 text-center text-14 text-muted-foreground">{translateUi("You can also sign in by approving from your NyxID app.")}</p>
           </>
         )}
         <WebDeviceLogin
@@ -44,12 +45,11 @@ export function LoginPage() {
   return (
     <>
       {params.get("mfa") === "expired" && (
-        <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
-          Your verification expired. Please sign in again.
-        </p>
+        <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-14 text-destructive">{translateUi("Your verification expired. Please sign in again.")}</p>
       )}
       <AuthFlow
         initialPanel={0}
+        enableEmailLogin={params.get("enable_email") === "true" || undefined}
         returnTo={returnTo}
         socialError={socialError}
         initialInviteCode={inviteCode}

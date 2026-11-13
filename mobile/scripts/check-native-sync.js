@@ -4,11 +4,23 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const plist = require("@expo/plist").default;
+const { validateIosDeviceSupport } = require("./lib/native-device-support");
 
 const MOBILE_ROOT = path.join(__dirname, "..");
 const PACKAGE_JSON_PATH = path.join(MOBILE_ROOT, "package.json");
 const PODFILE_LOCK_PATH = path.join(MOBILE_ROOT, "ios", "Podfile.lock");
-const INFO_PLIST_PATH = path.join(MOBILE_ROOT, "ios", "NyxIDMobile", "Info.plist");
+const INFO_PLIST_PATH = path.join(
+  MOBILE_ROOT,
+  "ios",
+  "NyxIDMobile",
+  "Info.plist",
+);
+const XCODE_PROJECT_PATH = path.join(
+  MOBILE_ROOT,
+  "ios",
+  "NyxIDMobile.xcodeproj",
+  "project.pbxproj",
+);
 const REQUIRED_IOS_PODS = ["ExpoCameraBarcodeScanning", "ZXingObjC"];
 
 function runJson(command, args, env = process.env) {
@@ -21,7 +33,7 @@ function runJson(command, args, env = process.env) {
       encoding: "utf8",
       env: commandEnv,
       stdio: ["ignore", "pipe", "inherit"],
-    })
+    }),
   );
 }
 
@@ -46,7 +58,9 @@ function podNamesFromLockfile(contents) {
 }
 
 function expectedDirectNativePods(packageJson) {
-  const directDependencies = new Set(Object.keys(packageJson.dependencies ?? {}));
+  const directDependencies = new Set(
+    Object.keys(packageJson.dependencies ?? {}),
+  );
   const expected = new Map();
 
   const expoModules = runAutolinking("resolve").modules ?? [];
@@ -56,7 +70,8 @@ function expectedDirectNativePods(packageJson) {
     if (pods.length > 0) expected.set(module.packageName, pods);
   }
 
-  const reactNativeModules = runAutolinking("react-native-config").dependencies ?? {};
+  const reactNativeModules =
+    runAutolinking("react-native-config").dependencies ?? {};
   for (const [packageName, module] of Object.entries(reactNativeModules)) {
     if (!directDependencies.has(packageName)) continue;
     const podspecPath = module.platforms?.ios?.podspecPath;
@@ -79,26 +94,32 @@ function resolvedExpoConfig() {
   return runJson(
     "pnpm",
     ["exec", "expo", "config", "--type", "public", "--json"],
-    { ...fallbackEnv, ...process.env }
+    { ...fallbackEnv, ...process.env },
   );
 }
 
 function declaredIosPermissions(config) {
   const permissions = new Map(
     Object.entries(config.ios?.infoPlist ?? {}).filter(
-      ([key, value]) => key.endsWith("UsageDescription") && typeof value === "string"
-    )
+      ([key, value]) =>
+        key.endsWith("UsageDescription") && typeof value === "string",
+    ),
   );
 
   const cameraPlugin = (config.plugins ?? []).find(
-    (plugin) => Array.isArray(plugin) && plugin[0] === "expo-camera"
+    (plugin) => Array.isArray(plugin) && plugin[0] === "expo-camera",
   );
-  const cameraOptions = Array.isArray(cameraPlugin) ? cameraPlugin[1] ?? {} : {};
+  const cameraOptions = Array.isArray(cameraPlugin)
+    ? (cameraPlugin[1] ?? {})
+    : {};
   if (typeof cameraOptions.cameraPermission === "string") {
     permissions.set("NSCameraUsageDescription", cameraOptions.cameraPermission);
   }
   if (typeof cameraOptions.microphonePermission === "string") {
-    permissions.set("NSMicrophoneUsageDescription", cameraOptions.microphonePermission);
+    permissions.set(
+      "NSMicrophoneUsageDescription",
+      cameraOptions.microphonePermission,
+    );
   }
 
   return {
@@ -117,7 +138,9 @@ function main() {
   for (const [packageName, pods] of expectedPods) {
     for (const pod of pods) {
       if (!lockedPods.has(pod)) {
-        failures.push(`${packageName} is declared in package.json but pod ${pod} is missing`);
+        failures.push(
+          `${packageName} is declared in package.json but pod ${pod} is missing`,
+        );
       }
     }
   }
@@ -134,50 +157,37 @@ function main() {
   for (const [key, value] of permissions) {
     if (nativeInfoPlist[key] !== value) {
       failures.push(
-        `${key} in Info.plist does not match app.config.ts (${JSON.stringify(value)})`
+        `${key} in Info.plist does not match app.config.ts (${JSON.stringify(value)})`,
       );
     }
   }
-  if (microphoneSuppressed && nativeInfoPlist.NSMicrophoneUsageDescription !== undefined) {
+  if (
+    microphoneSuppressed &&
+    nativeInfoPlist.NSMicrophoneUsageDescription !== undefined
+  ) {
     failures.push(
-      "NSMicrophoneUsageDescription must be absent when expo-camera microphonePermission is false"
+      "NSMicrophoneUsageDescription must be absent when expo-camera microphonePermission is false",
     );
   }
 
-  const supportedOrientations = [
-    "UIInterfaceOrientationPortrait",
-    "UIInterfaceOrientationLandscapeLeft",
-    "UIInterfaceOrientationLandscapeRight",
-  ];
-  for (const [source, value] of [
-    ["app.config.ts", config.ios?.infoPlist?.UISupportedInterfaceOrientations],
-    ["Info.plist", nativeInfoPlist.UISupportedInterfaceOrientations],
-  ]) {
-    if (JSON.stringify(value) !== JSON.stringify(supportedOrientations)) {
-      failures.push(`${source} must allow portrait and both desktop landscape orientations`);
-    }
-  }
-  const orientationPlugin = (config.plugins ?? []).find(
-    (plugin) => Array.isArray(plugin) && plugin[0] === "expo-screen-orientation"
+  failures.push(
+    ...validateIosDeviceSupport(
+      config,
+      nativeInfoPlist,
+      fs.readFileSync(XCODE_PROJECT_PATH, "utf8"),
+    ),
   );
-  if (
-    config.orientation !== "portrait" ||
-    orientationPlugin?.[1]?.initialOrientation !== "PORTRAIT_UP" ||
-    nativeInfoPlist.EXDefaultScreenOrientationMask !== "UIInterfaceOrientationMaskPortrait"
-  ) {
-    failures.push("app.config.ts and Info.plist must default to upright portrait; only desktop requests landscape at runtime");
-  }
 
   if (failures.length > 0) {
     process.stderr.write(
-      `Committed iOS native state is out of sync:\n- ${failures.join("\n- ")}\n`
+      `Committed iOS native state is out of sync:\n- ${failures.join("\n- ")}\n`,
     );
     process.exit(1);
   }
 
   const nativePackages = [...expectedPods.keys()].sort();
   process.stdout.write(
-    `iOS native sync verified for ${nativePackages.length} direct native dependencies, ${REQUIRED_IOS_PODS.length} required companion pods, ${permissions.size} declared permissions, and portrait-default/desktop-landscape orientation.\n`
+    `iOS native sync verified for ${nativePackages.length} direct native dependencies, ${REQUIRED_IOS_PODS.length} required companion pods, ${permissions.size} declared permissions, iPhone portrait defaults and universal iPad multitasking/orientation support.\n`,
   );
 }
 

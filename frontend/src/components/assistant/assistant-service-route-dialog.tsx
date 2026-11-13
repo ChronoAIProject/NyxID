@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { RefreshCw, Server } from "lucide-react";
 import { z } from "zod";
@@ -114,6 +116,7 @@ export function AssistantServiceRouteDialog({
   readonly params: AssistantServiceRouteParams;
   readonly onComplete: (userServiceId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -228,24 +231,24 @@ export function AssistantServiceRouteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? "Service routing updated" : "Route connected service"}
+            {resultId ? translateUi("Service routing updated") : translateUi("Route connected service")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "NyxID verified node routing from authorization evidence."
-              : "Set a node UUID to route through a credential node, or leave empty to clear routing."}
+              ? translateUi("NyxID verified node routing from authorization evidence.")
+              : translateUi("Set a node UUID to route through a credential node, or leave empty to clear routing.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-route-node">Node ID</Label>
+              <Label htmlFor="assistant-service-route-node">{translateUi("Node ID")}</Label>
               <Input
                 id="assistant-service-route-node"
                 value={viaNodeId}
                 onChange={(event) => setViaNodeId(event.target.value)}
-                placeholder="Leave empty to clear routing"
+                placeholder={translateUi("Leave empty to clear routing")}
                 maxLength={256}
               />
             </div>
@@ -255,15 +258,13 @@ export function AssistantServiceRouteDialog({
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
               <p className="type-card-title">
-                {observedNodeId ? "Routed through node" : "Direct routing"}
+                {observedNodeId ? translateUi("Routed through node") : translateUi("Direct routing")}
               </p>
               <p className="break-all font-mono text-14 text-muted-foreground">
-                {observedNodeId ?? "no node"}
+                {observedNodeId ?? translateUi("no node")}
               </p>
               {verified ? (
-                <p className="text-13 text-success">
-                  Routing evidence verified.
-                </p>
+                <p className="text-13 text-success">{translateUi("Routing evidence verified.")}</p>
               ) : null}
             </div>
           </div>
@@ -271,7 +272,7 @@ export function AssistantServiceRouteDialog({
 
         {error ? (
           <p role="alert" className="text-14 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
@@ -286,9 +287,7 @@ export function AssistantServiceRouteDialog({
                   void verifyEvidence(resultId, viaNodeId, expectedStateVersion);
               }}
             >
-              <RefreshCw />
-              Retry verification
-            </Button>
+              <RefreshCw />{translateUi("Retry verification")}</Button>
           ) : null}
           {resultId ? (
             <Button
@@ -296,18 +295,14 @@ export function AssistantServiceRouteDialog({
               variant="primary"
               disabled={!verified}
               onClick={() => onComplete(resultId)}
-            >
-              Report service
-            </Button>
+            >{translateUi("Report service")}</Button>
           ) : (
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               onClick={() => void submit()}
-            >
-              Apply routing
-            </Button>
+            >{translateUi("Apply routing")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

@@ -1,3 +1,4 @@
+import type { ActivityDecision } from "./activity-decision";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 /** Settled decisions only: pending cards stay in the transcript as cards. */
@@ -32,29 +33,49 @@ export function decisionText(row: Decision): string {
 }
 
 export interface DecisionCounts {
+  readonly waiting?: number;
+  readonly cancelled?: number;
+  readonly unavailable?: number;
   readonly automatic: number;
   readonly allowed: number;
   readonly denied: number;
   readonly expired: number;
 }
 
-export function countDecisions(rows: readonly Decision[]): DecisionCounts {
+export function countDecisions(rows: readonly Decision[], links: readonly ActivityDecision[] = []): DecisionCounts {
   let automatic = 0;
   let allowed = 0;
   let denied = 0;
   let expired = 0;
+  const linked = new Map(links.map((link) => [link.id, link]));
   for (const row of rows) {
+    if (linked.has(row.id)) continue;
     if (isAutomatic(row)) automatic += 1;
     else if (row.status === "denied") denied += 1;
     else if (row.status === "expired") expired += 1;
     else allowed += 1;
   }
-  return { automatic, allowed, denied, expired };
+  if (!linked.size) return { automatic, allowed, denied, expired };
+  let waiting = 0, cancelled = 0, unavailable = 0;
+  for (const link of linked.values()) {
+    switch (link.state) {
+      case "waiting": waiting += 1; break;
+      case "allowed": case "completed": case "failed": allowed += 1; break;
+      case "denied": denied += 1; break;
+      case "expired": expired += 1; break;
+      case "cancelled": cancelled += 1; break;
+      default: unavailable += 1;
+    }
+  }
+  return { automatic, allowed, denied, expired, waiting, cancelled, unavailable };
 }
 
 /** Header fragments for a turn's decisions, most important first. */
 export function decisionSummary(counts: DecisionCounts): string[] {
   return [
+    counts.waiting ? `${String(counts.waiting)} waiting` : "",
+    counts.cancelled ? `${String(counts.cancelled)} cancelled` : "",
+    counts.unavailable ? `${String(counts.unavailable)} outcome unavailable` : "",
     counts.denied ? `${String(counts.denied)} denied` : "",
     counts.allowed ? `${String(counts.allowed)} allowed` : "",
     counts.automatic ? `${String(counts.automatic)} allowed by Full access` : "",

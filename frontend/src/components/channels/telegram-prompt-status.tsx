@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { TelegramNewRequest } from "@/schemas/telegram-new";
@@ -12,6 +14,7 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
   readonly regenerating: boolean;
   readonly recoveryUrl?: string;
 }) {
+  useUiTranslation();
   const delivery = request.prompt_delivery;
   const outcome = delivery?.outcome;
   const text = request.status === "waiting_telegram"
@@ -33,31 +36,27 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
   return (
     <div className="space-y-3 text-13 text-muted-foreground">
       <p role="status" aria-live="polite">{text}{reason ? ` ${reason}` : ""}</p>
-      {request.can_open_creation_form && !recoveryUnexpired && <p role="status">This setup expired. Refresh its progress before continuing.</p>}
-      {request.status === "waiting_bot" && <p>Waiting for a verified bot creation from the Telegram account that opened this setup.</p>}
+      {request.can_open_creation_form && !recoveryUnexpired && <p role="status">{translateUi("This setup expired. Refresh its progress before continuing.")}</p>}
+      {request.status === "waiting_bot" && <p>{translateUi("Waiting for a verified bot creation from the Telegram account that opened this setup.")}</p>}
       {request.can_open_creation_form && recoveryUnexpired && request.status === "waiting_bot" && (
         <>
-          <p>Button missing? Open the same creation form for <strong className="break-words">{request.label}</strong>. Use the same Telegram account and check the NyxID destination shown in the setup chat.</p>
+          <p>{translateUi("Button missing? Open the same creation form for ")}<strong className="break-words">{request.label}</strong>{translateUi(". Use the same Telegram account and check the NyxID destination shown in the setup chat.")}</p>
           {request.username_suggestions && (
-            <div className="space-y-2 type-secondary" aria-label="Username suggestions">
-              <p>Suggested username: <code>{request.username_suggestions[0]}</code></p>
-              <p>Use 5–32 letters, digits or underscores, start with a letter, and end in bot. Usernames must be unique. Telegram checks availability when you create the bot; these suggestions have not been checked.</p>
+            <div className="space-y-2 type-secondary" aria-label={translateUi("Username suggestions")}>
+              <p>{translateUi("Suggested username: ")}<code>{request.username_suggestions[0]}</code></p>
+              <p>{translateUi("Use 5–32 letters, digits or underscores, start with a letter, and end in bot. Usernames must be unique. Telegram checks availability when you create the bot; these suggestions have not been checked.")}</p>
               <div className="flex flex-wrap gap-2">
                 {request.username_suggestions.slice(1).map((username, index) => (
-                  <Button key={username} type="button" variant="outline" disabled={pending} onClick={() => onRecover(index + 1)}>
-                    Use {username}
+                  <Button key={username} type="button" variant="outline" disabled={pending} onClick={() => onRecover(index + 1)}>{translateUi("Use ")}{username}
                   </Button>
                 ))}
-                <Button type="button" variant="outline" disabled={pending} isLoading={regenerating} onClick={onRegenerate}>
-                  Regenerate username
-                </Button>
+                <Button type="button" variant="outline" disabled={pending} isLoading={regenerating} onClick={onRegenerate}>{translateUi("Regenerate username")}</Button>
               </div>
             </div>
           )}
-          <Button type="button" variant="outline" disabled={pending} isLoading={recovering} onClick={() => onRecover(0)}>
-            Open creation form <ExternalLink className="size-3" aria-hidden="true" />
+          <Button type="button" variant="outline" disabled={pending} isLoading={recovering} onClick={() => onRecover(0)}>{translateUi("Open creation form ")}<ExternalLink className="size-3" aria-hidden="true" />
           </Button>
-          {recoveryUrl && <Button asChild variant="outline"><a className="ph-no-capture" href={recoveryUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open Telegram creation form</a></Button>}
+          {recoveryUrl && <Button asChild variant="outline"><a className="ph-no-capture" href={recoveryUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{translateUi("Open Telegram creation form")}</a></Button>}
         </>
       )}
     </div>

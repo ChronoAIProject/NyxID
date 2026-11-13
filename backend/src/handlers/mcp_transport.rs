@@ -1,3 +1,7 @@
+#[path = "mcp_lark_diagnostics.rs"]
+mod lark_diagnostics;
+#[path = "mcp_tool_results.rs"]
+mod retained_results;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -6,7 +10,7 @@ pub(crate) mod async_operations;
 
 use axum::body::Body;
 use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header::CACHE_CONTROL};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use mongodb::bson::doc;
@@ -79,6 +83,7 @@ enum ToolOutcome {
     Completed,
     Error,
     PolicyRefusal,
+    DecisionRequired,
 }
 
 #[derive(Clone)]
@@ -107,7 +112,7 @@ fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversa
         || (response.status().is_success()
             && matches!(
                 response.extensions().get::<ToolOutcome>(),
-                Some(ToolOutcome::PolicyRefusal)
+                Some(ToolOutcome::PolicyRefusal | ToolOutcome::DecisionRequired)
             ))
     {
         return None;
@@ -280,6 +285,42 @@ fn content_result(
         id,
         serde_json::json!({ "content": content, "isError": is_error }),
     )
+}
+
+fn diagnosed_tool_result(
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> (serde_json::Value, ToolResultDigest) {
+    let mut result = serde_json::json!({"content":content,"isError":is_error});
+    // Progress tracks the business result, never random diagnostic metadata.
+    let digest = result_digest(&result);
+    if is_error && let Some(diagnostic) = diagnostic {
+        result["content"]
+            .as_array_mut()
+            .expect("tool content array")
+            .push(diagnostic.content());
+        result["structuredContent"] = serde_json::json!({"nyxid_invocation_diagnostic":diagnostic});
+    }
+    (result, digest)
+}
+
+fn content_result_with_diagnostic(
+    id: Option<serde_json::Value>,
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> Response {
+    if !is_error || diagnostic.is_none() {
+        return content_result(id, content, is_error);
+    }
+    let (result, digest) = diagnosed_tool_result(content, is_error, diagnostic);
+    let mut response = rpc_success(id, result);
+    response.extensions_mut().insert(digest);
+    response
+        .headers_mut()
+        .append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn classify_service_tool_response(
@@ -567,13 +608,21 @@ fn content_result_with_notifications(
     is_error: bool,
     notifications: Vec<serde_json::Value>,
 ) -> Response {
+    content_result_with_notifications_and_diagnostic(id, content, is_error, notifications, None)
+}
+
+fn content_result_with_notifications_and_diagnostic(
+    id: Option<serde_json::Value>,
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    notifications: Vec<serde_json::Value>,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> Response {
+    let (result, digest) = diagnosed_tool_result(content, is_error, diagnostic);
     let result = JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
         id,
-        result: Some(serde_json::json!({
-            "content": content,
-            "isError": is_error,
-        })),
+        result: Some(result),
         error: None,
     };
 
@@ -589,8 +638,12 @@ fn content_result_with_notifications(
             .data(serde_json::to_string(&notification).unwrap_or_default())));
     }
 
-    let digest = result_digest(result.result.as_ref().expect("tool result"));
     let mut response = Sse::new(tokio_stream::iter(events)).into_response();
+    if diagnostic.is_some() {
+        response
+            .headers_mut()
+            .append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     response.extensions_mut().insert(digest);
     response.extensions_mut().insert(if is_error {
         ToolOutcome::Error
@@ -701,6 +754,7 @@ struct McpAuthContext {
     /// No source lookup occurs for unrelated tools; Machine admission is live.
     machine_source: Option<crate::services::machine_external_grant_service::VerifiedExternalSource>,
     caller_token: Option<proxy_service::CallerToken>,
+    sender_constrained: bool,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
     parent_session_id: Option<String>,
@@ -766,6 +820,7 @@ impl McpAuthContext {
             oauth_lineage: None,
             machine_source: None,
             caller_token: None,
+            sender_constrained: false,
             chat: None,
             account_acknowledged: false,
             parent_session_id: None,
@@ -1057,6 +1112,7 @@ async fn authenticate_mcp_or_public(
                         None
                     },
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
+                    sender_constrained: false,
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
                     chat,
@@ -1249,6 +1305,7 @@ async fn authenticate_mcp_or_public(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method.clone());
+                ctx.sender_constrained = claims.cnf.is_some();
                 if auth_method == AuthMethod::AccessToken && claims.client_id.is_none() {
                     ctx.parent_session_id = claims.sid.clone();
                 }
@@ -1691,7 +1748,6 @@ pub async fn mcp_post(
         context.capture_idempotency(&headers);
         context.bind_cancellation(cancellation);
     }
-
     // Per-agent rate limit runs after auth, before any work. For OAuth/session
     // callers it is a no-op (no api_key_id / rps). This mirrors the REST proxy.
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
@@ -2336,6 +2392,9 @@ async fn handle_tools_list(
         .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
     {
         tool_defs.push(crate::services::assistant_resource_service::definition());
+        if retained_results::chat(auth).is_some() {
+            tool_defs.push(crate::services::assistant_tool_result_service::definition());
+        }
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -2377,6 +2436,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
             let mut definitions = mcp_service::generate_tool_definitions(&[], None);
             definitions.extend(crate::services::machine_tools::definitions());
             definitions.push(crate::services::assistant_resource_service::definition());
+            definitions.push(crate::services::assistant_tool_result_service::definition());
             definitions.push(crate::services::assistant_upload_service::definition());
             definitions.push(crate::services::assistant_upload_service::list_definition());
             definitions
@@ -2583,13 +2643,22 @@ async fn handle_tools_call(
         GENERATED_ARTIFACTS_ENABLED
             .scope(
                 cell,
-                handle_tools_call_inner(
+                lark_diagnostics::call(
                     state,
                     auth,
-                    session_id,
                     request,
-                    client_accepts_sse,
-                    billing_egress_permit,
+                    // Keep the large dispatch state out of the diagnostic and
+                    // task-local wrappers, including for ordinary non-Lark tools.
+                    box_tool_future(|| {
+                        handle_tools_call_inner(
+                            state,
+                            auth,
+                            session_id,
+                            request,
+                            client_accepts_sse,
+                            billing_egress_permit,
+                        )
+                    }),
                 ),
             )
             .await
@@ -2653,6 +2722,13 @@ async fn handle_tools_call_inner(
             )
             .await
     {
+        crate::services::lark_attachment_tool::diagnostics::failure(
+            crate::services::lark_attachment_tool::diagnostics::Reason::Eligibility(
+                crate::services::lark_attachment_tool::eligibility::Reason::NotLive,
+            ),
+            None,
+            None,
+        );
         return app_error_to_rpc(request.id.clone(), &error);
     }
     // A retried turn may not repeat a call its failed turn completed. Checked
@@ -2736,25 +2812,36 @@ async fn handle_tools_call_inner(
     };
     // Keep native dispatch out of the progress-tracking wrapper's frame.
     // Universal calls add another dispatch layer before transactional cards.
-    let response = crate::services::machine_activity_service::ACTIVITY_ID
+    let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut response = crate::services::assistant_activity_decision::DECISION_PENDING
         .scope(
-            activity.as_ref().map(|(_, id)| id.clone()),
-            Box::pin(dispatch_tools_call(
-                state,
-                auth,
-                session_id,
-                request,
-                client_accepts_sse,
-                billing_egress_permit,
-            )),
+            pending.clone(),
+            crate::services::machine_activity_service::ACTIVITY_ID.scope(
+                activity.as_ref().map(|(_, id)| id.clone()),
+                Box::pin(dispatch_tools_call(
+                    state,
+                    auth,
+                    session_id,
+                    request,
+                    client_accepts_sse,
+                    billing_egress_permit,
+                )),
+            ),
         )
         .await;
+    if pending.load(std::sync::atomic::Ordering::Relaxed) && !tool_succeeded(&response) {
+        response
+            .extensions_mut()
+            .insert(ToolOutcome::DecisionRequired);
+    }
     if let (Some(chat), Some(window), Some(params), Some(digest)) = (
         auth.chat.as_ref(),
         window.as_ref(),
         request.params.as_ref(),
         response.extensions().get::<ToolResultDigest>(),
     ) {
+        let normalized = retained_results::progress_params(params);
+        let params = &normalized;
         let call = crate::services::assistant_continuation::call_digest(
             params
                 .get("name")
@@ -2776,6 +2863,7 @@ async fn handle_tools_call_inner(
             tracing::warn!(conversation_id = %chat.conversation_id, "Could not record tool progress digest");
         }
     }
+    lark_diagnostics::decorate_current(&mut response);
     if let Some((chat, id)) = activity {
         let failure = tool_failure(&response);
         let _ = crate::services::assistant_nyxagent::activity_finished_for_turn(
@@ -2829,6 +2917,7 @@ async fn dispatch_tools_call(
                 | "nyx__ssh_exec"
                 | "nyx__ssh_list_services"
                 | "nyx__resource_get"
+                | "nyxid__read_tool_result"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
@@ -2864,6 +2953,15 @@ async fn dispatch_tools_call(
         return refused;
     }
 
+    if tool_name == crate::services::assistant_tool_result_service::TOOL_NAME {
+        return Box::pin(retained_results::read(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
+        ))
+        .await;
+    }
     if tool_name.starts_with("nyxid__") {
         return Box::pin(handle_account_tool(
             state,
@@ -3317,7 +3415,15 @@ fn dispatch_service_tool<'a>(
         {
             Ok(catalog) => catalog,
             Err(e) => {
-                tracing::error!("Failed to load tools for execution: {e}");
+                if crate::services::lark_attachment_tool::diagnostics::active() {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                    tracing::error!(
+                        error_code = e.error_code(),
+                        "Attachment tool catalog unavailable"
+                    );
+                } else {
+                    tracing::error!("Failed to load tools for execution: {e}");
+                }
                 return tool_result(request.id.clone(), "Failed to load tools", true);
             }
         };
@@ -3366,6 +3472,10 @@ fn dispatch_service_tool<'a>(
                 );
             }
         };
+
+        if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+            crate::services::lark_attachment_tool::diagnostics::bind(&service.service_id);
+        }
 
         if let Some((row, _)) = &resource
             && !crate::services::assistant_resource_service::matches_endpoint(
@@ -3423,6 +3533,9 @@ fn dispatch_service_tool<'a>(
                     .and_then(|_| arguments["acknowledgement_id"].as_str()),
             ),
             Err(e) => {
+                if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                }
                 return tool_result(
                     request.id.clone(),
                     &format!("Invalid tool arguments: {e}"),
@@ -3564,7 +3677,7 @@ fn dispatch_service_tool<'a>(
         )
         .await;
 
-        let execution = mcp_service::execute_tool_response(
+        let execution = mcp_service::execute_tool_response_with_outcome(
             &state.http_client,
             &state.db,
             &state.encryption_keys,
@@ -3585,15 +3698,13 @@ fn dispatch_service_tool<'a>(
         )
         .await;
         if let Some(watch) = &async_watch
-            && let Err(error) = crate::services::async_service_operation::submitted(
-                &state.db,
-                watch,
-                execution.as_ref().ok(),
-            )
-            .await
+            && let Err(error) =
+                crate::services::async_service_operation::submitted(state, watch, &execution).await
         {
             tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
         }
+        let execution = execution.and_then(mcp_service::McpToolExecutionOutcome::into_response);
+        let diagnostic = service_failure_handle(state, auth, service, &execution).await;
         let mut response = match execution {
             Ok(r) => r,
             Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
@@ -3606,11 +3717,19 @@ fn dispatch_service_tool<'a>(
                 return concurrency_limited_response(request.id.clone());
             }
             Err(e) => {
-                tracing::warn!("Tool execution failed for {tool_name}: {e}");
-                return tool_result(
+                if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                    tracing::warn!(
+                        error_code = e.error_code(),
+                        "Attachment tool execution failed"
+                    );
+                } else {
+                    tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                }
+                return tool_failure_with_diagnostic(
                     request.id.clone(),
                     &format!("Tool execution failed: {e}"),
-                    true,
+                    diagnostic.as_ref(),
                 );
             }
         };
@@ -3619,21 +3738,25 @@ fn dispatch_service_tool<'a>(
             response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
         }
         // Audit log -- attribute the API key when the caller is an agent.
-        audit_service::log_async(
-            state.db.clone(),
-            Some(auth.user_id.clone()),
-            "mcp_tool_call".to_string(),
-            Some(serde_json::json!({
-                "tool": tool_name,
-                "service_id": service.service_id,
-                "response_status": response.status,
-                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-            })),
-            auth.ip_address.clone(),
-            auth.user_agent.clone(),
-            auth.api_key_id.clone(),
-            auth.api_key_name.clone(),
-        );
+        if !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+            || !crate::services::lark_attachment_tool::diagnostics::active()
+        {
+            audit_service::log_async(
+                state.db.clone(),
+                Some(auth.user_id.clone()),
+                "mcp_tool_call".to_string(),
+                Some(serde_json::json!({
+                    "tool": tool_name,
+                    "service_id": service.service_id,
+                    "response_status": response.status,
+                    "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+                })),
+                auth.ip_address.clone(),
+                auth.user_agent.clone(),
+                auth.api_key_id.clone(),
+                auth.api_key_name.clone(),
+            );
+        }
 
         let concurrency = response.concurrency.take();
         let is_policy_refusal = response.is_policy_refusal();
@@ -3691,13 +3814,84 @@ fn dispatch_service_tool<'a>(
             )
             .await;
         }
-        let mut result = content_result(request.id.clone(), content, is_error);
+        let (content, business_digest) =
+            box_tool_future(|| retained_results::project(state, auth, content, is_error)).await;
+        let mut result = content_result_with_diagnostic(
+            request.id.clone(),
+            content,
+            is_error,
+            diagnostic.as_ref(),
+        );
+        if let Some(digest) = business_digest {
+            result.extensions_mut().insert(digest);
+        }
         classify_service_tool_response(&mut result, is_policy_refusal, failure);
         match concurrency {
             Some(lease) => lease.hold_response(result),
             None => result,
         }
     })
+}
+
+async fn service_failure_handle(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    execution: &crate::errors::AppResult<mcp_service::ToolResponse>,
+) -> Option<crate::services::invocation_diagnostic_service::IssuedHandle> {
+    use crate::services::invocation_diagnostic_service as diagnostics;
+    if !state.config.invocation_diagnostics_enabled
+        || !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref())
+        || auth.chat.is_some()
+        || auth.sender_constrained
+    {
+        return None;
+    }
+    let eligible = match execution {
+        Ok(response) => (500..600).contains(&response.status) && !response.is_policy_refusal(),
+        Err(error) => diagnostics::eligible_error(error),
+    };
+    if !eligible {
+        return None;
+    }
+    let mcp_service::McpToolSource::UserManaged {
+        user_service_id, ..
+    } = &service.source
+    else {
+        return None;
+    };
+    match diagnostics::issue(
+        &state.db,
+        &state.config,
+        &auth.user_id,
+        &auth.auth_method,
+        auth.api_key_id.as_deref(),
+        auth.acting_client_id
+            .as_deref()
+            .or(auth.oauth_client_id.as_deref()),
+        user_service_id,
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(crate::errors::AppError::MonitoringNotConfigured) => None,
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Invocation diagnostic handle was not issued"
+            );
+            None
+        }
+    }
+}
+
+fn tool_failure_with_diagnostic(
+    id: Option<serde_json::Value>,
+    original_error: &str,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> Response {
+    let content = vec![serde_json::json!({"type":"text","text":original_error})];
+    content_result_with_diagnostic(id, content, true, diagnostic)
 }
 
 /// Build the execution context passed to `mcp_service::execute_tool` from
@@ -3928,6 +4122,16 @@ async fn authorize_mcp_operation(
         )
     })?;
 
+    if let Some(chat) = auth.chat.as_ref() {
+        crate::services::assistant_activity_decision::approval(
+            &state.db,
+            chat,
+            &approval_request.id,
+            false,
+        )
+        .await
+        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
+    }
     let req_id = approval_request.id.clone();
     approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
         .await
@@ -3937,6 +4141,14 @@ async fn authorize_mcp_operation(
             tool_result(request_id.clone(), &outcome.to_string(), true)
         })?;
     if let Some(chat) = auth.chat.as_ref() {
+        crate::services::assistant_activity_decision::approval(
+            &state.db,
+            chat,
+            &approval_request.id,
+            true,
+        )
+        .await
+        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
             .await
             .map_err(|_| {
@@ -4367,6 +4579,9 @@ fn guest_turn(auth: &McpAuthContext) -> bool {
 /// team, memory, connection, SSH and Oracle tools act for the owner and are
 /// refused.
 fn guest_tool_allowed(tool_name: &str) -> bool {
+    if tool_name == crate::services::assistant_tool_result_service::TOOL_NAME {
+        return true;
+    }
     if tool_name.starts_with("nyxid__") {
         return false;
     }
@@ -4520,6 +4735,7 @@ async fn handle_account_tool(
         keys: &state.encryption_keys,
         http: &state.http_client,
         config: &state.config,
+        jwt_keys: &state.jwt_keys,
         token_exchange_cache: &state.token_exchange_cache,
         node_manager: &state.node_ws_manager,
     };
@@ -4944,6 +5160,9 @@ async fn handle_meta_call_tool(
         ))
         .await;
     }
+    if tool_name == crate::services::assistant_tool_result_service::TOOL_NAME {
+        return Box::pin(retained_results::read(state, auth, &inner_args, request_id)).await;
+    }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
     }
@@ -4985,7 +5204,15 @@ async fn handle_meta_call_tool(
     {
         Ok(catalog) => catalog,
         Err(e) => {
-            tracing::error!("Failed to load tools for call_tool: {e}");
+            if crate::services::lark_attachment_tool::diagnostics::active() {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+                tracing::error!(
+                    error_code = e.error_code(),
+                    "Attachment tool catalog unavailable"
+                );
+            } else {
+                tracing::error!("Failed to load tools for call_tool: {e}");
+            }
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
@@ -5036,6 +5263,10 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+        crate::services::lark_attachment_tool::diagnostics::bind(&service.service_id);
+    }
+
     if result_query.is_some()
         && (endpoint.method != "GET"
             || endpoint.path != "/v1/blocks/{block_id}/children"
@@ -5071,6 +5302,9 @@ async fn handle_meta_call_tool(
                 .and_then(|_| inner_args["acknowledgement_id"].as_str()),
         ),
         Err(e) => {
+            if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+            }
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
@@ -5225,7 +5459,7 @@ async fn handle_meta_call_tool(
     )
     .await;
 
-    let execution = mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response_with_outcome(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -5246,15 +5480,13 @@ async fn handle_meta_call_tool(
     )
     .await;
     if let Some(watch) = &async_watch
-        && let Err(error) = crate::services::async_service_operation::submitted(
-            &state.db,
-            watch,
-            execution.as_ref().ok(),
-        )
-        .await
+        && let Err(error) =
+            crate::services::async_service_operation::submitted(state, watch, &execution).await
     {
         tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
     }
+    let execution = execution.and_then(mcp_service::McpToolExecutionOutcome::into_response);
+    let diagnostic = service_failure_handle(state, auth, service, &execution).await;
     let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
@@ -5267,8 +5499,20 @@ async fn handle_meta_call_tool(
             return concurrency_limited_response(request_id);
         }
         Err(e) => {
-            tracing::warn!("Tool execution failed for {tool_name}: {e}");
-            return tool_result(request_id, &format!("Tool execution failed: {e}"), true);
+            if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+                tracing::warn!(
+                    error_code = e.error_code(),
+                    "Attachment tool execution failed"
+                );
+            } else {
+                tracing::warn!("Tool execution failed for {tool_name}: {e}");
+            }
+            return tool_failure_with_diagnostic(
+                request_id,
+                &format!("Tool execution failed: {e}"),
+                diagnostic.as_ref(),
+            );
         }
     };
 
@@ -5276,22 +5520,26 @@ async fn handle_meta_call_tool(
         response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
     }
     // Audit log -- attribute the API key when the caller is an agent.
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth.user_id.clone()),
-        "mcp_tool_call".to_string(),
-        Some(serde_json::json!({
-            "tool": tool_name,
-            "service_id": service.service_id,
-            "response_status": response.status,
-            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-            "via": "nyx__call_tool",
-        })),
-        auth.ip_address.clone(),
-        auth.user_agent.clone(),
-        auth.api_key_id.clone(),
-        auth.api_key_name.clone(),
-    );
+    if !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        || !crate::services::lark_attachment_tool::diagnostics::active()
+    {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(auth.user_id.clone()),
+            "mcp_tool_call".to_string(),
+            Some(serde_json::json!({
+                "tool": tool_name,
+                "service_id": service.service_id,
+                "response_status": response.status,
+                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+                "via": "nyx__call_tool",
+            })),
+            auth.ip_address.clone(),
+            auth.user_agent.clone(),
+            auth.api_key_id.clone(),
+            auth.api_key_name.clone(),
+        );
+    }
 
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
@@ -5316,9 +5564,11 @@ async fn handle_meta_call_tool(
         .await;
     }
 
+    let (content, business_digest) =
+        box_tool_future(|| retained_results::project(state, auth, content, is_error)).await;
     // Embed tools/list_changed inline for SSE-capable clients
     let mut result = if changed && client_accepts_sse {
-        content_result_with_notifications(
+        content_result_with_notifications_and_diagnostic(
             request_id,
             content,
             is_error,
@@ -5326,10 +5576,14 @@ async fn handle_meta_call_tool(
                 "jsonrpc": JSONRPC_VERSION,
                 "method": "notifications/tools/list_changed",
             })],
+            diagnostic.as_ref(),
         )
     } else {
-        content_result(request_id, content, is_error)
+        content_result_with_diagnostic(request_id, content, is_error, diagnostic.as_ref())
     };
+    if let Some(digest) = business_digest {
+        result.extensions_mut().insert(digest);
+    }
     classify_service_tool_response(&mut result, is_policy_refusal, failure);
     match concurrency {
         Some(lease) => lease.hold_response(result),
@@ -5476,6 +5730,9 @@ async fn handle_meta_search(
             .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
         {
             candidates.push(crate::services::assistant_resource_service::definition());
+            if retained_results::chat(auth).is_some() {
+                candidates.push(crate::services::assistant_tool_result_service::definition());
+            }
         }
     }
     let ranked_candidates = if exact_service_id_query {
@@ -5542,6 +5799,21 @@ async fn handle_meta_search(
     });
     if auth.chat.is_some() {
         response_json["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
+    }
+
+    if crate::services::lark_wiki::relevant_query(query)
+        && let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest)
+        && let Ok(Some(guidance)) = crate::services::lark_wiki::discovery(
+            &state.db,
+            &services,
+            chat,
+            &auth.allowed_service_ids,
+            &auth.allowed_platform_service_ids,
+            &state.config.frontend_url,
+        )
+        .await
+    {
+        response_json["lark_setup"] = guidance;
     }
 
     let text = if auth.chat.is_some() {
@@ -6110,6 +6382,15 @@ async fn handle_meta_connect(
                 "connected_at": result.get("connected_at").and_then(|v| v.as_str()).unwrap_or(""),
                 "note": "Service tools are now available. Your tool list has been updated.",
             });
+            if let Some(verification) = result
+                .get("credential_verification")
+                .filter(|v| !v.is_null())
+            {
+                response_json["credential_verification"] = verification.clone();
+                response_json["note"] = serde_json::json!(
+                    "Credential saved, not verified. Tools are listed, but provider authentication has not been checked."
+                );
+            }
             if let Some(existing) = &existing {
                 existing.attach(&mut response_json);
                 for field in ["service_id", "service_slug"] {
@@ -7442,6 +7723,7 @@ mod tests {
             oauth_lineage: None,
             machine_source: None,
             caller_token: None,
+            sender_constrained: false,
             chat: None,
             account_acknowledged: false,
             parent_session_id: None,
@@ -12068,6 +12350,10 @@ mod broad_enrollment_tests {
 }
 
 #[cfg(test)]
+#[path = "mcp_invocation_diagnostic_tests.rs"]
+mod invocation_diagnostic_tests;
+
+#[cfg(test)]
 #[path = "memory_write_tests.rs"]
 mod memory_write_tests;
 
@@ -12142,5 +12428,76 @@ mod turn_trace_parity_tests {
                 .any(|key| key.starts_with("update:") || key.starts_with("findAndModify:"))
         );
         eprintln!("turn trace MCP command parity: {:?}", measured[0]);
+    }
+}
+
+#[cfg(test)]
+#[path = "mcp_lark_wiki_tests.rs"]
+mod lark_wiki_tests;
+
+#[cfg(test)]
+mod decision_result_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn trusted_decision_outcome_leaves_result_bytes_and_loop_guard_digest_unchanged() {
+        let result =
+            json!({"isError":true,"content":[{"type":"text","text":"acknowledgement_required"}]});
+        let original = rpc_success(None, result.clone());
+        let mut gated = rpc_success(None, result);
+        let digest = gated
+            .extensions()
+            .get::<ToolResultDigest>()
+            .unwrap()
+            .0
+            .clone();
+        gated.extensions_mut().insert(ToolOutcome::DecisionRequired);
+        assert!(!tool_succeeded(&gated));
+        assert!(tool_failure(&gated).is_none());
+        assert_eq!(
+            original.extensions().get::<ToolResultDigest>().unwrap().0,
+            digest
+        );
+        assert_eq!(
+            gated.extensions().get::<ToolResultDigest>().unwrap().0,
+            digest
+        );
+        assert_eq!(
+            axum::body::to_bytes(original.into_body(), 4096)
+                .await
+                .unwrap(),
+            axum::body::to_bytes(gated.into_body(), 4096).await.unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn tools_call_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            &'static McpAuthContext,
+            Option<&'static str>,
+            &'static JsonRpcRequest,
+            bool,
+            crate::services::billing::route_inventory::BillingEgressPermit,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn diagnostic_boundary_keeps_tools_call_future_small() {
+        // Measure the actual shared entry point without constructing a fixture
+        // or polling it. Unrelated native tools must not embed Lark's child state.
+        let size = tools_call_future_size(handle_tools_call);
+        eprintln!("shared tools/call future: {size} bytes");
+        assert!(
+            size < 64 * 1024,
+            "shared tools/call future grew to {size} bytes"
+        );
     }
 }

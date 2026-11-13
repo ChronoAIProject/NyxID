@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Pressable, StyleSheet, View } from "react-native";
 import { Minus, Plus } from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -23,18 +24,23 @@ type Key = keyof ChatLayout;
 const COPY: Record<Key, { step: number; footer: string }> = {
   columnWidth: {
     step: 40,
-    footer: "How wide conversations can grow on large screens. Saved on this device.",
+    footer:
+      "How wide conversations can grow on large screens. Saved on this device.",
   },
   composerMaxHeight: {
     step: 20,
-    footer: "The composer grows with your draft up to this height. Saved on this device.",
+    footer:
+      "The composer grows with your draft up to this height. Saved on this device.",
   },
 };
 
 export { chatLayoutTitle };
 
 /** Settings › Display › one chat layout value with a live preview. */
-export function ChatLayoutEditScreen({ route }: SheetScreenProps<"ChatLayoutEdit">) {
+export function ChatLayoutEditScreen({
+  route,
+}: SheetScreenProps<"ChatLayoutEdit">) {
+  const { t } = useAppLanguage();
   const key = route.params.key;
   const copy = { ...COPY[key], title: chatLayoutTitle(key) };
   const { colors } = useTheme();
@@ -47,7 +53,15 @@ export function ChatLayoutEditScreen({ route }: SheetScreenProps<"ChatLayoutEdit
     return (
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${direction < 0 ? "Decrease" : "Increase"} ${copy.title.toLowerCase()}`}
+        accessibilityLabel={
+          direction < 0
+            ? t("Decrease {{setting}}", {
+                setting: t(copy.title).toLowerCase(),
+              })
+            : t("Increase {{setting}}", {
+                setting: t(copy.title).toLowerCase(),
+              })
+        }
         accessibilityState={{ disabled }}
         disabled={disabled}
         onPress={() => update({ [key]: value + direction * copy.step })}
@@ -69,7 +83,7 @@ export function ChatLayoutEditScreen({ route }: SheetScreenProps<"ChatLayoutEdit
         composerHeight={key === "composerMaxHeight" ? value : undefined}
         columnRatio={key === "columnWidth" ? value / max : undefined}
       />
-      <SettingsGroup inset={false} footer={copy.footer}>
+      <SettingsGroup inset={false} footer={t(copy.footer)}>
         <View style={styles.stepper}>
           {step(-1)}
           <View style={styles.readout}>
@@ -88,7 +102,9 @@ export function ChatLayoutEditScreen({ route }: SheetScreenProps<"ChatLayoutEdit
         {value !== defaultChatLayout[key] ? (
           <SettingsRow
             centered
-            label={`Reset to ${defaultChatLayout[key]} pt`}
+            label={t("Reset to {{value}} pt", {
+              value: defaultChatLayout[key],
+            })}
             onPress={() => update({ [key]: defaultChatLayout[key] })}
           />
         ) : null}

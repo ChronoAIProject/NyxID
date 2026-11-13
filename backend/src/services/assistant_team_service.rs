@@ -799,6 +799,7 @@ async fn create_thread_with_kind(
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        title_language: None,
         automation_v2: false,
         artifact_head: None,
         collaboration: collaboration.clone(),
@@ -1005,6 +1006,31 @@ pub async fn home_thread_for(
 // Grants
 // ---------------------------------------------------------------------------
 
+/// One authorization inventory for grant editors and all grant writers. Tool
+/// publication affects discovery, not whether an HTTP connection can be granted.
+pub async fn grant_catalog(
+    db: &Database,
+    nodes: &NodeWsManager,
+    actor: &str,
+    scope: mcp_service::ServiceScope<'_>,
+    targets: &[String],
+) -> AppResult<Vec<mcp_service::McpToolService>> {
+    let catalog = mcp_service::load_authorization_catalog(db, nodes, actor, scope, targets).await?;
+    Ok(catalog
+        .services
+        .into_iter()
+        .chain(catalog.unpublished_services)
+        .filter(|service| {
+            !matches!(service.source, mcp_service::McpToolSource::Internal)
+                && !is_engine(&service.service_slug)
+        })
+        .collect())
+}
+
+fn is_engine(target: &str) -> bool {
+    target.eq_ignore_ascii_case(engine::SERVICE_SLUG) || target.eq_ignore_ascii_case("nyxagent")
+}
+
 /// Services resolved from slugs or IDs exactly as MCP enforces them: user
 /// services by `UserService` ID, platform services by catalog ID.
 #[derive(Clone, Debug, Default)]
@@ -1067,9 +1093,7 @@ pub async fn resolve_each_target(
         Some(access) => mcp_service::ServiceScope::Organization { access },
         None => mcp_service::ServiceScope::Preferring(&trimmed_targets),
     };
-    let catalog =
-        mcp_service::load_authorization_catalog(db, node_manager, actor, scope, &trimmed_targets)
-            .await?;
+    let catalog = grant_catalog(db, node_manager, actor, scope, &trimmed_targets).await?;
     for target in &trimmed_targets {
         let target = target.as_str();
         let refuse = |reason: String| Refused {
@@ -1078,9 +1102,7 @@ pub async fn resolve_each_target(
         };
         // Every agent runs on NyxAgent and thinks with NyxID's model
         // services; the engine itself is not a service an agent calls.
-        if target.eq_ignore_ascii_case(crate::services::assistant_nyxagent::SERVICE_SLUG)
-            || target.eq_ignore_ascii_case("nyxagent")
-        {
+        if is_engine(target) {
             refused.push(refuse(
                 "NyxAgent is the assistant engine every agent already runs on; it is not \
                 granted as a service"
@@ -1106,7 +1128,6 @@ pub async fn resolve_each_target(
             continue;
         }
         let Some(service) = catalog
-            .services
             .iter()
             .find(|service| service.service_slug == target || service.service_id == target)
         else {
@@ -2023,6 +2044,7 @@ pub(crate) async fn sync_thread_authority(
                 .as_ref()
                 .and_then(|c| c.org_specialist.as_ref())
                 .map(|b| &b.guests);
+            let ready = super::org_channel_service::guest_grants_ready(db).await?;
             let grants = AgentGrants {
                 service_ids: agent
                     .grants
@@ -2030,13 +2052,7 @@ pub(crate) async fn sync_thread_authority(
                     .iter()
                     .filter(|id| {
                         policy.is_some_and(|p| {
-                            p.service_ids.contains(id)
-                                && p.service_authority.get(*id).is_some_and(|digest| {
-                                    *digest
-                                        == super::org_channel_service::management::service_digest(
-                                            agent, id,
-                                        )
-                                })
+                            super::org_channel_service::guest_service_selected(agent, p, ready, id)
                         })
                     })
                     .cloned()
@@ -2343,6 +2359,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                 db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
                     .await?;
+                db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+                    .delete_many(doc! {"source.agent_id": &agent.id})
+                    .session(&mut *session)
+                    .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
                     db, &mut agent, session,
                 ))
@@ -2411,6 +2431,13 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                         )
                         .session(&mut *session)
                         .await?;
+                    super::assistant_notification_service::resolve_cards_in_session(
+                        db,
+                        session,
+                        super::assistant_notification_service::CardScope::Conversation(&row.id),
+                        "superseded",
+                    )
+                    .await?;
                 }
                 Ok((agent, children))
             }
@@ -2467,6 +2494,9 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     }
     // Clean derived authoring claims before the parent so a failed cleanup
     // remains retryable through the existing destroyed-agent purge endpoint.
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.agent_id": &agent.id})
+        .await?;
     db.collection::<bson::Document>(
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     )
@@ -3392,8 +3422,7 @@ pub async fn tool_delegation_summaries(
 /// Idle threads with queued events whose wake-up was deferred (full pool or
 /// a replica restart), oldest first. Bounded; loop guards still apply at wake time.
 pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<AssistantConversation>> {
-    // NyxBot threads parked at the streak cap wait for a user message; they
-    // never crowd out threads that can still wake.
+    // Provider approvals obey the same autonomous loop guard as other events.
     let mut filter = doc! {
         "collaboration": null,
         "pending_events.created_at": {"$exists": true},

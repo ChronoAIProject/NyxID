@@ -835,6 +835,10 @@ including skill, version, and tag deletion.
 
 Use direct user-type grants for an SA. Ornn's organization-grant resolution
 requires a NyxID organization lookup that Curation tokens cannot perform.
+The organization-specialist skill reader has a separate, purpose-limited
+membership callback for a live person, agent and owning organization. It is
+never issued to CatalogEditor/Curation service accounts and does not change
+this SA grant requirement.
 Ownership transfer requires a known Ornn recipient and leaves the former owner
 with read access; transferring away a skill ends the SA's creator edit rights.
 The service-binding route allows an owner to untie a skill with

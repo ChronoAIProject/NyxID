@@ -48,7 +48,7 @@ function load() {
       TOUCH_TARGET: 44,
     },
     "./ScrollEdgeFades": { PageScrollView: "ScrollView" },
-    "./AndroidKeyboardAvoidingView": { AndroidKeyboardAvoidingView: "AKAV" },
+    "./KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
   });
   const ui = h.load(
     fileURLToPath(new URL("./WorkspaceUI.tsx", import.meta.url)),

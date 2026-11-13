@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useFieldArray, useFormContext } from "react-hook-form";
 import type { AllocationForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -19,6 +21,7 @@ export function ServiceLimitsEditor({
   readonly services: readonly DownstreamService[];
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const form = useFormContext<AllocationForm>();
   const rules = useFieldArray({
     control: form.control,
@@ -26,15 +29,8 @@ export function ServiceLimitsEditor({
   });
   return (
     <details className="rounded-lg border border-border p-3" open>
-      <summary className="cursor-pointer type-card-title">
-        Service limits (optional)
-      </summary>
-      <p className="my-3 text-14 text-muted-foreground">
-        Limits share the allocation total. A group of services shares one
-        ceiling. They do not reserve separate funds. Other eligible services
-        remain unrestricted, and other allocations or purchased credits may pay
-        any excess.
-      </p>
+      <summary className="cursor-pointer type-card-title">{translateUi("Service limits (optional)")}</summary>
+      <p className="my-3 text-14 text-muted-foreground">{translateUi("Limits share the allocation total. A group of services shares one ceiling. They do not reserve separate funds. Other eligible services remain unrestricted, and other allocations or purchased credits may pay any excess.")}</p>
       <fieldset disabled={disabled} className="space-y-4">
         {rules.fields.map((rule, index) => (
           <div
@@ -46,7 +42,7 @@ export function ServiceLimitsEditor({
               name={`service_limits.${index}.label`}
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Group label {index + 1} (optional)</FormLabel>
+                  <FormLabel>{translateUi("Group label ")}{index + 1}{translateUi(" (optional)")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -59,7 +55,7 @@ export function ServiceLimitsEditor({
               name={`service_limits.${index}.service_refs`}
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Services sharing limit {index + 1}</FormLabel>
+                  <FormLabel>{translateUi("Services sharing limit ")}{index + 1}</FormLabel>
                   <FormControl>
                     <ServicePicker
                       services={services}
@@ -77,7 +73,7 @@ export function ServiceLimitsEditor({
               name={`service_limits.${index}.amount`}
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Credit ceiling {index + 1}</FormLabel>
+                  <FormLabel>{translateUi("Credit ceiling ")}{index + 1}</FormLabel>
                   <FormControl>
                     <Input inputMode="decimal" {...field} />
                   </FormControl>
@@ -90,8 +86,7 @@ export function ServiceLimitsEditor({
               variant="outline"
               size="sm"
               onClick={() => rules.remove(index)}
-            >
-              Remove limit {index + 1}
+            >{translateUi("Remove limit ")}{index + 1}
             </Button>
           </div>
         ))}
@@ -103,9 +98,7 @@ export function ServiceLimitsEditor({
           onClick={() =>
             rules.append({ label: "", service_refs: [], amount: "" })
           }
-        >
-          Add service limit
-        </Button>
+        >{translateUi("Add service limit")}</Button>
       </fieldset>
     </details>
   );

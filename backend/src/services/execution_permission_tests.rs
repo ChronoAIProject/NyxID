@@ -669,6 +669,7 @@ fn oauth_refresh_preserves_coverage_but_account_replacement_invalidates() {
     let service = crate::models::downstream_service::test_helpers::dummy_service();
     let mut resolution = UserServiceResolution {
         target: ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,

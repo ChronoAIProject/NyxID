@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -79,25 +81,22 @@ export function ManagerRuntimeSettings({
 }: {
   profile: PlatformProfile;
 }) {
+  useUiTranslation();
   const query = useManagerRuntime(profile.id);
   if (query.isPending)
     return (
-      <p role="status" className="text-14">
-        Loading bot access settings...
-      </p>
+      <p role="status" className="text-14">{translateUi("Loading bot access settings...")}</p>
     );
   if (query.error)
     return (
       <ErrorBanner
-        message="Public and personal bot access is unavailable. The server may not support this feature yet."
+        message={translateUi("Public and personal bot access is unavailable. The server may not support this feature yet.")}
         onRetry={() => void query.refetch()}
       />
     );
   if (!query.data.supported)
     return (
-      <p role="status" className="text-14 text-muted-foreground">
-        Public and personal bot access is not supported by this server.
-      </p>
+      <p role="status" className="text-14 text-muted-foreground">{translateUi("Public and personal bot access is not supported by this server.")}</p>
     );
   const runtime = query.data.runtime;
   return (
@@ -111,9 +110,7 @@ export function ManagerRuntimeSettings({
         variant="outline"
         onClick={() => void query.refetch()}
         disabled={query.isFetching}
-      >
-        Refresh status
-      </Button>
+      >{translateUi("Refresh status")}</Button>
     </div>
   );
 }
@@ -124,6 +121,7 @@ function BasicRuntimeForm({
   profile: PlatformProfile;
   value: ManagerRuntime;
 }) {
+  useUiTranslation();
   const runtime = value.runtime;
   const stopped = runtime?.emergency_stopped === true;
   const mutation = useManagerRuntimeAction(profile.id);
@@ -229,25 +227,23 @@ function BasicRuntimeForm({
         <Badge variant={active ? "success" : "warning"}>{statusLabel}</Badge>
         <Badge
           variant={active && runtime?.public_enabled ? "success" : "secondary"}
-        >
-          Public{" "}
+        >{translateUi("Public")}{" "}
           {runtime?.public_enabled
             ? active
-              ? "enabled"
-              : "configured"
-            : "off"}
+              ? translateUi("enabled")
+              : translateUi("configured")
+            : translateUi("off")}
         </Badge>
         <Badge
           variant={
             active && runtime?.personal_enabled ? "success" : "secondary"
           }
-        >
-          Personal{" "}
+        >{translateUi("Personal")}{" "}
           {runtime?.personal_enabled
             ? active
-              ? "enabled"
-              : "configured"
-            : "off"}
+              ? translateUi("enabled")
+              : translateUi("configured")
+            : translateUi("off")}
         </Badge>
       </div>
       <p role="status">{statusText}</p>
@@ -255,12 +251,12 @@ function BasicRuntimeForm({
         runtime?.public_enabled &&
         !runtime.public_policy &&
         value.public_readiness.status === "faq_ready" && (
-          <p>Built-in FAQ is ready. No model or sponsor is required.</p>
+          <p>{translateUi("Built-in FAQ is ready. No model or sponsor is required.")}</p>
         )}
       {active && runtime?.public_enabled && runtime.public_policy && (
         <p>
           {value.public_readiness.status === "ready"
-            ? "The configured public AI deployment is ready."
+            ? translateUi("The configured public AI deployment is ready.")
             : reasons[value.public_readiness.reason ?? "public_not_ready"]}
         </p>
       )}
@@ -276,51 +272,35 @@ function BasicRuntimeForm({
             checked={publicEnabled}
             onCheckedChange={(value) => setPublic(value === true)}
           />
-          <span>
-            Public FAQ — approved help for visitors, without personal data.
-          </span>
+          <span>{translateUi("Public FAQ — approved help for visitors, without personal data.")}</span>
         </Label>
         <Label className="flex items-start gap-2">
           <Checkbox
             checked={personal}
             onCheckedChange={(value) => setPersonal(value === true)}
           />
-          <span>
-            Personal NyxBot — sign in, review consent and confirm in this
-            private conversation.
-          </span>
+          <span>{translateUi("Personal NyxBot — sign in, review consent and confirm in this private conversation.")}</span>
         </Label>
         {runtime?.public_policy ? (
-          <Label className="block space-y-1">
-            Public answers
-            <select
-              aria-label="Public answers"
+          <Label className="block space-y-1">{translateUi("Public answers")}<select
+              aria-label={translateUi("Public answers")}
               value={source}
               onChange={(event) => setSource(event.target.value)}
               className="h-8 w-full rounded-lg border border-input bg-background px-3"
             >
-              <option value="faq">
-                Built-in approved FAQ (no inference credits)
-              </option>
-              <option value="ai">Saved public AI configuration</option>
+              <option value="faq">{translateUi("Built-in approved FAQ (no inference credits)")}</option>
+              <option value="ai">{translateUi("Saved public AI configuration")}</option>
             </select>
           </Label>
         ) : (
-          <p className="text-muted-foreground">
-            Public answers use the built-in approved FAQ. No inference credits
-            or model setup are required.
-          </p>
+          <p className="text-muted-foreground">{translateUi("Public answers use the built-in approved FAQ. No inference credits or model setup are required.")}</p>
         )}
         {!personal && !publicEnabled && (
-          <p>Select at least one mode to enable or resume this bot.</p>
+          <p>{translateUi("Select at least one mode to enable or resume this bot.")}</p>
         )}
         {failure && <ErrorBanner message={failure} />}
         {aiRecovery && (
-          <p>
-            To continue without public AI, choose Built-in approved FAQ or turn
-            off Public FAQ, then save or resume. Personal NyxBot can run without
-            a public AI deployment.
-          </p>
+          <p>{translateUi("To continue without public AI, choose Built-in approved FAQ or turn off Public FAQ, then save or resume. Personal NyxBot can run without a public AI deployment.")}</p>
         )}
         <div className="flex flex-wrap gap-2">
           <Button
@@ -333,31 +313,23 @@ function BasicRuntimeForm({
             }
           >
             {stopped
-              ? "Resume bot"
+              ? translateUi("Resume bot")
               : !runtime || initializedOff
-                ? "Enable bot"
-                : "Save modes"}
+                ? translateUi("Enable bot")
+                : translateUi("Save modes")}
           </Button>
           {runtime && !stopped && (
             <Button
               type="button"
               disabled={mutation.isPending}
               onClick={() => void save(true)}
-            >
-              Pause bot
-            </Button>
+            >{translateUi("Pause bot")}</Button>
           )}
         </div>
       </form>
-      <p className="text-muted-foreground">
-        Pause stops FAQ and personal work. Personal turns use each person's
-        existing NyxBot permissions, memory and normal account billing in a
-        separate saved channel thread.
-      </p>
+      <p className="text-muted-foreground">{translateUi("Pause stops FAQ and personal work. Personal turns use each person's existing NyxBot permissions, memory and normal account billing in a separate saved channel thread.")}</p>
       <details onToggle={(event) => setAdvanced(event.currentTarget.open)}>
-        <summary className="cursor-pointer">
-          Advanced public AI deployment
-        </summary>
+        <summary className="cursor-pointer">{translateUi("Advanced public AI deployment")}</summary>
         {advanced && <AiRuntimeForm profile={profile} value={value} />}
       </details>
     </section>
@@ -371,6 +343,7 @@ export function AiRuntimeForm({
   profile: PlatformProfile;
   value: ManagerRuntime;
 }) {
+  useUiTranslation();
   const runtime = value.runtime;
   const policy = runtime?.public_policy;
   const mutation = useManagerRuntimeAction(profile.id);
@@ -523,34 +496,26 @@ export function AiRuntimeForm({
         onSubmit={form.handleSubmit(enable)}
       >
         <div className="flex flex-wrap gap-2">
-          <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>
-            Public {runtime?.public_enabled ? "enabled" : "paused"}
+          <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>{translateUi("Public ")}{runtime?.public_enabled ? translateUi("enabled") : translateUi("paused")}
           </Badge>
-          <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>
-            Personal {runtime?.personal_enabled ? "enabled" : "paused"}
+          <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>{translateUi("Personal ")}{runtime?.personal_enabled ? translateUi("enabled") : translateUi("paused")}
           </Badge>
-          {stopped && <Badge variant="destructive">Manager stopped</Badge>}
+          {stopped && <Badge variant="destructive">{translateUi("Manager stopped")}</Badge>}
         </div>
-        <p>
-          Optional public AI uses the selected sponsor organization's credits.
-          Built-in FAQ and signup links need no inference credits. Personal work
-          uses each person's existing account billing and organization rules.
-        </p>
+        <p>{translateUi("Optional public AI uses the selected sponsor organization's credits. Built-in FAQ and signup links need no inference credits. Personal work uses each person's existing account billing and organization rules.")}</p>
         <FormField
           control={form.control}
           name="source"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Agent source</FormLabel>
+              <FormLabel>{translateUi("Agent source")}</FormLabel>
               <FormControl>
                 <select
                   {...field}
                   className="h-8 w-full rounded-lg border border-input bg-background px-3"
                 >
-                  <option value="nyxagent">
-                    NyxAgent
-                    {profiles.find((row) => row.id === selection)
-                      ? ` · ${profiles.find((row) => row.id === selection)!.label}`
+                  <option value="nyxagent">{translateUi("NyxAgent")}{profiles.find((row) => row.id === selection)
+                      ? translateUi(" · {{label}}", { label: profiles.find((row) => row.id === selection)!.label })
                       : ""}
                   </option>
                 </select>
@@ -576,20 +541,17 @@ export function AiRuntimeForm({
                   <FormControl>
                     <Input {...field} inputMode="decimal" />
                   </FormControl>
-                  <p className="text-13 text-muted-foreground">Credits</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Credits")}</p>
                   <FormMessage />
                 </FormItem>
               )}
             />
           ))}
         </div>
-        <p className="text-muted-foreground">
-          Public tools can read the public FAQ and offer signup or linking. They
-          cannot access anyone's account, services, memory or machines.
-        </p>
+        <p className="text-muted-foreground">{translateUi("Public tools can read the public FAQ and offer signup or linking. They cannot access anyone's account, services, memory or machines.")}</p>
         <p role="status" className="text-muted-foreground">
           {readiness.status === "ready"
-            ? "Readiness was verified. Apply activates this deployment. A changed deployment ends existing public sessions so senders can start fresh."
+            ? translateUi("Readiness was verified. Apply activates this deployment. A changed deployment ends existing public sessions so senders can start fresh.")
             : reasons[readiness.reason!]}
         </p>
         {error && <ErrorBanner message={error} />}
@@ -603,10 +565,10 @@ export function AiRuntimeForm({
             {runtime
               ? runtime.public_enabled
                 ? form.formState.isDirty
-                  ? "Save public settings"
-                  : "Validate and apply public deployment"
-                : "Enable public guide"
-              : "Enable bot"}
+                  ? translateUi("Save public settings")
+                  : translateUi("Validate and apply public deployment")
+                : translateUi("Enable public guide")
+              : translateUi("Enable bot")}
           </Button>
         </div>
         <div className="space-y-3 rounded-lg border border-border p-3">
@@ -615,7 +577,7 @@ export function AiRuntimeForm({
             name="profile"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Public NyxAgent profile</FormLabel>
+                <FormLabel>{translateUi("Public NyxAgent profile")}</FormLabel>
                 <FormControl>
                   <select
                     {...field}
@@ -624,8 +586,8 @@ export function AiRuntimeForm({
                     {!profiles.some((row) => row.id === field.value) && (
                       <option value={field.value}>
                         {field.value
-                          ? `${field.value} (unverified draft)`
-                          : "Use the advertised public default"}
+                          ? translateUi("{{value1}} (unverified draft)", { value1: field.value })
+                          : translateUi("Use the advertised public default")}
                       </option>
                     )}
                     {profiles.map((row) => (
@@ -644,28 +606,25 @@ export function AiRuntimeForm({
             variant="outline"
             disabled={pending || stopped}
             onClick={() => void discover()}
-          >
-            Refresh public profiles
-          </Button>
+          >{translateUi("Refresh public profiles")}</Button>
           <FormField
             control={form.control}
             name="sponsor_owner_user_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Sponsor organization</FormLabel>
+                <FormLabel>{translateUi("Sponsor organization")}</FormLabel>
                 <FormControl>
                   <select
                     {...field}
                     className="h-8 w-full rounded-lg border border-input bg-background px-3"
                   >
-                    <option value="">Choose an organization</option>
+                    <option value="">{translateUi("Choose an organization")}</option>
                     {field.value &&
                       !targets.data?.orgs.some(
                         (org) => org.id === field.value,
                       ) && (
                         <option value={field.value}>
-                          {field.value} (authorization rechecked on save)
-                        </option>
+                          {field.value}{translateUi(" (authorization rechecked on save)")}</option>
                       )}
                     {targets.data?.orgs.map((org) => (
                       <option key={org.id} value={org.id}>
@@ -678,16 +637,8 @@ export function AiRuntimeForm({
               </FormItem>
             )}
           />
-          <p>
-            Profile discovery and readiness may consume sponsor credits. Public
-            limits count admitted maximum costs for forwarded work, while
-            billing settles actual usage. Public quotas do not limit personal
-            chats.
-          </p>
-          <p>
-            Rate, concurrency and execution limits are validated by the server.
-            This API does not offer editable runtime bounds.
-          </p>
+          <p>{translateUi("Profile discovery and readiness may consume sponsor credits. Public limits count admitted maximum costs for forwarded work, while billing settles actual usage. Public quotas do not limit personal chats.")}</p>
+          <p>{translateUi("Rate, concurrency and execution limits are validated by the server. This API does not offer editable runtime bounds.")}</p>
         </div>
       </form>
     </Form>

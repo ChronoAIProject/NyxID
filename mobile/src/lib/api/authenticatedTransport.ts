@@ -17,6 +17,7 @@ type Session = { accessToken: string; userId?: string };
 type HttpResponse = {
   ok: boolean;
   status: number;
+  headers?: { get(name: string): string | null };
   text: () => Promise<string>;
 };
 
@@ -51,7 +52,7 @@ export async function executeAuthenticatedRequest<
   loadSession: () => Promise<Session | null>;
   refresh: () => Promise<{ access_token: string } | null>;
   invalidate: () => Promise<void>;
-  toError: (payload: unknown, status: number) => Error;
+  toError: (payload: unknown, status: number, headers?: HttpResponse["headers"]) => Error;
   getAuthEpoch?: () => number;
 }): Promise<{ response: R; assertOwner: () => Promise<void> }> {
   const { options } = input;
@@ -135,7 +136,7 @@ export async function executeAuthenticatedRequest<
     try {
       payload = raw ? JSON.parse(raw) : null;
     } catch {
-      /* Plain error bodies remain readable. */
+      /* The error boundary rejects non-JSON proxy bodies. */
     }
     if (
       response.status === 401 &&
@@ -144,7 +145,7 @@ export async function executeAuthenticatedRequest<
     ) {
       await input.invalidate();
     }
-    throw input.toError(payload, response.status);
+    throw input.toError(payload, response.status, response.headers);
   }
   return { response, assertOwner: checkOwner };
 }

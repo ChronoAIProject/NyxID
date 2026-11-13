@@ -1,6 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { appI18n } from "@/i18n";
 import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
 import { WebDeviceLogin } from "./web-device-login";
 
@@ -67,7 +68,30 @@ beforeEach(() => {
   deviceState.error = null;
 });
 
+afterEach(async () => {
+  await appI18n.changeLanguage("en");
+});
+
 describe("WebDeviceLogin", () => {
+  it("translates an existing connection failure and its retry control when language changes", async () => {
+    const user = userEvent.setup();
+    const message = "Couldn't reach NyxID. Check your connection and try again.";
+    deviceState.phase = "error";
+    deviceState.error = { code: null, message };
+    render(<WebDeviceLogin />);
+    await user.click(screen.getByRole("button", { name: "Continue with the NyxID app" }));
+    expect(screen.getByText(message)).toBeVisible();
+
+    await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+    expect(screen.getByText("无法连接到 NyxID。请检查网络连接后重试。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "生成新验证码" })).toBeVisible();
+    await act(async () => { await appI18n.changeLanguage("zh-TW"); });
+    expect(screen.getByText("無法連線至 NyxID。請檢查網路連線後再試。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "產生新驗證碼" })).toBeVisible();
+    expect(screen.queryByText(message)).not.toBeInTheDocument();
+    expect(deviceState.error).toEqual({ code: null, message });
+    expect(mockStart).toHaveBeenCalledTimes(1);
+  });
   it("formats the countdown as mm:ss", () => {
     expect(formatWebAuthDeviceRemaining(583)).toBe("9:43");
     expect(formatWebAuthDeviceRemaining(0)).toBe("0:00");

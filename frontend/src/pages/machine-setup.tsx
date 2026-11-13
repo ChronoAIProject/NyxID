@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
@@ -82,6 +84,7 @@ const states: Record<string, string> = {
 };
 
 export function MachineSetupPage() {
+  useUiTranslation();
   return (
     <GroupedPage>
       <MachineSetupContent />
@@ -90,6 +93,7 @@ export function MachineSetupPage() {
 }
 
 function MachineSetupContent() {
+  useUiTranslation();
   const guard = useGroupedDraftGuard();
   const search = useSearch({ strict: false }) as {
     setup?: string;
@@ -197,11 +201,11 @@ function MachineSetupContent() {
       data-ph-no-capture
     >
       <PageHeader
-        title="Add a machine"
+        title={translateUi("Add a machine")}
         description={
           hosted
-            ? "Configure a personal NyxID hosted machine and review its billing and data policies."
-            : "Review the choices, then run one command on the machine."
+            ? translateUi("Configure a personal NyxID hosted machine and review its billing and data policies.")
+            : translateUi("Review the choices, then run one command on the machine.")
         }
       />
       {!hosted && <SetupSafety />}
@@ -224,27 +228,19 @@ function MachineSetupContent() {
             value="this_computer"
             disabled={locked}
             className="px-2 sm:px-3"
-          >
-            This computer
-          </TabsTrigger>
-          <TabsTrigger value="vm" disabled={locked} className="px-2 sm:px-3">
-            Remote VM
-          </TabsTrigger>
+          >{translateUi("This computer")}</TabsTrigger>
+          <TabsTrigger value="vm" disabled={locked} className="px-2 sm:px-3">{translateUi("Remote VM")}</TabsTrigger>
           <TabsTrigger
             value="docker"
             disabled={locked}
             className="px-2 sm:px-3"
-          >
-            Docker
-          </TabsTrigger>
+          >{translateUi("Docker")}</TabsTrigger>
           {remoteAdmission && (
             <TabsTrigger
               value="hosted"
               disabled={locked}
               className="px-2 sm:px-3"
-            >
-              NyxID hosted
-            </TabsTrigger>
+            >{translateUi("NyxID hosted")}</TabsTrigger>
           )}
         </TabsList>
       </Tabs>
@@ -261,20 +257,20 @@ function MachineSetupContent() {
       ) : (
         <Form {...form}>
           <form onSubmit={form.handleSubmit(submit)} className="space-y-6">
-            <GroupedList title="Machine">
+            <GroupedList title={translateUi("Machine")}>
               <FormField
                 control={form.control}
                 name="owner_id"
                 render={({ field }) => (
                   <FormItem inline>
-                    <FormLabel>Machine owner</FormLabel>
+                    <FormLabel>{translateUi("Machine owner")}</FormLabel>
                     <FormControl>
                       <OrgScopeSelect
                         grouped
                         value={field.value ?? null}
                         onChange={field.onChange}
                         disabled={locked}
-                        label="Machine owner"
+                        label={translateUi("Machine owner")}
                       />
                     </FormControl>
                     <FormMessage />
@@ -286,7 +282,7 @@ function MachineSetupContent() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Machine name</FormLabel>
+                    <FormLabel>{translateUi("Machine name")}</FormLabel>
                     <FormControl>
                       <Input {...field} disabled={locked} autoComplete="off" />
                     </FormControl>
@@ -296,22 +292,12 @@ function MachineSetupContent() {
               />
             </GroupedList>
             <GroupedList
-              title="Agent separation"
+              title={translateUi("Agent separation")}
               footer={
                 <>
-                  <p>
-                    Automatic and required refuse when the real host probes
-                    cannot confirm support. macOS and browserless nodes need an
-                    informed legacy choice or a supported Linux host.
-                  </p>
+                  <p>{translateUi("Automatic and required refuse when the real host probes cannot confirm support. macOS and browserless nodes need an informed legacy choice or a supported Linux host.")}</p>
                   {where !== "docker" && (
-                    <p>
-                      On Linux, provision distinct OS users by running the
-                      generated setup command with sudo and --separate-users.
-                      Separation also needs a managed browser; enable Browser
-                      only if you want to grant that capability. The command
-                      preserves your selected capabilities.
-                    </p>
+                    <p>{translateUi("On Linux, provision distinct OS users by running the generated setup command with sudo and --separate-users. Separation also needs a managed browser; enable Browser only if you want to grant that capability. The command preserves your selected capabilities.")}</p>
                   )}
                   {form.watch("separation") === "shared_legacy" && (
                     <p className="text-warning">{SHARED_LEGACY_WARNING}</p>
@@ -324,9 +310,7 @@ function MachineSetupContent() {
                 name="separation"
                 render={({ field }) => (
                   <FormItem inline>
-                    <FormLabel className="flex-1 text-foreground">
-                      Agent separation
-                    </FormLabel>
+                    <FormLabel className="flex-1 text-foreground">{translateUi("Agent separation")}</FormLabel>
                     <Select value={field.value ?? "automatic"} disabled={locked} onValueChange={value => {
                       // The hidden select can emit an empty value during reset.
                       // Preserve the reviewed choice until a valid option is selected.
@@ -336,9 +320,9 @@ function MachineSetupContent() {
                     }}>
                       <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
                       <SelectContent>
-                        <SelectItem value="automatic">Automatic — require confirmed supported separation</SelectItem>
-                        <SelectItem value="require_separated">Require separated workspaces and browsers</SelectItem>
-                        <SelectItem value="shared_legacy">Explicit shared legacy access</SelectItem>
+                        <SelectItem value="automatic">{translateUi("Automatic — require confirmed supported separation")}</SelectItem>
+                        <SelectItem value="require_separated">{translateUi("Require separated workspaces and browsers")}</SelectItem>
+                        <SelectItem value="shared_legacy">{translateUi("Explicit shared legacy access")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -348,16 +332,14 @@ function MachineSetupContent() {
               {form.watch("separation") === "shared_legacy" && (
                 <GroupedRow asChild>
                   <Label>
-                    <span className="flex-1">
-                      I explicitly accept shared legacy access and this warning.
-                    </span>
+                    <span className="flex-1">{translateUi("I explicitly accept shared legacy access and this warning.")}</span>
                     <Switch disabled={locked} checked={form.watch("legacy_warning_acknowledged") === true} onCheckedChange={value => form.setValue("legacy_warning_acknowledged", value === true)} />
                     <FormField control={form.control} name="legacy_warning_acknowledged" render={() => <FormMessage />} />
                   </Label>
                 </GroupedRow>
               )}
             </GroupedList>
-            <GroupedList title="Enable on this machine">
+            <GroupedList title={translateUi("Enable on this machine")}>
               {(["shell", "files", "browser", "computer"] as const).map(
                 (capability) => (
                   <GroupedRow key={capability} asChild>
@@ -381,15 +363,15 @@ function MachineSetupContent() {
               )}
             </GroupedList>
             <GroupedList
-              title="Specialist access"
-              footer="Agent permissions are configured separately in agent settings. New assignments start with no allowed capabilities."
+              title={translateUi("Specialist access")}
+              footer={translateUi("Agent permissions are configured separately in agent settings. New assignments start with no allowed capabilities.")}
             >
               <FormField
                 control={form.control}
                 name="grant_to"
                 render={({ field }) => (
                   <FormItem inline>
-                    <FormLabel>Select a specialist for this machine</FormLabel>
+                    <FormLabel>{translateUi("Select a specialist for this machine")}</FormLabel>
                     <Select
                       value={field.value ?? "none"}
                       disabled={locked}
@@ -403,9 +385,7 @@ function MachineSetupContent() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="none">
-                          No specialist assignment
-                        </SelectItem>
+                        <SelectItem value="none">{translateUi("No specialist assignment")}</SelectItem>
                         {agents.data?.agents
                           .filter(
                             (agent) =>
@@ -425,33 +405,18 @@ function MachineSetupContent() {
               />
             </GroupedList>
             <GroupedList
-              title="Updates"
+              title={translateUi("Updates")}
               footer={
                 <>
-                  <p>
-                    Update automatically when idle (recommended). Updates wait
-                    for work and desktop sessions to end, and notify you.
-                  </p>
+                  <p>{translateUi("Update automatically when idle (recommended). Updates wait for work and desktop sessions to end, and notify you.")}</p>
                   {where === "docker" && (
-                    <p>
-                      The command also installs a small updater companion. Its
-                      Docker socket grants host-root access; only the node
-                      supervisor can request an update, and the helper accepts
-                      only a release version, verifies the official image
-                      attestation and restores the previous container if
-                      reconnection fails. Your identity and workspace volumes
-                      are preserved.
-                    </p>
+                    <p>{translateUi("The command also installs a small updater companion. Its Docker socket grants host-root access; only the node supervisor can request an update, and the helper accepts only a release version, verifies the official image attestation and restores the previous container if reconnection fails. Your identity and workspace volumes are preserved.")}</p>
                   )}
                   {where !== "docker" &&
                     (capabilities.includes("computer") ||
                       capabilities.includes("browser")) && (
                       <p>
-                        {SINGLE_USER_WARNING} Saved-login typing starts off;
-                        allow it later in Nodes settings. Setup asks once for
-                        administrator access to install browser policies. On
-                        macOS, also allow Screen Recording and Accessibility.
-                      </p>
+                        {SINGLE_USER_WARNING}{translateUi(" Saved-login typing starts off; allow it later in Nodes settings. Setup asks once for administrator access to install browser policies. On macOS, also allow Screen Recording and Accessibility.")}</p>
                     )}
                 </>
               }
@@ -466,7 +431,7 @@ function MachineSetupContent() {
                       form.setValue("automatic_updates", value === true)
                     }
                   />
-                  <span className="flex-1">Update automatically when idle</span>
+                  <span className="flex-1">{translateUi("Update automatically when idle")}</span>
                 </Label>
               </GroupedRow>
             </GroupedList>
@@ -474,7 +439,7 @@ function MachineSetupContent() {
               <GroupedDialogActions
                 intent="create"
                 cancel={() => void navigate({ to: "/assistant/machines" })}
-                label="machine setup"
+                label={translateUi("machine setup")}
                 dirty={form.formState.isDirty}
                 pending={issuing}
                 disabled={!capabilities.length || !form.watch("name")}
@@ -483,7 +448,7 @@ function MachineSetupContent() {
                   form.reset();
                   setError(undefined);
                 }}
-                saveLabel="Create my setup command"
+                saveLabel={translateUi("Create my setup command")}
               />
             )}
           </form>
@@ -491,13 +456,13 @@ function MachineSetupContent() {
       )}
       {!hosted && command ? (
         <GroupedList
-          title="Run on your machine"
-          footer="Single-use command, shown only here. Do not paste it into chat. It expires in 15 minutes."
+          title={translateUi("Run on your machine")}
+          footer={translateUi("Single-use command, shown only here. Do not paste it into chat. It expires in 15 minutes.")}
         >
           <GroupedRow>
             <CopyableField
               grouped
-              label="Run on your machine"
+              label={translateUi("Run on your machine")}
               value={command}
             />
           </GroupedRow>
@@ -518,10 +483,12 @@ function MachineSetupContent() {
 }
 
 export function MachinePairPage() {
+  useUiTranslation();
   return <GroupedPage><MachinePairContent /></GroupedPage>;
 }
 
 function MachinePairContent() {
+  useUiTranslation();
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as { code?: string };
   const [code, setCode] = useState(search.code ?? "");
@@ -547,8 +514,8 @@ function MachinePairContent() {
         discard={() => setConfirmed(false)}
       />
       <PageHeader
-        title="Pair this machine"
-        description="Approve only a setup you started."
+        title={translateUi("Pair this machine")}
+        description={translateUi("Approve only a setup you started.")}
       />
       <form
         onSubmit={(event) => {
@@ -556,10 +523,10 @@ function MachinePairContent() {
         }}
         className="space-y-6"
       >
-        <GroupedList title="Pairing code">
+        <GroupedList title={translateUi("Pairing code")}>
           <GroupedRow>
             <Input
-              aria-label="Pairing code"
+              aria-label={translateUi("Pairing code")}
               value={code}
               maxLength={16}
               disabled={Boolean(decision.data) || preview.isPending || decision.isPending}
@@ -573,26 +540,24 @@ function MachinePairContent() {
               type="submit"
               isLoading={preview.isPending}
               disabled={!code || Boolean(decision.data) || preview.isPending || decision.isPending}
-            >
-              Review
-            </Button>
+            >{translateUi("Review")}</Button>
           </GroupedRow>
         </GroupedList>
       </form>
       {details ? (
         <div className="space-y-6">
-          <GroupedList title="Machine" footer={MACHINE_SAFETY}>
-            <GroupedRow title="Hostname" accessory={details.hostname} />
-            <GroupedRow title="Operating system" accessory={details.os} />
-            <GroupedRow title="IP address" accessory={details.ip} />
+          <GroupedList title={translateUi("Machine")} footer={MACHINE_SAFETY}>
+            <GroupedRow title={translateUi("Hostname")} accessory={details.hostname} />
+            <GroupedRow title={translateUi("Operating system")} accessory={details.os} />
+            <GroupedRow title={translateUi("IP address")} accessory={details.ip} />
             <GroupedRow
-              title="Requested access"
+              title={translateUi("Requested access")}
               accessory={details.choices.capabilities.join(", ")}
             />
           </GroupedList>
           <GroupedList
-            title="Pairing"
-            footer="Automatic updates wait for jobs, turns and live desktop sessions to end, and notify you."
+            title={translateUi("Pairing")}
+            footer={translateUi("Automatic updates wait for jobs, turns and live desktop sessions to end, and notify you.")}
           >
             <GroupedRow asChild>
               <Label>
@@ -602,9 +567,7 @@ function MachinePairContent() {
                   disabled={Boolean(decision.data) || decision.isPending}
                   onCheckedChange={(value) => setAutomatic(value === true)}
                 />
-                <span className="flex-1">
-                  Update automatically when idle (recommended)
-                </span>
+                <span className="flex-1">{translateUi("Update automatically when idle (recommended)")}</span>
               </Label>
             </GroupedRow>
             {!decision.data ? (
@@ -617,9 +580,7 @@ function MachinePairContent() {
                       disabled={decision.isPending}
                       onCheckedChange={(value) => setConfirmed(value === true)}
                     />
-                    <span className="flex-1">
-                      I started this setup and recognize this machine.
-                    </span>
+                    <span className="flex-1">{translateUi("I started this setup and recognize this machine.")}</span>
                   </Label>
                 </GroupedRow>
               </>
@@ -627,7 +588,7 @@ function MachinePairContent() {
               <GroupedRow>
                 <p role="status">
                   {states[status.data?.status ?? decision.data.status] ??
-                    "Waiting for the machine…"}
+                    translateUi("Waiting for the machine…")}
                 </p>
               </GroupedRow>
             )}
@@ -635,25 +596,19 @@ function MachinePairContent() {
         </div>
       ) : null}
       {details && !decision.data ? (
-        <GroupedSaveBar aria-label="Pairing actions">
-          <Button variant="ghost" disabled={decision.isPending} onClick={() => void navigate({ to: "/assistant/machines" })}>
-            Cancel
-          </Button>
+        <GroupedSaveBar aria-label={translateUi("Pairing actions")}>
+          <Button variant="ghost" disabled={decision.isPending} onClick={() => void navigate({ to: "/assistant/machines" })}>{translateUi("Cancel")}</Button>
           <Button
             variant="destructive"
             disabled={decision.isPending}
             onClick={() => void decide(false).catch(() => undefined)}
-          >
-            Decline
-          </Button>
+          >{translateUi("Decline")}</Button>
           <Button
             variant="primary"
             disabled={!confirmed || decision.isPending}
             isLoading={decision.isPending}
             onClick={() => void decide(true).catch(() => undefined)}
-          >
-            Approve pairing
-          </Button>
+          >{translateUi("Approve pairing")}</Button>
         </GroupedSaveBar>
       ) : null}
       {preview.error || decision.error ? (
@@ -670,26 +625,19 @@ function MachinePairContent() {
 }
 
 function SetupSafety() {
+  useUiTranslation();
   return (
     <GroupedList
-      title="Before you start"
+      title={translateUi("Before you start")}
       footer={
         <>
           <p>{SINGLE_USER_SHELL_WARNING}</p>
-          <p>
-            The Docker command downloads NyxID’s seccomp profile and passes
-            --security-opt seccomp to enable Chromium’s user-namespace sandbox.
-            It grants no additional container capabilities.
-          </p>
-          <p>
-            The image is pinned to this server’s release. After a server
-            upgrade, recreate the container with the matching image and the same
-            identity and workspace volumes to keep this machine connected.
-          </p>
+          <p>{translateUi("The Docker command downloads NyxID’s seccomp profile and passes --security-opt seccomp to enable Chromium’s user-namespace sandbox. It grants no additional container capabilities.")}</p>
+          <p>{translateUi("The image is pinned to this server’s release. After a server upgrade, recreate the container with the matching image and the same identity and workspace volumes to keep this machine connected.")}</p>
         </>
       }
     >
-      <GroupedRow title="Review machine access" />
+      <GroupedRow title={translateUi("Review machine access")} />
       <GroupedFooter>
         <p className="text-warning">{MACHINE_SAFETY}</p>
       </GroupedFooter>
@@ -698,9 +646,10 @@ function SetupSafety() {
 }
 
 function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
+  useUiTranslation();
   return (
     <GroupedList
-      title="Setup progress"
+      title={translateUi("Setup progress")}
       role="status"
       footer={
         <>
@@ -713,15 +662,15 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
         </>
       }
     >
-      <GroupedRow title={states[setup.status] ?? "Waiting for setup…"} />
+      <GroupedRow title={states[setup.status] ?? translateUi("Waiting for setup…")} />
       {setup.status === "selection_required" && (
         <GroupedRow asChild interactive>
-          <Link to="/assistant/machines">Review machine separation</Link>
+          <Link to="/assistant/machines">{translateUi("Review machine separation")}</Link>
         </GroupedRow>
       )}
       {setup.machine && (
         <GroupedRow
-          title="Enabled"
+          title={translateUi("Enabled")}
           accessory={(["shell", "files", "browser", "computer"] as const)
             .filter((c) => setup.machine?.[c])
             .join(", ")}
@@ -729,11 +678,9 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
       )}
       <GroupedRow asChild interactive>
         {setup.conversation_id ? (
-          <Link to="/assistant" search={{ c: setup.conversation_id }}>
-            Back to NyxBot
-          </Link>
+          <Link to="/assistant" search={{ c: setup.conversation_id }}>{translateUi("Back to NyxBot")}</Link>
         ) : (
-          <Link to="/nodes">View nodes</Link>
+          <Link to="/nodes">{translateUi("View nodes")}</Link>
         )}
       </GroupedRow>
     </GroupedList>

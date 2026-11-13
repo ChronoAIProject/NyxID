@@ -17,6 +17,9 @@ use super::scrub;
 /// `docs/TELEMETRY.md` §5.1.
 #[derive(Debug, Clone)]
 pub enum TelemetryEvent {
+    ServiceInvocationDiagnostic {
+        diagnostic: crate::services::invocation_diagnostic_service::Diagnostic,
+    },
     /// Explicit client event admitted under a revision captured before enqueue.
     ClientOriginated {
         event: super::client_event::ClientEvent,
@@ -453,6 +456,7 @@ impl TelemetryEvent {
             Self::AdminNodeDeleted { .. } => "admin.node_deleted",
             Self::AdminServiceCreated { .. } => "admin.service_created",
             Self::AdminServiceUpdated { .. } => "admin.service_updated",
+            Self::ServiceInvocationDiagnostic { .. } => "monitoring.invocation_diagnostic",
             Self::ProxyError { .. } => "proxy.error",
             Self::ProxySuccess { .. } => "proxy.success",
             Self::ApiRateLimited { .. } => "api.rate_limited",
@@ -763,6 +767,9 @@ impl TelemetryEvent {
             Self::AdminNodeDeleted { node_id } => json!({ "node_id": node_id }),
             Self::AdminServiceCreated { slug } => json!({ "slug": slug }),
             Self::AdminServiceUpdated { slug } => json!({ "slug": slug }),
+            Self::ServiceInvocationDiagnostic { diagnostic } => {
+                serde_json::to_value(diagnostic).expect("enum projection")
+            }
             Self::ProxyError {
                 service_slug,
                 error_code,

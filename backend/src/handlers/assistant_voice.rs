@@ -60,6 +60,16 @@ pub async fn active_session(
         .map(Json)
 }
 
+pub async fn account_active_session(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<crate::services::voice::application::AccountActiveSessionResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    crate::services::voice::application::account_active_session(&state, &auth)
+        .await
+        .map(Json)
+}
+
 pub async fn session_status(
     State(state): State<AppState>,
     auth: AuthUser,

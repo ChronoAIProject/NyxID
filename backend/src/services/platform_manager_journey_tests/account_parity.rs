@@ -167,6 +167,7 @@ impl InspectOwnerEgress {
             keys: &self.state.encryption_keys,
             http: &self.state.http_client,
             config: &self.state.config,
+            jwt_keys: &self.state.jwt_keys,
             token_exchange_cache: &self.state.token_exchange_cache,
             node_manager: &self.state.node_ws_manager,
         };

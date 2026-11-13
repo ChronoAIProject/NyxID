@@ -1,9 +1,12 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useAdminBillingService } from "@/hooks/use-admin-billing";
 import { publicModelSchema, type AdminModel } from "@/schemas/platform-models";
 import { SaveError } from "./shared";
 
 /** Preview the allowlisted customer DTO; never serialize the admin model itself. */
 export function PublicPreview({ model }: { readonly model: AdminModel }) {
+  useUiTranslation();
   const billing = useAdminBillingService(model.billing_service_id ?? "");
   const preview = publicModelSchema.parse({
     id: model.public_id,
@@ -25,13 +28,10 @@ export function PublicPreview({ model }: { readonly model: AdminModel }) {
   });
   return (
     <section className="space-y-3">
-      <p className="type-secondary text-muted-foreground">
-        Public metadata and retail prices only. Each person still needs
-        entitlement to see this model.
-      </p>
+      <p className="type-secondary text-muted-foreground">{translateUi("Public metadata and retail prices only. Each person still needs entitlement to see this model.")}</p>
       <SaveError error={billing.error} />
       {billing.isFetching ? (
-        <p className="type-body">Loading prices…</p>
+        <p className="type-body">{translateUi("Loading prices…")}</p>
       ) : (
         <pre className="overflow-auto rounded-xl border border-border/50 p-4 type-code">
           {JSON.stringify(preview, null, 2)}

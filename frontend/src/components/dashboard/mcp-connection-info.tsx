@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { copyToClipboard } from "@/lib/utils";
@@ -49,16 +52,17 @@ function CopyButton({
   readonly text: string;
   readonly label: string;
 }) {
+  useUiTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success(`${label} copied to clipboard`);
+      toast.success(translateUi("{{value1}} copied to clipboard", { value1: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -74,12 +78,13 @@ function CopyButton({
       ) : (
         <Copy className="h-3 w-3" />
       )}
-      <span className="sr-only">Copy {label}</span>
+      <span className="sr-only">{translateUi("Copy ")}{label}</span>
     </Button>
   );
 }
 
 export function McpConnectionInfo() {
+  useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
 
   if (isLoading) {
@@ -94,30 +99,22 @@ export function McpConnectionInfo() {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-13 text-muted-foreground">
-          NyxID exposes a single MCP endpoint that provides tools for all your
-          connected services. Connect your MCP client once and it will
-          automatically discover tools from every service you have enabled.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("NyxID exposes a single MCP endpoint that provides tools for all your connected services. Connect your MCP client once and it will automatically discover tools from every service you have enabled.")}</p>
       </div>
 
       <div>
-        <p className="mb-1 type-secondary-emphasis text-muted-foreground">
-          MCP Proxy URL
-        </p>
+        <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("MCP Proxy URL")}</p>
         <div className="relative">
           <code className="block rounded bg-muted px-3 py-2 pr-10 text-14 break-all">
             {mcpUrl}
           </code>
-          <CopyButton text={mcpUrl} label="MCP proxy URL" />
+          <CopyButton text={mcpUrl} label={translateUi("MCP proxy URL")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="type-secondary-emphasis text-muted-foreground">
-            Cursor Configuration
-          </p>
+          <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Cursor Configuration")}</p>
           <Badge variant="secondary" className="text-12">
             .cursor/mcp.json
           </Badge>
@@ -126,15 +123,13 @@ export function McpConnectionInfo() {
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {cursorConfig}
           </pre>
-          <CopyButton text={cursorConfig} label="Cursor config" />
+          <CopyButton text={cursorConfig} label={translateUi("Cursor config")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="type-secondary-emphasis text-muted-foreground">
-            Claude Code Configuration
-          </p>
+          <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Claude Code Configuration")}</p>
           <Badge variant="secondary" className="text-12">
             .claude/settings.json
           </Badge>
@@ -143,15 +138,13 @@ export function McpConnectionInfo() {
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {claudeCodeConfig}
           </pre>
-          <CopyButton text={claudeCodeConfig} label="Claude Code config" />
+          <CopyButton text={claudeCodeConfig} label={translateUi("Claude Code config")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="type-secondary-emphasis text-muted-foreground">
-            Codex Configuration
-          </p>
+          <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Codex Configuration")}</p>
           <Badge variant="secondary" className="text-12">
             ~/.codex/config.toml
           </Badge>
@@ -160,18 +153,13 @@ export function McpConnectionInfo() {
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {codexConfig}
           </pre>
-          <CopyButton text={codexConfig} label="Codex config" />
+          <CopyButton text={codexConfig} label={translateUi("Codex config")} />
         </div>
       </div>
 
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="type-secondary-emphasis mb-1">How it works</p>
-        <p className="text-13 text-muted-foreground">
-          When an MCP client connects, NyxID authenticates via OAuth in your
-          browser. Once authenticated, the proxy exposes tools from all your
-          connected services. Tool calls are forwarded to each service's API
-          with your credentials injected automatically.
-        </p>
+        <p className="type-secondary-emphasis mb-1">{translateUi("How it works")}</p>
+        <p className="text-13 text-muted-foreground">{translateUi("When an MCP client connects, NyxID authenticates via OAuth in your browser. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.")}</p>
       </div>
     </div>
   );

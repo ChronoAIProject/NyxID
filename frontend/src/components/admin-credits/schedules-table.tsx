@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { exactCredits, formatExactCredits } from "@/lib/credits";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Pencil } from "lucide-react";
@@ -37,19 +40,22 @@ export function SchedulesTable({
   readonly onToggle: (schedule: CreditSchedule) => void;
   readonly onSeed?: (schedule: CreditSchedule) => void;
 }) {
+  useUiTranslation();
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table className="max-sm:block">
         <TableHeader className="max-sm:hidden">
           <TableRow>
-            <TableHead>Amount</TableHead>
-            <TableHead>Recurrence</TableHead>
-            <TableHead>Expiry</TableHead>
-            <TableHead>Targets</TableHead>
-            <TableHead>Current period</TableHead>
-            <TableHead>Status</TableHead>
+            <TableHead>{translateUi("Amount")}</TableHead>
+            <TableHead>{translateUi("Recurrence")}</TableHead>
+            <TableHead>{translateUi("Expiry")}</TableHead>
+            <TableHead>{translateUi("Targets")}</TableHead>
+            <TableHead>{translateUi("Current period")}</TableHead>
+            <TableHead>{translateUi("Status")}</TableHead>
             {canWrite ? (
-              <TableHead className="text-right">Actions</TableHead>
+              <TableHead className="text-right">
+                {translateUi("Actions")}
+              </TableHead>
             ) : null}
           </TableRow>
         </TableHeader>
@@ -68,14 +74,14 @@ export function SchedulesTable({
                   ) ?? "0",
                   12,
                 )}{" "}
-                credits
+                {translateUi("credits")}
               </TableCell>
               <TableCell className="capitalize">
                 {schedule.recurrence}
                 <p className="text-11 normal-case text-muted-foreground">
                   {schedule.timing === "recipient"
-                    ? "From recipient start date"
-                    : "Calendar periods (UTC)"}
+                    ? translateUi("From recipient start date")
+                    : translateUi("Calendar periods (UTC)")}
                 </p>
               </TableCell>
               <TableCell>{expiryLabel(schedule.expiry)}</TableCell>
@@ -83,7 +89,7 @@ export function SchedulesTable({
                 <div>{billingTargetLabel(schedule)}</div>
                 <p className="text-13 text-muted-foreground">
                   {schedule.scope.all_services
-                    ? "All services"
+                    ? translateUi("All services")
                     : schedule.scope.service_slugs.join(", ")}
                 </p>
                 {schedule.service_limits?.map((rule) => (
@@ -91,12 +97,13 @@ export function SchedulesTable({
                     key={rule.key}
                     className="max-w-sm whitespace-normal break-words text-13"
                   >
-                    {rule.label || "Service limit"}:{" "}
-                    {rule.service_slugs.join(", ")} · up to{" "}
+                    {rule.label || translateUi("Service limit")}:{" "}
+                    {rule.service_slugs.join(", ")}
+                    {translateUi(" · up to")}{" "}
                     <span className="break-all">
                       {formatExactCredits(rule.limit, 12)}
                     </span>{" "}
-                    credits per issuance
+                    {translateUi("credits per issuance")}
                   </p>
                 ))}
                 <RolloutSummary schedule={schedule} />
@@ -105,14 +112,17 @@ export function SchedulesTable({
                 <div>{periodLabel(schedule)}</div>
                 {schedule.skipped_periods > 0 ? (
                   <Badge variant="warning" className="mt-1">
-                    {formatNumber(schedule.skipped_periods)} skipped period
+                    {formatNumber(schedule.skipped_periods)}
+                    {translateUi(" skipped period")}
                     {schedule.skipped_periods === 1 ? "" : "s"}
                   </Badge>
                 ) : null}
               </TableCell>
               <TableCell>
                 <Badge variant={schedule.is_active ? "success" : "secondary"}>
-                  {schedule.is_active ? "Active" : "Paused"}
+                  {schedule.is_active
+                    ? translateUi("Active")
+                    : translateUi("Paused")}
                 </Badge>
               </TableCell>
               {canWrite ? (
@@ -128,15 +138,15 @@ export function SchedulesTable({
                         disabled={updatePending}
                         onClick={() => onSeed(schedule)}
                       >
-                        Grant missing credits
+                        {translateUi("Grant missing credits")}
                       </Button>
                     ) : null}
                     <Button
                       type="button"
                       size="icon"
                       variant="ghost"
-                      title="Edit schedule"
-                      aria-label="Edit schedule"
+                      title={translateUi("Edit schedule")}
+                      aria-label={translateUi("Edit schedule")}
                       disabled={updatePending}
                       onClick={() => onEdit(schedule)}
                     >
@@ -147,8 +157,8 @@ export function SchedulesTable({
                       disabled={updatePending}
                       aria-label={
                         schedule.is_active
-                          ? "Pause schedule"
-                          : "Resume schedule"
+                          ? translateUi("Pause schedule")
+                          : translateUi("Resume schedule")
                       }
                       onCheckedChange={() => onToggle(schedule)}
                     />
@@ -163,7 +173,7 @@ export function SchedulesTable({
                 colSpan={canWrite ? 7 : 6}
                 className="py-10 text-center text-muted-foreground"
               >
-                No credit schedules.
+                {translateUi("No credit schedules.")}
               </TableCell>
             </TableRow>
           ) : null}
@@ -174,6 +184,7 @@ export function SchedulesTable({
 }
 
 function RolloutSummary({ schedule }: { readonly schedule: CreditSchedule }) {
+  useUiTranslation();
   const disabled = schedule.recipients?.filter(
     (recipient) => !recipient.recipient_billing_enabled,
   ).length;
@@ -184,12 +195,15 @@ function RolloutSummary({ schedule }: { readonly schedule: CreditSchedule }) {
         <span className="mt-1 inline-flex cursor-help" tabIndex={0}>
           <Badge variant="warning" className="gap-1">
             <AlertTriangle className="h-3 w-3" />
-            {disabled} rollout off
+            {disabled}
+            {translateUi(" rollout off")}
           </Badge>
         </span>
       </TooltipTrigger>
       <TooltipContent>
-        Selected owners outside the billing rollout cannot see billing yet.
+        {translateUi(
+          "Selected owners outside the billing rollout cannot see billing yet.",
+        )}
       </TooltipContent>
     </Tooltip>
   );
@@ -198,20 +212,26 @@ function RolloutSummary({ schedule }: { readonly schedule: CreditSchedule }) {
 function expiryLabel(expiry: CreditExpiryPolicy) {
   switch (expiry.kind) {
     case "end_of_period":
-      return "End of period";
+      return translateUi("End of period");
     case "after_days":
       return `After ${String(expiry.days)} day${expiry.days === 1 ? "" : "s"}`;
     case "never":
-      return "Never";
+      return translateUi("Never");
   }
 }
 
 function periodLabel(schedule: CreditSchedule) {
-  if (schedule.timing === "recipient") return "Individual recipient cycles";
+  if (schedule.timing === "recipient")
+    return translateUi("Individual recipient cycles");
   const period = schedule.current_period;
-  if (!period) return schedule.is_active ? "Pending" : "No open period";
+  if (!period)
+    return schedule.is_active
+      ? translateUi("Pending")
+      : translateUi("No open period");
   if (period.status === "disbursing") {
-    return `Disbursing ${formatNumber(period.disbursed_count)}`;
+    return translateUi("Disbursing {{amount}}", {
+      amount: formatNumber(period.disbursed_count),
+    });
   }
   return `Complete - ${formatNumber(period.disbursed_count)} - expires ${
     period.expires_at ? formatDate(period.expires_at) : "never"
@@ -219,7 +239,7 @@ function periodLabel(schedule: CreditSchedule) {
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(getFormattingLocale(), {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -227,5 +247,5 @@ function formatDate(value: string) {
 }
 
 function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
+  return new Intl.NumberFormat(getFormattingLocale()).format(value);
 }

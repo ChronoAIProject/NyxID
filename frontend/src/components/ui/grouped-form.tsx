@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { flushSync } from "react-dom";
 import {
   useCallback,
@@ -30,6 +32,7 @@ export function GroupedFormScope({
   readonly collect?: boolean;
   readonly viewport?: boolean;
 }) {
+  useUiTranslation();
   const parent = useContext(GroupedFormContext);
   const [entries, setEntries] = useState<ReadonlyMap<string, GroupedFormEntry>>(
     new Map(),
@@ -93,6 +96,7 @@ export function GroupedFormScope({
 }
 
 export function GroupedFormBar({ dialog = false, viewport = false }: { readonly dialog?: boolean; readonly viewport?: boolean }) {
+  useUiTranslation();
   const context = useContext(GroupedFormContext);
   const dirty = [...(context?.entries.values() ?? [])].filter(
     (entry) => entry.dirty,
@@ -103,36 +107,31 @@ export function GroupedFormBar({ dialog = false, viewport = false }: { readonly 
     <GroupedSaveBar
       data-viewport-save-bar={viewport ? "" : undefined}
       role="region"
-      aria-label={dialog ? "Form actions" : "Unsaved changes"}
+      aria-label={dialog ? translateUi("Form actions") : translateUi("Unsaved changes")}
     >
       {!dialog && (
         <p
           className="sr-only"
           aria-live="polite"
-        >
-          Unsaved: {[...new Set(dirty.map((entry) => entry.label))].join(", ")}
+        >{translateUi("Unsaved: ")}{[...new Set(dirty.map((entry) => entry.label))].join(", ")}
         </p>
       )}
       {dialog ? (
-        <GroupedDialogCancel disabled={busy}>Cancel</GroupedDialogCancel>
+        <GroupedDialogCancel disabled={busy}>{translateUi("Cancel")}</GroupedDialogCancel>
       ) : (
         <Button
           type="button"
           variant="ghost"
           disabled={busy}
           onClick={() => dirty.forEach((entry) => entry.discard())}
-        >
-          Discard
-        </Button>
+        >{translateUi("Discard")}</Button>
       )}
       <Button
         type="button"
         variant="primary"
         disabled={busy || !dirty.length || dirty.some((entry) => entry.disabled)}
         onClick={context.requestReview}
-      >
-        Save changes
-      </Button>
+      >{translateUi("Save changes")}</Button>
     </GroupedSaveBar>
   );
 }
@@ -150,13 +149,14 @@ export function GroupedDialogActions({
   readonly saveLabel?: string;
   readonly saveVariant?: "primary" | "destructive";
 }) {
+  useUiTranslation();
   const coordinated = useGroupedForm(entry);
   const context = useContext(GroupedFormContext);
   const guard = useGroupedDraftGuard();
   return (
     <ChangeReview entries={[entry]} save={entry.save} disabled={entry.disabled || entry.pending}>{(review) => <>
       {intent === "edit" && <ReviewSubmit review={context?.requestReview ?? review} />}
-      {!coordinated && <GroupedSaveBar role="region" aria-label="Form actions">
+      {!coordinated && <GroupedSaveBar role="region" aria-label={translateUi("Form actions")}>
       {cancel ? (
         <Button
           type="button"
@@ -168,11 +168,9 @@ export function GroupedDialogActions({
               if (discard) cancel();
             });
           }}
-        >
-          Cancel
-        </Button>
+        >{translateUi("Cancel")}</Button>
       ) : (
-        <GroupedDialogCancel disabled={entry.pending}>Cancel</GroupedDialogCancel>
+        <GroupedDialogCancel disabled={entry.pending}>{translateUi("Cancel")}</GroupedDialogCancel>
       )}
       <Button
         type="button"
@@ -201,6 +199,7 @@ export function GroupedFormActions({
   readonly saveLabel?: string;
   readonly saveVariant?: "primary" | "destructive";
 }) {
+  useUiTranslation();
   const coordinated = useGroupedForm({
     changes,
     label,
@@ -214,18 +213,15 @@ export function GroupedFormActions({
   return (
     <ChangeReview entries={[{label, dirty, pending, disabled, save, discard, changes}]} save={save} disabled={disabled || pending}>{(review) => <>
     <ReviewSubmit review={context?.requestReview ?? review} />
-    {!coordinated && dirty && <GroupedSaveBar role="region" aria-label="Unsaved changes">
-      <p className="sr-only" aria-live="polite">
-        Unsaved: {label}
+    {!coordinated && dirty && <GroupedSaveBar role="region" aria-label={translateUi("Unsaved changes")}>
+      <p className="sr-only" aria-live="polite">{translateUi("Unsaved: ")}{label}
       </p>
       <Button
         type="button"
         variant="ghost"
         disabled={pending}
         onClick={discard}
-      >
-        Discard
-      </Button>
+      >{translateUi("Discard")}</Button>
       <Button
         type="button"
         variant={saveVariant}
@@ -241,6 +237,7 @@ export function GroupedFormActions({
 
 /** Route native Enter submissions through the same review as the visible action. */
 function ReviewSubmit({ review }: { readonly review: () => void }) {
+  useUiTranslation();
   const marker = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
     const form = marker.current?.closest("form");

@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import {
@@ -37,14 +40,15 @@ function Trend({
   measure: Measure;
   title: string;
 }) {
+  useUiTranslation();
   const points = modelDailyPoints(data, measure);
   return (
     <div className="min-w-0 space-y-2">
-      <h3 className="type-body-strong">{title} · Daily UTC</h3>
+      <h3 className="type-body-strong">{title}{translateUi(" · Daily UTC")}</h3>
       <div
         className="analytics-plot h-56"
         role="img"
-        aria-label={`${title} by model. Exact daily values in the table below.`}
+        aria-label={translateUi("{{value1}} by model. Exact daily values in the table below.", { value1: title })}
       >
         <ResponsiveContainer
           width="100%"
@@ -71,7 +75,7 @@ function Trend({
             <YAxis
               width={60}
               tickFormatter={(v: number) =>
-                v.toLocaleString(undefined, {
+                v.toLocaleString(getFormattingLocale(), {
                   notation: "compact",
                   maximumSignificantDigits: 3,
                 })
@@ -83,7 +87,7 @@ function Trend({
                 active && payload?.length ? (
                   <div className="max-h-72 max-w-80 overflow-auto rounded-lg border border-border bg-popover p-3 text-13 shadow-lg">
                     <p className="mb-1 font-semibold">
-                      {day} UTC · {modelMeasureLabels[measure]}
+                      {day}{translateUi(" UTC · ")}{modelMeasureLabels[measure]}
                     </p>
                     {data.models.map((model, index) => (
                       <p key={index} className="break-words">
@@ -114,22 +118,19 @@ function Trend({
         </ResponsiveContainer>
       </div>
       <details className="text-13">
-        <summary className="cursor-pointer text-muted-foreground">
-          Exact daily {modelMeasureLabels[measure].toLowerCase()}
+        <summary className="cursor-pointer text-muted-foreground">{translateUi("Exact daily ")}{modelMeasureLabels[measure].toLowerCase()}
         </summary>
         <div
           className="mt-2 max-h-80 overflow-auto"
           role="region"
-          aria-label={`Exact daily ${modelMeasureLabels[measure].toLowerCase()}`}
+          aria-label={translateUi("Exact daily {{value1}}", { value1: modelMeasureLabels[measure].toLowerCase() })}
           tabIndex={0}
         >
           <table className="w-full text-left">
-            <caption className="sr-only">{title} daily exact values</caption>
+            <caption className="sr-only">{title}{translateUi(" daily exact values")}</caption>
             <thead>
               <tr>
-                <th scope="col" className="p-2">
-                  UTC date
-                </th>
+                <th scope="col" className="p-2">{translateUi("UTC date")}</th>
                 {data.models.map((model, i) => (
                   <th key={i} scope="col" className="min-w-36 p-2">
                     {modelLabel(model)}
@@ -167,6 +168,7 @@ export function ModelTrends({
   data: NyxbotModelUsage;
   kind: "cost" | "traffic";
 }) {
+  useUiTranslation();
   const [cost, setCost] = useState<(typeof costFields)[number]>("gross_cost");
   const [tokens, setTokens] =
     useState<(typeof tokenFields)[number]>("total_tokens");
@@ -181,12 +183,9 @@ export function ModelTrends({
   return (
     <Card className="min-w-0 space-y-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-13 text-muted-foreground">
-          Full-period Top 20 models + Other · days without usage show zero ·
-          gaps mean cost is unavailable
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Full-period Top 20 models + Other · days without usage show zero · gaps mean cost is unavailable")}</p>
         <div className="flex items-center gap-2 text-13">
-          <Label asChild><span>{kind === "cost" ? "Cost measure" : "Token measure"}</span></Label>
+          <Label asChild><span>{kind === "cost" ? translateUi("Cost measure") : translateUi("Token measure")}</span></Label>
           <Select
             value={kind === "cost" ? cost : effectiveTokens}
             onValueChange={(value) =>
@@ -197,7 +196,7 @@ export function ModelTrends({
           >
             <SelectTrigger
               className="w-44"
-              aria-label={kind === "cost" ? "Cost measure" : "Token measure"}
+              aria-label={kind === "cost" ? translateUi("Cost measure") : translateUi("Token measure")}
             >
               <SelectValue />
             </SelectTrigger>
@@ -238,7 +237,7 @@ export function ModelTrends({
         <Trend data={data} measure={cost} title={modelMeasureLabels[cost]} />
       ) : (
         <div className="grid min-w-0 gap-6 xl:grid-cols-2">
-          <Trend data={data} measure="requests" title="Requests" />
+          <Trend data={data} measure="requests" title={translateUi("Requests")} />
           <Trend
             data={data}
             measure={effectiveTokens}

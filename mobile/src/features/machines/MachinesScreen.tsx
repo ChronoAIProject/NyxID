@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ContentScreenProps } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
@@ -43,13 +43,24 @@ export function MachinesScreen({
   const tab = route.name === "Machines" ? route.params?.tab : undefined;
   const [handoffError, setHandoffError] = useState<string>();
   // Preserve the web query URL while detail gets real horizontal Back history.
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (route.name === "Machines" && route.params?.machine) {
       const machineId = route.params.machine;
+      // Deep links commit the parent navigator after child layout effects.
+      // Consume only the live request, including when effects are replayed.
+      const current = navigation
+        .getState()
+        .routes.find((item) => item.key === route.key);
+      if (
+        current?.name !== "Machines" ||
+        (current.params as { machine?: string } | undefined)?.machine !==
+          machineId
+      )
+        return;
       navigation.setParams({ machine: undefined });
       navigation.push("MachineDetail", { machineId });
     }
-  }, [navigation, route.name, route.params]);
+  }, [navigation, route.key, route.name, route.params]);
   const inventory = useQuery({
     queryKey: [...machineKeys(runtime.epoch), "inventory"],
     queryFn: ({ signal }) => machinesApi.inventory(signal),

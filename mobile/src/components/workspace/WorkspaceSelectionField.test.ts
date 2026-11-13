@@ -3,6 +3,8 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
 import type { WorkspaceSelectionOption } from "./WorkspaceSelectionField";
+import { authSurfaceColors } from "../../features/auth/authAppearance";
+import { lightColors } from "../../theme/mobileTheme";
 
 type Element = { type: unknown; props: Record<string, any> };
 const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
@@ -140,6 +142,33 @@ function setup(overrides: Record<string, any> = {}, field = false) {
   };
 }
 
+test("auth selectors keep the local soft palette in the trigger and search sheet", () => {
+  const surfaceColors = authSurfaceColors(lightColors, "light");
+  const field = setup({ surfaceColors }, true);
+  assert.equal(
+    field.label("Members: Option 0").props.style[1].backgroundColor,
+    surfaceColors.cardSoft,
+  );
+  field.label("Members: Option 0").props.onPress();
+  field.harness.flush();
+  assert.equal(
+    field
+      .all()
+      .find((row) => row.type === field.exports.WorkspaceSelectionSheet)?.props
+      .surfaceColors,
+    surfaceColors,
+  );
+  const sheet = setup({ surfaceColors });
+  const search = sheet.one(
+    (row) =>
+      row.type === "View" &&
+      row.props.style?.[1]?.backgroundColor === surfaceColors.card,
+  );
+  assert.equal(search.props.style[1].borderColor, surfaceColors.controlBorder);
+  field.harness.unmount();
+  sheet.harness.unmount();
+});
+
 test("summary stays bounded and read-only users can inspect the full selector", () => {
   const state = setup(
     { value: ["id-0", "id-1", "id-2", "id-3"], disabled: true, readOnly: true },
@@ -155,6 +184,36 @@ test("summary stays bounded and read-only users can inspect the full selector", 
       .some((row) => row.type === state.exports.WorkspaceSelectionSheet),
   );
   assert.equal(state.writes.length, 0);
+});
+
+test("voice selection can use a fixed fullscreen overlay without detaching the live media host", () => {
+  const state = setup({ presentationStyle: "overFullScreen" });
+  assert.equal(
+    state.one((row) => row.type === "Modal").props.presentationStyle,
+    "overFullScreen",
+  );
+  state.harness.unmount();
+  const ordinary = setup();
+  assert.equal(
+    ordinary.one((row) => row.type === "Modal").props.presentationStyle,
+    "pageSheet",
+  );
+  ordinary.harness.unmount();
+});
+
+test("a voice picker can retain its draft and controls while Apply is temporarily disabled", () => {
+  const state = setup({ keepOpenWhenDisabled: true });
+  state.select("Option 3");
+  state.props.disabled = true;
+  state.harness.render();
+  assert.equal(state.closed(), 0);
+  assert.equal(state.apply().props.disabled, true);
+  state.props.disabled = false;
+  state.harness.render();
+  assert.equal(state.apply().props.disabled, false);
+  state.apply().props.onPress();
+  assert.deepEqual(state.writes, [["id-0", "id-3"]]);
+  state.harness.unmount();
 });
 
 test("search by name, metadata and exact IDs keeps hidden selections", () => {

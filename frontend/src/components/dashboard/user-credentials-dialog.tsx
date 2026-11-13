@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { ProviderConfig, UserProviderCredentials } from "@/types/api";
@@ -45,6 +48,7 @@ export function UserCredentialsDialog({
   provider,
   onClose,
 }: UserCredentialsDialogProps) {
+  useUiTranslation();
   const { data: credentials, isLoading } = useMyProviderCredentials(
     provider.id,
   );
@@ -78,14 +82,14 @@ export function UserCredentialsDialog({
             : undefined,
       });
       toast.success(
-        hasExisting ? "OAuth credentials updated" : "OAuth credentials saved",
+        translateUi(hasExisting ? "OAuth credentials updated" : "OAuth credentials saved"),
       );
       onClose();
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to save credentials");
+        toast.error(translateErrorMessage("Failed to save credentials"));
       }
     }
   }
@@ -93,13 +97,13 @@ export function UserCredentialsDialog({
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(provider.id);
-      toast.success("OAuth credentials removed");
+      toast.success(translateUi("OAuth credentials removed"));
       onClose();
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to remove credentials");
+        toast.error(translateErrorMessage("Failed to remove credentials"));
       }
     }
   }
@@ -109,18 +113,14 @@ export function UserCredentialsDialog({
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {hasExisting ? "Manage" : "Setup"} OAuth App for {provider.name}
+            {hasExisting ? translateUi("Manage") : translateUi("Setup")}{translateUi(" OAuth App for ")}{provider.name}
           </DialogTitle>
-          <DialogDescription>
-            Enter your own OAuth app credentials to connect with {provider.name}
-            . Public or PKCE-only clients can leave Client Secret blank.
-          </DialogDescription>
+          <DialogDescription>{translateUi("Enter your own OAuth app credentials to connect with ")}{provider.name}
+            {translateUi(". Public or PKCE-only clients can leave Client Secret blank. ")}</DialogDescription>
         </DialogHeader>
 
         {isLoading ? (
-          <div className="py-8 text-center text-14 text-muted-foreground">
-            Loading...
-          </div>
+          <div className="py-8 text-center text-14 text-muted-foreground">{translateUi("Loading...")}</div>
         ) : (
           <>
             <ExistingCredentialsInfo credentials={credentials} />
@@ -138,9 +138,7 @@ export function UserCredentialsDialog({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 type-row-title text-primary-text hover:underline"
-              >
-                How to create an OAuth app
-                <ExternalLink className="h-3 w-3" />
+              >{translateUi("How to create an OAuth app")}<ExternalLink className="h-3 w-3" />
               </a>
             )}
 
@@ -160,10 +158,10 @@ export function UserCredentialsDialog({
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>{translateUi("Client ID")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Your OAuth app Client ID"
+                          placeholder={translateUi("Your OAuth app Client ID")}
                           autoComplete="off"
                           {...field}
                         />
@@ -178,19 +176,16 @@ export function UserCredentialsDialog({
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client Secret (optional)</FormLabel>
+                      <FormLabel>{translateUi("Client Secret (optional)")}</FormLabel>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Your OAuth app Client Secret"
+                          placeholder={translateUi("Your OAuth app Client Secret")}
                           autoComplete="off"
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Leave blank for public clients that do not use a client
-                        secret.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Leave blank for public clients that do not use a client secret.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -201,10 +196,10 @@ export function UserCredentialsDialog({
                   name="label"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Label (optional)</FormLabel>
+                      <FormLabel>{translateUi("Label (optional)")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="e.g., My Dev App"
+                          placeholder={translateUi("e.g., My Dev App")}
                           maxLength={200}
                           {...field}
                         />
@@ -222,9 +217,7 @@ export function UserCredentialsDialog({
                       onClick={() => setConfirmDelete(true)}
                       className="mr-auto"
                     >
-                      <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
-                      Remove
-                    </Button>
+                      <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Remove")}</Button>
                   )}
 
                   {confirmDelete && (
@@ -234,16 +227,12 @@ export function UserCredentialsDialog({
                         variant="destructive"
                         onClick={() => void handleDelete()}
                         isLoading={deleteMutation.isPending}
-                      >
-                        Confirm Remove
-                      </Button>
+                      >{translateUi("Confirm Remove")}</Button>
                       <Button
                         type="button"
                         variant="ghost"
                         onClick={() => setConfirmDelete(false)}
-                      >
-                        Cancel
-                      </Button>
+                      >{translateUi("Cancel")}</Button>
                     </div>
                   )}
 
@@ -252,11 +241,9 @@ export function UserCredentialsDialog({
                     variant="outline"
                     onClick={onClose}
                     disabled={setMutation.isPending}
-                  >
-                    Cancel
-                  </Button>
+                  >{translateUi("Cancel")}</Button>
                   <Button variant="primary" type="submit" isLoading={setMutation.isPending} disabled={!form.formState.isValid || setMutation.isPending}>
-                    {hasExisting ? "Update" : "Save"}
+                    {hasExisting ? translateUi("Update") : translateUi("Save")}
                   </Button>
                 </DialogFooter>
               </form>
@@ -273,15 +260,16 @@ function ExistingCredentialsInfo({
 }: {
   readonly credentials: UserProviderCredentials | undefined;
 }) {
+  useUiTranslation();
   if (!credentials?.has_credentials) return null;
 
   return (
     <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-14">
-      <Badge variant="success">Configured</Badge>
+      <Badge variant="success">{translateUi("Configured")}</Badge>
       <div className="flex flex-col gap-0.5 text-13 text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}
         {credentials.updated_at && (
-          <span>Updated {formatDate(credentials.updated_at)}</span>
+          <span>{translateUi("Updated ")}{formatDate(credentials.updated_at)}</span>
         )}
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { StyleSheet, View } from "react-native";
 import {
   SettingsCheckRow,
@@ -8,18 +9,19 @@ import { bubblePalettes, type BubblePalette } from "../../theme/chatAppearance";
 
 /** Bubble colour as an iOS choice list; the page preview shows the result. */
 export function ChatBubbleSettings() {
+  const { t } = useAppLanguage();
   const { colors, mode, bubblePalette, setBubblePalette } = useTheme();
   const tone = (key: BubblePalette) =>
     mode === "dark" ? bubblePalettes[key].dark : bubblePalettes[key].light;
   return (
     <SettingsGroup
-      title="Message bubble"
-      footer="The color of your messages. Saved on this device."
+      title={t("Message bubble")}
+      footer={t("The color of your messages. Saved on this device.")}
     >
       {(Object.keys(bubblePalettes) as BubblePalette[]).map((key) => (
         <SettingsCheckRow
           key={key}
-          label={bubblePalettes[key].label}
+          label={t(bubblePalettes[key].label)}
           selected={bubblePalette === key}
           onPress={() => setBubblePalette(key)}
           leading={

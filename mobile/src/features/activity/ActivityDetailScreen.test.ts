@@ -16,6 +16,7 @@ const nodes = (e: Element): Element[] => [
 function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
   const calls: unknown[][] = [];
   const openedUrls: string[] = [];
+  let frontendUrl = "https://app.example.test";
   let guard: any;
   let pending = false;
   const gate = deferred<void>();
@@ -39,7 +40,7 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
-    "../../lib/env": { getFrontendUrl: () => "https://app.example.test" },
+    "../../lib/env": { getFrontendUrl: () => frontendUrl },
     "react-native": {
       Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
       ...Object.fromEntries(["Text", "View"].map((n) => [n, n])),
@@ -121,6 +122,9 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
     h,
     calls,
     openedUrls,
+    setFrontendUrl: (url: string) => {
+      frontendUrl = url;
+    },
     gate,
     guard: () => guard,
     pair: () =>
@@ -186,6 +190,12 @@ test("execution proposal detail retains the redesigned groups and has only a web
   assert.equal(link.props.accessibilityRole, "link");
   link.props.onPress();
   assert.deepEqual(e.openedUrls, ["https://app.example.test/assistant/approvals"]);
+  e.setFrontendUrl("https://selected.example.test");
+  link.props.onPress();
+  assert.deepEqual(e.openedUrls, [
+    "https://app.example.test/assistant/approvals",
+    "https://selected.example.test/assistant/approvals",
+  ]);
   assert.deepEqual(e.calls, []);
   e.h.unmount();
 });

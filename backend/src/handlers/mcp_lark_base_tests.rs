@@ -109,12 +109,15 @@ async fn writes(f: &Fixture, enabled: bool) {
     .await;
 }
 async fn bind_upload(f: &Fixture, bytes: &[u8]) -> String {
+    bind_named_upload(f, "receipt.txt", bytes).await
+}
+async fn bind_named_upload(f: &Fixture, name: &str, bytes: &[u8]) -> String {
     let item = uploads::upload(
         &f.state.db,
         &f.state.encryption_keys,
         &f.owner,
         &f.row.id,
-        "receipt.txt",
+        name,
         bytes.to_vec(),
     )
     .await
@@ -165,6 +168,12 @@ async fn bump_credential_epoch(f: &Fixture, credential: &str, previous: i64) {
 }
 
 fn setup(name: &'static str) -> futures::future::BoxFuture<'static, BaseFixture> {
+    setup_catalog(name, "api-lark")
+}
+fn setup_catalog(
+    name: &'static str,
+    slug: &'static str,
+) -> futures::future::BoxFuture<'static, BaseFixture> {
     Box::pin(async move {
         let f = orchestrator_fixture(name).await;
         crate::db::ensure_lark_base_write_indexes(&f.state.db)
@@ -195,9 +204,13 @@ fn setup(name: &'static str) -> futures::future::BoxFuture<'static, BaseFixture>
         let mut catalog = downstream_service::test_helpers::dummy_service();
         catalog.id = Uuid::new_v4().to_string();
         catalog.name = "Lark".into();
-        catalog.slug = "api-lark".into();
+        catalog.slug = slug.into();
         catalog.created_by = "system".into();
-        let base_url = format!("{}/open-apis", server.uri());
+        let base_url = if slug.ends_with("-bot") {
+            server.uri()
+        } else {
+            format!("{}/open-apis", server.uri())
+        };
         catalog.base_url = base_url.clone();
         f.state
             .db
@@ -279,6 +292,42 @@ fn setup(name: &'static str) -> futures::future::BoxFuture<'static, BaseFixture>
             if row.name == "bitable_record_create_with_attachments" {
                 endpoint = Some(row);
             }
+        }
+        if slug.ends_with("-bot") {
+            Mock::given(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"code":0,"tenant_access_token":"tenant-test-token","expire":7200}),
+                ))
+                .mount(&server)
+                .await;
+            let config =
+                crate::services::channel_adapters::lark::lark_family_token_exchange_config();
+            f.state.db.collection::<bson::Document>(downstream_service::COLLECTION_NAME)
+                .update_one(doc! {"_id":&catalog.id},doc! {"$set":{"auth_method":"token_exchange","token_exchange_config":bson::to_bson(&config).unwrap()}}).await.unwrap();
+            let connection = f
+                .state
+                .db
+                .collection::<bson::Document>("user_services")
+                .find_one(doc! {"_id":&instance})
+                .await
+                .unwrap()
+                .unwrap();
+            let encrypted = f
+                .state
+                .encryption_keys
+                .encrypt(br#"{"app_id":"test-app","app_secret":"secret-do-not-audit"}"#)
+                .await
+                .unwrap();
+            f.state.db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id":connection.get_str("api_key_id").unwrap()},doc! {"$set":{"credential_type":"api_key","credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}},"$unset":{"access_token_encrypted":""}}).await.unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .update_one(
+                    doc! {"_id":&instance},
+                    doc! {"$set":{"auth_method":"token_exchange","slug":format!("{slug}-3")}},
+                )
+                .await
+                .unwrap();
         }
         writes(&f, true).await;
         let attachment_id = bind_upload(&f, b"receipt-a bytes").await;
@@ -821,6 +870,8 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
         "destination",
         "contract",
         "unpublish",
+        "flag",
+        "generation",
     ] {
         let u = setup("base_guard").await;
         let auth = authenticate(&u.f).await;
@@ -840,6 +891,7 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
         let (response, ()) = tokio::join!(call(&u, &auth, false, input), async {
             wait_upload(&u).await;
             match change {
+                "flag" => writes(&u.f, false).await,
                 "stop" => {
                     u.f.state
                         .db
@@ -957,6 +1009,8 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
                             doc! {"service_id":&u.catalog.id,"name":"bitable_record_create"},
                             if change == "unpublish" {
                                 doc! {"$set":{"publication":"draft"}}
+                            } else if change == "generation" {
+                                doc! {"$set":{"operation_generation":2_i64}}
                             } else {
                                 doc! {"$set":{"path":"/different"}}
                             },
@@ -967,6 +1021,18 @@ async fn lark_base_write_guard_revocation_stop_credential_and_dependency_changes
             }
         });
         assert_error(&response);
+        if change == "flag" {
+            assert!(
+                text(&response).contains("attachment_write_flag_off"),
+                "{response}"
+            );
+        }
+        if change == "generation" {
+            assert!(
+                text(&response).contains("attachment_write_operation_generation_changed"),
+                "{response}"
+            );
+        }
         assert_no_create(&u).await;
         assert_eq!(
             requests(&u)
@@ -1009,6 +1075,10 @@ async fn lark_base_write_four_flag_combinations_both_dispatch_paths_and_discover
                     assert_eq!(payload(&response)["record_id"], "rec_receipt");
                 } else {
                     assert_error(&response);
+                    assert!(
+                        text(&response).contains("attachment_write_flag_off"),
+                        "{response}"
+                    );
                     assert!(requests(&u).await.is_empty());
                 }
                 let before = requests(&u).await.len();
@@ -1809,3 +1879,9 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
         cleanup(u).await;
     }
 }
+
+#[path = "mcp_lark_base_eligibility_tests.rs"]
+mod eligibility_tests;
+
+#[path = "mcp_lark_base_diagnostics_tests.rs"]
+mod diagnostics_tests;

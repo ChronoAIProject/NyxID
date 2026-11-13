@@ -20,6 +20,7 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     ["Usage & credits", "UsageCredits"],
     ["Notifications", "NotificationSettings"],
     ["Display", "DisplaySettings"],
+    ["Language", "LanguageSettings"],
     ["Privacy", "PrivacySettings"],
     ["Terms of Service", "TermsOfService"],
     ["Privacy Policy", "PrivacyPolicy"],
@@ -195,7 +196,10 @@ test("Preferences always offers dictation; it is Voice only when live voice is e
   );
   assert.throws(() => off.row("Voice"));
   off.row("Dictation").props.onPress();
-  assert.equal(JSON.stringify(off.pushes.at(-1)), '["VoiceSettings",{"voice":false}]');
+  assert.equal(
+    JSON.stringify(off.pushes.at(-1)),
+    '["VoiceSettings",{"voice":false}]',
+  );
   off.harness.unmount();
   const on = setupSettingsScreen(
     "./AccountSettingsScreen.tsx",
@@ -203,6 +207,27 @@ test("Preferences always offers dictation; it is Voice only when live voice is e
     { voiceEnabled: true },
   );
   on.row("Voice").props.onPress();
-  assert.equal(JSON.stringify(on.pushes.at(-1)), '["VoiceSettings",{"voice":true}]');
+  assert.equal(
+    JSON.stringify(on.pushes.at(-1)),
+    '["VoiceSettings",{"voice":true}]',
+  );
   on.harness.unmount();
+});
+
+test("tablet account identity uses its measured card width when Dynamic Type outgrows the sheet", () => {
+  const env = setup();
+  env.resize(1032, 2.2);
+  const identity = () => env.parent(env.parent(env.text("AE")));
+  identity().props.onLayout({
+    nativeEvent: { layout: { width: 688, height: 180 } },
+  });
+  env.harness.flush();
+  assert.equal(style(identity()).flexDirection, "column");
+  assert.equal(
+    style(env.parent(env.text("alex.long-address@example.test"))).width,
+    "100%",
+  );
+  env.resize(1194, 1);
+  assert.equal(style(identity()).flexDirection, "row");
+  env.harness.unmount();
 });

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ThreadTitle } from "./thread-title";
 import { useContext, type ComponentProps, type ReactNode } from "react";
 import { MotionConfig, motion } from "motion/react";
@@ -26,6 +28,7 @@ export function AgentStatusDot({
   readonly status: AssistantAgentStatus;
   readonly className?: string;
 }) {
+  useUiTranslation();
   return (
     <span
       aria-hidden="true"
@@ -41,18 +44,21 @@ export function AgentStatusDot({
 }
 
 /** NyxBot is the identity (accent); specialists are neutral. */
-export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind }) {
+export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind | "unknown" }) {
+  useUiTranslation();
   return (
-    <Badge variant={kind === "nyxbot" ? "accent" : "secondary"}>{AGENT_KIND_LABEL[kind]}</Badge>
+    <Badge variant={kind === "nyxbot" ? "accent" : "secondary"}>{kind === "unknown" ? translateUi("Agent") : AGENT_KIND_LABEL[kind]}</Badge>
   );
 }
 
 /** A thread that came from a chat app (Telegram, ...). */
 export function ChannelBadge({ platform }: { readonly platform: string }) {
-  return <Badge variant="secondary">via {channelPlatformName(platform)}</Badge>;
+  useUiTranslation();
+  return <Badge variant="secondary">{translateUi("via ")}{channelPlatformName(platform)}</Badge>;
 }
 
 export function ThreadPanels({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <div
@@ -74,6 +80,7 @@ export function ThreadPanels({ children }: { readonly children: ReactNode }) {
  * row.
  */
 export function HeaderBar({ children }: { readonly children: ReactNode }) {
+  useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
   const animate = useContext(ChatHeaderAnimateContext);
   return (
@@ -82,7 +89,7 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
         layout
         layoutDependency={compact}
         role="group"
-        aria-label="Conversation controls"
+        aria-label={translateUi("Conversation controls")}
         data-chat-header-controls=""
         data-compact={compact}
         style={{ borderRadius: 12 }}
@@ -102,6 +109,7 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
 }
 
 export function HeaderItem(props: ComponentProps<typeof motion.div>) {
+  useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
   return <motion.div {...props} layout="position" layoutDependency={compact} />;
 }
@@ -134,7 +142,7 @@ export function ThreadHeader({
   readonly name: string;
   /** "@handle", shown when a display name hides it. */
   readonly handle?: string;
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "unknown";
   readonly loading?: boolean;
   /** Picks the specialist's avatar tint. */
   readonly agentId?: string;
@@ -145,6 +153,7 @@ export function ThreadHeader({
   /** Additional thread controls. */
   readonly controls?: ReactNode;
 }) {
+  useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <div className="space-y-2">
@@ -196,12 +205,12 @@ export function ThreadHeader({
               <Button
                 size={compact ? "icon" : "sm"}
                 variant="ghost"
-                aria-label="Agent details"
-                title="Agent details"
+                aria-label={translateUi("Agent details")}
+                title={translateUi("Agent details")}
                 onClick={onOpenDetails}
               >
                 <PanelRightOpen aria-hidden="true" />
-                <span className={compact ? "sr-only" : undefined}>Details</span>
+                <span className={compact ? "sr-only" : undefined}>{translateUi("Details")}</span>
               </Button>
             ) : null}
           </HeaderItem>
@@ -212,8 +221,7 @@ export function ThreadHeader({
           role="status"
           className="rounded-lg bg-overlay px-3 py-2 text-13 text-muted-foreground"
         >
-          {name} was destroyed. Its access is revoked and this thread is read-only.
-        </p>
+          {name}{translateUi(" was destroyed. Its access is revoked and this thread is read-only.")}</p>
       ) : null}
     </div>
   );
@@ -231,11 +239,12 @@ export function WaitingNote({
   readonly items: readonly NyxAgentWaiting[];
   readonly agentName: string;
 }) {
+  useUiTranslation();
   if (!items.length) return null;
   return (
     <div
       role="status"
-      aria-label="Waiting"
+      aria-label={translateUi("Waiting")}
       className="space-y-1 rounded-lg border border-border px-3 py-2"
     >
       {items.map((item) => (
@@ -247,8 +256,7 @@ export function WaitingNote({
             />
             <span className="min-w-0 truncate">{item.title}</span>
             {item.expires_at ? (
-              <span className="ml-auto shrink-0 text-13 text-text-tertiary">
-                expires {formatTimeDistance(item.expires_at)}
+              <span className="ml-auto shrink-0 text-13 text-text-tertiary">{translateUi("expires ")}{formatTimeDistance(item.expires_at)}
               </span>
             ) : null}
           </p>
@@ -258,8 +266,7 @@ export function WaitingNote({
         </div>
       ))}
       <p className="text-13 text-text-tertiary">
-        {agentName} continues here by itself when this happens; no need to reply.
-      </p>
+        {agentName}{translateUi(" continues here by itself when this happens; no need to reply.")}</p>
     </div>
   );
 }
@@ -272,10 +279,10 @@ export function PendingEventsNote({
   readonly count: number;
   readonly agentName: string;
 }) {
+  useUiTranslation();
   if (count <= 0) return null;
   return (
     <p role="status" className="px-1 text-13 text-text-tertiary">
-      {count} {count === 1 ? "update" : "updates"} waiting for {agentName}&apos;s next turn
-    </p>
+      {count} {count === 1 ? translateUi("update") : translateUi("updates")}{translateUi(" waiting for ")}{agentName}{translateUi("'s next turn")}</p>
   );
 }

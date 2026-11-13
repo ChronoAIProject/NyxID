@@ -31,6 +31,7 @@ import {
 } from "@/schemas/assistant-nyxagent";
 import {
   assistantOnboardingSchema,
+  suggestionSetupSchema,
   type OnboardingAnswers,
 } from "@/schemas/assistant-onboarding";
 
@@ -121,6 +122,10 @@ export const nyxBotApi = {
     return nyxAgentSettingsSchema.parse(
       await assistantJson(`${ROOT}/settings`, { method: "PUT", body: update }),
     );
+  },
+  /** Live provider choices for an owner-clicked suggestion. */
+  async suggestionSetup(id: string) {
+    return suggestionSetupSchema.parse(await assistantJson(`${ROOT}/onboarding/suggestions/${encodeURIComponent(id)}`));
   },
   /** First-run intro state, the answer choices and next-step cards. */
   async onboarding() {

@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { analyticsAmount, plotAmount } from "@/lib/usage-analytics";
 import { useId } from "react";
 import { useTextSize } from "@/hooks/use-text-size";
@@ -79,6 +82,7 @@ export function ChartView({
   onSelect?: (id: string) => void;
   compact?: boolean;
 }) {
+  useUiTranslation();
   const chartId = useId().replace(/:/g, "");
   const tokenSize = useTextSize(13);
   const seriesData = data.points.map((point, index) => ({
@@ -135,12 +139,8 @@ export function ChartView({
   };
   const chart = noUsage ? (
     <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
-      <span className="type-card-title text-foreground">
-        No usage in this view
-      </span>
-      <span className="text-14">
-        Try a different time range or clear a filter.
-      </span>
+      <span className="type-card-title text-foreground">{translateUi("No usage in this view")}</span>
+      <span className="text-14">{translateUi("Try a different time range or clear a filter.")}</span>
     </div>
   ) : panel.chart === "pie" ? (
     pieData.length ? (
@@ -184,8 +184,8 @@ export function ChartView({
     ) : (
       <div className="flex h-full items-center justify-center text-14 text-muted-foreground">
         {data.slices.some((slice) => slice.value === null)
-          ? "Cost is unavailable for this selection."
-          : "No positive values to display."}
+          ? translateUi("Cost is unavailable for this selection.")
+          : translateUi("No positive values to display.")}
       </div>
     )
   ) : panel.chart === "bar" ? (
@@ -469,21 +469,21 @@ export function ChartView({
         </div>
         <span className="text-12 text-muted-foreground">
           {temporal
-            ? `${INTERVAL_LABELS[data.granularity]} · UTC`
+            ? translateUi("{{value1}} · UTC", { value1: INTERVAL_LABELS[data.granularity] })
             : panel.top
-              ? `Top ${panel.top}${data.slices.some((s) => s.is_other) ? " + Other" : ""}`
-              : "All usage"}
+              ? translateUi("Top {{value1}}{{value2}}", { value1: panel.top, value2: data.slices.some((s) => s.is_other) ? translateUi(" + Other") : "" })
+              : translateUi("All usage")}
         </span>
       </div>
       {panel.chart === "combo" && (
         <div className="mb-2 flex justify-between text-12 text-muted-foreground">
-          <span>Bars · {unit} · left axis</span>
-          <span>Line · requests · right axis</span>
+          <span>{translateUi("Bars · ")}{unit}{translateUi(" · left axis")}</span>
+          <span>{translateUi("Line · requests · right axis")}</span>
         </div>
       )}
       <div
         role="img"
-        aria-label={`${panel.title}: ${panel.chart} chart. Values available in the data table.`}
+        aria-label={translateUi("{{value1}}: {{value2}} chart. Values available in the data table.", { value1: panel.title, value2: panel.chart })}
         aria-describedby={`${chartId}-coverage`}
         className={cn(
           "analytics-plot min-w-0 shrink-0",
@@ -501,22 +501,18 @@ export function ChartView({
       >
         {temporal &&
           data.points.some((point) => partialBucket(point.bucket, data)) && (
-            <p>* Partial intervals. Hover for the exact UTC dates included.</p>
+            <p>{translateUi("* Partial intervals. Hover for the exact UTC dates included.")}</p>
           )}
         {unknown > 0 && (
           <p className="text-warning">
-            {unknown.toLocaleString()} metering events have unknown cost.
-            Affected cost values are unavailable
-            {panel.chart === "pie" ? "; slices show known values only" : ""}.
+            {unknown.toLocaleString(getFormattingLocale())}{translateUi(" metering events have unknown cost. Affected cost values are unavailable")}{panel.chart === "pie" ? translateUi("; slices show known values only") : ""}.
           </p>
         )}
         {data.totals.legacy_cost_events > 0 && data.unit === "microcredits" && (
-          <p>Includes historical estimates at cached rates.</p>
+          <p>{translateUi("Includes historical estimates at cached rates.")}</p>
         )}
         {!data.freshness.validated && (
-          <p className="text-warning">
-            Usage is updating. Refresh to confirm this snapshot.
-          </p>
+          <p className="text-warning">{translateUi("Usage is updating. Refresh to confirm this snapshot.")}</p>
         )}
       </div>
       {!noUsage && (
@@ -533,7 +529,7 @@ export function ChartView({
                 "flex items-center justify-between gap-3 text-13",
                 compact && "max-w-[46%]",
               )}
-              title={`${slice.label}: ${format(analyticsAmount(slice))} ${unit}`}
+              title={translateUi("{{label}}: {{value}} {{unit}}", { label: slice.label, value: format(analyticsAmount(slice)), unit: unit })}
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span
@@ -546,7 +542,7 @@ export function ChartView({
                   <Button
                     variant="link"
                     className="h-auto min-w-0 justify-start p-0 text-14 text-foreground"
-                    title={`Filter to ${slice.label}`}
+                    title={translateUi("Filter to {{value1}}", { value1: slice.label })}
                     onClick={() => onSelect(slice.id!)}
                   >
                     <span className="truncate">{slice.label}</span>
@@ -572,7 +568,7 @@ export function ChartView({
       <div className={cn("pt-4", compact && "mt-auto")}>
         <section
           className="border-t border-border/50 pt-3"
-          aria-label={`${panel.title} data table`}
+          aria-label={translateUi("{{value1}} data table", { value1: panel.title })}
         >
           <details
             key={panel.table_display ?? "always"}
@@ -584,14 +580,10 @@ export function ChartView({
                 "flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden",
                 panel.table_display !== "accordion" && "hidden",
               )}
-            >
-              Data table
-              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+            >{translateUi("Data table")}<ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
             </summary>
             {panel.table_display !== "accordion" && (
-              <h4 className="type-secondary-emphasis text-muted-foreground">
-                Data table
-              </h4>
+              <h4 className="type-secondary-emphasis text-muted-foreground">{translateUi("Data table")}</h4>
             )}
             <div
               className={cn(
@@ -600,14 +592,14 @@ export function ChartView({
               )}
             >
               <table className="w-full text-left text-13">
-                <caption className="sr-only">{panel.title} data</caption>
+                <caption className="sr-only">{panel.title}{translateUi(" data")}</caption>
                 <thead className="sticky top-0 bg-muted/90">
                   <tr>
                     <th className="px-3 py-2 font-medium">
                       {temporal
-                        ? "Time (UTC)"
+                        ? translateUi("Time (UTC)")
                         : panel.top === 0
-                          ? "Group"
+                          ? translateUi("Group")
                           : BREAKDOWN_LABELS[panel.breakdown]}
                     </th>
                     <th className="px-3 py-2 text-right font-medium">{unit}</th>
@@ -622,9 +614,7 @@ export function ChartView({
                         </th>
                       ))}
                     {panel.chart === "combo" && (
-                      <th className="px-3 py-2 text-right font-medium">
-                        Requests
-                      </th>
+                      <th className="px-3 py-2 text-right font-medium">{translateUi("Requests")}</th>
                     )}
                   </tr>
                 </thead>
@@ -658,7 +648,7 @@ export function ChartView({
                             ))}
                           {panel.chart === "combo" && (
                             <td className="px-3 py-2 text-right font-mono">
-                              {point.requests.toLocaleString()}
+                              {point.requests.toLocaleString(getFormattingLocale())}
                             </td>
                           )}
                         </tr>

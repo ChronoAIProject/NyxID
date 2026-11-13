@@ -330,6 +330,7 @@ pub(super) async fn begin_ready(
                     db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).update_many(doc! {"conversation_id":id,"decision":"skip"},doc! {"$set":{"decision":"revoked","updated_at":bson::DateTime::now()}}).session(&mut *session).await?;
                     // Completed request cards cannot authorize a different chain.
                     db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).update_many(doc! {"conversation_id":id,"status":{"$in":["pending","allowed"]}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+                    crate::services::assistant_notification_service::resolve_cards_in_session(db,session,crate::services::assistant_notification_service::CardScope::Conversation(id),"superseded").await?;
                 }
                 // Completed turns cannot donate their previous request binding.
                 row.active_turn=None;row.collaboration=Some(b.clone());
@@ -530,6 +531,14 @@ pub(crate) async fn publish_reply(
         .session(&mut *session)
         .await?;
     notifications::enqueue(db, &group, &public, session).await?;
+    crate::services::assistant_notification_service::record_collaboration_reply_in_session(
+        db,
+        session,
+        &b.original_requester_id,
+        &group,
+        &public,
+    )
+    .await?;
     Ok(())
 }
 

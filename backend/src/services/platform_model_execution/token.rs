@@ -85,6 +85,21 @@ impl ServiceAccount {
     }
 }
 
+/// Save-time validation shares the executor's closed parser, without minting a token.
+/// Errors contain no supplied data, including parser diagnostics or key fragments.
+pub(crate) fn validate_saved_credential(raw: &str, service_account: bool) -> AppResult<()> {
+    let result = if service_account {
+        ServiceAccount::parse(raw).map(|_| ())
+    } else {
+        validate_bearer(raw)
+    };
+    result.map_err(|_| AppError::ValidationError(if service_account {
+        "Invalid Google Cloud service-account JSON; use a service_account key with the standard Google endpoints and a valid RSA private key"
+    } else {
+        "Invalid provider API key"
+    }.into()))
+}
+
 struct Cached {
     token: Zeroizing<String>,
     refresh_at: Instant,
@@ -242,6 +257,28 @@ mod tests {
     };
     fn key() -> String {
         super::super::tests::sa()
+    }
+    #[test]
+    fn saved_credentials_share_the_runtime_parser_without_provider_calls() {
+        assert!(validate_saved_credential(&key(), true).is_ok());
+        assert!(validate_saved_credential("sk-test-fixture", false).is_ok());
+        assert!(validate_saved_credential(&key(), false).is_err());
+        for (field, value) in [
+            ("type", serde_json::json!("external_account")),
+            (
+                "credential_source",
+                serde_json::json!({"file":"secret-path"}),
+            ),
+            ("token_uri", serde_json::json!("https://private.invalid")),
+            ("private_key", serde_json::json!("secret-material")),
+        ] {
+            let mut value_key: serde_json::Value = serde_json::from_str(&key()).unwrap();
+            value_key[field] = value;
+            let error = validate_saved_credential(&value_key.to_string(), true).unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(_)));
+            assert!(!error.to_string().contains("secret-"));
+            assert!(!error.to_string().contains("private.invalid"));
+        }
     }
     #[test]
     fn bearer_cannot_contain_a_service_account_or_header_material() {

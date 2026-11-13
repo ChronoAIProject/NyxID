@@ -88,6 +88,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: PoolCommands,
     },
+    /// Inspect optional secondary evidence for a failed service invocation
+    Monitoring {
+        #[command(subcommand)]
+        command: MonitoringCommands,
+    },
     /// Manage inbound event triggers
     Trigger {
         #[command(subcommand)]
@@ -232,6 +237,17 @@ pub enum Commands {
     },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Subcommand)]
+pub enum MonitoringCommands {
+    /// Redeem a short-lived diagnostic handle from a failed invocation
+    Diagnose {
+        /// Opaque handle returned by NyxID with the original failure
+        handle: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -1565,8 +1581,10 @@ pub enum ServiceCommands {
         /// Desired scope set, declared up front (repeatable, comma- or
         /// space-separated). Pre-seeds the wizard picker with exactly these
         /// scopes so the whole change is driven from one command — ideal for
-        /// AI/CLI use. Omit to open the picker seeded with the connection's
-        /// current scopes. The upstream provider still re-consents in the
+        /// AI/CLI use. Providers with add-only scope management (GitHub)
+        /// retain their current grants even if omitted here. Removals on
+        /// other providers require confirmation. Omit to open the picker
+        /// seeded with the connection's current scopes. The provider re-consents in the
         /// browser. Example: --set "tweet.read,media.write"
         #[arg(long = "set", value_name = "SCOPES")]
         set_scopes: Vec<String>,

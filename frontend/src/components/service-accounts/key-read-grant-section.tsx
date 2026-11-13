@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -13,6 +16,7 @@ import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 
 export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
+  useUiTranslation();
   const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
   const { data: grant, isLoading, error } = useSaKeyReadGrant(saId);
   const save = useSaveSaKeyReadGrant(saId);
@@ -34,7 +38,7 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
         expires_at: values.expires_at ? new Date(values.expires_at).toISOString() : undefined,
       });
       setEditing(false);
-      toast.success("Connection metadata access granted");
+      toast.success(translateUi("Connection metadata access granted"));
     } catch (error) {
       setSubmitError(error instanceof ApiError ? error.message : "Could not save key read grant");
     }
@@ -43,37 +47,30 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
   async function revokeGrant() {
     try {
       await revoke.mutateAsync();
-      toast.success("Connection metadata access revoked");
+      toast.success(translateUi("Connection metadata access revoked"));
     } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : "Could not revoke key read grant");
+      toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Could not revoke key read grant"));
     }
   }
 
   return (
-    <DetailSection title="Connection metadata access">
+    <DetailSection title={translateUi("Connection metadata access")}>
       <div className="space-y-4 p-5">
-        <p className="text-14 text-muted-foreground">
-          Optional access to selected private connections owned by a person or
-          organization. Catalog editors read the platform catalog through their
-          catalog scopes granted by a platform administrator and do not need this grant. For private connection
-          reads, the account needs user-services:read and a platform
-          administrator must grant the connection UUIDs below. Connections must
-          remain accessible to the account owner.
-        </p>
-        {isLoading && <p>Loading grant…</p>}
-        {error && <p role="alert">Could not load connection metadata access.</p>}
+        <p className="text-14 text-muted-foreground">{translateUi("Optional access to selected private connections owned by a person or organization. Catalog editors read the platform catalog through their catalog scopes granted by a platform administrator and do not need this grant. For private connection reads, the account needs user-services:read and a platform administrator must grant the connection UUIDs below. Connections must remain accessible to the account owner.")}</p>
+        {isLoading && <p>{translateUi("Loading grant…")}</p>}
+        {error && <p role="alert">{translateUi("Could not load connection metadata access.")}</p>}
         {!isLoading && !error && (
           <>
-            <DetailRow label="Connection UUIDs" value={grant?.user_service_ids.join(", ") ?? "None"} />
-            {grant && <DetailRow label="Expires" value={grant.expires_at ? formatDate(grant.expires_at) : "No expiry"} />}
+            <DetailRow label={translateUi("Connection UUIDs")} value={grant?.user_service_ids.join(", ") ?? "None"} />
+            {grant && <DetailRow label={translateUi("Expires")} value={grant.expires_at ? formatDate(grant.expires_at) : "No expiry"} />}
             {isAdmin && !editing && (
               <div className="flex justify-end gap-2">
-                {grant && <Button variant="destructive" isLoading={revoke.isPending} onClick={() => void revokeGrant()}>Revoke read access</Button>}
+                {grant && <Button variant="destructive" isLoading={revoke.isPending} onClick={() => void revokeGrant()}>{translateUi("Revoke read access")}</Button>}
                 <Button onClick={() => {
                   form.reset({ user_service_ids: grant?.user_service_ids.join(", ") ?? "", expires_at: grant?.expires_at ?? "" });
                   setSubmitError(null);
                   setEditing(true);
-                }}>{grant ? "Replace read grant" : "Grant read access"}</Button>
+                }}>{grant ? translateUi("Replace read grant") : translateUi("Grant read access")}</Button>
               </div>
             )}
           </>
@@ -89,10 +86,10 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
                   <FormItem><FormLabel>{label}</FormLabel><FormControl><Input {...field} placeholder={placeholder} /></FormControl><FormMessage /></FormItem>
                 )} />
               ))}
-              {submitError && <p role="alert" className="text-destructive">{submitError}</p>}
+              {submitError && <p role="alert" className="text-destructive">{translateUi(submitError)}</p>}
               <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
-                <Button type="submit" isLoading={save.isPending} disabled={!isDirty || !isValid}>Save read grant</Button>
+                <Button type="button" variant="outline" onClick={() => setEditing(false)}>{translateUi("Cancel")}</Button>
+                <Button type="submit" isLoading={save.isPending} disabled={!isDirty || !isValid}>{translateUi("Save read grant")}</Button>
               </div>
             </form>
           </Form>

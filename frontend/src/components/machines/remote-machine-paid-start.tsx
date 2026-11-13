@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import {
   assertRemoteMachineAdmission,
   useRemoteMachineAdmission,
@@ -76,6 +79,7 @@ export function RemoteMachinePaidStart({
   machine,
   onAccepted,
 }: Props) {
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const enabled = useRemoteMachineAdmission();
   const [review, setReview] = useState({
@@ -110,6 +114,7 @@ function PaidStartContent({
   readonly machine: RemoteMachine;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const scope = `${machine.node_id}:resume`;
   const quote = useRemoteMachineQuote();
@@ -262,94 +267,62 @@ function PaidStartContent({
   return (
     <DialogContent className="md:max-w-2xl">
       <DialogHeader>
-        <DialogTitle>Review paid resume</DialogTitle>
-        <DialogDescription>
-          Review a server-issued runtime quote before explicitly starting
-          continuous account-balance charging.
-        </DialogDescription>
+        <DialogTitle>{translateUi("Review paid resume")}</DialogTitle>
+        <DialogDescription>{translateUi("Review a server-issued runtime quote before explicitly starting continuous account-balance charging.")}</DialogDescription>
       </DialogHeader>
       <Form {...form}>
         <form className="space-y-6" onSubmit={form.handleSubmit(submit)}>
           <GroupedList
-            title="Runtime quote"
+            title={translateUi("Runtime quote")}
             footer={
               <div className="space-y-2">
                 {saved ? (
                   <>
-                    <p>
-                      A previously submitted request is saved for this account.
-                      Retrying recovers the same request, including after the
-                      original quote expires; it does not accept a replacement
-                      quote.
-                    </p>
-                    <p className="break-all">
-                      Original quote: {saved.body.quote_id ?? "Unavailable"}
+                    <p>{translateUi("A previously submitted request is saved for this account. Retrying recovers the same request, including after the original quote expires; it does not accept a replacement quote.")}</p>
+                    <p className="break-all">{translateUi("Original quote: ")}{saved.body.quote_id ?? translateUi("Unavailable")}
                     </p>
                     {saved.body.profile_version ? (
-                      <p>Original profile: {saved.body.profile_version}</p>
+                      <p>{translateUi("Original profile: ")}{saved.body.profile_version}</p>
                     ) : null}
-                    <p>
-                      Original policies: {saved.body.policy_version} /{" "}
+                    <p>{translateUi("Original policies: ")}{saved.body.policy_version} /{" "}
                       {saved.body.data_policy_version}
                     </p>
                   </>
                 ) : quote.isPending ? (
-                  <p role="status">Requesting a synchronized runtime quote…</p>
+                  <p role="status">{translateUi("Requesting a synchronized runtime quote…")}</p>
                 ) : quote.error ? (
                   <ErrorBanner
                     message={
                       quote.error instanceof Error
                         ? quote.error.message
-                        : "Paid runtime quoting is unavailable."
+                        : translateUi("Paid runtime quoting is unavailable.")
                     }
                     onRetry={reviewAgain}
                   />
                 ) : offer ? (
                   <>
-                    <p>
-                      Offered rate:{" "}
+                    <p>{translateUi("Offered rate:")}{" "}
                       <strong>
-                        {offer.credits_per_second} Credits per cumulative whole
-                        running second
-                      </strong>
+                        {offer.credits_per_second}{translateUi(" Credits per cumulative whole running second")}</strong>
                       .
                     </p>
-                    <p className="break-all">Rate version: {offer.rate_version}</p>
-                    <p>
-                      Quote expires:{" "}
-                      {new Date(offer.valid_until).toLocaleString()}. Quotes are
-                      valid for 15 minutes.
-                    </p>
+                    <p className="break-all">{translateUi("Rate version: ")}{offer.rate_version}</p>
+                    <p>{translateUi("Quote expires:")}{" "}
+                      {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}{translateUi(". Quotes are valid for 15 minutes. ")}</p>
                     {expired ? (
-                      <p role="alert" className="text-destructive">
-                        This quote has expired. Review a fresh quote before
-                        starting.
-                      </p>
+                      <p role="alert" className="text-destructive">{translateUi("This quote has expired. Review a fresh quote before starting.")}</p>
                     ) : null}
-                    <p>
-                      Profile: {offer.profile.profile_version}. Fixed{" "}
-                      {offer.profile.cpu_millis / 1000} vCPU,{" "}
-                      {offer.profile.memory_mib / 1024} GiB memory,{" "}
-                      {offer.profile.workspace_gib} GiB /workspace.
-                    </p>
-                    <p>
-                      Temporary storage is managed by the deployment environment. No
-                      fixed capacity commitment, selectable size or extra storage
-                      charge. Temporary data may be lost after pause or Pod
-                      recreation. Full disks can cause writes to fail, and disk
-                      pressure can evict the Pod. Review Machine details for
-                      recovery guidance.
-                    </p>
-                    <p>
-                      Policy: {offer.policy.policy_version}. Data policy:{" "}
+                    <p>{translateUi("Profile: ")}{offer.profile.profile_version}{translateUi(". Fixed")}{" "}
+                      {offer.profile.cpu_millis / 1000}{translateUi(" vCPU,")}{" "}
+                      {offer.profile.memory_mib / 1024}{translateUi(" GiB memory,")}{" "}
+                      {offer.profile.workspace_gib}{translateUi(" GiB /workspace.")}</p>
+                    <p>{translateUi("Temporary storage is managed by the deployment environment. No fixed capacity commitment, selectable size or extra storage charge. Temporary data may be lost after pause or Pod recreation. Full disks can cause writes to fail, and disk pressure can evict the Pod. Review Machine details for recovery guidance.")}</p>
+                    <p>{translateUi("Policy: ")}{offer.policy.policy_version}{translateUi(". Data policy:")}{" "}
                       {offer.policy.data_policy_version}.
                     </p>
                   </>
                 ) : (
-                  <p role="alert">
-                    A synchronized, priced runtime quote is unavailable. This server
-                    has not supplied an acceptable paid offer.
-                  </p>
+                  <p role="alert">{translateUi("A synchronized, priced runtime quote is unavailable. This server has not supplied an acceptable paid offer.")}</p>
                 )}
                 <RemoteMachinePlatformReadiness grouped
                   platform={offer?.platform ?? entitlement.data?.platform}
@@ -372,47 +345,23 @@ function PaidStartContent({
                   quotePrice={offer?.credits_per_second}
                   now={now}
                 />
-                <p>
-                  Charging draws continuously from the shared account balance with
-                  no per-instance spending cap. Cumulative whole running seconds are
-                  charged at the accepted rate; a final fractional second is free. A
-                  ready machine continues billing while idle; there is no automatic
-                  idle pause. Paused workspace storage is free. Downstream service
-                  usage is charged separately.
-                </p>
-                <p>
-                  Account wallet available:{" "}
+                <p>{translateUi("Charging draws continuously from the shared account balance with no per-instance spending cap. Cumulative whole running seconds are charged at the accepted rate; a final fractional second is free. A ready machine continues billing while idle; there is no automatic idle pause. Paused workspace storage is free. Downstream service usage is charged separately.")}</p>
+                <p>{translateUi("Account wallet available:")}{" "}
                   {available === null
-                    ? "Unavailable"
-                    : `${formatExactCredits(available, 12)} Credits`}
-                  . The server checks current eligibility, subscription, provider
-                  readiness, and finite funding when you submit.
-                </p>
+                    ? translateUi("Unavailable")
+                    : translateUi("{{value1}} Credits", { value1: formatExactCredits(available, 12) })}
+                  {translateUi(". The server checks current eligibility, subscription, provider readiness, and finite funding when you submit. ")}</p>
                 {machine ? (
-                  <p>
-                    Resume requires a new accepted quote and resolution of the
-                    previous run’s pending liability. Adding funds never resumes
-                    this Machine automatically.
-                  </p>
+                  <p>{translateUi("Resume requires a new accepted quote and resolution of the previous run’s pending liability. Adding funds never resumes this Machine automatically.")}</p>
                 ) : null}
-                <p>
-                  All clients share the OS and workspace. File roots do not isolate
-                  shell commands. There are no inbound ports, public IP, persistent
-                  environment variables, snapshots, or restore. Job environment
-                  variables are temporary.
-                </p>
-                <p>
-                  Job metadata is retained for 30 days and terminal operation
-                  history for 90 days. Output is live-only, retained at most one
-                  hour after termination, and may disappear sooner. Paused
-                  workspaces remain until owner deletion; fixed disks cannot expand.
-                </p>
+                <p>{translateUi("All clients share the OS and workspace. File roots do not isolate shell commands. There are no inbound ports, public IP, persistent environment variables, snapshots, or restore. Job environment variables are temporary.")}</p>
+                <p>{translateUi("Job metadata is retained for 30 days and terminal operation history for 90 days. Output is live-only, retained at most one hour after termination, and may disappear sooner. Paused workspaces remain until owner deletion; fixed disks cannot expand.")}</p>
               </div>
             }
           >
-            <GroupedRow title="Review continuous account-balance charging" />
+            <GroupedRow title={translateUi("Review continuous account-balance charging")} />
           </GroupedList>
-          <GroupedList title="Acceptance">
+          <GroupedList title={translateUi("Acceptance")}>
             {!saved ? (
               <FormField
                 control={form.control}
@@ -430,11 +379,7 @@ function PaidStartContent({
                       />
                     </FormControl>
                     <div className="min-w-0 flex-1 space-y-1">
-                      <FormLabel>
-                        I accept this exact rate, continuous account-balance
-                        charging with no per-instance cap, and the displayed
-                        profile, shared environment, and data policy versions.
-                      </FormLabel>
+                      <FormLabel>{translateUi("I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions.")}</FormLabel>
                       <FormMessage />
                     </div>
                   </FormItem>
@@ -443,39 +388,33 @@ function PaidStartContent({
             ) : null}
             <GroupedFooter>
               {unreadable ? (
-                <ErrorBanner message="The saved request cannot be read. Review and reset it before continuing." />
+                <ErrorBanner message={translateUi("The saved request cannot be read. Review and reset it before continuing.")} />
               ) : null}
               {!permittedState && !saved ? (
-                <ErrorBanner message="Paid resume is available only for a paused paid Machine. Reload its current details." />
+                <ErrorBanner message={translateUi("Paid resume is available only for a paused paid Machine. Reload its current details.")} />
               ) : null}
               {error ? <ErrorBanner message={error} /> : null}
               {conflict ? (
-                <p role="alert" className="text-14 text-muted-foreground">
-                  The server rejected this request. Resolve the reported condition,
-                  review current Machine details and a fresh quote; continuing
-                  requires new acceptance. Adding funds does not start this request.
-                </p>
+                <p role="alert" className="text-14 text-muted-foreground">{translateUi("The server rejected this request. Resolve the reported condition, review current Machine details and a fresh quote; continuing requires new acceptance. Adding funds does not start this request.")}</p>
               ) : null}
             </GroupedFooter>
           </GroupedList>
           {conflict || unreadable || (!saved && !quote.isPending) ? (
             <GroupedList>
               <GroupedRow asChild interactive>
-                <button type="button" disabled={busy} onClick={reviewAgain}>
-                  Review fresh quote
-                </button>
+                <button type="button" disabled={busy} onClick={reviewAgain}>{translateUi("Review fresh quote")}</button>
               </GroupedRow>
             </GroupedList>
           ) : null}
           <GroupedDialogActions
             intent="create"
-            label="paid resume acceptance"
+            label={translateUi("paid resume acceptance")}
             dirty={form.formState.isDirty}
             pending={busy}
             disabled={!form.formState.isValid || !canSubmit || !form.watch("accepted")}
             save={form.handleSubmit(submit)}
             discard={() => form.reset()}
-            saveLabel={saved ? "Retry saved paid request" : "Accept quote and resume"}
+            saveLabel={saved ? translateUi("Retry saved paid request") : translateUi("Accept quote and resume")}
           />
         </form>
       </Form>

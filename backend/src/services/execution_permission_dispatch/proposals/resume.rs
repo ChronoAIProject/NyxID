@@ -41,7 +41,7 @@ impl Resume {
         if version.number() != self.version {
             return Err(conflict());
         }
-        version.require(db).await?;
+        version.require_serving(db).await?;
         fence_endpoint(db, session, proposal(&row)?).await?;
 
         let update = if dispatch {
@@ -76,7 +76,13 @@ pub(crate) async fn resume_turn(
         return Ok(None);
     }
     let mut notes = Vec::new();
+    let mut reviews = presentation::ReviewNotes::default();
+    let mut seen = std::collections::HashSet::new();
     for id in ids {
+        // Replayed wake IDs are the same receipt, never another operation.
+        if !seen.insert(id) {
+            continue;
+        }
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
@@ -93,7 +99,7 @@ pub(crate) async fn resume_turn(
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
-            notes.push("The execution permission was not approved. Nothing was sent.".into());
+            reviews.push(&request, p);
             continue;
         }
         if p.state == "completed" {
@@ -129,8 +135,9 @@ pub(crate) async fn resume_turn(
             ));
             continue;
         }
-        super::super::super::security_readiness_service::require(&state.db, READINESS).await?;
-        version.require(&state.db).await?;
+        super::super::super::security_readiness_service::require_serving(&state.db, READINESS)
+            .await?;
+        version.require_serving(&state.db).await?;
         let live = async {
             tasks::check(&state.db, &p.task).await?;
             require_enrolled(&state.db, &row.user_id, None).await
@@ -201,6 +208,7 @@ pub(crate) async fn resume_turn(
         let mut independent_request = None;
         let mut independent_card = None;
         let mut private_result = None;
+        let mut activity_outcome = None;
         let (state_name, text, code) = match outcome {
             Ok(response) if sent => {
                 let status = response.status();
@@ -213,6 +221,7 @@ pub(crate) async fn resume_turn(
                         };
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
+                        activity_outcome = Some(if status.is_success() { "completed" } else { "failed" });
                         ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},None)
                     },
                     _=>("unknown","The response was incomplete or unavailable. The operation will not be sent again.".into(),Some("response_unavailable")),
@@ -278,7 +287,7 @@ pub(crate) async fn resume_turn(
                 format!("{}:result", aad(id)).as_bytes(),
             )
             .await?;
-        let mut update = doc! {"$set":{"execution_proposal.v1.state":state_name,"execution_proposal.v1.failure_code":code,"execution_proposal.v1.result":binary(result),"execution_proposal.v1.independent_request_id":independent_request,"execution_proposal.v1.independent_card_id":independent_card}};
+        let mut update = doc! {"$set":{"activity_outcome":activity_outcome,"execution_proposal.v1.state":state_name,"execution_proposal.v1.failure_code":code,"execution_proposal.v1.result":binary(result),"execution_proposal.v1.independent_request_id":independent_request,"execution_proposal.v1.independent_card_id":independent_card}};
         if state_name != "waiting" {
             update.insert("$unset", doc! {"execution_proposal.v1.payload":""});
         }
@@ -293,6 +302,7 @@ pub(crate) async fn resume_turn(
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
         notes.push(text);
     }
+    notes.extend(reviews.render());
     Ok(Some(notes.join("\n\n")))
 }
 /// Called only after first-party-human ownership checks. Public projections
@@ -347,7 +357,7 @@ async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> 
             let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(filter.clone())).session(&mut *session).await? else {return Ok(false)};
             let p=proposal(&row)?;
             let version=AssistantVersion::of(&row)?;
-            version.require(db).await?;
+            version.require_serving(db).await?;
             if db.collection::<Document>(REQUESTS).update_one(version.selector(filter),version.update(doc!{"$set":{
                 "execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":*claim,
                 "execution_proposal.v1.resume_turn_id":*turn,"execution_proposal.v1.claimed_at":bson::DateTime::now()

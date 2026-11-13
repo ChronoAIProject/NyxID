@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
@@ -54,6 +57,7 @@ export function ComposerSettings({
   readonly disabled?: boolean;
   readonly onVoiceSettings?: () => void;
 }) {
+  useUiTranslation();
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const thinking = model === "nyxagent/research";
   const nextThinkingModel = thinking ? "nyxagent/chat" : "nyxagent/research";
@@ -87,9 +91,9 @@ export function ComposerSettings({
       .mutateAsync({ conversationId, model: next })
       .catch((error: unknown) => {
         toast.error(
-          error instanceof Error
+          translateErrorMessage(error instanceof Error
             ? error.message
-            : "Could not change the model.",
+            : "Could not change the model."),
         );
       });
   }
@@ -100,7 +104,7 @@ export function ComposerSettings({
         <button
           type="button"
           disabled={disabled}
-          aria-label={`${menuLabel}: ${triggerLabel}${advancedControls && mode ? `, ${accessLabel}` : ""}`}
+          aria-label={translateUi("{{menuLabel}}: {{triggerLabel}}{{value}}", { menuLabel: menuLabel, triggerLabel: triggerLabel, value: advancedControls && mode ? `, ${accessLabel}` : "" })}
           className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-14 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           <span className="flex min-w-0 items-center text-foreground">
@@ -108,7 +112,7 @@ export function ComposerSettings({
               {advancedControls ? name : accessLabel}
             </span>
             {!advancedControls && thinking && (
-              <span className="shrink-0">, Thinking</span>
+              <span className="shrink-0">{translateUi(", Thinking")}</span>
             )}
           </span>
           <ChevronDown aria-hidden className="h-3 w-3 shrink-0" />
@@ -125,7 +129,7 @@ export function ComposerSettings({
         {!advancedControls && (
           <DropdownMenuItem
             role="menuitemcheckbox"
-            aria-label="Thinking mode"
+            aria-label={translateUi("Thinking mode")}
             aria-checked={thinking}
             disabled={
               modelLocked ||
@@ -139,7 +143,7 @@ export function ComposerSettings({
               selectModel(nextThinkingModel);
             }}
           >
-            <span className="flex-1">Thinking</span>
+            <span className="flex-1">{translateUi("Thinking")}</span>
             <span
               aria-hidden
               className={`flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors ${thinking ? "bg-primary" : "bg-muted-foreground/30"}`}
@@ -151,9 +155,7 @@ export function ComposerSettings({
           </DropdownMenuItem>
         )}
         {!advancedControls && models.isError && (
-          <DropdownMenuItem onSelect={() => void models.refetch()}>
-            Retry loading settings
-          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void models.refetch()}>{translateUi("Retry loading settings")}</DropdownMenuItem>
         )}
         {!advancedControls && <DropdownMenuSeparator className="my-0.5" />}
         {advancedControls && (
@@ -161,14 +163,14 @@ export function ComposerSettings({
             <DropdownMenuItem
               disabled
               className="min-h-8 px-2"
-              title="NyxAgent does not expose configurable reasoning effort yet."
+              title={translateUi("NyxAgent does not expose configurable reasoning effort yet.")}
             >
-              <span className="flex-1">Reasoning</span>
-              <span className="text-muted-foreground">Unavailable</span>
+              <span className="flex-1">{translateUi("Reasoning")}</span>
+              <span className="text-muted-foreground">{translateUi("Unavailable")}</span>
               <ChevronRight aria-hidden />
             </DropdownMenuItem>
             <DropdownMenuSeparator className="my-0.5" />
-            <SettingsSection label="Model" value={name}>
+            <SettingsSection label={translateUi("Model")} value={name}>
               {options.map((row) => (
                 <DropdownMenuItem
                   key={row.id}
@@ -180,10 +182,10 @@ export function ComposerSettings({
                 >
                   <span className="min-w-0 flex-1 break-words">
                     {modelDisplayName(row)}
-                    {modelCannotViewImages(row) && <span className="ml-2 text-13 text-muted-foreground">Can’t view images</span>}
+                    {modelCannotViewImages(row) && <span className="ml-2 text-13 text-muted-foreground">{translateUi("Can’t view images")}</span>}
                     {row.id.startsWith("nyxid/") && row.description && <span className="block text-13 text-muted-foreground">{row.description}</span>}
                     {!row.available && !models.isPending
-                      ? " (unavailable)"
+                      ? translateUi(" (unavailable)")
                       : ""}
                   </span>
                   {model === row.id && (
@@ -192,16 +194,14 @@ export function ComposerSettings({
                 </DropdownMenuItem>
               ))}
               {models.isError && (
-                <DropdownMenuItem onSelect={() => void models.refetch()}>
-                  Retry loading models
-                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => void models.refetch()}>{translateUi("Retry loading models")}</DropdownMenuItem>
               )}
             </SettingsSection>
             <DropdownMenuSeparator className="my-0.5" />
           </>
         )}
         <SettingsSection
-          label="Permissions"
+          label={translateUi("Permissions")}
           value={mode ? ACCESS_MODE_LABEL[mode] : "Loading…"}
         >
           {MODES.map((value) => (
@@ -217,26 +217,24 @@ export function ComposerSettings({
                   .mutateAsync({ access_mode: value })
                   .catch((error: unknown) => {
                     toast.error(
-                      error instanceof Error
+                      translateErrorMessage(error instanceof Error
                         ? error.message
-                        : "Could not change permissions.",
+                        : "Could not change permissions."),
                     );
                   });
               }}
             >
-              <span className="flex-1">{ACCESS_MODE_LABEL[value]}</span>
+              <span className="flex-1">{translateUi(ACCESS_MODE_LABEL[value])}</span>
               {mode === value && <Check aria-hidden />}
             </DropdownMenuItem>
           ))}
           {settings.isError && (
-            <DropdownMenuItem onSelect={() => void settings.refetch()}>
-              Retry loading permissions
-            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void settings.refetch()}>{translateUi("Retry loading permissions")}</DropdownMenuItem>
           )}
         </SettingsSection>
         {onVoiceSettings && <>
           <DropdownMenuSeparator className="my-0.5" />
-          <DropdownMenuItem onSelect={onVoiceSettings}>Voice settings</DropdownMenuItem>
+          <DropdownMenuItem onSelect={onVoiceSettings}>{translateUi("Voice settings")}</DropdownMenuItem>
         </>}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -261,6 +259,7 @@ function SettingsSection({
   readonly value: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   const narrow = useSyncExternalStore(
     subscribeToMenuWidth,
     () => window.matchMedia(NARROW_MENU_QUERY).matches,

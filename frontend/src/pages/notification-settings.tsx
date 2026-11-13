@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -84,6 +88,7 @@ import type {
 } from "@/types/approvals";
 
 export function NotificationSettingsPage() {
+  useUiTranslation();
   const { data: rawSettings, isLoading, error, refetch } = useNotificationSettings();
   const updateMutation = useUpdateNotificationSettings();
   const telegramLinkMutation = useTelegramLink();
@@ -251,12 +256,12 @@ export function NotificationSettingsPage() {
         delete update.group_mentions_enabled;
       }
       await updateMutation.mutateAsync(update);
-      toast.success("Notification settings updated");
+      toast.success(translateUi("Notification settings updated"));
     } catch (err) {
       if (err instanceof ApiError) {
         form.setError("root", { message: err.message });
       } else {
-        toast.error("Failed to update settings");
+        toast.error(translateErrorMessage("Failed to update settings"));
       }
     }
   }
@@ -267,7 +272,7 @@ export function NotificationSettingsPage() {
       setLinkDialogOpen(true);
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to generate link code",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to generate link code"),
       );
     }
   }
@@ -275,10 +280,10 @@ export function NotificationSettingsPage() {
   async function handleDisconnect() {
     try {
       await telegramDisconnectMutation.mutateAsync();
-      toast.success("Telegram disconnected");
+      toast.success(translateUi("Telegram disconnected"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to disconnect Telegram",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to disconnect Telegram"),
       );
     } finally {
       setDisconnectDialogOpen(false);
@@ -290,10 +295,10 @@ export function NotificationSettingsPage() {
 
     try {
       await removeDeviceMutation.mutateAsync(removeDeviceId);
-      toast.success("Device removed");
+      toast.success(translateUi("Device removed"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to remove device",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to remove device"),
       );
     } finally {
       setRemoveDeviceId(null);
@@ -316,7 +321,7 @@ export function NotificationSettingsPage() {
         rules: simplePolicy.rules,
         defaultEffect: simplePolicy.defaultEffect,
       });
-      toast.success("Per-service approval override added");
+      toast.success(translateUi("Per-service approval override added"));
       setAddServiceDialogOpen(false);
       setSelectedServiceId("");
       setSelectedApprovalRequired(true);
@@ -324,7 +329,7 @@ export function NotificationSettingsPage() {
       setSelectedApprovalVerbs(approvalVerbs);
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to add service config",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to add service config"),
       );
     }
   }
@@ -356,9 +361,9 @@ export function NotificationSettingsPage() {
       });
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to update service config",
+          : "Failed to update service config"),
       );
     }
   }
@@ -383,9 +388,9 @@ export function NotificationSettingsPage() {
       });
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to update approval mode",
+          : "Failed to update approval mode"),
       );
     }
   }
@@ -417,9 +422,9 @@ export function NotificationSettingsPage() {
       });
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to update approval rule",
+          : "Failed to update approval rule"),
       );
     }
   }
@@ -441,12 +446,12 @@ export function NotificationSettingsPage() {
         rules,
         defaultEffect,
       });
-      toast.success("Approval rules updated");
+      toast.success(translateUi("Approval rules updated"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to update approval rules",
+          : "Failed to update approval rules"),
       );
     }
   }
@@ -454,12 +459,12 @@ export function NotificationSettingsPage() {
   async function handleDeleteServiceConfig(serviceId: string) {
     try {
       await deleteConfigMutation.mutateAsync({ serviceId });
-      toast.success("Per-service override removed");
+      toast.success(translateUi("Per-service override removed"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to remove service config",
+          : "Failed to remove service config"),
       );
     }
   }
@@ -467,8 +472,8 @@ export function NotificationSettingsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Notification Settings"
-        description="Configure how you receive approval and group mention notifications."
+        title={translateUi("Notification Settings")}
+        description={translateUi("Configure how you receive approval and group mention notifications.")}
       />
 
       {isLoading ? (
@@ -477,7 +482,7 @@ export function NotificationSettingsPage() {
           <Skeleton className="h-64 w-full" />
         </div>
       ) : error ? (
-        <ErrorBanner message="Failed to load notification settings. Please try again." onRetry={refetch} />
+        <ErrorBanner message={translateUi("Failed to load notification settings. Please try again.")} onRetry={refetch} />
       ) : (
         <div className="space-y-6">
           {/* Setup Wizard */}
@@ -500,17 +505,15 @@ export function NotificationSettingsPage() {
           {/* Telegram Connection Card */}
           <Card>
             <CardHeader>
-              <CardTitle>Telegram Connection</CardTitle>
-              <CardDescription>
-                Connect your Telegram account to receive approval notifications.
-              </CardDescription>
+              <CardTitle>{translateUi("Telegram Connection")}</CardTitle>
+              <CardDescription>{translateUi("Connect your Telegram account to receive approval notifications.")}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   {settings?.telegram_connected ? (
                     <>
-                      <Badge variant="success">Connected</Badge>
+                      <Badge variant="success">{translateUi("Connected")}</Badge>
                       {settings.telegram_username && (
                         <span className="text-14 text-muted-foreground">
                           {settings.telegram_username}
@@ -518,7 +521,7 @@ export function NotificationSettingsPage() {
                       )}
                     </>
                   ) : (
-                    <Badge variant="secondary">Not connected</Badge>
+                    <Badge variant="secondary">{translateUi("Not connected")}</Badge>
                   )}
                 </div>
                 {settings?.telegram_connected ? (
@@ -527,9 +530,7 @@ export function NotificationSettingsPage() {
                     className="text-text-tertiary hover:text-muted-foreground"
                     onClick={() => setDisconnectDialogOpen(true)}
                   >
-                    <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
-                    Disconnect
-                  </Button>
+                    <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{translateUi("Disconnect")}</Button>
                 ) : (
                   <Button
                     variant="outline"
@@ -541,9 +542,7 @@ export function NotificationSettingsPage() {
                       <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
                       </svg>
-                    </ButtonIcon>
-                    Connect Telegram
-                  </Button>
+                    </ButtonIcon>{translateUi("Connect Telegram")}</Button>
                 )}
               </div>
             </CardContent>
@@ -552,11 +551,8 @@ export function NotificationSettingsPage() {
           {/* Push Devices Card */}
           <Card>
             <CardHeader>
-              <CardTitle>Push Devices</CardTitle>
-              <CardDescription>
-                Mobile devices registered for push notifications. Devices are
-                registered from the NyxID mobile app.
-              </CardDescription>
+              <CardTitle>{translateUi("Push Devices")}</CardTitle>
+              <CardDescription>{translateUi("Mobile devices registered for push notifications. Devices are registered from the NyxID mobile app.")}</CardDescription>
             </CardHeader>
             <CardContent>
               {isPushDevicesLoading ? (
@@ -566,18 +562,13 @@ export function NotificationSettingsPage() {
                 </div>
               ) : !pushDevices?.devices.length ? (
                 <div className="space-y-3">
-                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
-                    No devices registered. Install the NyxID mobile app and sign
-                    in to register a device.
-                  </div>
+                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No devices registered. Install the NyxID mobile app and sign in to register a device.")}</div>
                   <div className="flex justify-end">
                     <Button variant="primary" asChild>
                       <a href="https://nyxid.dev/app" target="_blank" rel="noopener noreferrer">
                         <ButtonIcon className="border-white/20 bg-white/10">
                           <Smartphone className="h-3 w-3" />
-                        </ButtonIcon>
-                        Get App
-                      </a>
+                        </ButtonIcon>{translateUi("Get App")}</a>
                     </Button>
                   </div>
                 </div>
@@ -594,24 +585,22 @@ export function NotificationSettingsPage() {
                             device.platform === "apns" ? "secondary" : "secondary"
                           }
                         >
-                          {device.platform === "apns" ? "iOS" : "Android"}
+                          {device.platform === "apns" ? translateUi("iOS") : translateUi("Android")}
                         </Badge>
                         <div className="space-y-0.5">
                           <p className="type-row-title">
-                            {device.device_name ?? "Unknown device"}
+                            {device.device_name ?? translateUi("Unknown device")}
                           </p>
-                          <p className="text-13 text-muted-foreground">
-                            Registered{" "}
+                          <p className="text-13 text-muted-foreground">{translateUi("Registered")}{" "}
                             {new Date(
                               device.registered_at,
-                            ).toLocaleDateString()}
+                            ).toLocaleDateString(getFormattingLocale())}
                             {device.last_used_at && (
                               <>
-                                {" "}
-                                &middot; Last used{" "}
+                                {" "}{translateUi("· Last used")}{" "}
                                 {new Date(
                                   device.last_used_at,
-                                ).toLocaleDateString()}
+                                ).toLocaleDateString(getFormattingLocale())}
                               </>
                             )}
                           </p>
@@ -621,7 +610,7 @@ export function NotificationSettingsPage() {
                         variant="ghost"
                         size="icon"
                         onClick={() => setRemoveDeviceId(device.device_id)}
-                        title="Remove device"
+                        title={translateUi("Remove device")}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
@@ -635,14 +624,8 @@ export function NotificationSettingsPage() {
           {/* Approval Preferences */}
           <Card>
             <CardHeader>
-              <CardTitle>Approval Preferences</CardTitle>
-              <CardDescription>
-                Configure approval settings. When enabled, requests require
-                approval by default (per-request mode). Auto-connected
-                services remain available unless you add an explicit
-                per-service policy. You can opt specific services into
-                time-based grants below.
-              </CardDescription>
+              <CardTitle>{translateUi("Approval Preferences")}</CardTitle>
+              <CardDescription>{translateUi("Configure approval settings. When enabled, requests require approval by default (per-request mode). Auto-connected services remain available unless you add an explicit per-service policy. You can opt specific services into time-based grants below.")}</CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...form}>
@@ -665,25 +648,19 @@ export function NotificationSettingsPage() {
                     render={({ field }) => (
                       <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel>
-                            Approval (Global Default)
-                          </FormLabel>
-                          <FormDescription>
-                            Writes only requires approval for changes and destructive
-                            operations. Reads and stateless model inference can proceed.
-                            Per-service and organization policies still apply.
-                          </FormDescription>
+                          <FormLabel>{translateUi("Approval (Global Default)")}</FormLabel>
+                          <FormDescription>{translateUi("Writes only requires approval for changes and destructive operations. Reads and stateless model inference can proceed. Per-service and organization policies still apply.")}</FormDescription>
                         </div>
                         <Select value={field.value} onValueChange={field.onChange}>
                           <FormControl>
-                            <SelectTrigger className="w-48" aria-label="Approval (Global Default)">
+                            <SelectTrigger className="w-48" aria-label={translateUi("Approval (Global Default)")}>
                               <SelectValue />
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="writes_only">Writes only (default)</SelectItem>
-                            <SelectItem value="all">All requests</SelectItem>
-                            <SelectItem value="off">Off</SelectItem>
+                            <SelectItem value="writes_only">{translateUi("Writes only (default)")}</SelectItem>
+                            <SelectItem value="all">{translateUi("All requests")}</SelectItem>
+                            <SelectItem value="off">{translateUi("Off")}</SelectItem>
                           </SelectContent>
                         </Select>
                       </FormItem>
@@ -696,12 +673,8 @@ export function NotificationSettingsPage() {
                     render={({ field }) => (
                       <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel>
-                            Telegram Notifications
-                          </FormLabel>
-                          <FormDescription>
-                            Send approval requests via Telegram.
-                          </FormDescription>
+                          <FormLabel>{translateUi("Telegram Notifications")}</FormLabel>
+                          <FormDescription>{translateUi("Send approval requests via Telegram.")}</FormDescription>
                         </div>
                         <FormControl>
                           <Switch
@@ -720,12 +693,8 @@ export function NotificationSettingsPage() {
                     render={({ field }) => (
                       <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel>
-                            Push Notifications
-                          </FormLabel>
-                          <FormDescription>
-                            Send notifications to your registered devices.
-                          </FormDescription>
+                          <FormLabel>{translateUi("Push Notifications")}</FormLabel>
+                          <FormDescription>{translateUi("Send notifications to your registered devices.")}</FormDescription>
                         </div>
                         <FormControl>
                           <Switch
@@ -744,8 +713,8 @@ export function NotificationSettingsPage() {
                     render={({ field }) => (
                       <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel>Mentions in groups</FormLabel>
-                          <FormDescription>Push alerts when someone mentions you in a group. Requires Push Notifications; unread badges stay on.</FormDescription>
+                          <FormLabel>{translateUi("Mentions in groups")}</FormLabel>
+                          <FormDescription>{translateUi("Push alerts when someone mentions you in a group. Requires Push Notifications; unread badges stay on.")}</FormDescription>
                         </div>
                         <FormControl><Switch checked={field.value ?? true} onCheckedChange={field.onChange} /></FormControl>
                       </FormItem>
@@ -757,7 +726,7 @@ export function NotificationSettingsPage() {
                     name="approval_timeout_secs"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Approval Timeout (seconds)</FormLabel>
+                        <FormLabel>{translateUi("Approval Timeout (seconds)")}</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
@@ -772,10 +741,7 @@ export function NotificationSettingsPage() {
                             ref={field.ref}
                           />
                         </FormControl>
-                        <FormDescription>
-                          How long to wait for a response before auto-rejecting
-                          (10-300 seconds).
-                        </FormDescription>
+                        <FormDescription>{translateUi("How long to wait for a response before auto-rejecting (10-300 seconds).")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -786,7 +752,7 @@ export function NotificationSettingsPage() {
                     name="grant_expiry_days"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Grant Expiry (days)</FormLabel>
+                        <FormLabel>{translateUi("Grant Expiry (days)")}</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
@@ -801,20 +767,14 @@ export function NotificationSettingsPage() {
                             ref={field.ref}
                           />
                         </FormControl>
-                        <FormDescription>
-                          How many days an approval grant lasts before
-                          re-prompting (1-365 days). Only applies to services
-                          configured with time-based grant mode.
-                        </FormDescription>
+                        <FormDescription>{translateUi("How many days an approval grant lasts before re-prompting (1-365 days). Only applies to services configured with time-based grant mode.")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
                   />
 
                   <div className="flex justify-end">
-                    <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
-                      Save Preferences
-                    </Button>
+                    <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>{translateUi("Save Preferences")}</Button>
                   </div>
                 </form>
               </Form>
@@ -826,17 +786,12 @@ export function NotificationSettingsPage() {
             <CardHeader>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="space-y-1.5">
-                  <CardTitle>Per-Service Approval Overrides</CardTitle>
-                  <CardDescription>
-                    Override the global approval setting for specific services.
-                    Services without an override use per-request approval by
-                    default. Use overrides to switch services to time-based
-                    grants or to exempt them from approval.
-                  </CardDescription>
+                  <CardTitle>{translateUi("Per-Service Approval Overrides")}</CardTitle>
+                  <CardDescription>{translateUi("Override the global approval setting for specific services. Services without an override use per-request approval by default. Use overrides to switch services to time-based grants or to exempt them from approval.")}</CardDescription>
                 </div>
                 <div className="shrink-0 self-start sm:self-center">
                   <AddCtaButton
-                    label="Add Override"
+                    label={translateUi("Add Override")}
                     onClick={() => setAddServiceDialogOpen(true)}
                     disabled={
                       isServiceConfigsLoading ||
@@ -854,12 +809,9 @@ export function NotificationSettingsPage() {
                   <Skeleton className="h-16 w-full" />
                 </div>
               ) : serviceConfigsError ? (
-                <ErrorBanner message="Failed to load per-service overrides. Try refreshing the page." onRetry={refetchServiceConfigs} />
+                <ErrorBanner message={translateUi("Failed to load per-service overrides. Try refreshing the page.")} onRetry={refetchServiceConfigs} />
               ) : serviceConfigs?.configs.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
-                  No per-service overrides configured. All services use the
-                  global default.
-                </div>
+                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No per-service overrides configured. All services use the global default.")}</div>
               ) : (
                 <div className="space-y-3">
                   {serviceConfigs?.configs.map((config) => {
@@ -887,7 +839,7 @@ export function NotificationSettingsPage() {
                           </p>
                           <p className="text-13 text-muted-foreground">
                             {config.user_service_slug
-                              ? `${config.user_service_slug} — `
+                              ? translateUi("{{user_service_slug}} — ", { user_service_slug: config.user_service_slug })
                               : ""}
                             {approvalPolicyLabel(config)}
                           </p>
@@ -908,7 +860,7 @@ export function NotificationSettingsPage() {
                             onClick={() =>
                               void handleDeleteServiceConfig(mutationKey)
                             }
-                            title="Remove override (use global default)"
+                            title={translateUi("Remove override (use global default)")}
                           >
                             <RotateCcw className="h-4 w-4 text-muted-foreground" />
                           </Button>
@@ -917,13 +869,13 @@ export function NotificationSettingsPage() {
                       {hasPolicy && (
                         <Tabs defaultValue="simple" className="mt-3 border-t border-border pt-3">
                           <TabsList>
-                            <TabsTrigger value="simple">Simple</TabsTrigger>
-                            <TabsTrigger value="advanced">Advanced</TabsTrigger>
+                            <TabsTrigger value="simple">{translateUi("Simple")}</TabsTrigger>
+                            <TabsTrigger value="advanced">{translateUi("Advanced")}</TabsTrigger>
                           </TabsList>
                           <TabsContent value="simple" className="mt-3">
                             <div className="flex flex-col gap-3">
                               <div className="flex flex-wrap items-center gap-2">
-                                <Label htmlFor={`approval-mode-${mutationKey}`}>Mode</Label>
+                                <Label htmlFor={`approval-mode-${mutationKey}`}>{translateUi("Mode")}</Label>
                                 <Select
                                   value={config.approval_mode}
                                   onValueChange={(value) =>
@@ -938,18 +890,14 @@ export function NotificationSettingsPage() {
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
-                                    <SelectItem value="per_request">
-                                      Per request
-                                    </SelectItem>
-                                    <SelectItem value="grant">
-                                      Time-based grant
-                                    </SelectItem>
+                                    <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
+                                    <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                                   </SelectContent>
                                 </Select>
                                 <span className="text-13 text-muted-foreground">
                                   {config.approval_mode === "grant"
-                                    ? "Approval creates a reusable grant"
-                                    : "Every request needs fresh approval"}
+                                    ? translateUi("Approval creates a reusable grant")
+                                    : translateUi("Every request needs fresh approval")}
                                 </span>
                               </div>
                               <div className="flex flex-wrap gap-3">
@@ -1008,32 +956,24 @@ export function NotificationSettingsPage() {
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Connect Telegram</DialogTitle>
-            <DialogDescription>
-              Send the following command to the NyxID bot on Telegram to link
-              your account.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Connect Telegram")}</DialogTitle>
+            <DialogDescription>{translateUi("Send the following command to the NyxID bot on Telegram to link your account.")}</DialogDescription>
           </DialogHeader>
           {linkData && (
             <div className="space-y-4">
               <div className="rounded-lg bg-muted p-4 text-center">
-                <p className="text-13 text-muted-foreground">
-                  Send this to @{linkData.bot_username}
+                <p className="text-13 text-muted-foreground">{translateUi("Send this to @")}{linkData.bot_username}
                 </p>
                 <code className="mt-2 block type-body">
                   /start {linkData.link_code}
                 </code>
               </div>
-              <p className="text-13 text-muted-foreground">
-                This code expires in{" "}
-                {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("This code expires in")}{" "}
+                {String(Math.floor(linkData.expires_in_secs / 60))}{translateUi(" minutes.")}</p>
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>
-              Close
-            </Button>
+            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>{translateUi("Close")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1045,26 +985,19 @@ export function NotificationSettingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Disconnect Telegram</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to disconnect your Telegram account? You
-              will no longer receive approval notifications via Telegram.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Disconnect Telegram")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to disconnect your Telegram account? You will no longer receive approval notifications via Telegram.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => setDisconnectDialogOpen(false)}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDisconnect()}
               isLoading={telegramDisconnectMutation.isPending}
-            >
-              Disconnect
-            </Button>
+            >{translateUi("Disconnect")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1078,24 +1011,16 @@ export function NotificationSettingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Remove Device</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to remove this device? It will no longer
-              receive push notifications. You can re-register it from the mobile
-              app.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Remove Device")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to remove this device? It will no longer receive push notifications. You can re-register it from the mobile app.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRemoveDeviceId(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRemoveDeviceId(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRemoveDevice()}
               isLoading={removeDeviceMutation.isPending}
-            >
-              Remove Device
-            </Button>
+            >{translateUi("Remove Device")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1107,23 +1032,18 @@ export function NotificationSettingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add Per-Service Override</DialogTitle>
-            <DialogDescription>
-              Choose a service and set whether approval is required for it,
-              overriding the global default.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Add Per-Service Override")}</DialogTitle>
+            <DialogDescription>{translateUi("Choose a service and set whether approval is required for it, overriding the global default.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="service-select">
-                Service
-              </Label>
+              <Label htmlFor="service-select">{translateUi("Service")}</Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
               >
                 <SelectTrigger id="service-select">
-                  <SelectValue placeholder="Select a service" />
+                  <SelectValue placeholder={translateUi("Select a service")} />
                 </SelectTrigger>
                 <SelectContent>
                   {selectableUserServices.map((s) => (
@@ -1133,18 +1053,12 @@ export function NotificationSettingsPage() {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-13 text-muted-foreground">
-                Shows your configured AI services. To add a new one, go to
-                the Keys page.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("Shows your configured AI services. To add a new one, go to the Keys page.")}</p>
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="type-row-title">Require Approval</p>
-                <p className="text-13 text-muted-foreground">
-                  Whether this service requires approval for programmatic
-                  access.
-                </p>
+                <p className="type-row-title">{translateUi("Require Approval")}</p>
+                <p className="text-13 text-muted-foreground">{translateUi("Whether this service requires approval for programmatic access.")}</p>
               </div>
               <Switch
                 checked={selectedApprovalRequired}
@@ -1160,9 +1074,7 @@ export function NotificationSettingsPage() {
                   <Label
 
                     htmlFor="approval-mode-select"
-                  >
-                    Approval Mode
-                  </Label>
+                  >{translateUi("Approval Mode")}</Label>
                   <Select
                     value={selectedApprovalMode}
                     onValueChange={(v) =>
@@ -1173,20 +1085,18 @@ export function NotificationSettingsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="per_request">Per request</SelectItem>
-                      <SelectItem value="grant">Time-based grant</SelectItem>
+                      <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
+                      <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <p className="text-13 text-muted-foreground">
                     {selectedApprovalMode === "grant"
-                      ? "Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires."
-                      : "Every API request requires a fresh approval. No grant is created."}
+                      ? translateUi("Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires.")
+                      : translateUi("Every API request requires a fresh approval. No grant is created.")}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="type-row-title">
-                    Require Approval For
-                  </p>
+                  <p className="type-row-title">{translateUi("Require Approval For")}</p>
                   <div className="grid gap-2 sm:grid-cols-3">
                     {approvalVerbs.map((verb) => (
                       <Label
@@ -1223,17 +1133,13 @@ export function NotificationSettingsPage() {
             <Button
               variant="outline"
               onClick={() => setAddServiceDialogOpen(false)}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={() => void handleAddServiceConfig()}
               disabled={!selectedServiceId}
               isLoading={setConfigMutation.isPending}
-            >
-              Add Override
-            </Button>
+            >{translateUi("Add Override")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

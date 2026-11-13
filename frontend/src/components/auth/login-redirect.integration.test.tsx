@@ -327,6 +327,7 @@ it("preserves a relative assistant return URL after password login", async () =>
   await open();
   await screen.findByRole("button", { name: "Continue with Google" });
   await passwordLogin();
+  await confirmProfile();
   await waitFor(() =>
     expect(assign).toHaveBeenCalledExactlyOnceWith(
       `${window.location.origin}${returnPath}`,
@@ -438,6 +439,7 @@ it("keeps the conversation return URL through email registration and subsequent 
   );
   vi.useRealTimers();
   await passwordLogin();
+  await confirmProfile();
   await waitFor(() =>
     expect(assign).toHaveBeenCalledExactlyOnceWith(
       `${window.location.origin}${returnPath}`,

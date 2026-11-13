@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -32,36 +34,27 @@ export function SandboxBillingSettings({
 }: {
   readonly serviceId: string;
 }) {
+  useUiTranslation();
   const query = useSandboxBillingSettings(serviceId);
   return (
     <section className="mt-6 space-y-3 rounded-lg border border-border p-4">
-      <h2 className="type-row-title">Sandbox billing</h2>
-      <p className="text-13 text-muted-foreground">
-        Choose the trusted account that requests prepaid Sandbox windows and
-        submits usage evidence. Admission follows the CMA Sandbox billing
-        feature flag.
-      </p>
+      <h2 className="type-row-title">{translateUi("Sandbox billing")}</h2>
+      <p className="text-13 text-muted-foreground">{translateUi("Choose the trusted account that requests prepaid Sandbox windows and submits usage evidence. Admission follows the CMA Sandbox billing feature flag.")}</p>
       {query.isPending ? (
-        <p className="text-13">Loading Sandbox settings…</p>
+        <p className="text-13">{translateUi("Loading Sandbox settings…")}</p>
       ) : query.isError ? (
-        <p role="alert" className="text-13 text-destructive">
-          Could not load Sandbox settings.{" "}
+        <p role="alert" className="text-13 text-destructive">{translateUi("Could not load Sandbox settings.")}{" "}
           <Button
             type="button"
             variant="outline"
             onClick={() => void query.refetch()}
-          >
-            Retry
-          </Button>
+          >{translateUi("Retry")}</Button>
         </p>
       ) : (
         <ProducerEditor settings={query.data} />
       )}
-      <p className="text-13 text-muted-foreground">
-        Prices and their version history remain in{" "}
-        <a className="underline" href="/admin/billing?tab=settings">
-          Billing Settings → CMA rate cards
-        </a>
+      <p className="text-13 text-muted-foreground">{translateUi("Prices and their version history remain in")}{" "}
+        <a className="underline" href="/admin/billing?tab=settings">{translateUi("Billing Settings → CMA rate cards")}</a>
         .
       </p>
     </section>
@@ -69,6 +62,7 @@ export function SandboxBillingSettings({
 }
 
 function ProducerEditor({ settings }: { readonly settings: Settings }) {
+  useUiTranslation();
   const [revision, setRevision] = useState(settings.revision);
   const [search, setSearch] = useState("");
   const accounts = useServiceAccounts(1, 100, search || undefined);
@@ -97,7 +91,7 @@ function ProducerEditor({ settings }: { readonly settings: Settings }) {
       form.reset({
         producer: saved.authorized_producer_service_account_id ?? "",
       });
-      toast.success("Sandbox billing producer saved");
+      toast.success(translateUi("Sandbox billing producer saved"));
     } catch (error) {
       form.setError("root", {
         message:
@@ -120,30 +114,29 @@ function ProducerEditor({ settings }: { readonly settings: Settings }) {
             }}
           />
         )}
-        <Label htmlFor="sandbox-producer-search">Search service accounts</Label>
+        <Label htmlFor="sandbox-producer-search">{translateUi("Search service accounts")}</Label>
         <Input
           id="sandbox-producer-search"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search by name"
+          placeholder={translateUi("Search by name")}
         />
         <FormField
           control={form.control}
           name="producer"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Authorized producer service account</FormLabel>
+              <FormLabel>{translateUi("Authorized producer service account")}</FormLabel>
               <FormControl>
                 <NativeSelect
                   {...field}
                   disabled={accounts.isPending || accounts.isError}
                 >
-                  <option value="">Not configured</option>
+                  <option value="">{translateUi("Not configured")}</option>
                   {selected &&
                     !eligible.some((account) => account.id === selected) && (
                       <option value={selected}>
-                        {selected} (current selection)
-                      </option>
+                        {selected}{translateUi(" (current selection)")}</option>
                     )}
                   {eligible.map((account) => (
                     <option key={account.id} value={account.id}>
@@ -157,24 +150,15 @@ function ProducerEditor({ settings }: { readonly settings: Settings }) {
           )}
         />
         {accounts.isError && (
-          <p role="alert" className="text-13 text-destructive">
-            Could not load service accounts.{" "}
+          <p role="alert" className="text-13 text-destructive">{translateUi("Could not load service accounts.")}{" "}
             <Button
               type="button"
               variant="outline"
               onClick={() => void accounts.refetch()}
-            >
-              Retry
-            </Button>
+            >{translateUi("Retry")}</Button>
           </p>
         )}
-        <p className="text-13 text-muted-foreground">
-          Only active General accounts with billing:sandbox:write are eligible.
-          Saving restricts account and credential management to platform admins.
-          When unset, Sandbox billing requests are refused. Submit evidence for
-          funded windows before replacing the producer; rotate its credentials
-          to keep the same identity.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Only active General accounts with billing:sandbox:write are eligible. Saving restricts account and credential management to platform admins. When unset, Sandbox billing requests are refused. Submit evidence for funded windows before replacing the producer; rotate its credentials to keep the same identity.")}</p>
         {form.formState.errors.root && (
           <p role="alert" className="text-13 text-destructive">
             {form.formState.errors.root.message}
@@ -190,7 +174,7 @@ function ProducerEditor({ settings }: { readonly settings: Settings }) {
             accounts.isError
           }
         >
-          {mutation.isPending ? "Saving…" : "Save Sandbox producer"}
+          {mutation.isPending ? translateUi("Saving…") : translateUi("Save Sandbox producer")}
         </Button>
       </form>
     </Form>

@@ -1,3 +1,4 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
 /** Decimal credits are transported as strings and calculated in picocredits. */
 export const CREDIT_SCALE = 1_000_000_000_000n;
 export function parseCredits(value: string): bigint {
@@ -46,11 +47,11 @@ export function formatExactCredits(value: string, digits = 6): string {
     return `${pico < 0n ? ">-" : "<"}${decimalCredits(step)}`;
   const rounded = ((magnitude + step / 2n) / step) * step;
   const [whole, fraction] = decimalCredits(rounded).split(".");
-  const grouped = new Intl.NumberFormat(undefined, {
+  const grouped = new Intl.NumberFormat(getFormattingLocale(), {
     maximumFractionDigits: 0,
   }).format(BigInt(whole!));
   const separator =
-    new Intl.NumberFormat()
+    new Intl.NumberFormat(getFormattingLocale())
       .formatToParts(1.1)
       .find((part) => part.type === "decimal")?.value ?? ".";
   return `${pico < 0n ? "-" : ""}${grouped}${fraction ? separator + fraction : ""}`;

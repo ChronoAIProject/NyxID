@@ -204,19 +204,6 @@ pub(crate) async fn encrypt_image(
     bytes: &[u8],
 ) -> AppResult<Vec<u8>> {
     let path = image_path(row);
-    if row.origin == "generated_artifact" {
-        return keys
-            .encrypt_record(
-                bytes,
-                &RecordContext::new(
-                    crate::models::assistant_attachment::COLLECTION_NAME,
-                    &row.id,
-                    &row.user_id,
-                    &path,
-                )?,
-            )
-            .await;
-    }
     fields::encrypt_context(
         keys,
         &RecordContext::new(

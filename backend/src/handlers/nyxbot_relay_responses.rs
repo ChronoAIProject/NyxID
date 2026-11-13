@@ -49,9 +49,12 @@ pub(super) async fn prepare(
             "Invalid recovery command identity".into(),
         ));
     }
-    if crate::services::security_readiness_service::require(&state.db, recovery::RELAY_READINESS)
-        .await
-        .is_err()
+    if crate::services::security_readiness_service::require_serving(
+        &state.db,
+        recovery::RELAY_READINESS,
+    )
+    .await
+    .is_err()
     {
         return Ok(None);
     }

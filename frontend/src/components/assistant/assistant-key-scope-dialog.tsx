@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
@@ -103,6 +105,7 @@ export function AssistantKeyScopeDialog({
   readonly params: AssistantKeyScopeParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  useUiTranslation();
   const [platformGrant, setPlatformGrant] = useState(
     params.allowAutoConnectedServices,
   );
@@ -222,19 +225,19 @@ export function AssistantKeyScopeDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultKeyId ? "API key scope extended" : "Extend API key scope"}
+            {resultKeyId ? translateUi("API key scope extended") : translateUi("Extend API key scope")}
           </DialogTitle>
           <DialogDescription>
             {resultKeyId
-              ? "NyxID widened this key's allowed services. The assistant receives only the safe key reference."
-              : "Widening what this agent can reach is confirmed every time and is never remembered."}
+              ? translateUi("NyxID widened this key's allowed services. The assistant receives only the safe key reference.")
+              : translateUi("Widening what this agent can reach is confirmed every time and is never remembered.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultKeyId ? (
           <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Key</span>
+              <span className="text-muted-foreground">{translateUi("Key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -243,7 +246,7 @@ export function AssistantKeyScopeDialog({
               </Badge>
             </div>
             <div className="space-y-2">
-              <span className="text-muted-foreground">Add services</span>
+              <span className="text-muted-foreground">{translateUi("Add services")}</span>
               <div className="flex flex-wrap gap-1.5">
                 {(platformIds ?? params.addServiceIds).map((serviceId) => (
                   <Badge
@@ -272,31 +275,25 @@ export function AssistantKeyScopeDialog({
 
         {error ? (
           <p role="alert" className="text-13 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-13 text-success">
-            Exact widened service set verified.
-          </p>
+          <p className="text-13 text-success">{translateUi("Exact widened service set verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!resultKeyId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void extendScope()}
-              >
-                Extend scope
-              </Button>
+              >{translateUi("Extend scope")}</Button>
             </>
           ) : (
             <>
@@ -311,9 +308,7 @@ export function AssistantKeyScopeDialog({
                     void verifyScope(resultKeyId, expected);
                   }}
                 >
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -324,7 +319,7 @@ export function AssistantKeyScopeDialog({
                   close();
                 }}
               >
-                {replayed ? "Report existing key" : "Done"}
+                {replayed ? translateUi("Report existing key") : translateUi("Done")}
               </Button>
             </>
           )}

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { RefreshCw, ShieldAlert } from "lucide-react";
@@ -59,6 +61,7 @@ export function AssistantProviderDisconnectDialog({
   readonly params: AssistantProviderDisconnectParams;
   readonly onComplete: (providerId: string) => void;
 }) {
+  useUiTranslation();
   const submittingRef = useRef(false);
   const verifyingRef = useRef(false);
   const expectedVersionRef = useRef<number | null>(null);
@@ -161,17 +164,17 @@ export function AssistantProviderDisconnectDialog({
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{resultId ? "Provider disconnected" : "Disconnect provider"}</DialogTitle>
+          <DialogTitle>{resultId ? translateUi("Provider disconnected") : translateUi("Disconnect provider")}</DialogTitle>
           <DialogDescription>
             {resultId
-              ? "NyxID revoked this provider token and cleared its stored token material."
-              : "This revokes the legacy provider token and securely clears its stored token material."}
+              ? translateUi("NyxID revoked this provider token and cleared its stored token material.")
+              : translateUi("This revokes the legacy provider token and securely clears its stored token material.")}
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Provider</span>
+              <span className="text-muted-foreground">{translateUi("Provider")}</span>
               <Badge variant="secondary" className="max-w-[70%] truncate font-mono">
                 {params.providerId}
               </Badge>
@@ -182,32 +185,26 @@ export function AssistantProviderDisconnectDialog({
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
-                this revokes and clears the legacy provider token.
-              </span>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{translateUi("I understand this revokes and clears the legacy provider token.")}</span>
             </Label>
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
-        {verified ? <p className="text-13 text-success">Disconnect evidence verified.</p> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{translateUi(error)}</p> : null}
+        {verified ? <p className="text-13 text-success">{translateUi("Disconnect evidence verified.")}</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-              <Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>
-                Disconnect provider
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{translateUi("Cancel")}</Button>
+              <Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>{translateUi("Disconnect provider")}</Button>
             </>
           ) : (
             <>
               {!verified && expectedVersionRef.current !== null ? (
                 <Button type="button" variant="outline" isLoading={verifying} onClick={() => void verify(resultId, expectedVersionRef.current!)}>
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{translateUi("Retry verification")}</Button>
               ) : null}
               <Button type="button" variant="primary" disabled={!verified} onClick={() => { onComplete(resultId); close(); }}>
-                {replayed ? "Report disconnected provider" : "Done"}
+                {replayed ? translateUi("Report disconnected provider") : translateUi("Done")}
               </Button>
             </>
           )}

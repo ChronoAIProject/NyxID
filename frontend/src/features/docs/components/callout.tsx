@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { ReactNode } from "react";
 import {
   Info,
@@ -25,6 +26,7 @@ export function Callout({
   readonly type?: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   const style = STYLES[type] ?? NOTE;
   const { Icon } = style;
   return (

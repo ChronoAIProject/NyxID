@@ -42,14 +42,21 @@ export function ToastOverlay({ toast, duration = 2400 }: Props) {
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [queue, setQueue] = useState<ToastEntry[]>([]);
   const prevToastRef = useRef<ToastState | null>(null);
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => () => {
+    for (const timer of timers.current) clearTimeout(timer);
+    timers.current.clear();
+  }, []);
 
   useEffect(() => {
     if (toast && toast !== prevToastRef.current) {
       const id = ++nextId;
       setQueue((q) => [{ ...toast, id }, ...q].slice(0, MAX_VISIBLE));
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        timers.current.delete(timer);
         setQueue((q) => q.filter((t) => t.id !== id));
       }, duration);
+      timers.current.add(timer);
     }
     prevToastRef.current = toast;
   }, [toast, duration]);

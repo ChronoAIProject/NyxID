@@ -16,13 +16,13 @@ export function WizardHeading({
   readonly children?: ReactNode
 }) {
   return (
-    <div className="flex flex-col items-center gap-2 text-center">
+    <div className="flex flex-col gap-2 border-b border-border/60 pb-6">
       {eyebrow}
-      <h2 className="type-compact-page-title text-foreground sm:type-page-title">
+      <h2 className="type-page-title text-foreground">
         {title}
       </h2>
       {children ? (
-        <div className="max-w-md text-14 text-muted-foreground">{children}</div>
+        <div className="text-14 text-muted-foreground">{children}</div>
       ) : null}
     </div>
   )

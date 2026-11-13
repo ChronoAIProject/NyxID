@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useMemo } from "react";
 import { FileJson2 } from "lucide-react";
 import { ChatMessageEntry } from "@/components/assistant/chat-message";
@@ -132,6 +134,7 @@ export function AssistantWireReplayView({
 }: {
   readonly exchange: AssistantWireLogExchange;
 }) {
+  useUiTranslation();
   const replay = useMemo(
     () => replayAssistantWireExchange(exchange),
     [exchange],
@@ -141,35 +144,23 @@ export function AssistantWireReplayView({
   return (
     <div className="space-y-3" data-testid="wire-replay-view">
       {replay.partial ? (
-        <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-13 text-warning">
-          Partial replay: the delivered capture was truncated or ended without a
-          clean terminal frame.
-        </p>
+        <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-13 text-warning">{translateUi("Partial replay: the delivered capture was truncated or ended without a clean terminal frame.")}</p>
       ) : null}
-      <p className="text-13 text-text-tertiary">
-        Message content uses the production chat renderer. Actor facts are
-        diagnostic only and cannot be acted on here.
-      </p>
+      <p className="text-13 text-text-tertiary">{translateUi("Message content uses the production chat renderer. Actor facts are diagnostic only and cannot be acted on here.")}</p>
       {replay.message ? (
         <ChatMessageEntry message={replay.message} interactiveCards={false} feedbackEnabled={false} />
       ) : replay.actorFacts.length === 0 ? (
-        <p className="py-5 text-center text-13 text-text-tertiary">
-          No renderable chat content in this capture.
-        </p>
+        <p className="py-5 text-center text-13 text-text-tertiary">{translateUi("No renderable chat content in this capture.")}</p>
       ) : null}
       {replay.actorFacts.length ? (
         <section
-          aria-label="Actor facts (diagnostic only)"
+          aria-label={translateUi("Actor facts (diagnostic only)")}
           className="overflow-hidden rounded-lg border border-border/70 bg-background/50"
         >
           <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
             <FileJson2 className="h-3.5 w-3.5 text-text-tertiary" />
-            <span className="type-secondary-emphasis text-foreground">
-              Actor facts
-            </span>
-            <span className="ml-auto text-12 text-text-tertiary">
-              Diagnostic only
-            </span>
+            <span className="type-secondary-emphasis text-foreground">{translateUi("Actor facts")}</span>
+            <span className="ml-auto text-12 text-text-tertiary">{translateUi("Diagnostic only")}</span>
           </div>
           <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-14 text-muted-foreground">
             {JSON.stringify(replay.actorFacts, null, 2)}

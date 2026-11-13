@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { DownstreamService, ProviderConfig } from "@/types/api";
 
 export type OAuthScopeRisk = "low" | "medium" | "high";
@@ -9,88 +10,82 @@ export interface OAuthScopeMeta {
 }
 
 export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
-  none: "No Auth",
-  api_key: "API Key",
-  oauth2: "OAuth 2.0",
-  basic: "Basic Auth",
-  bearer: "Bearer Token",
-  bot_bearer: "Bot Token (Discord)",
-  body: "JSON Body Injection",
-  path: "Path Prefix",
-  ifttt_webhook: "IFTTT Webhooks",
-  ifttt_mcp: "IFTTT OAuth",
-  oidc: "OIDC / SSO",
-  ssh: "SSH Tunnel",
-  header: "API Key",
-  query: "Query Param",
+  get none() { return translateUi("No Auth"); },
+  get api_key() { return translateUi("API Key"); },
+  get oauth2() { return translateUi("OAuth 2.0"); },
+  get basic() { return translateUi("Basic Auth"); },
+  get bearer() { return translateUi("Bearer Token"); },
+  get bot_bearer() { return translateUi("Bot Token (Discord)"); },
+  get body() { return translateUi("JSON Body Injection"); },
+  get path() { return translateUi("Path Prefix"); },
+  get ifttt_webhook() { return translateUi("IFTTT Webhooks"); },
+  get ifttt_mcp() { return translateUi("IFTTT OAuth"); },
+  get oidc() { return translateUi("OIDC / SSO"); },
+  get ssh() { return translateUi("SSH Tunnel"); },
+  get header() { return translateUi("API Key"); },
+  get query() { return translateUi("Query Param"); },
 };
 
 export const SERVICE_TYPE_LABELS: Readonly<Record<string, string>> = {
-  http: "HTTP / API",
-  ssh: "SSH",
+  get http() { return translateUi("HTTP / API"); },
+  get ssh() { return translateUi("SSH"); },
 };
 
 export const SERVICE_CATEGORY_LABELS: Readonly<Record<string, string>> = {
-  provider: "SSO Provider",
-  connection: "External Service",
-  internal: "Internal Service",
+  get provider() { return translateUi("SSO Provider"); },
+  get connection() { return translateUi("External Service"); },
+  get internal() { return translateUi("Internal Service"); },
 };
 
 export const VISIBILITY_LABELS: Readonly<Record<string, string>> = {
-  public: "Public",
-  private: "Private",
+  get public() { return translateUi("Public"); },
+  get private() { return translateUi("Private"); },
 };
 
 export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
   openid: {
-    title: "Authenticate your identity",
-    description: "Allows the app to verify who you are.",
+    get title() { return translateUi("Authenticate your identity"); },
+    get description() { return translateUi("Allows the app to verify who you are."); },
     risk: "low",
   },
   profile: {
-    title: "Read basic profile",
-    description: "Lets the app read your display name and profile details.",
+    get title() { return translateUi("Read basic profile"); },
+    get description() { return translateUi("Lets the app read your display name and profile details."); },
     risk: "low",
   },
   email: {
-    title: "Read your email",
-    description:
-      "Lets the app access your email address and verification state.",
+    get title() { return translateUi("Read your email"); },
+    get description() { return translateUi("Lets the app access your email address and verification state."); },
     risk: "medium",
   },
   roles: {
-    title: "Read your roles and permissions",
-    description:
-      "Lets the app see your assigned roles and the permissions they grant.",
+    get title() { return translateUi("Read your roles and permissions"); },
+    get description() { return translateUi("Lets the app see your assigned roles and the permissions they grant."); },
     risk: "medium",
   },
   groups: {
-    title: "Read your groups",
-    description: "Lets the app see which groups you belong to.",
+    get title() { return translateUi("Read your groups"); },
+    get description() { return translateUi("Lets the app see which groups you belong to."); },
     risk: "medium",
   },
   proxy: {
-    title: "Use your connected services",
-    description:
-      "Lets the app send requests through NyxID to the services you authorize below.",
+    get title() { return translateUi("Use your connected services"); },
+    get description() { return translateUi("Lets the app send requests through NyxID to the services you authorize below."); },
     risk: "high",
   },
   machine: {
-    title: "Use selected Machines",
-    description:
-      "Lets the app use commands and files only on the Machines you explicitly approve. It cannot purchase, pause, resume or delete resources.",
+    get title() { return translateUi("Use selected Machines"); },
+    get description() { return translateUi("Lets the app use commands and files only on the Machines you explicitly approve. It cannot purchase, pause, resume or delete resources."); },
     risk: "high",
   },
   offline_access: {
-    title: "Long-lived access",
-    description:
-      "Lets the app refresh tokens without asking you to log in every time.",
+    get title() { return translateUi("Long-lived access"); },
+    get description() { return translateUi("Lets the app refresh tokens without asking you to log in every time."); },
     risk: "high",
   },
   "urn:nyxid:scope:broker_binding": {
-    title: "Durable broker access",
-    description:
-      "Lets the app hold a durable NyxID credential that can act as you.",
+    get title() { return translateUi("Durable broker access"); },
+    get description() { return translateUi("Lets the app hold a durable NyxID credential that can act as you."); },
     risk: "high",
   },
 };
@@ -193,16 +188,16 @@ export function getProviderConnectHint(
 ): string | null {
   if (!canConnectProvider(provider, hasUserCredentials)) {
     if (provider.provider_type === "telegram_widget") {
-      return "Admin must configure the Telegram bot username and bot token first.";
+      return translateUi("Admin must configure the Telegram bot username and bot token first.");
     }
     const mode = provider.credential_mode;
     if (mode === "user") {
-      return "Set up your OAuth app credentials first.";
+      return translateUi("Set up your OAuth app credentials first.");
     }
     if (mode === "both" && !hasUserCredentials) {
-      return "Admin credentials not configured. Set up your own OAuth app.";
+      return translateUi("Admin credentials not configured. Set up your own OAuth app.");
     }
-    return "Admin must configure OAuth client credentials first.";
+    return translateUi("Admin must configure OAuth client credentials first.");
   }
 
   return null;
@@ -222,29 +217,29 @@ export function getCredentialInputType(service: DownstreamService): {
   const authType = service.auth_type ?? service.auth_method;
   switch (authType) {
     case "api_key":
-      return { type: "api_key", label: "API Key", placeholder: "sk-..." };
+      return { type: "api_key", get label() { return translateUi("API Key"); }, placeholder: "sk-..." };
     case "bearer":
       return {
         type: "bearer",
-        label: "Bearer Token",
+        get label() { return translateUi("Bearer Token"); },
         placeholder: "eyJ...",
       };
     case "basic":
       return {
         type: "basic",
-        label: "Username:Password",
+        get label() { return translateUi("Username:Password"); },
         placeholder: "user:pass",
       };
     case "oauth2":
       return {
         type: "bearer",
-        label: "Access Token",
+        get label() { return translateUi("Access Token"); },
         placeholder: "oauth2 token",
       };
     default:
       return {
         type: "api_key",
-        label: "Credential",
+        get label() { return translateUi("Credential"); },
         placeholder: "Enter credential",
       };
   }

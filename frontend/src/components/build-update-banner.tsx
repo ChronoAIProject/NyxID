@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { RefreshCw, X } from "lucide-react";
@@ -8,6 +10,7 @@ export function BuildUpdateBanner({ ready, queryClient }: {
   readonly ready: boolean;
   readonly queryClient: QueryClient;
 }) {
+  useUiTranslation();
   const { buildId, available, refresh } = useBuildUpdates(ready, queryClient);
   const [dismissedBuildId, setDismissedBuildId] = useState<string>();
   const [applying, setApplying] = useState(false);
@@ -26,15 +29,13 @@ export function BuildUpdateBanner({ ready, queryClient }: {
       <div role="status" aria-live="polite" className="pointer-events-auto flex max-w-xl items-center gap-3 rounded-xl border border-border bg-card p-3 text-14 text-foreground shadow-lg">
         <RefreshCw className="size-4 shrink-0 text-primary" aria-hidden="true" />
         <div className="min-w-0">
-          <p className="font-medium">A new version of NyxID is ready.</p>
+          <p className="font-medium">{translateUi("A new version of NyxID is ready.")}</p>
           <p className="text-13 text-muted-foreground">
-            {failedBuildId === buildId ? "The update is still being deployed. Please try again shortly." : "You can keep working. Save your changes before refreshing."}
+            {failedBuildId === buildId ? translateUi("The update is still being deployed. Please try again shortly.") : translateUi("You can keep working. Save your changes before refreshing.")}
           </p>
         </div>
-        <Button size="sm" variant="primary" isLoading={applying} onClick={() => void apply()}>
-          Refresh
-        </Button>
-        <Button size="icon" variant="ghost" aria-label="Dismiss update banner" onClick={() => setDismissedBuildId(buildId)}>
+        <Button size="sm" variant="primary" isLoading={applying} onClick={() => void apply()}>{translateUi("Refresh")}</Button>
+        <Button size="icon" variant="ghost" aria-label={translateUi("Dismiss update banner")} onClick={() => setDismissedBuildId(buildId)}>
           <X className="size-3" aria-hidden="true" />
         </Button>
       </div>

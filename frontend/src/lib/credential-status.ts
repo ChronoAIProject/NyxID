@@ -15,6 +15,7 @@
  * can the user re-authorize out of this state, and what should the button
  * say.
  */
+import { credentialVerificationMeta } from "./credential-verification";
 import { getStatusMeta, type StatusMeta } from "@/lib/status-contract";
 
 /**
@@ -52,7 +53,9 @@ export function isProblemStatus(status: string): boolean {
  * by a newer backend renders as a readable badge instead of crashing or
  * showing an empty pill.
  */
-export function credentialStatusMeta(status: string): StatusMeta {
+export function credentialStatusMeta(status: string, connection?: Parameters<typeof credentialVerificationMeta>[0]): StatusMeta {
+  const verification = connection && credentialVerificationMeta(connection);
+  if (verification) return verification;
   return (
     getStatusMeta("credential", status) ?? {
       label: status.replaceAll("_", " ") || "Unknown",

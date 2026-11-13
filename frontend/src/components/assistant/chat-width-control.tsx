@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { RangeControl } from "@/components/ui/range-control";
 import {
   CHAT_CONTENT_WIDTH,
@@ -6,12 +8,13 @@ import {
 } from "@/stores/theme-store";
 
 export function ChatWidthControl() {
+  useUiTranslation();
   const width = useThemeStore((state) => state.chatContentWidth);
   const setWidth = useThemeStore((state) => state.setChatContentWidth);
   return (
     <RangeControl
-      label="Chat content width"
-      description="Maximum width for messages and the composer. Smaller screens fit automatically."
+      label={translateUi("Chat content width")}
+      description={translateUi("Maximum width for messages and the composer. Smaller screens fit automatically.")}
       saved={width}
       onChange={setWidth}
       {...CHAT_CONTENT_WIDTH}
@@ -22,12 +25,13 @@ export function ChatWidthControl() {
 }
 
 export function ComposerHeightControl() {
+  useUiTranslation();
   const height = useThemeStore((state) => state.composerMaxHeight);
   const setHeight = useThemeStore((state) => state.setComposerMaxHeight);
   return (
     <RangeControl
-      label="Maximum composer height"
-      description="How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen."
+      label={translateUi("Maximum composer height")}
+      description={translateUi("How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen.")}
       saved={height}
       onChange={setHeight}
       {...COMPOSER_MAX_HEIGHT}

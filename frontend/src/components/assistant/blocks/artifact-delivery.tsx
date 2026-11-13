@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -16,6 +18,7 @@ export function ArtifactDelivery({
 }: {
   readonly delivery: NonNullable<ChatMessage["artifactDelivery"]>;
 }) {
+  useUiTranslation();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -95,16 +98,14 @@ export function ArtifactDelivery({
       {!!delivery.rejected?.length && (
         <ul>
           {delivery.rejected.map((file) => (
-            <li key={file.index}>
-              File {file.index + 1} ({file.filename}): generated but not
-              delivered —{" "}
+            <li key={file.index}>{translateUi("File ")}{file.index + 1} ({file.filename}{translateUi("): generated but not delivered —")}{" "}
               {file.reason === "too_large"
-                ? "exceeds the supported file or accepted-total size limit"
+                ? translateUi("exceeds the supported file or accepted-total size limit")
                 : file.reason === "unavailable"
-                  ? "the producer could not retrieve this file"
+                  ? translateUi("the producer could not retrieve this file")
                   : file.reason === "missing"
-                    ? "the saved file is no longer available"
-                    : "the returned file failed validation"}
+                    ? translateUi("the saved file is no longer available")
+                    : translateUi("the returned file failed validation")}
               .
             </li>
           ))}
@@ -123,7 +124,7 @@ export function ArtifactDelivery({
             disabled={busy}
             onClick={() => void recover()}
           >
-            {busy ? "Recovering attachments…" : "Retry attachment delivery"}
+            {busy ? translateUi("Recovering attachments…") : translateUi("Retry attachment delivery")}
           </Button>
         )}
       {error && <p>{error}</p>}

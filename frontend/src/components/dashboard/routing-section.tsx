@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { Router } from "lucide-react";
 import { toast } from "sonner";
@@ -54,6 +57,7 @@ export function RoutingSection({
   title = "Routing",
   description = "How requests reach the endpoint",
 }: RoutingSectionProps) {
+  useUiTranslation();
   const [picking, setPicking] = useState(false);
   const { data: nodes } = useNodes();
   const updateService = useUpdateUserService();
@@ -64,13 +68,13 @@ export function RoutingSection({
       { serviceId, node_id: id },
       {
         onSuccess: () => {
-          toast.success(id ? "Route updated" : "Switched to direct routing");
+          toast.success(translateUi(id ? "Route updated" : "Switched to direct routing"));
           setPicking(false);
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update routing";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -92,7 +96,7 @@ export function RoutingSection({
           {!readOnly && !picking && (
             <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setPicking(true)}>
               <ButtonIcon><Router className="h-3 w-3" /></ButtonIcon>
-              {nodeId ? "Change Route" : "Route via Node"}
+              {nodeId ? translateUi("Change Route") : translateUi("Route via Node")}
             </Button>
           )}
         </div>
@@ -101,22 +105,22 @@ export function RoutingSection({
       <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
           <Badge variant={nodeId ? "default" : "secondary"}>
-            {nodeId ? `Via node: ${currentNodeName}` : "Direct"}
+            {nodeId ? translateUi("Via node: {{value1}}", { value1: currentNodeName }) : translateUi("Direct")}
           </Badge>
         </div>
 
         {!readOnly && picking && (
           <div className="space-y-2">
-            <Label>Select routing</Label>
+            <Label>{translateUi("Select routing")}</Label>
             <Select
               onValueChange={handleSelectNode}
               defaultValue={nodeId ?? "direct"}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select routing" />
+                <SelectValue placeholder={translateUi("Select routing")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="direct">Direct (no node)</SelectItem>
+                <SelectItem value="direct">{translateUi("Direct (no node)")}</SelectItem>
                 {allNodes.map((n) => (
                   <SelectItem
                     key={n.id}
@@ -129,17 +133,13 @@ export function RoutingSection({
               </SelectContent>
             </Select>
             {allNodes.length === 0 && (
-              <p className="text-13 text-muted-foreground">
-                No nodes registered. Register a node first.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("No nodes registered. Register a node first.")}</p>
             )}
             <div className="flex justify-end">
               <Button
                 variant="outline"
                 onClick={() => setPicking(false)}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
             </div>
           </div>
         )}

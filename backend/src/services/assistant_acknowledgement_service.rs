@@ -188,8 +188,9 @@ pub async fn enforce_turn_gate(
 
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
-pub const DECISION_NARRATION: &str =
-    "Then tell the user in one or two plain sentences what you did and the result.";
+pub const DECISION_NARRATION: &str = "Then tell the user in one or two plain sentences what you actually did and observed. An allowed card is permission, not execution. A denied card means that action was not sent; it does not cancel work already running in an external service.";
+
+const ACTION_STATE_GUIDANCE: &str = " This confirmation authorizes only the exact requested action. While pending, that action has not been sent. Denying it sends nothing to the external service, including no native approval refusal or task cancellation. Do not claim work completed or stopped without an observed result. End this turn while waiting; never retry a denied action unless the user explicitly asks again.";
 
 /// How risky an assistant action is. The owner's access mode decides which
 /// classes need a single-use action card; policy floors (webhook automations,
@@ -355,10 +356,19 @@ pub async fn retire_full_access_confirmations(
         if !ids.is_empty() {
             collection
                 .update_many(
-                    doc! {"_id": {"$in": ids}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
+                    doc! {"_id": {"$in": ids.clone()}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
                     doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
                 )
                 .await?;
+            // Source first; a crash here leaves rows the list and summary
+            // reconcile lazily from the card's state.
+            super::assistant_notification_service::resolve_cards(
+                db,
+                super::assistant_notification_service::CardScope::Ids(&ids),
+                "superseded",
+                None,
+            )
+            .await?;
         }
     }
     // Proxy approvals can exist without an acknowledgement; their owning service
@@ -410,7 +420,13 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
         });
     }
     let name = tool.strip_prefix("nyxid__")?;
+    if name == "read_tool_result" {
+        return Some(Read);
+    }
     use super::{assistant_account_tools as account, assistant_team_tools as team};
+    if name == "cma_save_attachment" {
+        return Some(Change);
+    }
     if account::TOOL_NAMES.contains(&name) {
         return Some(if account::read_only(name) {
             Read
@@ -711,6 +727,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
@@ -831,19 +848,34 @@ pub async fn confirm_action_with(
                 "kind":"action","tool_name":tool,"arguments_digest":arguments_digest(args),
                     "invocation_id":&chat.invocation_id,"decided_by":{"$ne":"access_mode"}})
                 .await?
-                && presentation_status(&card) != "pending"
             {
-                let mut value = refusal(&card);
-                // Preserve the existing execution refusal; code/status explain
-                // why the supplied one-use authority cannot be consumed.
-                value["error"] = json!("acknowledgement_invalid");
-                return Ok(Some(value));
+                super::assistant_activity_decision::bind(
+                    db,
+                    chat,
+                    "acknowledgement",
+                    &card.id,
+                    false,
+                    None,
+                )
+                .await?;
+                if presentation_status(&card) != "pending" {
+                    let mut value = refusal(&card);
+                    // Preserve the existing execution refusal; code/status explain
+                    // why the supplied one-use authority cannot be consumed.
+                    value["error"] = json!("acknowledgement_invalid");
+                    return Ok(Some(value));
+                }
             }
             return Ok(Some(json!({
                 "error": "acknowledgement_invalid", "code":"acknowledgement_invalid", "kind": "action",
                 "status":"unavailable", "message":"No usable confirmation exists for this exact call.",
-                "instructions": "This action card is missing, expired, used or does not match \
-                    the call. Ask the user before requesting a new action card.",
+                "instructions": "This call has no consumable approval. The card may still be \
+                    pending, or it may be missing, expired, used, or not match this call. \
+                    This error alone does not establish which case applies; do not claim \
+                    the card expired. If the current context shows a pending card, ask the \
+                    user to decide that existing card. A plain-text request to continue \
+                    does not approve it. Otherwise ask before requesting a new action card. \
+                    No external action was sent by this attempt.",
             })));
         }
     }
@@ -1915,6 +1947,8 @@ pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<
             doc! {"$set": {"status": "expired", "expiry_reason": "timeout"}},
         )
         .await?;
+    super::assistant_notification_service::resolve_expired_cards(db, user, Some(conversation))
+        .await?;
     Ok(())
 }
 
@@ -2100,6 +2134,9 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         .any(|row| row.status == "allowed" && row.kind == "action")
     {
         note.push_str("\nRetry an allowed action through its original callable tool or route with its acknowledgement_id. Internal exact-connection approvals are applied by NyxID when that original operation resumes; never invoke an internal approval name.");
+    }
+    if rows.iter().any(|row| row.kind == "action") {
+        note.push_str(ACTION_STATE_GUIDANCE);
     }
     note.push_str("\nDo not request denied items again unless the user asks. Expired confirmations cannot be allowed; ask the owner before requesting a new confirmation. Never describe a terminal request as waiting for approval.");
     note
@@ -2346,6 +2383,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
@@ -2435,6 +2473,30 @@ async fn prepare_request_candidate(
 }
 
 async fn request_candidate_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    candidate: &AssistantAcknowledgement,
+    origin: Option<&RequestOrigin>,
+    approval: super::approval_service::ApprovalOptions,
+    session: &mut ClientSession,
+) -> AppResult<(AssistantAcknowledgement, bool)> {
+    let result = Box::pin(request_candidate_inner(
+        db, chat, candidate, origin, approval, session,
+    ))
+    .await?;
+    super::assistant_activity_decision::bind(
+        db,
+        chat,
+        "acknowledgement",
+        &result.0.id,
+        false,
+        Some(session),
+    )
+    .await?;
+    Ok(result)
+}
+
+async fn request_candidate_inner(
     db: &Database,
     chat: &ChatAuthority,
     candidate: &AssistantAcknowledgement,
@@ -2603,6 +2665,15 @@ async fn request_candidate_in_session(
         .insert_one(&row)
         .session(&mut *session)
         .await?;
+    Box::pin(
+        super::assistant_notification_service::record_card_pending_in_session(
+            db,
+            session,
+            &row,
+            &conversation,
+        ),
+    )
+    .await?;
     super::assistant_voice::await_confirmation(db, &row, session).await?;
     Ok((row, true))
 }
@@ -2754,7 +2825,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
             "message":message,"instructions":message});
     }
     let denied = status == "denied";
-    let instructions = if row.decider == "orchestrator" {
+    let mut instructions: String = if row.decider == "orchestrator" {
         if denied {
             "Your orchestrator denied this request. Do not retry it; report what you \
             could do without it."
@@ -2794,6 +2865,9 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
             ),
         }
     };
+    if row.kind == "action" && row.authored_skill.is_none() {
+        instructions.push_str(ACTION_STATE_GUIDANCE);
+    }
     let mut value = json!({"error": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
         "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
@@ -3478,6 +3552,13 @@ pub(crate) async fn decide_in_session(
         .replace_one(filter, &row)
         .session(&mut *session)
         .await?;
+    super::assistant_notification_service::resolve_cards_in_session(
+        db,
+        session,
+        super::assistant_notification_service::CardScope::Ids(std::slice::from_ref(&row.id)),
+        "decided",
+    )
+    .await?;
     if allow && row.kind == "skills" && !by_nyxbot {
         // Internal outbox marker: the saved approval always has
         // durable work, even if the deciding process exits before
@@ -3647,8 +3728,11 @@ async fn consume_action_with_reason(
             }
             let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
                 filter,
-                doc! {"$set": {"status": "used"}},
+                doc! {"$set": {"status": "used", "activity_execution": bson::to_bson(&super::assistant_activity_decision::execution(&chat)).expect("execution metadata")}},
             ).session(&mut *session).await?;
+            if result.modified_count == 1 {
+                super::assistant_activity_decision::bind(&db, &chat, "acknowledgement", &id, true, Some(session)).await?;
+            }
             Ok(result.modified_count == 1)
         }.await;
         mutations::transaction_result(operation)
@@ -3674,10 +3758,21 @@ pub(crate) async fn consume_action_in_session(
             "arguments_digest": arguments_digest(arguments), "status": "allowed",
             "invocation_id": &chat.invocation_id,
             "decider": "user", "decided_by": {"$eq": "user", "$ne": "access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}},
-            doc! {"$set": {"status": "used"}},
+            doc! {"$set": {"status": "used", "activity_execution": bson::to_bson(&super::assistant_activity_decision::execution(chat)).expect("execution metadata")}},
         )
         .session(&mut *session)
         .await?;
+    if result.modified_count == 1 {
+        super::assistant_activity_decision::bind(
+            db,
+            chat,
+            "acknowledgement",
+            id,
+            true,
+            Some(session),
+        )
+        .await?;
+    }
     Ok(result.modified_count == 1)
 }
 

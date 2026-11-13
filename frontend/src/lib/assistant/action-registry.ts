@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   ACTION_SCHEMA_VERSION,
   ACTION_SERVICE_SLUG_PATTERN,
@@ -97,12 +98,12 @@ export interface ActionDescriptor<
 }
 
 const SERVICE_LABELS: Readonly<Record<string, string>> = {
-  github: "GitHub",
-  "api-github": "GitHub",
-  openai: "OpenAI",
-  "llm-openai": "OpenAI",
-  lark: "Lark",
-  "api-lark": "Lark",
+  get github() { return translateUi("GitHub"); },
+  get "api-github"() { return translateUi("GitHub"); },
+  get openai() { return translateUi("OpenAI"); },
+  get "llm-openai"() { return translateUi("OpenAI"); },
+  get lark() { return translateUi("Lark"); },
+  get "api-lark"() { return translateUi("Lark"); },
 };
 
 /**
@@ -799,12 +800,12 @@ function connectSummary(params: ActionCardParams): readonly SummaryRow[] {
   if (params.variant === "catalog") {
     return [
       {
-        label: "Service",
+        get label() { return translateUi("Service"); },
         value: clampServiceLabel(params.service_slug) || "Custom",
       },
       ...params.requested_scopes
         .filter(Boolean)
-        .map((scope) => ({ label: "Scopes", value: scope, mono: true })),
+        .map((scope) => ({ get label() { return translateUi("Scopes"); }, value: scope, mono: true })),
       ...(params.via_node_id
         ? [{ label: "", value: `Node ${params.via_node_id}`, mono: true }]
         : []),
@@ -817,10 +818,10 @@ function connectSummary(params: ActionCardParams): readonly SummaryRow[] {
     const host = endpointHost(params.endpoint_url);
     return [
       {
-        label: "Service",
+        get label() { return translateUi("Service"); },
         value: clampServiceLabel(params.name) || "Custom",
       },
-      ...(host ? [{ label: "Service", value: host }] : []),
+      ...(host ? [{ get label() { return translateUi("Service"); }, value: host }] : []),
       ...(params.via_node_id
         ? [{ label: "", value: `Node ${params.via_node_id}`, mono: true }]
         : []),
@@ -833,17 +834,16 @@ function connectSummary(params: ActionCardParams): readonly SummaryRow[] {
 }
 
 const serviceConnectDescriptor: ActionDescriptor = {
-  title: (params) => `Connect ${actionServiceLabel(params)}`,
+  title: (params) => translateUi("Connect {{value}}", { value: actionServiceLabel(params) }),
   body: (params) =>
-    `NyxID will broker access to ${actionServiceLabel(params)} for this assistant request. Your credential stays in NyxID and is never shared with the model.`,
-  cta: (params) => `Connect ${actionServiceLabel(params)}`,
+    translateUi("NyxID will broker access to {{value}} for this assistant request. Your credential stays in NyxID and is never shared with the model.", { value: actionServiceLabel(params) }),
+  cta: (params) => translateUi("Connect {{value}}", { value: actionServiceLabel(params) }),
   risk: "credential_access",
   normalize: normalizeServiceConnect,
   summary: connectSummary,
   icon: "service",
   busyLabel: "Connecting",
-  assurance:
-    "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.",
+  get assurance() { return translateUi("You choose the account, routing, and credential. The assistant receives only brokered access after you finish."); },
   resource: (completion) => ({
     userService: { userServiceId: completedId(completion) },
   }),
@@ -856,24 +856,24 @@ const serviceConnectDescriptor: ActionDescriptor = {
 };
 
 const serviceReauthorizeDescriptor: ActionDescriptor = {
-  title: () => "Re-authorize service",
+  title: () => translateUi("Re-authorize service"),
   body: (params) =>
     params.variant === "service_reauthorize"
-      ? "NyxID will re-authorize this connected service with the requested permissions. Your credential stays in NyxID and is never shared with the model."
-      : "NyxID will re-authorize one exact connected service.",
-  cta: () => "Re-authorize",
+      ? translateUi("NyxID will re-authorize this connected service with the requested permissions. Your credential stays in NyxID and is never shared with the model.")
+      : translateUi("NyxID will re-authorize one exact connected service."),
+  cta: () => translateUi("Re-authorize"),
   risk: "credential_access",
   normalize: normalizeServiceReauthorize,
   summary: (params) =>
     params.variant === "service_reauthorize"
       ? [
           {
-            label: "Service",
+            get label() { return translateUi("Service"); },
             value: params.user_service_id,
             mono: true,
           },
           ...params.requested_scopes.map((scope) => ({
-            label: "Requested scopes",
+            get label() { return translateUi("Requested scopes"); },
             value: scope,
             mono: true,
           })),
@@ -881,8 +881,7 @@ const serviceReauthorizeDescriptor: ActionDescriptor = {
       : [],
   icon: "shield",
   busyLabel: "Authorizing",
-  assurance:
-    "NyxID opens the provider authorization flow here. The assistant receives only the service reference after fresh authorization finishes.",
+  get assurance() { return translateUi("NyxID opens the provider authorization flow here. The assistant receives only the service reference after fresh authorization finishes."); },
   resource: (completion) => ({
     userService: { userServiceId: completedId(completion) },
   }),
@@ -892,12 +891,12 @@ const serviceReauthorizeDescriptor: ActionDescriptor = {
 };
 
 const keyCreateDescriptor: ActionDescriptor = {
-  title: () => "Create API key",
+  title: () => translateUi("Create API key"),
   body: (params) =>
     params.variant === "key_create"
-      ? `NyxID will create ${clampServiceLabel(params.name) || "an API key"} with proxy access limited to the listed services.`
-      : "NyxID will create a least-scope API key.",
-  cta: () => "Create key",
+      ? translateUi("NyxID will create {{value}} with proxy access limited to the listed services.", { value: clampServiceLabel(params.name) || "an API key" })
+      : translateUi("NyxID will create a least-scope API key."),
+  cta: () => translateUi("Create key"),
   risk: "credential_access",
   normalize: normalizeKeyCreate,
   summary: (params) =>
@@ -907,16 +906,16 @@ const keyCreateDescriptor: ActionDescriptor = {
             ? []
             : [
                 {
-                  label: "Platform services",
+                  get label() { return translateUi("Platform services"); },
                   value: params.allow_auto_connected_services
                     ? "All auto-connected, including future additions"
                     : "Only explicitly selected services",
                 },
               ]),
-          { label: "Key", value: params.name },
-          { label: "Key", value: params.platform },
+          { get label() { return translateUi("Key"); }, value: params.name },
+          { get label() { return translateUi("Key"); }, value: params.platform },
           ...params.allowed_service_ids.map((serviceId) => ({
-            label: "Allowed services",
+            get label() { return translateUi("Allowed services"); },
             value: serviceId,
             mono: true,
           })),
@@ -924,40 +923,38 @@ const keyCreateDescriptor: ActionDescriptor = {
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish.",
+  get assurance() { return translateUi("NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish."); },
   resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) => (params.variant === "key_create" ? "key_create" : null),
 };
 
 const keyRotateDescriptor: ActionDescriptor = {
-  title: () => "Rotate API key",
+  title: () => translateUi("Rotate API key"),
   body: (params) =>
     params.variant === "key_rotate"
-      ? "NyxID will replace this exact API key, preserve its authority, and commit an immutable predecessor link."
-      : "NyxID will rotate one exact API key.",
-  cta: () => "Rotate key",
+      ? translateUi("NyxID will replace this exact API key, preserve its authority, and commit an immutable predecessor link.")
+      : translateUi("NyxID will rotate one exact API key."),
+  cta: () => translateUi("Rotate key"),
   risk: "credential_access",
   normalize: normalizeKeyRotate,
   summary: (params) =>
     params.variant === "key_rotate"
-      ? [{ label: "Predecessor", value: params.key_id, mono: true }]
+      ? [{ get label() { return translateUi("Predecessor"); }, value: params.key_id, mono: true }]
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish.",
+  get assurance() { return translateUi("NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish."); },
   resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) => (params.variant === "key_rotate" ? "key_rotate" : null),
 };
 
 const keyUpdateDescriptor: ActionDescriptor = {
-  title: () => "Update API key",
+  title: () => translateUi("Update API key"),
   body: () =>
-    "NyxID will update the reviewed settings and service access for this API key.",
-  cta: () => "Update key",
+    translateUi("NyxID will update the reviewed settings and service access for this API key."),
+  cta: () => translateUi("Update key"),
   risk: "credential_access",
   normalize: normalizeKeyUpdate,
   summary: (params) =>
@@ -967,56 +964,54 @@ const keyUpdateDescriptor: ActionDescriptor = {
             ? []
             : [
                 {
-                  label: "Platform services",
+                  get label() { return translateUi("Platform services"); },
                   value: params.allow_auto_connected_services
                     ? "All auto-connected, including future additions"
                     : "Only explicitly selected services",
                 },
               ]),
-          { label: "Key", value: params.key_id, mono: true },
-          ...(params.name ? [{ label: "Name", value: params.name }] : []),
+          { get label() { return translateUi("Key"); }, value: params.key_id, mono: true },
+          ...(params.name ? [{ get label() { return translateUi("Name"); }, value: params.name }] : []),
           ...(params.platform
-            ? [{ label: "Platform", value: params.platform }]
+            ? [{ get label() { return translateUi("Platform"); }, value: params.platform }]
             : []),
           ...(params.description
-            ? [{ label: "Description", value: params.description }]
+            ? [{ get label() { return translateUi("Description"); }, value: params.description }]
             : []),
         ]
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID verifies the exact key and applies only these metadata changes. The assistant receives only the safe key reference.",
+  get assurance() { return translateUi("NyxID verifies the exact key and applies only these metadata changes. The assistant receives only the safe key reference."); },
   resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) => (params.variant === "key_update" ? "key_update" : null),
 };
 
 const keyDeleteDescriptor: ActionDescriptor = {
-  title: () => "Delete API key",
+  title: () => translateUi("Delete API key"),
   body: () =>
-    "NyxID will permanently delete this API key after you confirm the destructive change.",
-  cta: () => "Delete key",
+    translateUi("NyxID will permanently delete this API key after you confirm the destructive change."),
+  cta: () => translateUi("Delete key"),
   risk: "credential_access",
   normalize: normalizeKeyDelete,
   summary: (params) =>
     params.variant === "key_delete"
-      ? [{ label: "Key", value: params.key_id, mono: true }]
+      ? [{ get label() { return translateUi("Key"); }, value: params.key_id, mono: true }]
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted key reference.",
+  get assurance() { return translateUi("NyxID confirms and verifies this deletion here. The assistant receives only the deleted key reference."); },
   resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) => (params.variant === "key_delete" ? "key_delete" : null),
 };
 
 const keyExtendScopeDescriptor: ActionDescriptor = {
-  title: () => "Extend API key scope",
+  title: () => translateUi("Extend API key scope"),
   body: () =>
-    "NyxID will allow this API key to access the additional listed services after you confirm the wider authority.",
-  cta: () => "Extend scope",
+    translateUi("NyxID will allow this API key to access the additional listed services after you confirm the wider authority."),
+  cta: () => translateUi("Extend scope"),
   risk: "credential_access",
   normalize: normalizeKeyExtendScope,
   summary: (params) =>
@@ -1026,15 +1021,15 @@ const keyExtendScopeDescriptor: ActionDescriptor = {
             ? []
             : [
                 {
-                  label: "Platform services",
+                  get label() { return translateUi("Platform services"); },
                   value: params.allow_auto_connected_services
                     ? "All auto-connected, including future additions"
                     : "Only explicitly selected services",
                 },
               ]),
-          { label: "Key", value: params.key_id, mono: true },
+          { get label() { return translateUi("Key"); }, value: params.key_id, mono: true },
           ...params.add_service_ids.map((serviceId) => ({
-            label: "Add service",
+            get label() { return translateUi("Add service"); },
             value: serviceId,
             mono: true,
           })),
@@ -1042,8 +1037,7 @@ const keyExtendScopeDescriptor: ActionDescriptor = {
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID widens only the listed service scope after your confirmation. The assistant receives only the safe key reference.",
+  get assurance() { return translateUi("NyxID widens only the listed service scope after your confirmation. The assistant receives only the safe key reference."); },
   resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) =>
@@ -1051,19 +1045,19 @@ const keyExtendScopeDescriptor: ActionDescriptor = {
 };
 
 const keyBindCredentialDescriptor: ActionDescriptor = {
-  title: () => "Bind service credential",
+  title: () => translateUi("Bind service credential"),
   body: () =>
-    "NyxID will bind this API key to the selected stored credential for one exact service.",
-  cta: () => "Bind credential",
+    translateUi("NyxID will bind this API key to the selected stored credential for one exact service."),
+  cta: () => translateUi("Bind credential"),
   risk: "credential_access",
   normalize: normalizeKeyBindCredential,
   summary: (params) =>
     params.variant === "key_bind_credential"
       ? [
-          { label: "Key", value: params.key_id, mono: true },
-          { label: "Service", value: params.user_service_id, mono: true },
+          { get label() { return translateUi("Key"); }, value: params.key_id, mono: true },
+          { get label() { return translateUi("Service"); }, value: params.user_service_id, mono: true },
           {
-            label: "External key",
+            get label() { return translateUi("External key"); },
             value: params.external_key_id,
             mono: true,
           },
@@ -1071,8 +1065,7 @@ const keyBindCredentialDescriptor: ActionDescriptor = {
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID confirms and verifies the exact binding here. The assistant receives only safe key and service references.",
+  get assurance() { return translateUi("NyxID confirms and verifies the exact binding here. The assistant receives only safe key and service references."); },
   resource: keyBindingResource,
   wiring: "dialog",
   journey: (params) =>
@@ -1080,32 +1073,31 @@ const keyBindCredentialDescriptor: ActionDescriptor = {
 };
 
 const serviceUpdateDescriptor: ActionDescriptor = {
-  title: () => "Update connected service",
+  title: () => translateUi("Update connected service"),
   body: () =>
-    "NyxID will update this connected service's display and routing metadata without exposing its credential.",
-  cta: () => "Update service",
+    translateUi("NyxID will update this connected service's display and routing metadata without exposing its credential."),
+  cta: () => translateUi("Update service"),
   risk: "credential_access",
   normalize: normalizeServiceUpdate,
   summary: (params) =>
     params.variant === "service_update"
       ? [
-          { label: "Service", value: params.user_service_id, mono: true },
-          ...(params.name ? [{ label: "Name", value: params.name }] : []),
+          { get label() { return translateUi("Service"); }, value: params.user_service_id, mono: true },
+          ...(params.name ? [{ get label() { return translateUi("Name"); }, value: params.name }] : []),
           ...(params.endpoint_url
-            ? [{ label: "Endpoint", value: params.endpoint_url, mono: true }]
+            ? [{ get label() { return translateUi("Endpoint"); }, value: params.endpoint_url, mono: true }]
             : []),
           ...(params.auth_method
-            ? [{ label: "Auth method", value: params.auth_method }]
+            ? [{ get label() { return translateUi("Auth method"); }, value: params.auth_method }]
             : []),
           ...(params.auth_key_name
-            ? [{ label: "Auth key name", value: params.auth_key_name }]
+            ? [{ get label() { return translateUi("Auth key name"); }, value: params.auth_key_name }]
             : []),
         ]
       : [],
   icon: "service",
   busyLabel: "Working",
-  assurance:
-    "NyxID verifies the exact service and applies only these configuration changes. The assistant receives only the safe service reference.",
+  get assurance() { return translateUi("NyxID verifies the exact service and applies only these configuration changes. The assistant receives only the safe service reference."); },
   resource: (completion) => ({
     userService: { userServiceId: completedId(completion) },
   }),
@@ -1115,20 +1107,19 @@ const serviceUpdateDescriptor: ActionDescriptor = {
 };
 
 const serviceDeleteDescriptor: ActionDescriptor = {
-  title: () => "Delete connected service",
+  title: () => translateUi("Delete connected service"),
   body: () =>
-    "NyxID will permanently disconnect and delete this service after you confirm the destructive change.",
-  cta: () => "Delete service",
+    translateUi("NyxID will permanently disconnect and delete this service after you confirm the destructive change."),
+  cta: () => translateUi("Delete service"),
   risk: "credential_access",
   normalize: normalizeServiceDelete,
   summary: (params) =>
     params.variant === "service_delete"
-      ? [{ label: "Service", value: params.user_service_id, mono: true }]
+      ? [{ get label() { return translateUi("Service"); }, value: params.user_service_id, mono: true }]
       : [],
   icon: "service",
   busyLabel: "Working",
-  assurance:
-    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted service reference.",
+  get assurance() { return translateUi("NyxID confirms and verifies this deletion here. The assistant receives only the deleted service reference."); },
   resource: (completion) => ({
     userService: { userServiceId: completedId(completion) },
   }),
@@ -1138,20 +1129,20 @@ const serviceDeleteDescriptor: ActionDescriptor = {
 };
 
 const serviceRouteDescriptor: ActionDescriptor = {
-  title: () => "Change service routing",
+  title: () => translateUi("Change service routing"),
   body: (params) =>
     params.variant === "service_route" && params.via_node_id
-      ? "NyxID will route this connected service through the selected credential node."
-      : "NyxID will clear node routing and connect to this service directly.",
-  cta: () => "Change routing",
+      ? translateUi("NyxID will route this connected service through the selected credential node.")
+      : translateUi("NyxID will clear node routing and connect to this service directly."),
+  cta: () => translateUi("Change routing"),
   risk: "credential_access",
   normalize: normalizeServiceRoute,
   summary: (params) =>
     params.variant === "service_route"
       ? [
-          { label: "Service", value: params.user_service_id, mono: true },
+          { get label() { return translateUi("Service"); }, value: params.user_service_id, mono: true },
           {
-            label: "Route",
+            get label() { return translateUi("Route"); },
             value: params.via_node_id ?? "Direct",
             mono: Boolean(params.via_node_id),
           },
@@ -1159,8 +1150,7 @@ const serviceRouteDescriptor: ActionDescriptor = {
       : [],
   icon: "node",
   busyLabel: "Working",
-  assurance:
-    "NyxID verifies the exact service and routing target here. The assistant receives only the safe service reference.",
+  get assurance() { return translateUi("NyxID verifies the exact service and routing target here. The assistant receives only the safe service reference."); },
   resource: (completion) => ({
     userService: { userServiceId: completedId(completion) },
   }),
@@ -1170,20 +1160,19 @@ const serviceRouteDescriptor: ActionDescriptor = {
 };
 
 const serviceRotateCredentialDescriptor: ActionDescriptor = {
-  title: () => "Rotate service credential",
+  title: () => translateUi("Rotate service credential"),
   body: () =>
-    "NyxID will replace the stored credential for this connected service inside the browser journey.",
-  cta: () => "Rotate credential",
+    translateUi("NyxID will replace the stored credential for this connected service inside the browser journey."),
+  cta: () => translateUi("Rotate credential"),
   risk: "credential_access",
   normalize: normalizeServiceRotateCredential,
   summary: (params) =>
     params.variant === "service_rotate_credential"
-      ? [{ label: "Service", value: params.user_service_id, mono: true }]
+      ? [{ get label() { return translateUi("Service"); }, value: params.user_service_id, mono: true }]
       : [],
   icon: "shield",
   busyLabel: "Working",
-  assurance:
-    "You enter the replacement only inside NyxID. The assistant receives only the verified service reference.",
+  get assurance() { return translateUi("You enter the replacement only inside NyxID. The assistant receives only the verified service reference."); },
   resource: (completion) => ({
     userService: { userServiceId: completedId(completion) },
   }),
@@ -1195,24 +1184,24 @@ const serviceRotateCredentialDescriptor: ActionDescriptor = {
 };
 
 const endpointUpdateDescriptor: ActionDescriptor = {
-  title: () => "Update endpoint",
+  title: () => translateUi("Update endpoint"),
   body: () =>
-    "NyxID will update this endpoint's label, target URL, or OpenAPI specification URL.",
-  cta: () => "Update endpoint",
+    translateUi("NyxID will update this endpoint's label, target URL, or OpenAPI specification URL."),
+  cta: () => translateUi("Update endpoint"),
   risk: "credential_access",
   normalize: normalizeEndpointUpdate,
   summary: (params) =>
     params.variant === "endpoint_update"
       ? [
-          { label: "Endpoint", value: params.endpoint_id, mono: true },
-          ...(params.label ? [{ label: "Label", value: params.label }] : []),
+          { get label() { return translateUi("Endpoint"); }, value: params.endpoint_id, mono: true },
+          ...(params.label ? [{ get label() { return translateUi("Label"); }, value: params.label }] : []),
           ...(params.endpoint_url
-            ? [{ label: "Target URL", value: params.endpoint_url, mono: true }]
+            ? [{ get label() { return translateUi("Target URL"); }, value: params.endpoint_url, mono: true }]
             : []),
           ...(params.openapi_spec_url
             ? [
                 {
-                  label: "OpenAPI spec",
+                  get label() { return translateUi("OpenAPI spec"); },
                   value: params.openapi_spec_url,
                   mono: true,
                 },
@@ -1222,8 +1211,7 @@ const endpointUpdateDescriptor: ActionDescriptor = {
       : [],
   icon: "globe",
   busyLabel: "Working",
-  assurance:
-    "NyxID verifies the exact endpoint and applies only these changes. The assistant receives only the safe endpoint reference.",
+  get assurance() { return translateUi("NyxID verifies the exact endpoint and applies only these changes. The assistant receives only the safe endpoint reference."); },
   resource: (completion) => ({
     endpoint: { endpointId: completedId(completion) },
   }),
@@ -1233,20 +1221,19 @@ const endpointUpdateDescriptor: ActionDescriptor = {
 };
 
 const endpointDeleteDescriptor: ActionDescriptor = {
-  title: () => "Delete endpoint",
+  title: () => translateUi("Delete endpoint"),
   body: () =>
-    "NyxID will permanently delete this endpoint after you confirm the destructive change.",
-  cta: () => "Delete endpoint",
+    translateUi("NyxID will permanently delete this endpoint after you confirm the destructive change."),
+  cta: () => translateUi("Delete endpoint"),
   risk: "credential_access",
   normalize: normalizeEndpointDelete,
   summary: (params) =>
     params.variant === "endpoint_delete"
-      ? [{ label: "Endpoint", value: params.endpoint_id, mono: true }]
+      ? [{ get label() { return translateUi("Endpoint"); }, value: params.endpoint_id, mono: true }]
       : [],
   icon: "globe",
   busyLabel: "Working",
-  assurance:
-    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted endpoint reference.",
+  get assurance() { return translateUi("NyxID confirms and verifies this deletion here. The assistant receives only the deleted endpoint reference."); },
   resource: (completion) => ({
     endpoint: { endpointId: completedId(completion) },
   }),
@@ -1256,20 +1243,19 @@ const endpointDeleteDescriptor: ActionDescriptor = {
 };
 
 const externalKeyRotateDescriptor: ActionDescriptor = {
-  title: () => "Rotate external credential",
+  title: () => translateUi("Rotate external credential"),
   body: () =>
-    "NyxID will replace this stored external credential inside the browser journey.",
-  cta: () => "Rotate external credential",
+    translateUi("NyxID will replace this stored external credential inside the browser journey."),
+  cta: () => translateUi("Rotate external credential"),
   risk: "credential_access",
   normalize: normalizeExternalKeyRotate,
   summary: (params) =>
     params.variant === "external_key_rotate"
-      ? [{ label: "External key", value: params.external_key_id, mono: true }]
+      ? [{ get label() { return translateUi("External key"); }, value: params.external_key_id, mono: true }]
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "You enter the replacement only inside NyxID. The assistant receives only the verified external-key reference.",
+  get assurance() { return translateUi("You enter the replacement only inside NyxID. The assistant receives only the verified external-key reference."); },
   resource: (completion) => ({
     externalKey: { externalKeyId: completedId(completion) },
   }),
@@ -1279,20 +1265,19 @@ const externalKeyRotateDescriptor: ActionDescriptor = {
 };
 
 const externalKeyDeleteDescriptor: ActionDescriptor = {
-  title: () => "Delete external credential",
+  title: () => translateUi("Delete external credential"),
   body: () =>
-    "NyxID will permanently delete this stored external credential after you confirm the destructive change.",
-  cta: () => "Delete external credential",
+    translateUi("NyxID will permanently delete this stored external credential after you confirm the destructive change."),
+  cta: () => translateUi("Delete external credential"),
   risk: "credential_access",
   normalize: normalizeExternalKeyDelete,
   summary: (params) =>
     params.variant === "external_key_delete"
-      ? [{ label: "External key", value: params.external_key_id, mono: true }]
+      ? [{ get label() { return translateUi("External key"); }, value: params.external_key_id, mono: true }]
       : [],
   icon: "key",
   busyLabel: "Working",
-  assurance:
-    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted external-key reference.",
+  get assurance() { return translateUi("NyxID confirms and verifies this deletion here. The assistant receives only the deleted external-key reference."); },
   resource: (completion) => ({
     externalKey: { externalKeyId: completedId(completion) },
   }),
@@ -1303,35 +1288,35 @@ const externalKeyDeleteDescriptor: ActionDescriptor = {
 
 const connectionRevokeDescriptor = createDialogDescriptor({
   variant: "connection_revoke",
-  title: "Revoke service connection",
-  body: "NyxID will revoke this legacy service connection and securely clear its stored credential after explicit confirmation.",
-  cta: "Revoke connection",
+  get title() { return translateUi("Revoke service connection"); },
+  get body() { return translateUi("NyxID will revoke this legacy service connection and securely clear its stored credential after explicit confirmation."); },
+  get cta() { return translateUi("Revoke connection"); },
   icon: "service",
   normalize: normalizeConnectionRevoke,
   resourceKind: "connection",
-  fields: [{ label: "Service", key: "service_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service"); }, key: "service_id", mono: true }],
 });
 
 const providerDisconnectDescriptor = createDialogDescriptor({
   variant: "provider_disconnect",
-  title: "Disconnect provider",
-  body: "NyxID will revoke this legacy provider token and securely clear its stored token material after explicit confirmation.",
-  cta: "Disconnect provider",
+  get title() { return translateUi("Disconnect provider"); },
+  get body() { return translateUi("NyxID will revoke this legacy provider token and securely clear its stored token material after explicit confirmation."); },
+  get cta() { return translateUi("Disconnect provider"); },
   icon: "key",
   normalize: normalizeProviderDisconnect,
   resourceKind: "providerToken",
-  fields: [{ label: "Provider", key: "provider_id", mono: true }],
+  fields: [{ get label() { return translateUi("Provider"); }, key: "provider_id", mono: true }],
 });
 
 const providerSetAppCredentialsDescriptor = createDialogDescriptor({
   variant: "provider_set_app_credentials",
-  title: "Set OAuth app credentials",
-  body: "Enter the OAuth app client ID and secret only in this NyxID dialog. They are never returned to the assistant.",
-  cta: "Save credentials",
+  get title() { return translateUi("Set OAuth app credentials"); },
+  get body() { return translateUi("Enter the OAuth app client ID and secret only in this NyxID dialog. They are never returned to the assistant."); },
+  get cta() { return translateUi("Save credentials"); },
   icon: "key",
   normalize: normalizeProviderSetAppCredentials,
   resourceKind: "providerCredentials",
-  fields: [{ label: "Provider", key: "provider_id", mono: true }],
+  fields: [{ get label() { return translateUi("Provider"); }, key: "provider_id", mono: true }],
 });
 
 type DialogResourceKind =
@@ -1451,9 +1436,9 @@ function createDialogDescriptor(
     summary: (params) => dialogSummary(params, config),
     icon: config.icon,
     busyLabel: "Working",
-    assurance:
-      config.assurance ??
-      "NyxID performs and verifies this exact change in your signed-in browser. The assistant receives only the safe resource reference.",
+    get assurance() {
+      return config.assurance ?? translateUi("NyxID performs and verifies this exact change in your signed-in browser. The assistant receives only the safe resource reference.");
+    },
     resource: (completion) => dialogResource(config.resourceKind, completion),
     wiring: "dialog",
     journey: (params) =>
@@ -1463,114 +1448,114 @@ function createDialogDescriptor(
 
 const nodeRegisterTokenDescriptor = createDialogDescriptor({
   variant: "node_register_token",
-  title: "Create node registration token",
-  body: "NyxID will create one registration token and show it only in this browser dialog.",
-  cta: "Create registration token",
+  get title() { return translateUi("Create node registration token"); },
+  get body() { return translateUi("NyxID will create one registration token and show it only in this browser dialog."); },
+  get cta() { return translateUi("Create registration token"); },
   icon: "node",
   normalize: normalizeNodeRegisterToken,
   resourceKind: "node",
   fields: [
-    { label: "Node name", key: "name" },
-    { label: "Organization", key: "target_org_id", mono: true },
+    { get label() { return translateUi("Node name"); }, key: "name" },
+    { get label() { return translateUi("Organization"); }, key: "target_org_id", mono: true },
   ],
 });
 
 const nodeRotateTokenDescriptor = createDialogDescriptor({
   variant: "node_rotate_token",
-  title: "Rotate node credentials",
-  body: "NyxID will invalidate this node's current credentials and show the replacements once.",
-  cta: "Rotate node token",
+  get title() { return translateUi("Rotate node credentials"); },
+  get body() { return translateUi("NyxID will invalidate this node's current credentials and show the replacements once."); },
+  get cta() { return translateUi("Rotate node token"); },
   icon: "node",
   normalize: normalizeNodeRotateToken,
   resourceKind: "node",
-  fields: [{ label: "Node", key: "node_id", mono: true }],
+  fields: [{ get label() { return translateUi("Node"); }, key: "node_id", mono: true }],
 });
 
 const nodeDeleteDescriptor = createDialogDescriptor({
   variant: "node_delete",
-  title: "Delete credential node",
-  body: "NyxID will deactivate this node and its bindings after explicit destructive confirmation.",
-  cta: "Delete node",
+  get title() { return translateUi("Delete credential node"); },
+  get body() { return translateUi("NyxID will deactivate this node and its bindings after explicit destructive confirmation."); },
+  get cta() { return translateUi("Delete node"); },
   icon: "node",
   normalize: normalizeNodeDelete,
   resourceKind: "node",
-  fields: [{ label: "Node", key: "node_id", mono: true }],
+  fields: [{ get label() { return translateUi("Node"); }, key: "node_id", mono: true }],
 });
 
 const nodeTransferDescriptor = createDialogDescriptor({
   variant: "node_transfer",
-  title: "Transfer credential node",
-  body: "NyxID will move this node and its authority to a different owner after explicit confirmation.",
-  cta: "Transfer node",
+  get title() { return translateUi("Transfer credential node"); },
+  get body() { return translateUi("NyxID will move this node and its authority to a different owner after explicit confirmation."); },
+  get cta() { return translateUi("Transfer node"); },
   icon: "node",
   normalize: normalizeNodeTransfer,
   resourceKind: "node",
   fields: [
-    { label: "Node", key: "node_id", mono: true },
-    { label: "New owner", key: "new_owner_user_id", mono: true },
+    { get label() { return translateUi("Node"); }, key: "node_id", mono: true },
+    { get label() { return translateUi("New owner"); }, key: "new_owner_user_id", mono: true },
   ],
 });
 
 const nodeInjectCredentialDescriptor = createDialogDescriptor({
   variant: "node_inject_credential",
-  title: "Inject node credential",
-  body: "NyxID will queue this credential-injection shape for an online node without exposing a credential to chat.",
-  cta: "Inject credential",
+  get title() { return translateUi("Inject node credential"); },
+  get body() { return translateUi("NyxID will queue this credential-injection shape for an online node without exposing a credential to chat."); },
+  get cta() { return translateUi("Inject credential"); },
   icon: "node",
   normalize: normalizeNodeInjectCredential,
   resourceKind: "pendingCredential",
   fields: [
-    { label: "Node", key: "node_id", mono: true },
-    { label: "Service", key: "service_slug", mono: true },
-    { label: "Injection", key: "injection_method" },
-    { label: "Field", key: "field_name", mono: true },
+    { get label() { return translateUi("Node"); }, key: "node_id", mono: true },
+    { get label() { return translateUi("Service"); }, key: "service_slug", mono: true },
+    { get label() { return translateUi("Injection"); }, key: "injection_method" },
+    { get label() { return translateUi("Field"); }, key: "field_name", mono: true },
   ],
 });
 
 const pendingCredentialPushDescriptor = createDialogDescriptor({
   variant: "pending_credential_push",
-  title: "Queue pending credential",
-  body: "NyxID will create a pending remote-credential request for this node and verify its safe status projection.",
-  cta: "Push credential",
+  get title() { return translateUi("Queue pending credential"); },
+  get body() { return translateUi("NyxID will create a pending remote-credential request for this node and verify its safe status projection."); },
+  get cta() { return translateUi("Push credential"); },
   icon: "node",
   normalize: normalizePendingCredentialPush,
   resourceKind: "pendingCredential",
   fields: [
-    { label: "Node", key: "node_id", mono: true },
-    { label: "Service", key: "service_slug", mono: true },
-    { label: "Injection", key: "injection_method" },
-    { label: "Field", key: "field_name", mono: true },
+    { get label() { return translateUi("Node"); }, key: "node_id", mono: true },
+    { get label() { return translateUi("Service"); }, key: "service_slug", mono: true },
+    { get label() { return translateUi("Injection"); }, key: "injection_method" },
+    { get label() { return translateUi("Field"); }, key: "field_name", mono: true },
   ],
 });
 
 const pendingCredentialCancelDescriptor = createDialogDescriptor({
   variant: "pending_credential_cancel",
-  title: "Cancel pending credential",
-  body: "NyxID will deactivate this pending credential request after explicit destructive confirmation.",
-  cta: "Cancel credential",
+  get title() { return translateUi("Cancel pending credential"); },
+  get body() { return translateUi("NyxID will deactivate this pending credential request after explicit destructive confirmation."); },
+  get cta() { return translateUi("Cancel credential"); },
   icon: "node",
   normalize: normalizePendingCredentialCancel,
   resourceKind: "pendingCredential",
   fields: [
-    { label: "Node", key: "node_id", mono: true },
-    { label: "Pending credential", key: "pending_credential_id", mono: true },
+    { get label() { return translateUi("Node"); }, key: "node_id", mono: true },
+    { get label() { return translateUi("Pending credential"); }, key: "pending_credential_id", mono: true },
   ],
 });
 
 const deviceOnboardDescriptor = createDialogDescriptor({
   variant: "device_onboard",
-  title: "Onboard headless device",
-  body: "NyxID will create a one-time provisioning package and show its QR payload only here.",
-  cta: "Onboard device",
+  get title() { return translateUi("Onboard headless device"); },
+  get body() { return translateUi("NyxID will create a one-time provisioning package and show its QR payload only here."); },
+  get cta() { return translateUi("Onboard device"); },
   icon: "node",
   normalize: normalizeDeviceOnboard,
   resourceKind: "device",
   fields: [
-    { label: "Device", key: "label" },
-    { label: "Organization", key: "target_org_id", mono: true },
-    { label: "Default service", key: "default_service_ids", mono: true },
+    { get label() { return translateUi("Device"); }, key: "label" },
+    { get label() { return translateUi("Organization"); }, key: "target_org_id", mono: true },
+    { get label() { return translateUi("Default service"); }, key: "default_service_ids", mono: true },
     {
-      label: "Platform services",
+      get label() { return translateUi("Platform services"); },
       key: "allow_auto_connected_services",
       formatBoolean: (value) =>
         value
@@ -1582,138 +1567,138 @@ const deviceOnboardDescriptor = createDialogDescriptor({
 
 const orgCreateDescriptor = createDialogDescriptor({
   variant: "org_create",
-  title: "Create organization",
-  body: "NyxID will create an organization with the profile values reviewed in the dialog.",
-  cta: "Create organization",
+  get title() { return translateUi("Create organization"); },
+  get body() { return translateUi("NyxID will create an organization with the profile values reviewed in the dialog."); },
+  get cta() { return translateUi("Create organization"); },
   icon: "org",
   normalize: normalizeOrgCreate,
   resourceKind: "org",
-  fields: [{ label: "Name", key: "display_name" }],
+  fields: [{ get label() { return translateUi("Name"); }, key: "display_name" }],
 });
 
 const orgUpdateDescriptor = createDialogDescriptor({
   variant: "org_update",
-  title: "Update organization",
-  body: "NyxID will apply only the organization profile values reviewed in the dialog.",
-  cta: "Update organization",
+  get title() { return translateUi("Update organization"); },
+  get body() { return translateUi("NyxID will apply only the organization profile values reviewed in the dialog."); },
+  get cta() { return translateUi("Update organization"); },
   icon: "org",
   normalize: normalizeOrgUpdate,
   resourceKind: "org",
   fields: [
-    { label: "Organization", key: "org_id", mono: true },
-    { label: "Name", key: "display_name" },
+    { get label() { return translateUi("Organization"); }, key: "org_id", mono: true },
+    { get label() { return translateUi("Name"); }, key: "display_name" },
   ],
 });
 
 const orgDeleteDescriptor = createDialogDescriptor({
   variant: "org_delete",
-  title: "Delete organization",
-  body: "NyxID will permanently delete this organization after explicit confirmation.",
-  cta: "Delete organization",
+  get title() { return translateUi("Delete organization"); },
+  get body() { return translateUi("NyxID will permanently delete this organization after explicit confirmation."); },
+  get cta() { return translateUi("Delete organization"); },
   icon: "org",
   normalize: normalizeOrgDelete,
   resourceKind: "org",
-  fields: [{ label: "Organization", key: "org_id", mono: true }],
+  fields: [{ get label() { return translateUi("Organization"); }, key: "org_id", mono: true }],
 });
 
 const orgMemberAddDescriptor = createDialogDescriptor({
   variant: "org_member_add",
-  title: "Add organization member",
-  body: "NyxID will add this user with the role reviewed in the dialog.",
-  cta: "Add member",
+  get title() { return translateUi("Add organization member"); },
+  get body() { return translateUi("NyxID will add this user with the role reviewed in the dialog."); },
+  get cta() { return translateUi("Add member"); },
   icon: "org",
   normalize: normalizeOrgMemberAdd,
   resourceKind: "org",
   fields: [
-    { label: "Organization", key: "org_id", mono: true },
-    { label: "User", key: "user_id", mono: true },
-    { label: "Role", key: "role" },
+    { get label() { return translateUi("Organization"); }, key: "org_id", mono: true },
+    { get label() { return translateUi("User"); }, key: "user_id", mono: true },
+    { get label() { return translateUi("Role"); }, key: "role" },
   ],
 });
 
 const orgMemberRemoveDescriptor = createDialogDescriptor({
   variant: "org_member_remove",
-  title: "Remove organization member",
-  body: "NyxID will revoke this membership after explicit confirmation.",
-  cta: "Remove member",
+  get title() { return translateUi("Remove organization member"); },
+  get body() { return translateUi("NyxID will revoke this membership after explicit confirmation."); },
+  get cta() { return translateUi("Remove member"); },
   icon: "org",
   normalize: normalizeOrgMemberRemove,
   resourceKind: "org",
   fields: [
-    { label: "Organization", key: "org_id", mono: true },
-    { label: "Member", key: "member_id", mono: true },
+    { get label() { return translateUi("Organization"); }, key: "org_id", mono: true },
+    { get label() { return translateUi("Member"); }, key: "member_id", mono: true },
   ],
 });
 
 const orgMemberUpdateRoleDescriptor = createDialogDescriptor({
   variant: "org_member_update_role",
-  title: "Change organization role",
-  body: "NyxID will change this member to the role reviewed in the dialog.",
-  cta: "Change member role",
+  get title() { return translateUi("Change organization role"); },
+  get body() { return translateUi("NyxID will change this member to the role reviewed in the dialog."); },
+  get cta() { return translateUi("Change member role"); },
   icon: "org",
   normalize: normalizeOrgMemberUpdateRole,
   resourceKind: "org",
   fields: [
-    { label: "Member", key: "member_id", mono: true },
-    { label: "Role", key: "role" },
+    { get label() { return translateUi("Member"); }, key: "member_id", mono: true },
+    { get label() { return translateUi("Role"); }, key: "role" },
   ],
 });
 
 const orgInviteDescriptor = createDialogDescriptor({
   variant: "org_invite",
-  title: "Create organization invite",
-  body: "NyxID will create an invite with the role and lifetime reviewed in the dialog.",
-  cta: "Create invite",
+  get title() { return translateUi("Create organization invite"); },
+  get body() { return translateUi("NyxID will create an invite with the role and lifetime reviewed in the dialog."); },
+  get cta() { return translateUi("Create invite"); },
   icon: "org",
   normalize: normalizeOrgInvite,
   resourceKind: "org",
   fields: [
-    { label: "Organization", key: "org_id", mono: true },
-    { label: "Role", key: "role" },
+    { get label() { return translateUi("Organization"); }, key: "org_id", mono: true },
+    { get label() { return translateUi("Role"); }, key: "role" },
   ],
 });
 
 const orgSetPrimaryDescriptor = createDialogDescriptor({
   variant: "org_set_primary",
-  title: "Set primary organization",
-  body: "NyxID will make this organization the account's primary organization.",
-  cta: "Set primary",
+  get title() { return translateUi("Set primary organization"); },
+  get body() { return translateUi("NyxID will make this organization the account's primary organization."); },
+  get cta() { return translateUi("Set primary"); },
   icon: "org",
   normalize: normalizeOrgSetPrimary,
   resourceKind: "org",
-  fields: [{ label: "Organization", key: "org_id", mono: true }],
+  fields: [{ get label() { return translateUi("Organization"); }, key: "org_id", mono: true }],
 });
 
 const accountProfileUpdateDescriptor = createDialogDescriptor({
   variant: "account_profile_update",
-  title: "Update account profile",
-  body: "NyxID will apply the profile values shown for review.",
-  cta: "Update profile",
+  get title() { return translateUi("Update account profile"); },
+  get body() { return translateUi("NyxID will apply the profile values shown for review."); },
+  get cta() { return translateUi("Update profile"); },
   icon: "shield",
   normalize: normalizeAccountProfileUpdate,
   resourceKind: "account",
   fields: [
-    { label: "Display name", key: "display_name" },
-    { label: "Avatar URL", key: "avatar_url", mono: true },
+    { get label() { return translateUi("Display name"); }, key: "display_name" },
+    { get label() { return translateUi("Avatar URL"); }, key: "avatar_url", mono: true },
   ],
 });
 
 const accountRevokeConsentDescriptor = createDialogDescriptor({
   variant: "account_revoke_consent",
-  title: "Revoke application consent",
-  body: "NyxID will revoke this application's consent after explicit confirmation.",
-  cta: "Revoke consent",
+  get title() { return translateUi("Revoke application consent"); },
+  get body() { return translateUi("NyxID will revoke this application's consent after explicit confirmation."); },
+  get cta() { return translateUi("Revoke consent"); },
   icon: "shield",
   normalize: normalizeAccountRevokeConsent,
   resourceKind: "account",
-  fields: [{ label: "Client", key: "client_id", mono: true }],
+  fields: [{ get label() { return translateUi("Client"); }, key: "client_id", mono: true }],
 });
 
 const accountDeleteDescriptor = createDialogDescriptor({
   variant: "account_delete",
-  title: "Delete account",
-  body: "NyxID will require your account email before permanently deleting the account.",
-  cta: "Delete account",
+  get title() { return translateUi("Delete account"); },
+  get body() { return translateUi("NyxID will require your account email before permanently deleting the account."); },
+  get cta() { return translateUi("Delete account"); },
   icon: "shield",
   normalize: normalizeAccountDelete,
   resourceKind: "account",
@@ -1721,9 +1706,9 @@ const accountDeleteDescriptor = createDialogDescriptor({
 
 const accountMfaSetupDescriptor = createDialogDescriptor({
   variant: "account_mfa_setup",
-  title: "Set up multi-factor authentication",
-  body: "NyxID will keep setup and recovery material inside the browser journey.",
-  cta: "Set up MFA",
+  get title() { return translateUi("Set up multi-factor authentication"); },
+  get body() { return translateUi("NyxID will keep setup and recovery material inside the browser journey."); },
+  get cta() { return translateUi("Set up MFA"); },
   icon: "shield",
   normalize: normalizeAccountMfaSetup,
   resourceKind: "account",
@@ -1731,53 +1716,53 @@ const accountMfaSetupDescriptor = createDialogDescriptor({
 
 const approvalConfigureDescriptor = createDialogDescriptor({
   variant: "approval_configure",
-  title: "Configure service approvals",
-  body: "NyxID will apply the approval policy reviewed in the dialog.",
-  cta: "Configure approvals",
+  get title() { return translateUi("Configure service approvals"); },
+  get body() { return translateUi("NyxID will apply the approval policy reviewed in the dialog."); },
+  get cta() { return translateUi("Configure approvals"); },
   icon: "shield",
   normalize: normalizeApprovalConfigure,
   resourceKind: "approvalConfig",
-  fields: [{ label: "Service", key: "service_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service"); }, key: "service_id", mono: true }],
 });
 
 const approvalEnableDescriptor = createDialogDescriptor({
   variant: "approval_enable",
-  title: "Enable service approvals",
-  body: "NyxID will require approval for this service.",
-  cta: "Enable approvals",
+  get title() { return translateUi("Enable service approvals"); },
+  get body() { return translateUi("NyxID will require approval for this service."); },
+  get cta() { return translateUi("Enable approvals"); },
   icon: "shield",
   normalize: normalizeApprovalEnable,
   resourceKind: "approvalConfig",
-  fields: [{ label: "Service", key: "service_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service"); }, key: "service_id", mono: true }],
 });
 
 const approvalDisableDescriptor = createDialogDescriptor({
   variant: "approval_disable",
-  title: "Disable service approvals",
-  body: "NyxID will weaken this service's safety control only after explicit confirmation.",
-  cta: "Disable approvals",
+  get title() { return translateUi("Disable service approvals"); },
+  get body() { return translateUi("NyxID will weaken this service's safety control only after explicit confirmation."); },
+  get cta() { return translateUi("Disable approvals"); },
   icon: "shield",
   normalize: normalizeApprovalDisable,
   resourceKind: "approvalConfig",
-  fields: [{ label: "Service", key: "service_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service"); }, key: "service_id", mono: true }],
 });
 
 const approvalRevokeGrantDescriptor = createDialogDescriptor({
   variant: "approval_revoke_grant",
-  title: "Revoke approval grant",
-  body: "NyxID will revoke this active grant after explicit confirmation.",
-  cta: "Revoke grant",
+  get title() { return translateUi("Revoke approval grant"); },
+  get body() { return translateUi("NyxID will revoke this active grant after explicit confirmation."); },
+  get cta() { return translateUi("Revoke grant"); },
   icon: "shield",
   normalize: normalizeApprovalRevokeGrant,
   resourceKind: "grant",
-  fields: [{ label: "Grant", key: "grant_id", mono: true }],
+  fields: [{ get label() { return translateUi("Grant"); }, key: "grant_id", mono: true }],
 });
 
 const notificationsUpdateDescriptor = createDialogDescriptor({
   variant: "notifications_update",
-  title: "Update notification settings",
-  body: "NyxID will load the current settings and let you edit them in the dialog.",
-  cta: "Update notifications",
+  get title() { return translateUi("Update notification settings"); },
+  get body() { return translateUi("NyxID will load the current settings and let you edit them in the dialog."); },
+  get cta() { return translateUi("Update notifications"); },
   icon: "bell",
   normalize: normalizeNotificationsUpdate,
   resourceKind: "notificationBinding",
@@ -1785,9 +1770,9 @@ const notificationsUpdateDescriptor = createDialogDescriptor({
 
 const notificationsTelegramLinkDescriptor = createDialogDescriptor({
   variant: "notifications_telegram_link",
-  title: "Link Telegram notifications",
-  body: "NyxID will create a one-time Telegram linking code and show it only here.",
-  cta: "Link Telegram",
+  get title() { return translateUi("Link Telegram notifications"); },
+  get body() { return translateUi("NyxID will create a one-time Telegram linking code and show it only here."); },
+  get cta() { return translateUi("Link Telegram"); },
   icon: "bell",
   normalize: normalizeNotificationsTelegramLink,
   resourceKind: "notificationBinding",
@@ -1795,9 +1780,9 @@ const notificationsTelegramLinkDescriptor = createDialogDescriptor({
 
 const notificationsTelegramDisconnectDescriptor = createDialogDescriptor({
   variant: "notifications_telegram_disconnect",
-  title: "Disconnect Telegram notifications",
-  body: "NyxID will disconnect Telegram after explicit confirmation.",
-  cta: "Disconnect Telegram",
+  get title() { return translateUi("Disconnect Telegram notifications"); },
+  get body() { return translateUi("NyxID will disconnect Telegram after explicit confirmation."); },
+  get cta() { return translateUi("Disconnect Telegram"); },
   icon: "bell",
   normalize: normalizeNotificationsTelegramDisconnect,
   resourceKind: "notificationBinding",
@@ -1805,138 +1790,138 @@ const notificationsTelegramDisconnectDescriptor = createDialogDescriptor({
 
 const serviceAccountCreateDescriptor = createDialogDescriptor({
   variant: "service_account_create",
-  title: "Create service account",
-  body: "NyxID will create the service account and show its client secret once.",
-  cta: "Create service account",
+  get title() { return translateUi("Create service account"); },
+  get body() { return translateUi("NyxID will create the service account and show its client secret once."); },
+  get cta() { return translateUi("Create service account"); },
   icon: "key",
   normalize: normalizeServiceAccountCreate,
   resourceKind: "serviceAccount",
   fields: [
-    { label: "Name", key: "name" },
-    { label: "Organization", key: "target_org_id", mono: true },
+    { get label() { return translateUi("Name"); }, key: "name" },
+    { get label() { return translateUi("Organization"); }, key: "target_org_id", mono: true },
   ],
 });
 
 const serviceAccountUpdateDescriptor = createDialogDescriptor({
   variant: "service_account_update",
-  title: "Update service account",
-  body: "NyxID will update only the service-account metadata reviewed in the dialog.",
-  cta: "Update service account",
+  get title() { return translateUi("Update service account"); },
+  get body() { return translateUi("NyxID will update only the service-account metadata reviewed in the dialog."); },
+  get cta() { return translateUi("Update service account"); },
   icon: "key",
   normalize: normalizeServiceAccountUpdate,
   resourceKind: "serviceAccount",
-  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service account"); }, key: "service_account_id", mono: true }],
 });
 
 const serviceAccountDeleteDescriptor = createDialogDescriptor({
   variant: "service_account_delete",
-  title: "Delete service account",
-  body: "NyxID will deactivate this service account after explicit confirmation.",
-  cta: "Delete service account",
+  get title() { return translateUi("Delete service account"); },
+  get body() { return translateUi("NyxID will deactivate this service account after explicit confirmation."); },
+  get cta() { return translateUi("Delete service account"); },
   icon: "key",
   normalize: normalizeServiceAccountDelete,
   resourceKind: "serviceAccount",
-  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service account"); }, key: "service_account_id", mono: true }],
 });
 
 const serviceAccountRotateSecretDescriptor = createDialogDescriptor({
   variant: "service_account_rotate_secret",
-  title: "Rotate service-account secret",
-  body: "NyxID will rotate this service account's secret and show it once.",
-  cta: "Rotate service-account secret",
+  get title() { return translateUi("Rotate service-account secret"); },
+  get body() { return translateUi("NyxID will rotate this service account's secret and show it once."); },
+  get cta() { return translateUi("Rotate service-account secret"); },
   icon: "key",
   normalize: normalizeServiceAccountRotateSecret,
   resourceKind: "serviceAccount",
-  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service account"); }, key: "service_account_id", mono: true }],
 });
 
 const serviceAccountRevokeTokensDescriptor = createDialogDescriptor({
   variant: "service_account_revoke_tokens",
-  title: "Revoke service-account tokens",
-  body: "NyxID will invalidate this service account's active tokens after explicit confirmation.",
-  cta: "Revoke service-account tokens",
+  get title() { return translateUi("Revoke service-account tokens"); },
+  get body() { return translateUi("NyxID will invalidate this service account's active tokens after explicit confirmation."); },
+  get cta() { return translateUi("Revoke service-account tokens"); },
   icon: "key",
   normalize: normalizeServiceAccountRevokeTokens,
   resourceKind: "serviceAccount",
-  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+  fields: [{ get label() { return translateUi("Service account"); }, key: "service_account_id", mono: true }],
 });
 
 const developerAppCreateDescriptor = createDialogDescriptor({
   variant: "developer_app_create",
-  title: "Create developer application",
-  body: "NyxID will create the OAuth client and show its client secret once.",
-  cta: "Create developer app",
+  get title() { return translateUi("Create developer application"); },
+  get body() { return translateUi("NyxID will create the OAuth client and show its client secret once."); },
+  get cta() { return translateUi("Create developer app"); },
   icon: "app",
   normalize: normalizeDeveloperAppCreate,
   resourceKind: "developerApp",
   fields: [
-    { label: "Name", key: "name" },
-    { label: "Redirect URI", key: "redirect_uris", mono: true },
+    { get label() { return translateUi("Name"); }, key: "name" },
+    { get label() { return translateUi("Redirect URI"); }, key: "redirect_uris", mono: true },
   ],
 });
 
 const developerAppUpdateDescriptor = createDialogDescriptor({
   variant: "developer_app_update",
-  title: "Update developer application",
-  body: "NyxID will update only the OAuth client values reviewed in the dialog.",
-  cta: "Update developer app",
+  get title() { return translateUi("Update developer application"); },
+  get body() { return translateUi("NyxID will update only the OAuth client values reviewed in the dialog."); },
+  get cta() { return translateUi("Update developer app"); },
   icon: "app",
   normalize: normalizeDeveloperAppUpdate,
   resourceKind: "developerApp",
-  fields: [{ label: "Client", key: "client_id", mono: true }],
+  fields: [{ get label() { return translateUi("Client"); }, key: "client_id", mono: true }],
 });
 
 const developerAppDeleteDescriptor = createDialogDescriptor({
   variant: "developer_app_delete",
-  title: "Delete developer application",
-  body: "NyxID will deactivate this OAuth client after explicit confirmation.",
-  cta: "Delete developer app",
+  get title() { return translateUi("Delete developer application"); },
+  get body() { return translateUi("NyxID will deactivate this OAuth client after explicit confirmation."); },
+  get cta() { return translateUi("Delete developer app"); },
   icon: "app",
   normalize: normalizeDeveloperAppDelete,
   resourceKind: "developerApp",
-  fields: [{ label: "Client", key: "client_id", mono: true }],
+  fields: [{ get label() { return translateUi("Client"); }, key: "client_id", mono: true }],
 });
 
 const developerAppRotateSecretDescriptor = createDialogDescriptor({
   variant: "developer_app_rotate_secret",
-  title: "Rotate developer-app secret",
-  body: "NyxID will rotate this OAuth client secret and show it once.",
-  cta: "Rotate developer-app secret",
+  get title() { return translateUi("Rotate developer-app secret"); },
+  get body() { return translateUi("NyxID will rotate this OAuth client secret and show it once."); },
+  get cta() { return translateUi("Rotate developer-app secret"); },
   icon: "app",
   normalize: normalizeDeveloperAppRotateSecret,
   resourceKind: "developerApp",
-  fields: [{ label: "Client", key: "client_id", mono: true }],
+  fields: [{ get label() { return translateUi("Client"); }, key: "client_id", mono: true }],
 });
 
 const externalKeyAddGcpDescriptor = createDialogDescriptor({
   variant: "external_key_add_gcp_service_account",
-  title: "Add GCP service account",
-  body: "Paste the GCP service-account JSON only inside the NyxID dialog.",
-  cta: "Add GCP service account",
+  get title() { return translateUi("Add GCP service account"); },
+  get body() { return translateUi("Paste the GCP service-account JSON only inside the NyxID dialog."); },
+  get cta() { return translateUi("Add GCP service account"); },
   icon: "key",
   normalize: normalizeExternalKeyAddGcp,
   resourceKind: "externalKey",
   fields: [
-    { label: "Label", key: "label" },
-    { label: "Organization", key: "target_org_id", mono: true },
+    { get label() { return translateUi("Label"); }, key: "label" },
+    { get label() { return translateUi("Organization"); }, key: "target_org_id", mono: true },
   ],
 });
 
 const openClawConnectDescriptor = createDialogDescriptor({
   variant: "openclaw_connect",
-  title: "Connect OpenClaw",
-  body: "NyxID will collect the OpenClaw bearer credential only inside the browser dialog.",
-  cta: "Connect OpenClaw",
+  get title() { return translateUi("Connect OpenClaw"); },
+  get body() { return translateUi("NyxID will collect the OpenClaw bearer credential only inside the browser dialog."); },
+  get cta() { return translateUi("Connect OpenClaw"); },
   icon: "service",
   normalize: normalizeOpenClawConnect,
   resourceKind: "userService",
-  fields: [{ label: "Gateway", key: "gateway_url", mono: true }],
+  fields: [{ get label() { return translateUi("Gateway"); }, key: "gateway_url", mono: true }],
 });
 
 const unsupportedDescriptor: ActionDescriptor = {
-  title: () => "Unsupported action request",
+  title: () => translateUi("Unsupported action request"),
   body: () =>
-    "This assistant requested an action this version of NyxID cannot perform. Decline it to let the assistant continue safely.",
+    translateUi("This assistant requested an action this version of NyxID cannot perform. Decline it to let the assistant continue safely."),
   cta: () => "",
   risk: "unsupported",
   normalize: () => null,

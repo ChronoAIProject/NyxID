@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { ChevronDown, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -25,22 +27,20 @@ export function TokenOverlapHint({
 }: {
   selected: readonly TokenMetric[];
 }) {
+  useUiTranslation();
   if (!hasRedundantTokenSelection(selected)) return null;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label="How selected token counts are calculated"
+          aria-label={translateUi("How selected token counts are calculated")}
           className="inline-flex size-4 shrink-0 items-center justify-center align-middle text-muted-foreground hover:text-foreground"
         >
           <Info className="size-3.5" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-64">
-        Total tokens is input + output. Selected input, output, and cache counts
-        are shown but not added again; cache counts can overlap input.
-      </TooltipContent>
+      <TooltipContent className="max-w-64">{translateUi("Total tokens is input + output. Selected input, output, and cache counts are shown but not added again; cache counts can overlap input.")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -50,6 +50,7 @@ export function TokenMetricCaption({
 }: {
   selected: readonly TokenMetric[];
 }) {
+  useUiTranslation();
   return (
     <div className="mt-2 flex min-w-0 items-start text-12 text-muted-foreground">
       <span className="min-w-0 break-words">
@@ -78,6 +79,7 @@ export function TokenMetricPicker({
   compact?: boolean;
   allLabel?: string;
 }) {
+  useUiTranslation();
   const allSelected = selected.length === TOKEN_METRICS.length;
   const custom = selected.length > 1 && !(allSelected && allLabel);
   const name =
