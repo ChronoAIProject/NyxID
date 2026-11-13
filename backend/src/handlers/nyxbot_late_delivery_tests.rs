@@ -1209,3 +1209,61 @@ async fn telegram_partial_failure_notifies_saved_thread_once_without_restarting_
     assert_eq!(status(&f).await, "waiting");
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn model_approval_channel_stream_delivers_actionable_settings_url() {
+    let f = fixture("model_approval_channel_stream").await;
+    settled(&f, true).await;
+    let message = crate::services::assistant_model_observer::approval_message(
+        "model_approval_required",
+        &crate::services::assistant_links::AssistantPage::ApprovalSettings
+            .url(&f.state.config.frontend_url),
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id":&f.event.conversation_id,"role":"assistant"},
+            doc! {"$set":{"text":&message,"error_code":"model_approval_required"}},
+        )
+        .await
+        .unwrap();
+    let (sender, receiver) = broadcast::channel(8);
+    sender
+        .send(json!({"event":"turn.completed","status":"failed",
+        "error":{"code":"model_approval_required","message":message}}))
+        .unwrap();
+    let response = late_delivery::provider_stream(
+        f.state.clone(),
+        f.event.id.clone(),
+        "response".into(),
+        json!({"type":"response.created"}),
+        receiver,
+        Utc::now(),
+    );
+    let body = body_text(response).await;
+    assert!(body.contains("approval settings require approval for this model request"));
+    assert!(body.contains("/approvals/settings"));
+    assert!(!body.contains("response.failed"));
+}
+
+#[tokio::test]
+async fn model_approval_channel_partial_reply_keeps_guidance() {
+    let (sender, receiver) = broadcast::channel(8);
+    let message = crate::services::assistant_model_observer::approval_message(
+        "model_approval_required",
+        "https://example.test/approvals/settings",
+    );
+    sender
+        .send(json!({"event":"block.completed","block":{"text":"Partial answer"}}))
+        .unwrap();
+    sender
+        .send(json!({"event":"turn.completed","status":"failed",
+        "error":{"code":"model_approval_required","message":message}}))
+        .unwrap();
+    let text = final_reply(receiver).await.unwrap();
+    assert!(text.contains("Partial answer"));
+    assert!(text.contains("Incomplete"));
+    assert!(text.contains("approval settings require approval for this model request"));
+    assert!(text.contains("https://example.test/approvals/settings"));
+}

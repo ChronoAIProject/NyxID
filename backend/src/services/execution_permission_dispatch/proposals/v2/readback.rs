@@ -105,7 +105,7 @@ pub(crate) async fn readback(
         ProposalSource::Machine { binding } => {
             let admission=context.machine.get().ok_or_else(missing)?;
             if fingerprint(&admission.binding)? != fingerprint(binding)? {return Err(missing());}
-            crate::services::security_readiness_service::require(&state.db,machine::READINESS).await?;
+            crate::services::security_readiness_service::require_serving(&state.db,machine::READINESS).await?;
             binding.live(&state.db,p.task.as_ref().ok_or_else(missing)?).await.map_err(|e|if e.is_forbidden(){missing()}else{e})?; None
         },
         ProposalSource::External { pool } => pool.as_ref().map(|pool| (

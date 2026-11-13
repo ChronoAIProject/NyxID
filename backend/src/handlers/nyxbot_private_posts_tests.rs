@@ -77,6 +77,7 @@ async fn private_posts_2124_creation_and_placeholders_preserve_explicit_and_lega
             )
             .await
             .unwrap();
+        row.binding_id = Some("posts-binding".into());
         let partition = format!("conv_{}", Uuid::new_v4().simple());
         assert_eq!(
             put_conversation(

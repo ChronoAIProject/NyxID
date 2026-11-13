@@ -7,6 +7,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { ChannelAdapterBindings } from "./channel-adapter-bindings";
 import { AutomationPreferences } from "./automation-preferences";
+import { NotificationPreferences } from "./notification-preferences";
 import { PlatformPersonalBindings } from "./platform-personal-bindings";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -96,6 +97,7 @@ export function NyxBotSettingsContent() {
           <SettingsForm settings={settings.data} />
         )}
         <AutomationPreferences />
+        <NotificationPreferences />
         <div className="@container/channel-bots">
           <ChannelBotsSection />
         </div>

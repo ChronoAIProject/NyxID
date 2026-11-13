@@ -296,7 +296,7 @@ pub async fn evaluate_and_check_with_options(
     is_auto_connected: bool,
     options: ApprovalOptions,
 ) -> AppResult<ApprovalOutcome> {
-    let resolution = resolve_org_aware_approval(
+    let mut resolution = resolve_org_aware_approval(
         db,
         actor_user_id,
         service_owner_user_id,
@@ -309,6 +309,12 @@ pub async fn evaluate_and_check_with_options(
     if resolution.effect == ApprovalEffect::Deny {
         return Ok(ApprovalOutcome::Denied);
     }
+
+    super::assistant_model_observer::exempt_personal_requirement(
+        actor_user_id,
+        service_id,
+        &mut resolution,
+    );
 
     if !resolution.required || bypass_approval_flow {
         return Ok(ApprovalOutcome::Allowed {
@@ -402,6 +408,7 @@ pub async fn evaluate_for_chat(
         chat.map_or_else(ApprovalOptions::default, |chat| chat.approval_options()),
     )
     .await?;
+    super::assistant_model_observer::evaluated_policy(actor, service_id, &outcome).await?;
     if let ApprovalOutcome::NeedsApproval(ref pending) = outcome
         && let Some(chat) = chat.filter(|chat| !chat.guest)
         && acks::effective_access_mode(db, chat).await?

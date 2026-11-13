@@ -26,6 +26,8 @@ const liveEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("channels") }),
   z.object({ type: z.literal("channel_thread"), id: z.string(), channel_id: z.string(),
     parent_id: z.string().nullable(), conversation_id: z.string().nullable() }),
+  /** A notification row was created, coalesced or read; identifiers only. */
+  z.object({ type: z.literal("notification"), id: z.string() }),
   z.object({ type: z.literal("resync") }),
 ]);
 export type NyxAgentLiveEvent = z.infer<typeof liveEventSchema>;

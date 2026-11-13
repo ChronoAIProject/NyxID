@@ -1,8 +1,10 @@
 import { billingSearchSchema } from "@/schemas/billing";
 import { parseTab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT } from "@/lib/url-tabs";
+import { notificationFilter } from "@/schemas/assistant-notifications";
 
 export { ASSISTANT_SHELL_ROUTES, isAssistantShellRoute, type AssistantShellRoute } from "./shell-routes";
-export type AccountPanel = "settings" | "billing" | "nyxbot";
+/** `notifications` opens the feed sheet; its `panelTab` is the filter chip (all is implicit). */
+export type AccountPanel = "settings" | "billing" | "nyxbot" | "notifications";
 export interface AccountPanelSearch {
   panel?: AccountPanel;
   panelTab?: string;
@@ -40,6 +42,10 @@ export function parseAccountPanelSearch(search: Record<string, unknown>): Accoun
     } : {}) };
   }
   if (search.panel === "nyxbot") return { panel: "nyxbot" };
+  if (search.panel === "notifications") {
+    const filter = notificationFilter(search.panelTab);
+    return { panel: "notifications", ...(filter && filter !== "all" ? { panelTab: filter } : {}) };
+  }
   if (search.panel !== "billing") return {};
   const billing = billingSearchSchema.parse({
     tab: search.panelTab, period: search.panelPeriod,

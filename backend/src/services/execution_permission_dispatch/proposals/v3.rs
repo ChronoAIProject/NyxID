@@ -64,12 +64,12 @@ impl AssistantVersion {
         rebase(template, self.number())
     }
 
-    pub(super) async fn require(self, db: &Database) -> AppResult<()> {
+    pub(super) async fn require_serving(self, db: &Database) -> AppResult<()> {
         if self == Self::V3 {
-            crate::services::security_readiness_service::require(db, READINESS).await?;
+            crate::services::security_readiness_service::require_serving(db, READINESS).await?;
         }
         if self == Self::V4 {
-            crate::services::security_readiness_service::require(
+            crate::services::security_readiness_service::require_serving(
                 db,
                 crate::services::execution_permission_channel::READINESS,
             )
@@ -131,14 +131,14 @@ pub(super) async fn choose_version(
     reusable: bool,
 ) -> AppResult<AssistantVersion> {
     if matches!(c.context.audience, Audience::Channel { .. }) {
-        AssistantVersion::V4.require(db).await?;
+        AssistantVersion::V4.require_serving(db).await?;
         return Ok(AssistantVersion::V4);
     }
     if reusable
         && eligible(c)
-        && crate::services::security_readiness_service::report(db, READINESS)
+        && crate::services::security_readiness_service::serving_report(db, READINESS)
             .await?
-            .ready
+            .serving_ready
     {
         Ok(AssistantVersion::V3)
     } else {

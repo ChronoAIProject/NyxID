@@ -136,6 +136,10 @@ pub(super) async fn enqueue(
             .insert_one(row)
             .session(&mut *session)
             .await?;
+        crate::services::assistant_notification_service::record_mention_in_session(
+            db, session, user, group, message,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -150,6 +154,10 @@ pub(super) async fn depart(
     user: &str,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.group_id":group,"user_id":user})
+        .session(&mut *session)
+        .await?;
     db.collection::<bson::Document>(model::MENTION_NOTIFICATIONS)
         .delete_many(doc! {"group_id":group,"user_id":user})
         .session(session)
@@ -271,6 +279,9 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "assistant_notification_tests.rs"]
+mod assistant_notification_tests;
 #[cfg(test)]
 #[path = "notification_tests.rs"]
 mod tests;

@@ -143,6 +143,11 @@ function setup({
     "../../lib/api/agentsApi": {},
     "../../lib/api/groupsApi": {},
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
+    "../notifications/useNotifications": {
+      useNotificationRuntime: () => ({ active: true, online: true }),
+      useNotificationsEnabled: () => false,
+      useVisibleThreadRead: () => {},
+    },
     "../../app/WorkspaceHeader": {
       WorkspaceHeaderVisibility: "Visibility",
       useWorkspaceBack: (p: any) => {

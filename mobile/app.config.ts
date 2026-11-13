@@ -12,7 +12,9 @@ const { buildNativeLinks } = require("./scripts/lib/native-links");
 export default ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = (process.env.APP_ENV ?? "dev") as "dev" | "prod";
   const env = loadEnv();
-  const r = resolveProfile(appEnv, env, { warnOnFrontendUrlFallback: true });
+  const r = resolveProfile(appEnv, env, {
+    warnOnFrontendUrlFallback: true,
+  });
   const ident = appIdentity(env);
 
   // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
@@ -75,10 +77,14 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     android: {
       package: r.androidPackage,
       versionCode: Number(r.androidVersionCode),
-      googleServicesFile: "./google-services.json",
+      ...(r.androidGoogleServicesFile
+        ? { googleServicesFile: r.androidGoogleServicesFile }
+        : {}),
       permissions: [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
+        // Chromium WebView requires both audio permissions to expose a microphone.
+        "android.permission.MODIFY_AUDIO_SETTINGS",
       ],
       blockedPermissions: [
         "android.permission.READ_EXTERNAL_STORAGE",
@@ -92,6 +98,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       "./plugins/withVoiceAudio",
+      [
+        "./plugins/withAndroidGoogleServicesValidation",
+        {
+          file: r.androidGoogleServicesFile,
+          androidPackage: r.androidPackage,
+        },
+      ],
       ["expo-screen-orientation", { initialOrientation: "PORTRAIT_UP" }],
       [
         "expo-image-picker",

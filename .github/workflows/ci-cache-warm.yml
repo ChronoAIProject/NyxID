@@ -37,7 +37,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-cache-warm
+  group: ci-cache-warm-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -50,28 +50,32 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  # Archive readers do not consume graphs after the eight-commit replay.
+  # Warm their non-incremental dependencies; keep the full compile commands.
   backend-test-archive:
     name: Warm backend test archive cache
     continue-on-error: true
     runs-on: ubuntu-24.04
     env:
-      CARGO_INCREMENTAL: 1
+      CARGO_INCREMENTAL: 0
       RUST_MIN_STACK: 8388608
       LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
       NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: backend-build
-          incremental: 'true'
+          incremental: 'false'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
@@ -79,32 +83,32 @@ jobs:
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/backend-build.log" --
+          python3 .github/scripts/ci_resources.py backend-build
           cargo nextest archive -p nyxid -p nyxid-service-adapters
           --archive-file backend-tests.tar.zst
-      - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
+      - name: Release compile reserve before caching
+        run: bash .github/scripts/prepare-backend-runner.sh --release
+      - name: Upload resource samples
+        if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            target/debug/incremental
-            target/llvm-cov-target/debug/incremental
-          # Keep identical to backend-tests.yml's backend-build key.
-          key: v0-rust-incremental-backend-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          name: resources-warm-backend-build
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   coverage-backend-archive:
     name: Warm backend coverage archive cache
     continue-on-error: true
     runs-on: ubuntu-24.04
     env:
-      CARGO_INCREMENTAL: 1
+      CARGO_INCREMENTAL: 0
       RUST_MIN_STACK: 8388608
       LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
       NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -112,29 +116,37 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: coverage-backend-build
-          incremental: 'true'
+          incremental: 'false'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+      - name: Clear coverage counters
+        run: cargo llvm-cov clean --profraw-only
       - name: Build instrumented test archive
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/coverage-build.log" --
+          python3 .github/scripts/ci_resources.py coverage-build
           cargo llvm-cov nextest-archive --package nyxid
-          --archive-file backend-tests.tar.zst
-      - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
+          --archive-file backend-tests.tar.zst --no-clean
+      - name: Release compile reserve before caching
+        run: bash .github/scripts/prepare-backend-runner.sh --release
+      - name: Upload resource samples
+        if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            target/debug/incremental
-            target/llvm-cov-target/debug/incremental
-          # Keep identical to backend-tests.yml's coverage-backend-build key.
-          key: v0-rust-incremental-coverage-backend-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          name: resources-warm-coverage-backend-build
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   rust-clippy:
     name: Warm clippy cache
@@ -145,8 +157,6 @@ jobs:
       CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -154,22 +164,37 @@ jobs:
         with:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: rust-clippy
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Compile clippy
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
+          python3 .github/scripts/ci_resources.py clippy
           cargo clippy --workspace --all-targets -- -D warnings
+      - name: Release compile reserve before caching
+        run: bash .github/scripts/prepare-backend-runner.sh --release
       - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
+        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
+        uses: ./.github/actions/ci-rust-incremental-save
         with:
-          path: target/debug/incremental
-          key: v0-rust-incremental-rust-clippy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          key: ${{ steps.rust-cache.outputs.incremental-key }}
+          path: ${{ steps.rust-cache.outputs.incremental-path }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-rust-clippy
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   rust-features:
     name: Warm ${{ matrix.variant }} feature cache
@@ -184,31 +209,44 @@ jobs:
       CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Build feature set
         env:
           FEATURES: ${{ fromJSON('{"aws-kms":"aws-kms","gcp-kms":"gcp-kms","aws-and-gcp-kms":"aws-kms,gcp-kms"}')[matrix.variant] }}
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/features-${{ matrix.variant }}.log" --
+          python3 .github/scripts/ci_resources.py features-${{ matrix.variant }}
           cargo build -p nyxid --features "$FEATURES"
+      - name: Release compile reserve before caching
+        run: bash .github/scripts/prepare-backend-runner.sh --release
       - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
+        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
+        uses: ./.github/actions/ci-rust-incremental-save
         with:
-          path: target/debug/incremental
-          key: v0-rust-incremental-features-${{ matrix.variant }}-rust-features-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          key: ${{ steps.rust-cache.outputs.incremental-key }}
+          path: ${{ steps.rust-cache.outputs.incremental-path }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-features-${{ matrix.variant }}
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   cli-test:
     name: Warm CLI test cache
@@ -223,6 +261,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
           save-if: 'true'
           shared-key: cli-cli-test
@@ -234,19 +273,29 @@ jobs:
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/cli-build.log" --
+          python3 .github/scripts/ci_resources.py cli-build
           cargo build -p nyxid-cli
       - name: Build CLI tests
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/cli-test-build.log" --
+          python3 .github/scripts/ci_resources.py cli-test-build
           cargo nextest run --no-run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
       - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
+        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
+        uses: ./.github/actions/ci-rust-incremental-save
         with:
-          path: target/debug/incremental
-          key: v0-rust-incremental-cli-cli-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          key: ${{ steps.rust-cache.outputs.incremental-key }}
+          path: ${{ steps.rust-cache.outputs.incremental-path }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-cli-test
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   coverage-cli:
     name: Warm CLI coverage cache
@@ -265,6 +314,7 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
           save-if: 'true'
           shared-key: coverage-cli-coverage-cli
@@ -276,16 +326,23 @@ jobs:
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/coverage-cli-build.log" --
+          python3 .github/scripts/ci_resources.py coverage-cli
           cargo llvm-cov --package nyxid-cli --no-report
       - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
+        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
+        uses: ./.github/actions/ci-rust-incremental-save
         with:
-          path: |
-            target/debug/incremental
-            target/llvm-cov-target/debug/incremental
-          key: v0-rust-incremental-coverage-cli-coverage-cli-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          key: ${{ steps.rust-cache.outputs.incremental-key }}
+          path: ${{ steps.rust-cache.outputs.incremental-path }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-coverage-cli
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   permissions:
     name: Warm permissions cache
@@ -299,6 +356,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
           save-if: 'true'
           shared-key: permissions-test
@@ -307,19 +365,29 @@ jobs:
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/permissions-clippy.log" --
+          python3 .github/scripts/ci_resources.py permissions-clippy
           cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
       - name: Build permissions tests
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/permissions-test-build.log" --
+          python3 .github/scripts/ci_resources.py permissions-test
           cargo test -p nyxid-permissions --locked --no-run
       - name: Save incremental cache
-        if: github.ref == 'refs/heads/main' && success()
-        continue-on-error: true
-        uses: actions/cache/save@v4
+        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
+        uses: ./.github/actions/ci-rust-incremental-save
         with:
-          path: target/debug/incremental
-          key: v0-rust-incremental-permissions-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          key: ${{ steps.rust-cache.outputs.incremental-key }}
+          path: ${{ steps.rust-cache.outputs.incremental-path }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-permissions
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   backend-image-inputs:
     name: Warm backend image input cache
@@ -327,15 +395,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'true'
           shared-key: backend-image-inputs-backend-image-inputs
-      - name: Build backend release binary
-        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Check backend release inputs
+        run: |
+          python3 .github/scripts/ci_resources.py backend-image-inputs \
+            bash -c 'cargo check --locked --release -p nyxid --bin nyxid-server --features gcp-kms --message-format=json-render-diagnostics > "$RUNNER_TEMP/backend-image-inputs.jsonl"'
+      - name: Check backend Docker embedded assets
+        run: python3 scripts/check-backend-docker-embeds.py --cargo-messages "$RUNNER_TEMP/backend-image-inputs.jsonl"
+      - name: Release compile reserve before caching
+        run: bash .github/scripts/prepare-backend-runner.sh --release
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-backend-image-inputs
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14

@@ -356,10 +356,19 @@ pub async fn retire_full_access_confirmations(
         if !ids.is_empty() {
             collection
                 .update_many(
-                    doc! {"_id": {"$in": ids}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
+                    doc! {"_id": {"$in": ids.clone()}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
                     doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
                 )
                 .await?;
+            // Source first; a crash here leaves rows the list and summary
+            // reconcile lazily from the card's state.
+            super::assistant_notification_service::resolve_cards(
+                db,
+                super::assistant_notification_service::CardScope::Ids(&ids),
+                "superseded",
+                None,
+            )
+            .await?;
         }
     }
     // Proxy approvals can exist without an acknowledgement; their owning service
@@ -1680,6 +1689,11 @@ pub async fn for_key_with_access(
     };
     let live = super::assistant_nyxagent::live_turn(&conversation, Utc::now())
         .filter(|turn| !turn.stop_requested);
+    // A model-policy terminal fact ends this exact turn's execution authority.
+    // Authentication already loaded the row; retries add no read or new card.
+    if live.is_some_and(|turn| super::assistant_model_observer::approval_error(turn).is_some()) {
+        return Err(AppError::ApprovalUnsupported);
+    }
     let turn_live = live.is_some();
     let shared = access.is_some_and(|a| a.shared().is_some());
     let org_guest = access
@@ -1939,6 +1953,8 @@ pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<
             // Older replicas ignore this field; it never grants authority.
             doc! {"$set": {"status": "expired", "expiry_reason": "timeout"}},
         )
+        .await?;
+    super::assistant_notification_service::resolve_expired_cards(db, user, Some(conversation))
         .await?;
     Ok(())
 }
@@ -2656,6 +2672,15 @@ async fn request_candidate_inner(
         .insert_one(&row)
         .session(&mut *session)
         .await?;
+    Box::pin(
+        super::assistant_notification_service::record_card_pending_in_session(
+            db,
+            session,
+            &row,
+            &conversation,
+        ),
+    )
+    .await?;
     super::assistant_voice::await_confirmation(db, &row, session).await?;
     Ok((row, true))
 }
@@ -3534,6 +3559,13 @@ pub(crate) async fn decide_in_session(
         .replace_one(filter, &row)
         .session(&mut *session)
         .await?;
+    super::assistant_notification_service::resolve_cards_in_session(
+        db,
+        session,
+        super::assistant_notification_service::CardScope::Ids(std::slice::from_ref(&row.id)),
+        "decided",
+    )
+    .await?;
     if allow && row.kind == "skills" && !by_nyxbot {
         // Internal outbox marker: the saved approval always has
         // durable work, even if the deciding process exits before

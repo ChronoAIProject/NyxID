@@ -794,8 +794,10 @@ default-only routing, a successful direct reply, or `pending_discovery` alone
 never acknowledges the requested native policy.
 
 Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
-native enrollment. The existing roster/drained check refuses selection during a
-mixed rollout. A persisted `preparing` phase permits binding setup but refuses
+its first clean, drained activation. Native selection uses serving readiness:
+recorded activation tolerates supported roster overlaps, while an unsupported
+or undrained live generation still refuses selection. A persisted `preparing`
+phase permits binding setup but refuses
 provider execution with CMA's exact pre-admission `429` JSON refusal
 `{"error":{"type":"invalid_request_error","code":"conversation_not_ready"}}`
 until the transaction commits
@@ -935,7 +937,19 @@ ID names an existing row outside its authorized owner/chat/sender/route returns
 HTTP **403** with problem code `media_source_refused`. This refusal is terminal
 and must not be retried. Database failures still return **503**
 `provider_unavailable`; a missing source row produces the fixed unavailable-media
-note in the turn. Source presence does not authorize a provider download.
+note in the turn. A media-free activity does not assert a source and is never
+refused by this presence check, even when its source ID is missing or belongs to
+an unrelated row. Source presence does not authorize a provider download.
+
+The source fence compares platform families through NyxID's existing
+`channel_platform::canonical_platform` mapping. In particular, the managed
+Telegram adapter stores `telegram-new` on the inbound `ChannelMessage` while the
+NyxBot channel uses canonical `telegram`; this is the same authenticated bot,
+route key, conversation, sender and thread fence. Other platform identities are
+still exact. The terminal `media_source_refused` contract therefore applies only
+to a media-bearing activity whose source row exists but fails that complete
+owner/chat/sender/route/thread and platform-family fence. This is additive and
+mixed-fleet safe; no callback or API shape changes.
 
 Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
 `api/crates/cmaeg/src/{turns,tools/reply_targets}`:
@@ -1410,8 +1424,9 @@ Telegram has no explicit stop-typing API; its last indicator expires naturally.
 
 Reader rollout is fenced by the existing security-readiness mechanism's
 `nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
-relay events through the legacy path until every declared replica can serve
-these responses. This uses the existing roster and drain configuration, with
+relay events through the legacy path until the capability has clean activation
+and serving readiness. Recorded active capabilities tolerate roster warnings
+while every live generation supports them, including native transport selection. This uses the existing roster and drain configuration, with
 no new environment variables. The separately negotiated Lark/Feishu followed
 thread path retains its existing stream/late-send routing contract so its
 resolved `thread_reply` choice cannot change after the first durable frame.

@@ -4552,6 +4552,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -4575,6 +4576,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     resource_proof: Option<&'a super::resource_request_proof::ReadProofIssuer<'a>>,
     admission: Option<&'a super::service_dispatch_registry::DispatchAdmission>,
     dispatch_caller: Option<&'a super::service_dispatch_registry::DispatchCaller<'a>>,
+    catalog_route: Option<&'a super::lark_attachment_tool::routing::BotRoute>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
         client,
@@ -4595,6 +4597,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
         resource_proof,
         admission,
         dispatch_caller,
+        catalog_route,
     ))
 }
 
@@ -4618,6 +4621,7 @@ async fn forward_request_with_egress_guard_inner(
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
     admission: Option<&super::service_dispatch_registry::DispatchAdmission>,
     dispatch_caller: Option<&super::service_dispatch_registry::DispatchCaller<'_>>,
+    catalog_route: Option<&super::lark_attachment_tool::routing::BotRoute>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     let mut operation = crate::turn_trace::Operation::start(
         crate::turn_trace::TurnContext::current(),
@@ -4682,18 +4686,26 @@ async fn forward_request_with_egress_guard_inner(
     // could change DNS to point to a private IP after validation. Consider using a custom
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
+    // Scope/permission/admission identities retain the existing logical path.
+    // This capability only changes the wire prefix for two trusted bot calls;
+    // it independently verifies the final destination policy and exact path.
+    let wire_path = match catalog_route {
+        Some(route) => route.forwarding_path(target, method.as_str(), path, &prepared.path)
+            .map_err(ForwardRequestError::PreDispatchRejected)?,
+        None => prepared.path.as_str(),
+    };
     let url = if let Some(q) = prepared.query.as_deref() {
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            prepared.path,
+            wire_path,
             q
         )
     } else {
         format!(
             "{}/{}",
             target.base_url.trim_end_matches('/'),
-            prepared.path
+            wire_path
         )
     };
 
@@ -8403,6 +8415,7 @@ mod tests {
             &empty_response_cache(),
             vec![],
             crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            None,
             None,
             None,
             None,

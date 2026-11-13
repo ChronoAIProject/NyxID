@@ -43,6 +43,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh cache list --repo "$GITHUB_REPOSITORY" --limit 10000 \
-            --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt > "$RUNNER_TEMP/caches.json"
+            --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version > "$RUNNER_TEMP/caches.json"
           python3 .github/scripts/cache_budget.py "$RUNNER_TEMP/caches.json" \
             --repo "$GITHUB_REPOSITORY" --apply | tee -a "$GITHUB_STEP_SUMMARY"

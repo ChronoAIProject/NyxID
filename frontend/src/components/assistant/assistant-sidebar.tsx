@@ -39,6 +39,8 @@ import {
   MoreHorizontal,
   MessageSquare,
   PencilLine,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Settings2,
@@ -83,6 +85,8 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { usePinnedConversationIds } from "@/hooks/use-conversation-pins";
+import { pinnedConversationsFirst, useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import type { Conversation } from "@/types/assistant";
 
 /**
@@ -94,6 +98,11 @@ import type { Conversation } from "@/types/assistant";
  */
 const TITLE_FADE =
   "[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]";
+
+function PinnedChatMarker() {
+  useUiTranslation();
+  return <Pin role="img" aria-label={translateUi("Pinned chat")} className="h-3 w-3 shrink-0 text-text-tertiary" />;
+}
 
 function GroupLabel({ children }: { readonly children: string }) {
   useUiTranslation();
@@ -166,6 +175,9 @@ function ConversationRow({
   onSelect,
   onRequestDelete,
   onRequestRename,
+  pinned,
+  onTogglePin,
+  unread = false,
 }: {
   readonly conversation: Conversation;
   readonly active: boolean;
@@ -173,9 +185,16 @@ function ConversationRow({
   readonly onSelect: () => void;
   readonly onRequestDelete: () => void;
   readonly onRequestRename?: () => void;
+  readonly pinned: boolean;
+  readonly onTogglePin?: () => void;
+  /** The thread has unread notifications. */
+  readonly unread?: boolean;
 }) {
   useUiTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const optionsTrigger = useRef<HTMLButtonElement>(null);
+  const rowList = useRef<HTMLElement | null>(null);
+  const pinAction = useRef(false);
   const draft = useAssistantDraftStore((state) =>
     ownerUserId && state.ownerUserId === ownerUserId
       ? (state.drafts[`conv:${conversation.id}`]?.text ?? "")
@@ -197,7 +216,8 @@ function ConversationRow({
       <button
         type="button"
         onClick={onSelect}
-        aria-label={shownTitle}
+        aria-label={unread ? translateUi("{{title}}, unread", { title: shownTitle }) : shownTitle}
+        aria-current={active ? "page" : undefined}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
           "w-full overflow-hidden px-2 py-1 text-left transition-colors",
@@ -210,12 +230,16 @@ function ConversationRow({
         )}
       >
         <span className="flex min-w-0 items-center gap-1.5">
+          {pinned ? <PinnedChatMarker /> : null}
           <ChatKindIcon
             kind={conversation.channel?.chat_kind}
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
           {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-12 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
+          {unread ? (
+            <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+          ) : null}
         </span>
         {showDraft && (
           <span
@@ -228,9 +252,17 @@ function ConversationRow({
           </span>
         )}
       </button>
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+      <DropdownMenu open={menuOpen} onOpenChange={(open) => {
+        if (open) {
+          rowList.current = optionsTrigger.current?.closest("nav") ?? null;
+          pinAction.current = false;
+        }
+        setMenuOpen(open);
+      }}>
         <DropdownMenuTrigger asChild>
           <button
+            ref={optionsTrigger}
+            data-conversation-options={conversation.id}
             type="button"
             aria-label={translateUi("Options for {{value1}}", { value1: shownTitle })}
             data-icon-button=""
@@ -248,7 +280,34 @@ function ConversationRow({
           </button>
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
-        <DropdownMenuContent align="end" className="min-w-[160px]">
+        <DropdownMenuContent
+          align="end"
+          className="min-w-[160px]"
+          onCloseAutoFocus={(event) => {
+            if (!pinAction.current) return;
+            pinAction.current = false;
+            // Reordering may remount a row. Search the same sidebar instance:
+            // the hidden desktop sidebar also stays mounted beside the mobile drawer.
+            const channelKey = conversation.channel
+              ? conversation.channel.channel_agent_id ?? `platform:${conversation.channel.platform}`
+              : undefined;
+            const trigger = rowList.current?.querySelector<HTMLElement>(`[data-conversation-options="${CSS.escape(conversation.id)}"]`)
+              ?? (channelKey ? rowList.current?.querySelector<HTMLElement>(`[data-channel-group="${CSS.escape(channelKey)}"]`) : null);
+            if (trigger?.isConnected) {
+              event.preventDefault();
+              trigger.focus();
+            }
+          }}
+        >
+          {onTogglePin ? (
+            <DropdownMenuItem onSelect={() => {
+              pinAction.current = true;
+              onTogglePin();
+            }}>
+              {pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
+              {pinned ? translateUi("Unpin chat") : translateUi("Pin chat")}
+            </DropdownMenuItem>
+          ) : null}
           {onRequestRename ? (
             <DropdownMenuItem
               onSelect={onRequestRename}
@@ -293,6 +352,8 @@ export interface SidebarAgents {
   /** The NyxBot home is open. */
   readonly homeActive?: boolean;
   readonly onHome?: () => void;
+  /** Threads (including channel chats) with unread notifications. */
+  readonly unreadThreadIds?: ReadonlySet<string>;
 }
 
 /** Group chats: the user plus several agents. */
@@ -302,6 +363,8 @@ export interface SidebarGroups {
   readonly loading?: boolean;
   readonly onSelectGroup: (groupId: string) => void;
   readonly onNewGroup: () => void;
+  /** Crews with unread notifications; collaboration groups keep their own badge. */
+  readonly unreadGroupIds?: ReadonlySet<string>;
 }
 
 function agentAccessibleName(agent: AssistantAgent): string {
@@ -330,10 +393,12 @@ function ChannelThreadsGroup({
   group,
   activeThreadId,
   renderThread,
+  unreadThreadIds,
 }: {
   readonly group: ChannelThreadGroup;
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
+  readonly unreadThreadIds?: ReadonlySet<string>;
 }) {
   useUiTranslation();
   const holdsActive = group.threads.some((thread) => thread.id === activeThreadId);
@@ -344,9 +409,19 @@ function ChannelThreadsGroup({
   const open =
     pinned && (pinned.active === activeThreadId || !holdsActive) ? pinned.open : holdsActive;
   const running = group.threads.some((thread) => thread.active_turn);
-  const visible = group.threads.filter(
+  const unread = group.threads.some((thread) => unreadThreadIds?.has(thread.id));
+  const pinnedIds = usePinnedConversationIds();
+  const visible = pinnedConversationsFirst(group.threads, pinnedIds).filter(
     (thread, index) => index < shown || thread.id === activeThreadId,
   );
+  const parentGroups = new Map<string, Conversation[]>();
+  for (const thread of visible) {
+    const parentChatId = thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id;
+    const key = JSON.stringify([pinnedIds.has(thread.id), parentChatId]);
+    const siblings = parentGroups.get(key);
+    if (siblings) siblings.push(thread);
+    else parentGroups.set(key, [thread]);
+  }
   const hidden = group.threads.length - visible.length;
   const platform = channelPlatformName(group.platform);
   const count = group.threads.length;
@@ -355,7 +430,13 @@ function ChannelThreadsGroup({
       <button
         type="button"
         aria-expanded={open}
-        aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", { label: group.label, platform, count, status: running ? translateUi(", working") : "" })}
+        data-channel-group={group.key}
+        aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", {
+          label: group.label,
+          platform,
+          count,
+          status: `${running ? translateUi(", working") : ""}${unread ? translateUi(", unread") : ""}`,
+        })}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
         className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
@@ -370,16 +451,17 @@ function ChannelThreadsGroup({
         </span>
         {running ? (
           <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+        ) : unread && !open ? (
+          <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
         ) : null}
         <span className="shrink-0 tabular-nums text-13">{count}</span>
       </button>
       {open ? (
         // The guide line runs down from the chevron's centre.
         <div className="ml-3.5 space-y-px border-l border-border/60 pl-1">
-          {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
-            const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
+          {Array.from(parentGroups, ([key, children]) => {
             const followed = children.some((thread) => thread.channel?.thread_id);
-            return <div key={chatId}>
+            return <div key={key}>
               {followed ? <p className="px-3 pt-1 text-13 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? translateUi("Channel chat")}</p> : null}
               <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
             </div>;
@@ -432,7 +514,10 @@ function AgentRow({
   const [folded, setFolded] = useState<{ active: string | undefined }>();
   const expanded = selected && !(folded && folded.active === activeThreadId);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
-  const threads = expanded ? splitChannelThreads(model.threads) : { own: [], bots: [] };
+  const pinnedIds = usePinnedConversationIds();
+  const threads = expanded
+    ? splitChannelThreads(model.threads)
+    : { own: [], bots: [] };
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
   const handle = agentHandle(agent);
@@ -592,7 +677,7 @@ function AgentRow({
           aria-label={translateUi("Threads with {{value1}}", { value1: name })}
           className="mb-1 ml-[22px] mt-0.5 space-y-px border-l border-border/60 pl-1"
         >
-          {threads.own.map((conversation) => renderThread(conversation))}
+          {pinnedConversationsFirst(threads.own, pinnedIds).map(renderThread)}
           {model.threadsLoading && !model.threads.length ? (
             <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading threads...")}</p>
           ) : null}
@@ -602,6 +687,7 @@ function AgentRow({
               group={group}
               activeThreadId={activeThreadId}
               renderThread={renderThread}
+              unreadThreadIds={model.unreadThreadIds}
             />
           ))}
           {canChat ? (
@@ -779,6 +865,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
             {groups.map((group) => {
               const working = group.working_agent_ids.length;
               const selected = group.id === model.selectedGroupId;
+              const unread = !group.collaboration && (model.unreadGroupIds?.has(group.id) ?? false);
               return (
                 <button
                   key={group.id}
@@ -787,7 +874,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                   aria-current={selected ? "page" : undefined}
                   aria-label={translateUi("{{value1}}, group with {{value2}}{{value3}}", { value1: group.name, value2: group.members
                     .map((member) => agentTitle(member))
-                    .join(", "), value3: working ? `, ${String(working)} working` : "" })}
+                    .join(", "), value3: `${working ? translateUi(", {{value}} working", { value: working }) : ""}${unread ? translateUi(", unread") : ""}` })}
                   className={cn(
                     "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors",
                     selected
@@ -797,6 +884,9 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={3} ring="ring-sidebar group-hover:ring-sidebar-hover" />
                   <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                  {unread ? (
+                    <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+                  ) : null}
                   <GroupUnread group={group} />
                   {working ? (
                     <span
@@ -862,6 +952,10 @@ export function AssistantSidebar({
   const { current: accountPanel } = useAccountPanel();
   const rail = useContext(SidebarRailContext);
   const user = useAuthStore((state) => state.user);
+  const pinnedIds = usePinnedConversationIds();
+  const pinError = useAssistantPinsStore((state) =>
+    state.ownerUserId === user?.id ? state.error : null,
+  );
   const counts = useAssistantWorkspaceCounts();
   const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
   const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
@@ -916,11 +1010,14 @@ export function AssistantSidebar({
         conversation={conversation}
         active={conversation.id === activeConversationId}
         ownerUserId={user?.id ?? null}
+        pinned={pinnedIds.has(conversation.id)}
+        onTogglePin={user ? () => useAssistantPinsStore.getState().toggle(user.id, conversation.id) : undefined}
         onSelect={() => onSelect(conversation.id)}
         onRequestDelete={() => setDeleteTarget(conversation)}
         onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
           ? () => setRenameTarget(conversation)
           : undefined}
+        unread={agents?.unreadThreadIds?.has(conversation.id) ?? false}
       />
     );
   }
@@ -1088,6 +1185,13 @@ export function AssistantSidebar({
         </p>
       ) : null}
       <nav aria-label={translateUi("Agents and conversations")} className="@container px-2 pb-3">
+        {pinError ? (
+          <p role="alert" className="px-2 py-1 type-secondary text-destructive">
+            {pinError === "load"
+              ? translateUi("Could not load pinned chats in this browser. Try reloading the page.")
+              : translateUi("Could not save pinned chats in this browser. Please try again.")}
+          </p>
+        ) : null}
         {agents ? (
           <>
             <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} />
@@ -1105,7 +1209,7 @@ export function AssistantSidebar({
             <div className="-mx-2">
               <GroupLabel>{translateUi("Chats")}</GroupLabel>
             </div>
-            <div className="shell-nav-stack">{conversations.map(renderRow)}</div>
+            <div className="shell-nav-stack">{pinnedConversationsFirst(conversations, pinnedIds).map(renderRow)}</div>
           </>
         ) : null}
       </nav>
@@ -1193,7 +1297,7 @@ function RenameChatInline({
   });
   const [error, setError] = useState<string>();
   return (
-        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label={translateUi("Rename chat")} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
+        <form data-keep-drawer-open="" className="space-y-2 rounded-lg border border-hairline p-2" aria-label={translateUi("Rename chat")} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
           try {
             await onRename(conversation.id, title);
             onClose();
@@ -1342,16 +1446,20 @@ function SidebarRail({
           {groups?.groups.length ? <div className="h-2 shrink-0" aria-hidden="true" /> : null}
           {groups?.groups.map((group) => {
             const selected = group.id === groups.selectedGroupId;
+            const unread = !group.collaboration && (groups.unreadGroupIds?.has(group.id) ?? false);
             return (
               <RailItem key={group.id} label={group.name}>
                 <button
                   type="button"
-                  aria-label={translateUi("{{value1}}, group", { value1: group.name })}
+                  aria-label={translateUi("{{value1}}, group{{status}}", { value1: group.name, status: unread ? translateUi(", unread") : "" })}
                   aria-current={selected ? "page" : undefined}
                   onClick={() => groups.onSelectGroup(group.id)}
                   className={linkClass(selected)}
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={2} ring="ring-sidebar" />
+                  {unread ? (
+                    <span aria-hidden="true" data-unread-marker="" className="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-primary" />
+                  ) : null}
                   <GroupUnread group={group} compact />
                 </button>
               </RailItem>
@@ -1384,6 +1492,7 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
   readonly onSelect: (conversationId: string) => void;
 }) {
   useUiTranslation();
+  const pinnedIds = usePinnedConversationIds();
   const [open, setOpen] = useState(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -1393,9 +1502,12 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
       <PopoverContent side="right" align="start" className="w-72 p-2">
         <p className="px-2 py-1 type-row-title">{translateUi("Previous chats")}</p>
         <ul aria-label={translateUi("Previous chats")} className="max-h-80 shell-nav-stack overflow-y-auto">
-          {conversations.map((chat) => (
+          {pinnedConversationsFirst(conversations, pinnedIds).map((chat) => (
             <li key={chat.id}>
-              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
+              <button type="button" aria-label={chat.title} aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">
+                {pinnedIds.has(chat.id) ? <PinnedChatMarker /> : null}
+                <span className="min-w-0 truncate">{chat.title}</span>
+              </button>
             </li>
           ))}
         </ul>
@@ -1488,6 +1600,7 @@ function RailAgentChats({
   readonly onAll: () => void;
 }) {
   useUiTranslation();
+  const pinnedIds = usePinnedConversationIds();
   const userId = useAuthStore((state) => state.user?.id);
   const selected = agent.id === model.selectedAgentId;
   // The open agent's threads are already loaded; others load (and cache) on hover.
@@ -1496,7 +1609,26 @@ function RailAgentChats({
     queryFn: () => nyxAgentTransport.list(agent.id),
     enabled: !selected && Boolean(userId),
   });
-  const chats = selected ? model.threads : (threads.data ?? []);
+  // Preserve recent-list scope slots; a pin never moves a chat across bots.
+  const sourceChats = selected ? model.threads : (threads.data ?? []);
+  const scopes = new Map<string | null, Conversation[]>();
+  const scopeOf = (chat: Conversation) => chat.channel
+    ? chat.channel.channel_agent_id ?? `platform:${chat.channel.platform}`
+    : null;
+  for (const chat of sourceChats) {
+    const key = scopeOf(chat);
+    const scope = scopes.get(key) ?? [];
+    scope.push(chat);
+    scopes.set(key, scope);
+  }
+  const ordered = new Map([...scopes].map(([key, chats]) => [key, pinnedConversationsFirst(chats, pinnedIds)]));
+  const offsets = new Map<string | null, number>();
+  const chats = sourceChats.map((chat) => {
+    const key = scopeOf(chat);
+    const index = offsets.get(key) ?? 0;
+    offsets.set(key, index + 1);
+    return ordered.get(key)![index]!;
+  });
   const loading = selected ? Boolean(model.threadsLoading) : threads.isPending;
   return (
     <div className="space-y-1 text-14">
@@ -1521,13 +1653,15 @@ function RailAgentChats({
               <button
                 type="button"
                 onClick={() => onPick(chat.id)}
+                aria-label={chat.title || translateUi("New conversation")}
                 aria-current={chat.id === activeConversationId ? "page" : undefined}
                 className={cn(
-                  "w-full truncate rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
+                  "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
                   chat.id === activeConversationId ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
                 )}
               >
-                {chat.title || translateUi("New conversation")}
+                {pinnedIds.has(chat.id) ? <PinnedChatMarker /> : null}
+                <span className="min-w-0 truncate">{chat.title || translateUi("New conversation")}</span>
               </button>
             </li>
           ))}

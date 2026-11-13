@@ -41,7 +41,7 @@ impl Resume {
         if version.number() != self.version {
             return Err(conflict());
         }
-        version.require(db).await?;
+        version.require_serving(db).await?;
         fence_endpoint(db, session, proposal(&row)?).await?;
 
         let update = if dispatch {
@@ -135,8 +135,9 @@ pub(crate) async fn resume_turn(
             ));
             continue;
         }
-        super::super::super::security_readiness_service::require(&state.db, READINESS).await?;
-        version.require(&state.db).await?;
+        super::super::super::security_readiness_service::require_serving(&state.db, READINESS)
+            .await?;
+        version.require_serving(&state.db).await?;
         let live = async {
             tasks::check(&state.db, &p.task).await?;
             require_enrolled(&state.db, &row.user_id, None).await
@@ -356,7 +357,7 @@ async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> 
             let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(filter.clone())).session(&mut *session).await? else {return Ok(false)};
             let p=proposal(&row)?;
             let version=AssistantVersion::of(&row)?;
-            version.require(db).await?;
+            version.require_serving(db).await?;
             if db.collection::<Document>(REQUESTS).update_one(version.selector(filter),version.update(doc!{"$set":{
                 "execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":*claim,
                 "execution_proposal.v1.resume_turn_id":*turn,"execution_proposal.v1.claimed_at":bson::DateTime::now()

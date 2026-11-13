@@ -85,6 +85,9 @@ export type ForegroundNotification = {
   body: string | null;
   challengeId: string | null;
   type: PushSyncSignalType | null;
+  /** NyxBot notification pushes: the row to mark read and where to open. */
+  notificationId: string | null;
+  deeplink: string | null;
 };
 
 type ForegroundNotificationHandler = (notification: ForegroundNotification) => void;
@@ -200,21 +203,29 @@ function presentForegroundNotification(
     return;
   }
 
+  const data = content.data as
+    | { notification_id?: unknown; deeplink?: unknown; deep_link?: unknown }
+    | null
+    | undefined;
+  const destination = notificationDestination(content.data, {
+    scheme: NYXID_APP_SCHEME,
+    trustedUrls: [
+      ...NYXID_TRUSTED_FRONTEND_URLS,
+      ...NYXID_TRUSTED_API_BASE_URLS,
+      ...(NYXID_UNIVERSAL_LINK_HOST
+        ? [`https://${NYXID_UNIVERSAL_LINK_HOST}`]
+        : []),
+    ],
+  });
   foregroundNotificationHandler?.({
-    url: notificationDestination(content.data, {
-      scheme: NYXID_APP_SCHEME,
-      trustedUrls: [
-        ...NYXID_TRUSTED_FRONTEND_URLS,
-        ...NYXID_TRUSTED_API_BASE_URLS,
-        ...(NYXID_UNIVERSAL_LINK_HOST
-          ? [`https://${NYXID_UNIVERSAL_LINK_HOST}`]
-          : []),
-      ],
-    }) ?? `${NYXID_APP_SCHEME}://activity`,
+    url: destination ?? `${NYXID_APP_SCHEME}://activity`,
     title,
     body,
     challengeId: signal?.challengeId ?? null,
     type: signal?.type ?? null,
+    notificationId: destination ? asNonEmptyString(data?.notification_id) : null,
+    deeplink:
+      asNonEmptyString(data?.deeplink) ?? asNonEmptyString(data?.deep_link),
   });
 }
 

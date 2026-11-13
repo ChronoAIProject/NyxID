@@ -526,6 +526,10 @@ pub struct ActiveTurn {
     /// Confirmation continuation claims ignore the original run grace deadline.
     #[serde(default)]
     pub trigger_continuation: bool,
+    /// Owner notification flag at admission. Group/trigger turns defer this
+    /// check until a card is raised; their public producer owns settlement.
+    #[serde(default)]
+    pub notifications_enabled: Option<bool>,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,

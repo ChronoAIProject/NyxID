@@ -8136,8 +8136,24 @@ Returns a map keyed by security capability. Each report includes `ready`,
 `platform_policy_required`, `catalog_missing_policy`, and
 `catalog_explicit_empty_policy`. Catalog counts apply to the platform-policy
 capability. Missing, duplicate, stale, unsupported or differently configured
-serving processes block effective activation. Ordinary effective flag gates
-return `503 security_readiness_unavailable` (code `12900`) while unready.
+serving processes block activation (`ready` keeps its strict meaning).
+Additive `activated` / `active_since` show durable prior clean readiness;
+`serving_ready`, `serving_with_roster_warnings`, `roster_warnings` and
+`serving_blockers` explain continued serving separately. An activated capability
+may serve with roster warnings only while every live generation supports it and
+all hard checks pass. New activation remains strict. Refused gates return
+`503 security_readiness_unavailable` (code `12900`); ordinary flag reads retain
+their resolved boolean. The map includes `automation:coordinator-completion-v2`
+even when optional automation enrollment is disabled.
+
+| Additive field | JSON type | Nullable | Meaning |
+| --- | --- | --- | --- |
+| `activated` | boolean | No | Durable evidence of a prior clean assessment exists. |
+| `active_since` | RFC 3339 UTC string | Yes | First recorded activation time, or null when not recorded. |
+| `serving_ready` | boolean | No | Current traffic may serve, including recorded activation with only roster warnings. |
+| `serving_with_roster_warnings` | boolean | No | Serving is permitted despite one or more roster warnings. |
+| `roster_warnings` | array of strings | No | Sorted tolerable roster blocker strings, also present when hard checks refuse serving. |
+| `serving_blockers` | array of strings | No | Sorted hard serving blockers; includes `capability_not_activated` when strict readiness fails without evidence. |
 
 This endpoint requires admin/operator access and is separate from public
 `/health`. Roster/drain declarations are operational prerequisites; the
@@ -9111,6 +9127,29 @@ request/response schema, lifecycle, limits, and rollout contract, and the
 
 NyxBot channel link and chat override targets follow the organization-agent
 boundary and recovery contract in [ORG_AGENTS.md](ORG_AGENTS.md).
+
+## NyxBot Notifications
+
+The [Notifications contract](chat/12-notifications.md) defines a per-person feed
+behind the default-off `assistant:notifications` flag. The engine flag is also
+required. These routes accept only first-party human credentials; conversation
+keys, API keys, OAuth-client, delegated, relay and service-account tokens are
+rejected. Every read and preview uses the acting person's live source access.
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/notifications` | Cursor-paged list, `limit` 1–50, `unread_only`, `pending_only`, comma-separated `kind` filter; returns previews, canonical links, `next_cursor` and server `as_of` fence |
+| `GET /api/v1/assistant/nyxagent/notifications/summary` | Unread and pending-decision counts plus bounded per-source markers |
+| `POST /api/v1/assistant/nyxagent/notifications/read` | Exactly one of `ids` (at most 100), `source: {type,id}`, or `all: true` with server `before` fence; idempotent |
+| `GET /api/v1/assistant/nyxagent/settings` | Includes `notifications.push` preferences for all six kinds, default false |
+| `PUT /api/v1/assistant/nyxagent/settings` | Additively updates the complete `notifications: {push: {...}}` object |
+
+Reading a pending decision marks it seen without resolving its card. Mark-all
+records only scope/count audit metadata. The existing live stream adds
+`{type:"notification",id}` to invalidate the clients' list and summary. The
+native `nyxid__list_notifications` tool uses the same authorized previews and
+never marks read. It is available to owner NyxBot threads and NyxBot automation
+turns with the flag enabled. Upgrade all replicas before enabling the flag.
 
 ## NyxBot CMA Sandbox management scope
 

@@ -48,6 +48,7 @@ async fn pause(state: &AppState, flag_off: bool) {
         .await
         .unwrap();
     } else {
+        crate::services::security_readiness_service::stop_test_replica(&state.db).await;
         state.db.collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
             .update_many(doc! {}, doc! {"$set":{"observed_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(60))}})
             .await.unwrap();
