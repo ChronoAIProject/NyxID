@@ -244,6 +244,7 @@ impl AuthUser {
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         let execution_route = path.starts_with("/proxy")
             || path.starts_with("/llm/")
+            || path == "/keys"
             || path == "/monitoring/invocation-diagnostics"
             || matches!(path, "/mcp" | "/mcp/config")
             || path.starts_with("/oracle/pools/")
@@ -665,10 +666,6 @@ fn is_delegated_native_path(path: &str) -> bool {
 
     matches!(segments.as_slice(), ["approvals", "requests", _, "status"])
         || segments.starts_with(&["approvals", "exact-service"])
-        || matches!(
-            segments.as_slice(),
-            ["monitoring", "invocation-diagnostics"]
-        )
 }
 
 /// Return true for management GET classes that delegated account reads must
@@ -2814,7 +2811,6 @@ mod tests {
             "/api/v1/channel-relay/reply",
             "/api/v1/channel-events/conversation-id",
             "/api/v1/approvals/requests/request-id/status",
-            "/api/v1/monitoring/invocation-diagnostics",
         ];
 
         for path in native_paths {
@@ -2833,6 +2829,14 @@ mod tests {
         assert!(!is_delegated_native_path(
             "/api/v1/approvals/requests/request-id"
         ));
+        for scope in [WIDE_PROXY_SCOPE, "proxy account:read"] {
+            assert!(!delegated_request_allowed(
+                &Method::POST,
+                "/api/v1/monitoring/invocation-diagnostics",
+                &HeaderMap::new(),
+                scope,
+            ));
+        }
     }
 
     #[test]
@@ -4377,6 +4381,7 @@ mod tests {
         for path in [
             "/api/v1/proxy/service/path",
             "/api/v1/llm/provider",
+            "/api/v1/keys",
             "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/oracle/pools/pool/tasks",
             "/api/v1/approvals/exact-service/requests/request/redeem",

@@ -224,6 +224,11 @@ Content-Type: application/json
 {"handle":"nyx_diag_..."}
 ```
 
+MCP callers redeem inside the same authenticated request context with
+`nyx__diagnose_invocation`, passing only the opaque `handle`. The native tool
+retains request-local credential material only for that call and never exposes
+it in tool arguments, results, logs or persisted MCP sessions.
+
 Agent Key callers may instead use `X-API-Key: <current Agent Key>`. NyxID also
 accepts a Bearer-form Agent Key at ingress, then forwards the already classified
 credential to chrono-probe as `X-API-Key`; this avoids asking chrono-probe to
@@ -277,14 +282,19 @@ The explicit probe work, including feature and ACL reads, rate admission, both
 upstream requests and response reads, has a three-second budget. Redirects and
 ambient HTTP proxies remain disabled, and responses retain the existing 64KiB
 bound. A MongoDB token bucket permits one probe per acting person and exact
-service per ten seconds across replicas; a process permits at most 32 concurrent
-probe futures. chrono-probe callbacks and services on the configured monitoring
-origin are excluded from recursive diagnostics.
+service per ten seconds across replicas and across that person's Agent Keys.
+This owner-and-service key is intentional: minting multiple Agent Keys must not
+bypass the probe budget. A process permits at most 32 concurrent probe futures.
+chrono-probe callbacks and services on the configured monitoring origin are
+excluded from recursive diagnostics.
 Caller-scoped chrono-probe proxy requests carry the reserved
 `X-NyxID-Invocation-Diagnostic-Probe: 1` marker. NyxID removes it before
 downstream forwarding and suppresses handle issuance for that request, including
 raw Agent Key callbacks that do not have the `chrono-probe` acting-client ID.
-The marker is advisory and grants no execution authority.
+The marker is advisory and grants no execution authority. If the normal proxy
+policy would require approval, NyxID refuses that diagnostic probe before
+creating an approval request or sending a notification; the diagnostic remains
+bounded unknown/unavailable evidence instead of leaving a pending prompt.
 
 The existing probe API does not atomically pin the preflight configuration. If
 an owner clears a recipe between the status read and probe, chrono-probe can

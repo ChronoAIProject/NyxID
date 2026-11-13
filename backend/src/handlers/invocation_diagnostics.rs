@@ -26,6 +26,9 @@ use crate::{
 pub(crate) use diagnostics::{EXPIRES_HEADER, HANDLE_HEADER};
 pub(crate) const PROBE_HEADER: &str = "x-nyxid-invocation-diagnostic-probe";
 
+#[derive(Clone, Copy)]
+pub(crate) struct DiagnosticProbe;
+
 /// Internal retained LLM sends must preserve typed failures for their durable
 /// delivery coordinator, which classifies uncertain provider outcomes.
 #[derive(Clone, Copy)]
@@ -68,6 +71,9 @@ impl HttpInvocation {
             .and_then(|value| value.to_str().ok().map(str::to_owned))
             .as_deref()
             == Some("1");
+        if diagnostic_probe {
+            request.extensions_mut().insert(DiagnosticProbe);
+        }
         // Nested gateway/pool wrappers share the outer invocation's budget.
         if !state.config.invocation_diagnostics_enabled
             || state.config.chrono_probe_url.is_none()
@@ -228,54 +234,25 @@ pub async fn redeem(
     sender_constraint: Option<axum::Extension<crate::mw::auth::SenderConstrainedToken>>,
     Json(request): Json<RedeemRequest>,
 ) -> AppResult<Response> {
-    if auth.ensure_llm_proxy_access().is_err() {
-        return Err(crate::errors::AppError::NotFound(
-            "Invocation diagnostic not found".into(),
-        ));
-    }
-    if auth
-        .ensure_live_assistant_turn(&state.db, "monitoring.invocation_diagnostic")
-        .await
-        .is_err()
-    {
-        return Err(crate::errors::AppError::NotFound(
-            "Invocation diagnostic not found".into(),
-        ));
-    }
-    let caller_credential =
-        if sender_constraint.is_some() && matches!(auth.auth_method, AuthMethod::AccessToken) {
-            None
-        } else {
-            live_credential(
-                &auth.auth_method,
-                auth.acting_client_id.as_deref(),
-                &headers,
-            )
-        };
-    match diagnostics::redeem(
-        &state.db,
-        &state.config,
+    let caller_credential = if sender_constraint.is_some() {
+        None
+    } else {
+        live_credential(
+            &auth.auth_method,
+            auth.acting_client_id.as_deref(),
+            &headers,
+        )
+    };
+    match redeem_with_credential(
+        &state,
         &auth,
         &request.handle,
         caller_credential,
+        &telemetry,
     )
     .await?
     {
-        RedeemResult::Completed {
-            diagnostic,
-            exact_user_service_id,
-            fresh,
-        } => {
-            if fresh {
-                observe(
-                    &state,
-                    &AuditActor::from_auth_user(&auth),
-                    &exact_user_service_id,
-                    &diagnostic,
-                    &telemetry,
-                )
-                .await;
-            }
+        RedeemResult::Completed { diagnostic, .. } => {
             let mut response = Json(RedeemResponse::from(&diagnostic)).into_response();
             response
                 .headers_mut()
@@ -283,6 +260,53 @@ pub async fn redeem(
             Ok(response)
         }
         RedeemResult::NotReady => Err(AppError::DiagnosticNotReady),
+    }
+}
+
+pub(crate) async fn redeem_with_credential(
+    state: &AppState,
+    auth: &AuthUser,
+    handle: &str,
+    caller_credential: Option<CallerCredential<'_>>,
+    telemetry: &TelemetryContext,
+) -> AppResult<RedeemResult> {
+    if auth.ensure_llm_proxy_access().is_err() {
+        return Err(crate::errors::AppError::NotFound(
+            "Invocation diagnostic not found".into(),
+        ));
+    }
+    auth.ensure_live_assistant_turn(&state.db, "monitoring.invocation_diagnostic")
+        .await
+        .map_err(conceal_turn_authority_error)?;
+    let result =
+        diagnostics::redeem(&state.db, &state.config, auth, handle, caller_credential).await?;
+    if let RedeemResult::Completed {
+        diagnostic,
+        exact_user_service_id,
+        fresh: true,
+    } = &result
+    {
+        observe(
+            state,
+            &AuditActor::from_auth_user(auth),
+            exact_user_service_id,
+            diagnostic,
+            telemetry,
+        )
+        .await;
+    }
+    Ok(result)
+}
+
+fn conceal_turn_authority_error(error: crate::errors::AppError) -> crate::errors::AppError {
+    match error {
+        crate::errors::AppError::AssistantTurnRequired
+        | crate::errors::AppError::Forbidden(_)
+        | crate::errors::AppError::Unauthorized(_)
+        | crate::errors::AppError::ApiKeyScopeForbidden(_) => {
+            crate::errors::AppError::NotFound("Invocation diagnostic not found".into())
+        }
+        error => error,
     }
 }
 
@@ -378,5 +402,26 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_turn_authority_refusals_are_concealed_as_not_found() {
+        for error in [
+            crate::errors::AppError::AssistantTurnRequired,
+            crate::errors::AppError::Forbidden("stale turn".into()),
+            crate::errors::AppError::Unauthorized("stale key".into()),
+            crate::errors::AppError::ApiKeyScopeForbidden("scope changed".into()),
+        ] {
+            assert!(matches!(
+                conceal_turn_authority_error(error),
+                crate::errors::AppError::NotFound(_)
+            ));
+        }
+        assert!(matches!(
+            conceal_turn_authority_error(crate::errors::AppError::Internal(
+                "database unavailable".into()
+            )),
+            crate::errors::AppError::Internal(message) if message == "database unavailable"
+        ));
     }
 }

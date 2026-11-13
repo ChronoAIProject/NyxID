@@ -492,6 +492,14 @@ impl std::fmt::Debug for CallerToken {
     }
 }
 
+impl CallerToken {
+    /// Retain a credential only for the lifetime of the authenticated request.
+    /// The caller must validate and classify the value before constructing it.
+    pub(crate) fn from_verified(value: &str) -> Self {
+        Self(zeroize::Zeroizing::new(value.to_owned()))
+    }
+}
+
 /// The REST passthrough contract: only a supplied Bearer header, never a
 /// synthesized token or an x-api-key. Scheduled invocation credentials stay
 /// inside NyxID. Authentication must succeed before using this value.
@@ -506,7 +514,7 @@ pub(crate) fn caller_bearer_token_for_downstream(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(|value| CallerToken(zeroize::Zeroizing::new(value.to_owned())))
+        .map(CallerToken::from_verified)
 }
 
 /// Credential ownership follows the resolved service, falling back to the

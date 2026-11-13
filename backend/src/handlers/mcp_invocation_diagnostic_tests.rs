@@ -8,6 +8,58 @@ use wiremock::{
     matchers::{method, path},
 };
 
+fn conversation_auth(
+    actor: &str,
+    key_id: &str,
+    credential_id: &str,
+    raw_key: &str,
+) -> McpAuthContext {
+    use crate::{
+        models::assistant_conversation::AgentRole,
+        services::assistant_acknowledgement_service::ChatAuthority,
+    };
+
+    let mut auth = McpAuthContext::user(actor.to_owned(), AuthMethod::ApiKey);
+    auth.scope = "proxy".into();
+    auth.is_api_key = true;
+    auth.api_key_id = Some(key_id.to_owned());
+    auth.api_key_credential_id = Some(credential_id.to_owned());
+    auth.diagnostic_credential = Some(proxy_service::CallerToken::from_verified(raw_key));
+    auth.chat = Some(ChatAuthority {
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
+        channel_adapter_origin: None,
+        invocation_controlled: true,
+        invocation_id: None,
+        platform_thread: false,
+        platform_origin: None,
+        report_to: None,
+        with_nyxbot: true,
+        org_agent_access: None,
+        turn_id: Some("turn-1".into()),
+        turn_stopped: false,
+        turn_live: true,
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
+        conversation_id: "conversation-1".into(),
+        user_id: actor.to_owned(),
+        api_key_id: key_id.to_owned(),
+        role: AgentRole::Orchestrator,
+        agent_id: "nyxbot".into(),
+        agent_name: "NyxBot".into(),
+        guest: false,
+        confirmation_policy: None,
+    });
+    auth
+}
+
 #[tokio::test]
 async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_original_content() {
     for (universal, enabled, agent_key, status) in [
@@ -193,5 +245,96 @@ async fn invocation_diagnostic_random_handles_do_not_change_progress_digest() {
         }
         assert_eq!(digests[0], digests[1]);
         assert_eq!(digests[1], digests[2]);
+    }
+}
+
+#[tokio::test]
+async fn conversation_agent_key_redeems_with_the_same_child_and_raw_key() {
+    let (state, actor, id, server) = fixture().await;
+    let key_id = uuid::Uuid::new_v4().to_string();
+    let credential_id = uuid::Uuid::new_v4().to_string();
+    let raw_key = "nyxid_ag_current_conversation_key";
+    // The probe endpoint is bound to the exact UserService id, not to any
+    // service identifier supplied by the MCP caller.
+    crate::services::invocation_diagnostic_service::tests::mount_healthy_agent(
+        &server, &id, raw_key,
+    )
+    .await;
+    let issued = crate::services::invocation_diagnostic_service::issue(
+        &state.db,
+        &state.config,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some(&key_id),
+            Some(&credential_id),
+            None,
+        )
+        .with_api_key_purpose(crate::models::api_key::ApiKeyPurpose::General),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("conversation diagnostic handle");
+    let auth = conversation_auth(&actor, &key_id, &credential_id, raw_key);
+
+    let response = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": issued.handle}),
+        Some(json!(1)),
+    )
+    .await;
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap()).unwrap();
+    assert_eq!(
+        body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"]["observation"],
+        "agent"
+    );
+    assert_eq!(
+        body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"]["outcome"],
+        "completed"
+    );
+    assert!(!body.to_string().contains(raw_key));
+    assert!(!body.to_string().contains(&id));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopped_and_missing_conversation_turns_cannot_redeem_or_probe() {
+    for stopped in [false, true] {
+        let (state, actor, _, server) = fixture().await;
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let credential_id = uuid::Uuid::new_v4().to_string();
+        let mut auth = conversation_auth(
+            &actor,
+            &key_id,
+            &credential_id,
+            "nyxid_ag_stale_conversation_key",
+        );
+        let chat = auth.chat.as_mut().unwrap();
+        chat.turn_live = false;
+        chat.turn_stopped = stopped;
+        if !stopped {
+            chat.turn_id = None;
+        }
+
+        let response = handle_invocation_diagnostic(
+            &state,
+            &auth,
+            &json!({"handle":"nyx_diag_untrusted"}),
+            Some(json!(1)),
+        )
+        .await;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["content"][0]["text"],
+            "Invocation diagnostic not found"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        state.db.drop().await.unwrap();
     }
 }

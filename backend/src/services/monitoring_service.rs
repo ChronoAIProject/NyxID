@@ -344,7 +344,10 @@ impl Client {
         let request = self.http.request(method, url);
         let mut request = match self.credential_kind {
             CallerCredentialKind::Bearer => request.bearer_auth(self.credential.as_str()),
-            CallerCredentialKind::ApiKey => request.header("x-api-key", self.credential.as_str()),
+            CallerCredentialKind::ApiKey => request.header(
+                "x-api-key",
+                sensitive_header_value(self.credential.as_str())?,
+            ),
         };
         if let Some(revision) = revision {
             request = request.query(&[("revision", revision)]);
@@ -464,6 +467,13 @@ impl Client {
     }
 }
 
+fn sensitive_header_value(value: &str) -> AppResult<reqwest::header::HeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(value)
+        .map_err(|_| AppError::MonitoringUnavailable)?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 fn upstream_error(status: StatusCode) -> AppError {
     match status {
         StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => AppError::BadRequest("Invalid monitoring configuration; use a safe relative GET path and bounded expectations".into()),
@@ -485,6 +495,13 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, method, path, query_param},
     };
+
+    #[test]
+    fn caller_api_key_header_is_sensitive() {
+        let value = sensitive_header_value("nyxid_ag_example").unwrap();
+        assert!(value.is_sensitive());
+        assert_eq!(value.to_str().unwrap(), "nyxid_ag_example");
+    }
 
     pub(super) fn result(id: &str) -> Value {
         json!({"service":{"id":id,"secret":"never forward"},"snapshot_present":true,

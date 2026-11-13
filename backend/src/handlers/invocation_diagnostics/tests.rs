@@ -45,6 +45,7 @@ async fn diagnostic_probe_marker_is_stripped_and_suppresses_recursive_handles() 
     let invocation = HttpInvocation::start(&state, &mut request);
     assert!(invocation.is_none());
     assert!(!request.headers().contains_key(PROBE_HEADER));
+    assert!(request.extensions().get::<DiagnosticProbe>().is_some());
     Target::record_request(&request, Some(&id));
     let result = HttpInvocation::finish(
         invocation,
@@ -66,6 +67,54 @@ async fn diagnostic_probe_marker_is_stripped_and_suppresses_recursive_handles() 
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn diagnostic_probe_that_requires_approval_leaves_no_pending_prompt() {
+    let (state, actor, id, server) = fixture().await;
+    let downstream = MockServer::start().await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>("user_endpoints")
+        .update_many(doc! {}, doc! {"$set":{"url":downstream.uri()}})
+        .await
+        .unwrap();
+    set_test_approval_preference(&state.db, &actor, true).await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/proxy/s/same-slug/healthz?_nyxid_via={id}"))
+        .header("authorization", "Bearer original-caller")
+        .header(PROBE_HEADER, "1")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+
+    let result = Box::pin(super::super::proxy::proxy_request_by_slug(
+        State(state.clone()),
+        auth(&actor),
+        TelemetryContext::default(),
+        Path(("same-slug".into(), "healthz".into())),
+        request,
+    ))
+    .await;
+    assert!(matches!(result, Err(AppError::Forbidden(_))));
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(downstream.received_requests().await.unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]

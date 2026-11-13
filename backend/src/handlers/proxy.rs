@@ -4005,6 +4005,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::invocation_diagnostics::Target>()
         .cloned();
+    let invocation_diagnostic_probe = request
+        .extensions()
+        .get::<super::invocation_diagnostics::DiagnosticProbe>()
+        .is_some();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -5014,6 +5018,14 @@ async fn execute_resolved_proxy_inner<'a>(
             request_audit.denied(403);
             return Err(AppError::Forbidden(
                 "Ornn format check skipped: approval required".to_string(),
+            ));
+        }
+        // A caller-scoped diagnostic is secondary evidence, not a business
+        // operation. It must neither bypass approval nor leave a prompt behind.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if invocation_diagnostic_probe => {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Diagnostic probe skipped: approval required".to_string(),
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
