@@ -14,7 +14,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const env = loadEnv();
   const r = resolveProfile(appEnv, env, {
     warnOnFrontendUrlFallback: true,
-    validateAndroidGoogleServices: true,
   });
   const ident = appIdentity(env);
 
@@ -99,6 +98,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       "./plugins/withVoiceAudio",
+      [
+        "./plugins/withAndroidGoogleServicesValidation",
+        {
+          file: r.androidGoogleServicesFile,
+          androidPackage: r.androidPackage,
+        },
+      ],
       ["expo-screen-orientation", { initialOrientation: "PORTRAIT_UP" }],
       [
         "expo-image-picker",

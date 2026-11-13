@@ -188,6 +188,34 @@ test("keeps Firebase configuration profile-local instead of falling back to prod
   assert.equal(prod.androidGoogleServicesFile, "./google-services.json");
 });
 
+test("preserves the matching default Firebase file for an existing dev profile", () => {
+  const resolved = resolveProfile(
+    "dev",
+    profileEnv({ DEV_ANDROID_PACKAGE: "fun.chronoai.nyxid" }),
+  );
+  assert.equal(resolved.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("an explicit empty dev Firebase path disables FCM even when the default matches", () => {
+  const resolved = resolveProfile(
+    "dev",
+    profileEnv({
+      DEV_ANDROID_PACKAGE: "fun.chronoai.nyxid",
+      DEV_GOOGLE_SERVICES_FILE: "",
+    }),
+  );
+  assert.equal(resolved.androidGoogleServicesFile, "");
+});
+
+test("an empty production Firebase path preserves the existing FCM default", () => {
+  const resolved = resolveProfile(
+    "prod",
+    productionEnv({ PROD_GOOGLE_SERVICES_FILE: " " }),
+    { validateAndroidGoogleServices: true },
+  );
+  assert.equal(resolved.androidGoogleServicesFile, "./google-services.json");
+});
+
 test("rejects a Firebase file that does not contain the active Android package", () => {
   assert.throws(
     () =>

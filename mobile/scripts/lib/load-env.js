@@ -39,14 +39,9 @@ function fatal(message) {
 
 function readProfile(env, prefix) {
   const googleServicesKey = `${prefix}_GOOGLE_SERVICES_FILE`;
-  const googleServicesFile = Object.prototype.hasOwnProperty.call(
-    env,
-    googleServicesKey,
-  )
-    ? String(env[googleServicesKey] ?? "").trim()
-    : prefix === "PROD"
-      ? "./google-services.json"
-      : "";
+  const googleServicesFile =
+    String(env[googleServicesKey] ?? "").trim() ||
+    (prefix === "PROD" ? "./google-services.json" : "");
 
   return {
     apiBaseUrl: env[`${prefix}_API_BASE_URL`] || "",
@@ -95,6 +90,16 @@ function validateAndroidGoogleServicesFile(file, androidPackage) {
         `Register that Android package in Firebase and set the profile-specific ` +
         `GOOGLE_SERVICES_FILE path.`,
     );
+  }
+}
+
+function matchingDefaultGoogleServicesFile(androidPackage) {
+  const file = "./google-services.json";
+  try {
+    validateAndroidGoogleServicesFile(file, androidPackage);
+    return file;
+  } catch {
+    return "";
   }
 }
 
@@ -173,6 +178,7 @@ function resolveProfile(appEnv, env, options = {}) {
   }
 
   const pick = (k) => primary[k] || fallback[k] || "";
+  const androidPackage = pick("androidPackage");
   const explicitFrontendUrl = pick("frontendUrl");
   const legalBaseUrl = pick("legalBaseUrl");
 
@@ -183,12 +189,14 @@ function resolveProfile(appEnv, env, options = {}) {
     newFrontendUrl: newDomains?.frontendUrl ?? "",
     newLegalBaseUrl: newDomains?.legalBaseUrl ?? "",
     iosBundleId: pick("iosBundleId"),
-    androidPackage: pick("androidPackage"),
-    // Firebase configuration is intentionally profile-local. Falling back from
-    // a dev package to the production google-services.json creates a build that
-    // has the wrong Firebase app identity, so an absent dev file disables only
-    // remote push for local development instead of selecting the prod app.
-    androidGoogleServicesFile: primary.androidGoogleServicesFile,
+    androidPackage,
+    // Preserve working dev profiles that predate the per-profile Firebase path.
+    // An explicit empty path disables FCM; a mismatched default is never reused.
+    androidGoogleServicesFile:
+      appEnv === "dev" &&
+      !Object.prototype.hasOwnProperty.call(env, "DEV_GOOGLE_SERVICES_FILE")
+        ? matchingDefaultGoogleServicesFile(androidPackage)
+        : primary.androidGoogleServicesFile,
     appleAscAppId: pick("appleAscAppId"),
     iosBuildNumber: pick("iosBuildNumber") || "1",
     androidVersionCode: pick("androidVersionCode") || "1",
@@ -255,6 +263,7 @@ function appIdentity(env) {
 module.exports = {
   loadEnv,
   resolveProfile,
+  validateAndroidGoogleServicesFile,
   appIdentity,
   fatal,
   MOBILE_ROOT,

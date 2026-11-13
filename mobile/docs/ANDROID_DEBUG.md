@@ -38,7 +38,7 @@ pnpm install
 
 > `EXPO_PUBLIC_API_BASE_URL` 直接设置会被 `app.config.ts` 覆盖。请改 `DEV_API_BASE_URL`（或 `PROD_API_BASE_URL` 若运行 `APP_ENV=prod`）。
 
-开发包使用独立的 `DEV_ANDROID_PACKAGE` 时，不要复用生产的 `google-services.json`。如果需要在开发包测试 FCM，把对应 Firebase 应用下载的 JSON 放到本地，并设置 `DEV_GOOGLE_SERVICES_FILE`；配置会在 prebuild 前校验 JSON 中的包名。未设置时，开发构建不会注入生产 Firebase 应用，远程 FCM 不作为本地开发检查项。
+开发包使用独立的 `DEV_ANDROID_PACKAGE` 时，不要复用包名不匹配的 `google-services.json`。如果需要在开发包测试 FCM，把对应 Firebase 应用下载的 JSON 放到本地，并设置 `DEV_GOOGLE_SERVICES_FILE`；Android 原生生成时会校验 JSON 中的包名，iOS 构建不依赖此文件。省略这个变量时，仅当现有 `./google-services.json` 包含开发包的实际包名才沿用旧配置；文件缺失、无效或包名不匹配时关闭开发 FCM。显式设置为空会关闭开发 FCM，即使默认文件匹配。生产变量省略或为空时仍使用 `./google-services.json`。历史测试矩阵中没有远程 FCM 的开发包记录仍是当时的实测结果。
 
 ---
 

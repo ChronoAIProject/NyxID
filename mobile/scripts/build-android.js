@@ -37,7 +37,9 @@ const { loadEnv, resolveProfile, MOBILE_ROOT } = require("./lib/load-env");
 
 const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
 const env = loadEnv();
-const r = resolveProfile(APP_ENV, env);
+const r = resolveProfile(APP_ENV, env, {
+  validateAndroidGoogleServices: true,
+});
 
 const KEYSTORE_PATH =
   env.ANDROID_KEYSTORE_PATH || "./credentials/release.keystore";
@@ -84,6 +86,9 @@ console.log(
   `[build-android] New domains:     ${r.newApiBaseUrl ? `${r.newApiBaseUrl} (selected at launch by mobile:new-domains)` : "not configured"}`,
 );
 console.log(`[build-android] Android package: ${r.androidPackage}`);
+console.log(
+  `[build-android] Firebase config: ${r.androidGoogleServicesFile || "disabled"}`,
+);
 console.log(`[build-android] versionCode:     ${r.androidVersionCode}`);
 console.log(`[build-android] Keystore:        ${keystoreAbs}`);
 
