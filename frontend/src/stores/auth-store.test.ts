@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useAuthStore } from "./auth-store";
 import { useAssistantContextStore } from "./assistant-context-store";
 import { useAssistantDraftStore } from "./assistant-draft-store";
+import { useAssistantPinsStore, PIN_STORAGE_KEY } from "./assistant-pins-store";
 import { useAssistantWireLogStore } from "./assistant-wire-log-store";
 import { useServiceCardView } from "./service-card-view-store";
 import { useConsentStore } from "./consent-store";
@@ -55,6 +56,7 @@ async function getApiMock() {
 beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
+  useAssistantPinsStore.getState().bindAccount(null);
   transitionAssistantIdentity(null);
   useServiceCardView.setState({
     accountId: undefined,
@@ -231,6 +233,7 @@ describe("login", () => {
   it("clears account-local state when the confirmed login changes identity", async () => {
     const apiMock = await getApiMock();
     useAuthStore.getState().setUser(previousAccount);
+    useAssistantPinsStore.getState().toggle(previousAccount.id, "nyxa-private");
     useAssistantContextStore.getState().recordScreen(previousAccount.id, "/keys");
     useAssistantDraftStore
       .getState()
@@ -243,6 +246,8 @@ describe("login", () => {
     await useAuthStore.getState().login("next@example.com", "pass");
 
     expect(useAuthStore.getState().user).toEqual(nextAccount);
+    expect(useAssistantPinsStore.getState().ids).toEqual([]);
+    expect(localStorage.getItem(PIN_STORAGE_KEY)).toBeNull();
     expect(getAssistantIdentityUserId()).toBe(nextAccount.id);
     expect(useConsentStore.getState().accountId).toBe(nextAccount.id);
     expect(useAssistantContextStore.getState().lastScreen).toBeNull();
@@ -322,6 +327,8 @@ describe("logout", () => {
     apiMock.post.mockResolvedValueOnce(undefined);
 
     useAuthStore.setState({ isAuthenticated: true, mfaRequired: true });
+    useAssistantPinsStore.getState().bindAccount("u1");
+    useAssistantPinsStore.getState().toggle("u1", "nyxa-private");
     useAssistantContextStore.getState().recordScreen("u1", "/keys");
     useAssistantDraftStore
       .getState()
@@ -358,6 +365,8 @@ describe("logout", () => {
     await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();
+    expect(useAssistantPinsStore.getState().ids).toEqual([]);
+    expect(localStorage.getItem(PIN_STORAGE_KEY)).toBeNull();
     expect(state.user).toBeNull();
     expect(state.isAuthenticated).toBe(false);
     expect(state.mfaRequired).toBe(false);
