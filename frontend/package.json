@@ -20,7 +20,8 @@
     "test:coverage": "NODE_ENV=test vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "test:watch": "NODE_ENV=test vitest"
+    "test:watch": "NODE_ENV=test vitest",
+    "preview:skills": "node scripts/preview-skill-frontend.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
