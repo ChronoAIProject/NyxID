@@ -70,6 +70,7 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 | `*_FRONTEND_URL` | for web QR login / waitlist | Trusted frontend origin that creates login QR codes |
 | `*_IOS_BUNDLE_ID` | yes (one of dev/prod) | iOS bundle identifier (reverse-DNS) |
 | `*_ANDROID_PACKAGE` | yes (one of dev/prod) | Android application id |
+| `*_GOOGLE_SERVICES_FILE` | optional for dev; default for prod | Profile-specific Firebase JSON; it must contain the exact `*_ANDROID_PACKAGE`. Leave `DEV_GOOGLE_SERVICES_FILE` empty when local dev does not need remote FCM. |
 | `*_APPLE_ASC_APP_ID` | only for submit | Numeric ASC App ID |
 | `*_IOS_BUILD_NUMBER` | for release builds | `CFBundleVersion` — bump per release |
 | `*_ANDROID_VERSION_CODE` | for release builds | Android `versionCode` — bump per release |
@@ -124,6 +125,7 @@ mobile/credentials/play-service-account.json  Play Console → API access → se
 | --- | --- |
 | `pnpm build:ios` / `pnpm build:android` | Build a release `.ipa` / `.aab` for the **prod** profile |
 | `pnpm build:ios:dev` / `pnpm build:android:dev` | Same but for the **dev** profile |
+| `pnpm android` | Clean-prebuild and install the **dev** Android profile (clears stale prod Firebase native files) |
 | `pnpm build:prod` | Both platforms (iOS then Android), prod |
 | `pnpm build:dev` | Both platforms, dev |
 | `pnpm submit:ios` | Upload the most recent `.ipa` to App Store Connect → TestFlight |
@@ -160,7 +162,7 @@ pnpm build:android
 └─ APP_ENV=prod node scripts/build-android.js
    1. expo prebuild --platform android --clean
    2. patch-android-build-gradle.js      # force androidx.core 1.15.0
-   3. ./gradlew bundleRelease            # signing via -Pandroid.injected.signing.*
+   3. ./gradlew bundleRelease            # signing properties come from the child environment; passwords never enter argv/logs
                                          # → android/app/build/outputs/bundle/release/app-release.aab
 ```
 

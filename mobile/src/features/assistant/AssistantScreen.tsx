@@ -55,7 +55,6 @@ import {
   FlatList,
   findNodeHandle,
   Keyboard,
-  LayoutAnimation,
   Modal,
   Platform,
   ScrollView,
@@ -90,6 +89,8 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { withVoiceRequestDeadline } from "./voice/voiceRequestDeadline";
 import { chatBubbleColors } from "../../theme/chatAppearance";
 import { fonts } from "../../theme/designTokens";
 import { useAssistant } from "./useAssistant";
@@ -139,7 +140,6 @@ import {
   mergeVoiceTranscript,
   retainVoiceSnapshot,
   voiceTranscriptLabel,
-  withoutLiveUserSpeech,
   type VoiceTranscriptMessage,
 } from "./voice/voiceTranscript";
 import type { VoiceSnapshot } from "./voice/voiceContracts";
@@ -161,6 +161,65 @@ type AssistantScreenProps = {
   };
 };
 
+function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let subscription: ReturnType<typeof Keyboard.addListener> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      subscription?.remove();
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", aborted);
+      if (error) reject(error);
+      else resolve();
+    };
+    const aborted = () => finish(new Error("Voice start was cancelled."));
+    try {
+      // Keep the text input mounted until Android confirms the IME is hidden,
+      // before the voice WebView can take focus away from that input.
+      subscription = Keyboard.addListener("keyboardDidHide", () => finish());
+      timeout = setTimeout(
+        () => finish(new Error("Voice could not open. Try again.")),
+        1500,
+      );
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) aborted();
+      else if (!Keyboard.isVisible()) finish();
+      else Keyboard.dismiss();
+    } catch {
+      finish(new Error("Voice could not open. Try again."));
+    }
+  });
+}
+
+async function createVoiceDraft(
+  agentId: string | undefined,
+  signal: AbortSignal,
+) {
+  const request = new AbortController();
+  const cancel = () => request.abort(signal.reason);
+  if (signal.aborted) cancel();
+  else signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await withVoiceRequestDeadline(request, () =>
+      assistantUploadsApi.createDraft(agentId, request.signal),
+    );
+  } catch (cause) {
+    if (
+      cause &&
+      typeof cause === "object" &&
+      "name" in cause &&
+      cause.name === "VoiceRequestTimeoutError"
+    )
+      throw new Error("Voice could not open. Try again.");
+    throw cause;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
 export function AssistantScreen({
   route,
   contextual = false,
@@ -169,6 +228,7 @@ export function AssistantScreen({
   const focused = useIsFocused();
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
+  const { t } = useAppLanguage();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
   const transcriptEdges = useScrollEdges();
@@ -210,13 +270,6 @@ export function AssistantScreen({
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
-  const [voiceMinimized, setVoiceMinimized] = useState(false);
-  function changeVoiceSize(minimized: boolean) {
-    if (minimized === voiceMinimized) return;
-    if (!reducedMotion)
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setVoiceMinimized(minimized);
-  }
   const [voicePreferencesOpen, setVoicePreferencesOpen] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState<{
     thread: string;
@@ -326,19 +379,11 @@ export function AssistantScreen({
     voiceTranscript.epoch === voiceEpoch
       ? voiceTranscript.snapshot
       : undefined;
-  // While the voice composer is open it alone shows the user's unsent words;
-  // once it closes, the chat keeps them as a partial transcript.
-  const voiceComposerOpen =
-    !!voiceThread && voiceThread === assistant.conversationId;
+  // Caption IDs own voice messages. Microphone energy also includes noise and
+  // playback, so it must not create a separate transcription placeholder.
   const messages = useMemo(
-    () =>
-      mergeVoiceTranscript(
-        historyMessages ?? [],
-        voiceComposerOpen
-          ? withoutLiveUserSpeech(voiceSnapshot)
-          : voiceSnapshot,
-      ),
-    [historyMessages, voiceSnapshot, voiceComposerOpen],
+    () => mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot),
+    [historyMessages, voiceSnapshot],
   );
   const voiceHistory = useRef(historyMessages);
   voiceHistory.current = historyMessages;
@@ -503,6 +548,7 @@ export function AssistantScreen({
     epoch: getAuthEpoch(),
     revision: draftRevision.current,
     voiceAllowed: canCompose && voiceAvailable,
+    focused,
   });
   voiceContext.current = {
     agentId: assistant.agentId,
@@ -510,13 +556,21 @@ export function AssistantScreen({
     epoch: getAuthEpoch(),
     revision: draftRevision.current,
     voiceAllowed: canCompose && voiceAvailable,
+    focused,
   };
   useEffect(() => {
     setOpeningVoice(false);
     return () => {
       voiceOpening.current?.abort();
     };
-  }, [route?.params?.agentId, route?.params?.conversationId]);
+  }, [
+    route?.params?.agentId,
+    route?.params?.conversationId,
+    assistant.agentId,
+    assistant.conversationId,
+    voiceEpoch,
+    focused,
+  ]);
   useEffect(() => {
     if (voiceThread && voiceThread !== assistant.conversationId)
       setVoiceThread(undefined);
@@ -533,27 +587,30 @@ export function AssistantScreen({
   }, [assistant.conversationId, voiceEpoch]);
 
   async function openVoice() {
-    if (!canCompose || !voiceAvailable || voiceOpening.current) return;
+    if (!focused || !canCompose || !voiceAvailable || voiceOpening.current)
+      return;
     if (voiceThread === assistant.conversationId && voiceThread) return;
-    Keyboard.dismiss();
     const scope = { ...voiceContext.current, revision: draftRevision.current };
     const controller = new AbortController();
     voiceOpening.current = controller;
     setOpeningVoice(true);
+    setLocalError(undefined);
     const current = () =>
       !controller.signal.aborted &&
       voiceContext.current.agentId === scope.agentId &&
       voiceContext.current.conversationId === scope.conversationId &&
       voiceContext.current.voiceAllowed &&
+      voiceContext.current.focused &&
       getAuthEpoch() === scope.epoch &&
       draftRevision.current === scope.revision;
     try {
+      if (Keyboard.isVisible())
+        await dismissKeyboardForVoice(controller.signal);
+      else Keyboard.dismiss();
+      if (!current()) return;
       const id =
         scope.conversationId ??
-        (await assistantUploadsApi.createDraft(
-          scope.agentId,
-          controller.signal,
-        ));
+        (await createVoiceDraft(scope.agentId, controller.signal));
       if (!current()) return;
       if (!scope.conversationId) {
         adoptedId.current = id;
@@ -567,14 +624,15 @@ export function AssistantScreen({
           openLatest: false,
         });
       }
-      setVoiceMinimized(false);
       setVoiceThread(id);
     } catch (cause) {
       if (current())
         setLocalError(
-          cause instanceof Error
-            ? cause.message
-            : "Voice could not open. Try again.",
+          t(
+            cause instanceof Error
+              ? cause.message
+              : "Voice could not open. Try again.",
+          ),
         );
     } finally {
       if (voiceOpening.current === controller) {
@@ -1239,9 +1297,6 @@ export function AssistantScreen({
       <TranscriptViewport
         key="transcript-column"
         ready={homeVisible || transcriptScroll.ready}
-        onTouchStart={() => {
-          if (voiceThread) changeVoiceSize(true);
-        }}
         viewportRef={transcriptViewport}
       >
         {homeVisible ? (
@@ -1596,8 +1651,6 @@ export function AssistantScreen({
             key={`voice:${voiceThread}`}
             thread={voiceThread}
             agentName={agentName}
-            minimized={voiceMinimized}
-            onExpand={() => changeVoiceSize(false)}
             onClose={() => {
               if (
                 getAuthEpoch() !== voiceEpoch ||

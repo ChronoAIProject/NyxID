@@ -37,6 +37,7 @@ import {
 const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
+const REFRESH_REQUEST_TIMEOUT_MS = 10_000;
 const PROACTIVE_REFRESH_BUFFER_MS = 2 * 60 * 1000;
 
 // ── Session invalidation hook ──────────────────────────────────────
@@ -263,51 +264,79 @@ async function requestRefreshAccessToken(
   refreshToken: string,
   max409Retries = REFRESH_CONFLICT_RETRY_COUNT
 ): Promise<RefreshResponse | null> {
-  for (let attempt = 0; attempt <= max409Retries; attempt += 1) {
-    const response = await fetch(buildApiUrl("/auth/refresh"), {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
-    });
+  // Refresh is shared across callers, so its deadline belongs to this flight,
+  // not to an individual screen or voice attempt. Include response body reads.
+  const controller = new AbortController();
+  const timeoutError = networkApiError(null);
+  const assertActive = () => {
+    if (controller.signal.aborted) throw timeoutError;
+  };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      // Preserve the network failure even if abort synchronously rejects fetch.
+      reject(timeoutError);
+      controller.abort();
+    }, REFRESH_REQUEST_TIMEOUT_MS);
+  });
 
-    const payload = await readJsonSafely(response);
+  const request = async (): Promise<RefreshResponse | null> => {
+    for (let attempt = 0; attempt <= max409Retries; attempt += 1) {
+      assertActive();
+      const response = await fetch(buildApiUrl("/auth/refresh"), {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
+        signal: controller.signal,
+      });
+      assertActive();
+      const payload = await readJsonSafely(response);
+      assertActive();
 
-    if (response.status === 409 && attempt < max409Retries) {
-      await new Promise((resolve) => setTimeout(resolve, REFRESH_CONFLICT_RETRY_DELAY_MS));
-      continue;
-    }
-
-    if (!response.ok) {
-      if (__DEV__) {
-        console.warn("[auth] refresh failed", response.status, payload);
+      if (response.status === 409 && attempt < max409Retries) {
+        await new Promise((resolve) => setTimeout(resolve, REFRESH_CONFLICT_RETRY_DELAY_MS));
+        continue;
       }
+
+      if (!response.ok) {
+        if (__DEV__) {
+          console.warn("[auth] refresh failed", response.status, payload);
+        }
+        return null;
+      }
+
+      if (payload && typeof payload === "object") {
+        const data = payload as Partial<RefreshResponse>;
+        if (typeof data.access_token === "string" && data.access_token.length > 0) {
+          return {
+            access_token: data.access_token,
+            expires_in:
+              typeof data.expires_in === "number" && Number.isFinite(data.expires_in)
+                ? data.expires_in
+                : 0,
+            refresh_token:
+              typeof data.refresh_token === "string" && data.refresh_token.length > 0
+                ? data.refresh_token
+                : refreshToken,
+          };
+        }
+      }
+
       return null;
     }
 
-    if (payload && typeof payload === "object") {
-      const data = payload as Partial<RefreshResponse>;
-      if (typeof data.access_token === "string" && data.access_token.length > 0) {
-        return {
-          access_token: data.access_token,
-          expires_in:
-            typeof data.expires_in === "number" && Number.isFinite(data.expires_in)
-              ? data.expires_in
-              : 0,
-          refresh_token:
-            typeof data.refresh_token === "string" && data.refresh_token.length > 0
-              ? data.refresh_token
-              : refreshToken,
-        };
-      }
-    }
-
     return null;
-  }
+  };
 
-  return null;
+  try {
+    // A transport that ignores abort still cannot hold the shared refresh open.
+    return await Promise.race([request(), deadline]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 const refreshAccessTokenWithSingleFlight = createSessionRefresh({

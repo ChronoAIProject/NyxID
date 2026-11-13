@@ -309,7 +309,9 @@ export function AuthHomeScreen({ navigation }: Props) {
     try {
       const available = await publicConfig.refetch();
       if (!isMountedRef.current || !focusedRef.current || AppState.currentState !== "active") return;
-      if (available.error) throw available.error;
+      // The query owns discovery errors and its retry UI. Copying one into
+      // loginError would leave a stale banner after configuration recovers.
+      if (available.error) return;
       requireSocialProvider(available.data, provider);
       capture({ name: "ui.mobile_provider_connect_initiated", props: { provider, method: "oauth" } });
       const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL);

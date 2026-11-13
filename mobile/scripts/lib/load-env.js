@@ -38,11 +38,22 @@ function fatal(message) {
 }
 
 function readProfile(env, prefix) {
+  const googleServicesKey = `${prefix}_GOOGLE_SERVICES_FILE`;
+  const googleServicesFile = Object.prototype.hasOwnProperty.call(
+    env,
+    googleServicesKey,
+  )
+    ? String(env[googleServicesKey] ?? "").trim()
+    : prefix === "PROD"
+      ? "./google-services.json"
+      : "";
+
   return {
     apiBaseUrl: env[`${prefix}_API_BASE_URL`] || "",
     frontendUrl: env[`${prefix}_FRONTEND_URL`] || "",
     iosBundleId: env[`${prefix}_IOS_BUNDLE_ID`] || "",
     androidPackage: env[`${prefix}_ANDROID_PACKAGE`] || "",
+    androidGoogleServicesFile: googleServicesFile,
     appleAscAppId: env[`${prefix}_APPLE_ASC_APP_ID`] || "",
     iosBuildNumber: env[`${prefix}_IOS_BUILD_NUMBER`] || "",
     androidVersionCode: env[`${prefix}_ANDROID_VERSION_CODE`] || "",
@@ -56,6 +67,37 @@ function readProfile(env, prefix) {
   };
 }
 
+function validateAndroidGoogleServicesFile(file, androidPackage) {
+  const absolutePath = path.isAbsolute(file)
+    ? file
+    : path.join(MOBILE_ROOT, file);
+  if (!fs.existsSync(absolutePath)) {
+    fatal(
+      `Android Google Services file not found at ${file}. ` +
+        `Set the matching ${androidPackage} Firebase config path in the active profile.`,
+    );
+  }
+
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(absolutePath, "utf8"));
+  } catch {
+    fatal(`Android Google Services file ${file} is not valid JSON.`);
+  }
+
+  const packages = (config && Array.isArray(config.client) ? config.client : [])
+    .map((client) => client?.client_info?.android_client_info?.package_name)
+    .filter((packageName) => typeof packageName === "string");
+  if (!packages.includes(androidPackage)) {
+    fatal(
+      `Android Google Services file ${file} does not contain a client for ` +
+        `${androidPackage}. Found: ${packages.join(", ") || "none"}. ` +
+        `Register that Android package in Firebase and set the profile-specific ` +
+        `GOOGLE_SERVICES_FILE path.`,
+    );
+  }
+}
+
 const NEW_DOMAIN_URLS = [
   ["apiBaseUrl", "PROD_NEW_API_BASE_URL"],
   ["frontendUrl", "PROD_NEW_FRONTEND_URL"],
@@ -65,7 +107,9 @@ const NEW_DOMAIN_URLS = [
 // Production builds embed this second URL set when all three are configured;
 // the NyxID admin flag `mobile:new-domains` selects between the sets at launch.
 function readNewProductionDomains(env) {
-  const values = NEW_DOMAIN_URLS.map(([, variable]) => (env[variable] || "").trim());
+  const values = NEW_DOMAIN_URLS.map(([, variable]) =>
+    (env[variable] || "").trim(),
+  );
   if (values.every((value) => !value)) return null;
 
   const domains = {};
@@ -75,10 +119,20 @@ function readNewProductionDomains(env) {
     try {
       url = new URL(value);
     } catch {
-      fatal(`${variable} must be an absolute HTTPS URL. Set all three PROD_NEW_* URLs, or none.`);
+      fatal(
+        `${variable} must be an absolute HTTPS URL. Set all three PROD_NEW_* URLs, or none.`,
+      );
     }
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-      fatal(`${variable} must be an HTTPS URL without credentials, a query, or a fragment.`);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      fatal(
+        `${variable} must be an HTTPS URL without credentials, a query, or a fragment.`,
+      );
     }
     domains[field] = value;
   });
@@ -130,6 +184,11 @@ function resolveProfile(appEnv, env, options = {}) {
     newLegalBaseUrl: newDomains?.legalBaseUrl ?? "",
     iosBundleId: pick("iosBundleId"),
     androidPackage: pick("androidPackage"),
+    // Firebase configuration is intentionally profile-local. Falling back from
+    // a dev package to the production google-services.json creates a build that
+    // has the wrong Firebase app identity, so an absent dev file disables only
+    // remote push for local development instead of selecting the prod app.
+    androidGoogleServicesFile: primary.androidGoogleServicesFile,
     appleAscAppId: pick("appleAscAppId"),
     iosBuildNumber: pick("iosBuildNumber") || "1",
     androidVersionCode: pick("androidVersionCode") || "1",
@@ -152,6 +211,15 @@ function resolveProfile(appEnv, env, options = {}) {
     fatal(
       "FATAL: no ANDROID_PACKAGE set in either DEV or PROD profile.\n" +
         "Set DEV_ANDROID_PACKAGE and/or PROD_ANDROID_PACKAGE in mobile/.env.{dev,prod}.",
+    );
+  }
+  if (
+    resolved.androidGoogleServicesFile &&
+    options.validateAndroidGoogleServices
+  ) {
+    validateAndroidGoogleServicesFile(
+      resolved.androidGoogleServicesFile,
+      resolved.androidPackage,
     );
   }
 

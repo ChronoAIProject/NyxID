@@ -5,10 +5,10 @@
   "main": "index.ts",
   "scripts": {
     "start": "APP_ENV=dev expo start",
-    "android": "APP_ENV=dev expo run:android",
+    "android": "APP_ENV=dev expo prebuild --platform android --clean --no-install && APP_ENV=dev expo run:android",
     "ios": "APP_ENV=dev expo run:ios",
     "web": "APP_ENV=dev expo start --web",
-    "test": "tsx --test \"src/**/*.test.ts\"",
+    "test": "tsx --test \"src/**/*.test.ts\" scripts/android-build-command.test.js",
     "test:jest": "jest",
     "typecheck": "tsc --noEmit",
     "check:native-sync": "node scripts/check-native-sync.js",
