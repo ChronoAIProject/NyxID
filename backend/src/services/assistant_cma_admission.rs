@@ -1585,7 +1585,7 @@ pub async fn recover_creation(
 async fn recover_creation_core(
     db: &Database,
     keys: &EncryptionKeys,
-    gateway: &CatalogCmaGateway,
+    gateway: &CatalogCmaGateway<'_>,
     owner: &str,
     id: &str,
     generation: i64,
