@@ -40,6 +40,26 @@ class RetryIncrementalTests(unittest.TestCase):
                      'process failed (signal: 15, SIGTERM: termination)'):
             self.assertTrue(should_retry(text, 101))
 
+    def test_malformed_inventory_preserves_child_exit_status(self):
+        for code in (0, 7):
+            for malformed in ('file', 'symlink'):
+                with self.subTest(code=code, malformed=malformed), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    graphs = root / 'target/debug/incremental'
+                    graphs.mkdir(parents=True)
+                    if malformed == 'file':
+                        (graphs / 'unexpected').write_text('not a crate directory')
+                    else:
+                        (graphs / 'unexpected').symlink_to(root, target_is_directory=True)
+                    result = subprocess.run(
+                        [sys.executable, str(SCRIPT), '--log-file', 'build.log', '--',
+                         sys.executable, '-c', f'print("child ran"); raise SystemExit({code})'],
+                        cwd=root, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertEqual(result.stdout.count('child ran'), 1)
+                    self.assertIn('::warning::Incremental inventory (after-build)', result.stdout)
+                    self.assertNotIn('retrying', result.stdout)
+
     def test_real_child_retries_once_without_graph_or_incremental(self):
         for failure in ('137', '143', 'sigkill', 'sigterm', 'oom', 'stale', 'ordinary', 'twice'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:

@@ -34,6 +34,7 @@ def size(path):
 
 
 def inventory(label):
+    """Validate and measure a graph; writers must refuse unverified saves."""
     subprocess.run(['df', '-h', '.'], check=True)
     total = 0
     for root in ROOTS:
@@ -52,6 +53,14 @@ def inventory(label):
                     print(f'[ci-incremental] session {session.name}: {size(session)} bytes', flush=True)
     print(f'[ci-incremental] {label} total: {total} bytes', flush=True)
     return total
+
+
+def report_inventory(label):
+    """Reader diagnostics must not replace the compiler's exit status."""
+    try:
+        inventory(label)
+    except Exception as error:
+        print(f'::warning::Incremental inventory ({label}) unavailable: {error}', flush=True)
 
 
 SESSION = re.compile(r's-([0-9a-z]+)-([0-9a-z]+)-([0-9a-z]+|working)')
@@ -130,7 +139,7 @@ def main():
     elif args.command == 'prune':
         prune()
     else:
-        inventory(args.label)
+        report_inventory(args.label)
 
 
 if __name__ == '__main__':

@@ -176,15 +176,34 @@ Archive jobs now skip graph restoration entirely. This admission budget still
 protects the seven remaining incremental lanes; the archive jobs retain the
 swap allocation/build-space check and dependency restore diagnostics.
 
-Restoration now precedes swap allocation. Before dependency restore, Linux
-hosted jobs remove unused Android, .NET, GHC and ghcup SDK directories and log
-`df`. They do not remove these directories on developer machines. The next
-check measures actual free bytes **after** dependency extraction, so runner
+Restoration now precedes swap allocation. Before dependency restore, only
+jobs that allocate the swap reserve opt into `ci-rust-cache`'s `reclaim-disk`
+input: backend archives, Clippy, KMS features and backend image inputs, including
+their warm jobs. The input defaults to false. On hosted Linux runners it
+removes unused Android, .NET, GHC and ghcup SDK directories and logs `df`.
+Permissions, CLI tests, wizard freshness and CLI coverage skip this step;
+developer machines never have their SDKs removed. Removal or reader `df`
+failures log warnings and continue. The next check measures actual free bytes
+**after** dependency extraction, so runner
 image growth and the dependency target are charged to the budget rather than
 assumed constant. On a 145 GiB filesystem, restoring a graph requires the
 image, checkout, tools and extracted dependencies together to occupy at most
 about **56 GiB** (145 minus 89). Their separate sizes vary with runner images;
 there is no measured fixed image-baseline claim.
+
+The first completed job available from the swap experiment was permissions,
+run **43344390346**, job **131620090266**. Its old unconditional cleanup took
+**47.65 s** between the `df` samples at `01:22:30.8348853Z` and
+`01:23:18.4840545Z` on 2026-11-13. Available space rose from **86G to 107G**
+(approximately **21 GiB**, rounded by `df -h`; used space read 59G then 39G).
+This interval brackets SDK removal and the second `df`, not cache download.
+The opt-in removes that work from this small lane. Reproduce with:
+
+```sh
+gh run view 43344390346 --job 131620090266 --log
+# While the overall run is still in progress, a completed job's log is available via:
+gh api --allow-escape-sequences repos/ChronoAIProject/NyxID/actions/jobs/131620090266/logs
+```
 
 | Reserved use after dependency restore | GiB |
 | --- | ---: |
@@ -205,7 +224,9 @@ allocating. It still establishes at least 40 GiB total swap or fails before
 compilation. After the reserve is released, a save needs 25 GiB for the
 worst-case archive and free-space floor. These are enforced admission budgets;
 24 GiB build growth is a provision, not a hard bound on arbitrary future Rust
-source growth. Every phase prints `df`; resource samples include free bytes.
+source growth. Opted-in cleanup, extraction admission and save preflight print
+`df`; resource samples include free bytes. The actual free-space guards remain
+authoritative even when optional cleanup or a reader diagnostic fails.
 
 The new graph prefix is `v1-rust-graph`; it never restores old unbounded
 `v0-rust-incremental` archives. The dependency/artifact prefix remains
@@ -238,8 +259,12 @@ than once and rejecting symlinks. It refuses missing markers, empty graphs
 and saves above 16 GiB. That bound, with zstd overhead and tar headers covered
 by the 17 GiB download allowance, makes extraction admission independent of
 compression ratio. Inventories print native crate/session directories and
-sizes after restore, after each build, and before/after pruning. Broad manifest
-fallback remains, but obsolete crate directories and prior input sessions
+sizes after graph restore, after each wrapped build, and before/after pruning.
+The restore inventory step is skipped when `incremental` is false. Reader
+inventories are diagnostic only: malformed directories, symlinks, failed `df`
+or filesystem errors produce warnings and preserve the compiler's exit code.
+Pruning and writer preflight remain strict and refuse an unverified save.
+Broad manifest fallback remains, but obsolete crate directories and prior input sessions
 cannot accumulate across saved generations.
 
 The native version-change fixture shrank from **1,964,788** to **982,394 bytes**
@@ -1173,7 +1198,7 @@ sentinel name. Formatting and `git diff --check` passed. Clippy was not repeated
 the only Rust change is the fallback expression and its comment, and the
 fixtures compile both actual build scripts with stable 1.98.1 and `-Dwarnings`.
 
-Rounds five and six change only CI helpers, actions, workflows and documents;
+Rounds five through seven change only CI helpers, actions, workflows and documents;
 no Rust source or build script changes. The round-six verification
 results and replay above supersede the discarded wrapper experiment. The
 full MongoDB suites are not rerun locally; the new PR CI run must execute
@@ -1195,8 +1220,21 @@ The prior accepted real-workspace Clippy results and the newly passing fixtures
 remain the applicable evidence. No Docker resources were started this round. The owned 35 GiB scratch tree,
 including source snapshots, compiler targets, archives, downloaded tools and
 Python environment, was removed after recording these results. `target/`
-then measured 4 KiB, no owned benchmark processes remained, and HEAD stayed
-at `df20e4869`; all round-five/six edits remain uncommitted.
+then measured 4 KiB and no owned benchmark processes remained. The engineer
+subsequently committed those edits as `c40a5d95c` before the swap experiment.
+
+Round seven passed **217 CI helper tests** (25.576 s), **41 script helper tests**
+(34.385 s) and **8 dependency-recipe tests** (0.306 s), with no skips, using
+stable 1.98.1 and the pinned nextest/llvm-cov fixture tools. Actionlint **1.7.12**,
+all four reusable-workflow permission checks and `git diff --check` passed.
+The new tests cover malformed reader inventories preserving successful and
+failed child exits, the same malformed graphs refusing saves, failed `df`,
+failed SDK removal, unchanged disk admission and opt-in wiring across every
+cache consumer. No Rust source or build script changed, so full-workspace
+Clippy and backend suites were not repeated. The helper suites still compile
+their real Cargo/build-script/coverage fixtures. No Docker resources were
+started. The 83 MiB tool/environment scratch directory and downloaded job log
+were removed; `target/` returned to 4 KiB and no verification processes remain.
 
 Reproduce the real-workspace checks from the repository root:
 
@@ -1315,14 +1353,16 @@ conclusions. A green warm job alone does not prove a cache was saved.
 
 ### Before merge
 
-1. After committing/pushing the round-six changes, dispatch **CI Cache Warm**
+1. After committing/pushing the round-seven changes, dispatch **CI Cache Warm**
    on the PR branch with `swap-mode=zswap`, `zswap-pool-percent=20`. Verify
    seven graph saves, `after-prune` sizes at most 16 GiB, and one finalized
    session per retained crate. The two archive jobs must log `enabled=0`,
    skip graph restore/save and still compile full archives. Check `df` before
-   dependencies, after restore, after swap allocation and after reserve
-   release; graph lanes also check disk before their extraction. Require
-   zswap effective settings/counters or an explicit unavailable result.
+   dependencies in reserve jobs, after graph restore in graph lanes, after
+   swap allocation and after reserve release; graph lanes also check disk
+   before extraction. Confirm SDK cleanup is skipped in permissions and CLI
+   jobs and restored-graph inventory is skipped in archive/image-input jobs.
+   Require zswap effective settings/counters or an explicit unavailable result.
 2. Dispatch **CI Cache Warm** again at the same commit. The seven graph lanes
    must hit and pass extraction admission; a safe restore skip does not prove
    reuse. Inspect inventories for obsolete crates/sessions. Archive jobs stay
@@ -1338,9 +1378,11 @@ conclusions. A green warm job alone does not prove a cache was saved.
    same revision and dependency-cache state. Dispatch **CI Cache Warm** in
    parallel with (`swap-mode=off`), (`swap-mode=zswap`, `zswap-pool-percent=20`),
    and (`swap-mode=zswap`, `zswap-pool-percent=50`). The per-ref concurrency
-   allows all three. The two archive jobs must log `enabled=0` and empty
-   graph inventories; no archive-graph cache deletion is needed under the
-   final policy. Compare build-phase wall/CPU/RSS/swap and pool statistics
+   allows all three. The engineer dispatched runs **43344390346** (off),
+   **43344395848** (20%) and **43344400769** (50%) from `c40a5d95c`;
+   their build results are not evaluated in this round. The two archive jobs
+   must log `enabled=0` and skip graph restoration; no archive-graph cache
+   deletion is needed under the final policy. Compare build-phase wall/CPU/RSS/swap and pool statistics
    across these three runs. Run 43310342885 is the previous incremental-policy
    baseline, so a difference from it cannot be attributed to zswap alone.
    Keep the measured winner and remove the experiment inputs in the ensuing
@@ -1400,6 +1442,6 @@ Do not use **Publish Images** as a pre-merge dry run: it really publishes.
    branch build proves compilation/packaging; it does not prove tag-triggered
    publication permissions or artifact delivery.
 
-The engineer committed df20e4869, opened PR #2428 and triggered the hosted
-runs above. Round-five and round-six edits are left uncommitted; the agent did not push,
-dispatch workflows or delete remote caches.
+The engineer committed df20e4869 and c40a5d95c, opened PR #2428 and triggered
+the hosted runs above. Round-seven edits are left uncommitted on c40a5d95c;
+the agent did not push, dispatch workflows or delete remote caches.

@@ -207,6 +207,13 @@ not carried forward. One marker spans all Cargo commands in the job. There is
 no compiler wrapper or Cargo debug-log parser. An absent marker, empty graph,
 busy lock, unknown layout or graph above 16 GiB refuses the save.
 
+Reader inventories only report diagnostics: filesystem/layout or `df` errors
+log warnings without changing the build's exit status. The restored-graph
+inventory is skipped when no graph is requested. Pruning and writer preflight
+retain strict validation. Only reserve-allocating jobs opt into hosted Linux
+SDK reclamation; deletion failures warn, and actual free space still controls
+restore admission.
+
 Graph readers build with `CARGO_INCREMENTAL=0` on a miss or disk-guard skip.
 The seven graph producers keep it enabled on misses; the two archive jobs
 keep it disabled and do not produce unused graphs. A compiler OOM/kill or

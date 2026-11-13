@@ -98,6 +98,42 @@ class IncrementalTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'no build marker'):
                 cache.prune()
 
+    def test_malformed_reader_inventory_warns_but_prune_refuses_save(self):
+        for malformed in ('file', 'symlink', 'nested-symlink'):
+            with self.subTest(malformed=malformed), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                graphs = root / 'target/debug/incremental'
+                graphs.mkdir(parents=True)
+                (root / 'target/ci-incremental-build-start').touch()
+                entry = graphs / 'unexpected'
+                if malformed == 'file':
+                    entry.write_text('not a crate directory')
+                elif malformed == 'symlink':
+                    entry.symlink_to(root, target_is_directory=True)
+                else:
+                    entry.mkdir()
+                    (entry / 'nested').symlink_to(root, target_is_directory=True)
+                for command, code in (('inventory', 0), ('prune', 1)):
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / '.github/scripts/incremental_cache.py'), command],
+                        cwd=root, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertIn('::warning::' if command == 'inventory' else 'ValueError',
+                                  result.stdout + result.stderr)
+                self.assertTrue(entry.exists(), 'validation must refuse before deleting malformed graphs')
+
+    def test_failed_df_is_diagnostic_only_for_readers(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(cache, 'MARKER', Path(tmp) / 'marker'), \
+             patch('incremental_cache.subprocess.run', side_effect=subprocess.CalledProcessError(1, 'df')):
+            cache.MARKER.touch()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                cache.report_inventory('test')
+            self.assertIn('::warning::Incremental inventory (test)', output.getvalue())
+            with self.assertRaises(subprocess.CalledProcessError):
+                cache.prune()
+
     def test_budget_covers_download_extraction_and_build_growth(self):
         swap = backend_disk.reserve_bytes('SwapTotal: 3145728 kB')
         self.assertEqual(swap, 37 * 1024**3 + 1024**2)

@@ -54,7 +54,7 @@ def run_once(command, log_path, append, env):
             sys.stdout.flush()
             log.write(line)
         code = process.wait()
-        incremental_cache.inventory('after-build')
+        incremental_cache.report_inventory('after-build')
         return 128 - code if code < 0 else code
 
 

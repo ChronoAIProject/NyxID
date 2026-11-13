@@ -218,7 +218,24 @@ class CacheWarmTests(unittest.TestCase):
         for name in ('backend-test-archive', 'coverage-backend-archive'):
             self.assertEqual(self.warm['jobs'][name]['env']['CARGO_INCREMENTAL'], 0)
         inventory = next(s for s in self.action['runs']['steps'] if s.get('name') == 'Record restored graph sizes')
-        self.assertNotIn('if', inventory)
+        self.assertEqual(inventory['if'], "inputs.incremental == 'true'")
+
+    def test_only_reserve_jobs_opt_into_sdk_reclamation(self):
+        self.assertEqual(self.action['inputs']['reclaim-disk']['default'], 'false')
+        prepare = next(s for s in self.action['runs']['steps']
+                       if s.get('name') == 'Prepare disk before dependency restore')
+        self.assertEqual(prepare['if'], "runner.os == 'Linux' && inputs.reclaim-disk == 'true'")
+        self.assertEqual(prepare['run'], 'python3 .github/scripts/backend_disk.py before-dependencies')
+        for path in Path('.github/workflows').glob('*.yml'):
+            for job_id, job in load(str(path))['jobs'].items():
+                steps = job.get('steps', [])
+                reserve = any(s.get('run') == 'bash .github/scripts/prepare-backend-runner.sh'
+                              for s in steps)
+                for step in steps:
+                    if step.get('uses') == CACHE_ACTION:
+                        with self.subTest(workflow=path.name, job=job_id):
+                            self.assertEqual(step['with'].get('reclaim-disk', 'false'),
+                                             'true' if reserve else 'false')
 
     def test_manual_dispatch_saves_branch_caches_and_push_saves_main_only(self):
         policy = next(step for step in self.action["runs"]["steps"] if step.get("id") == "save-policy")

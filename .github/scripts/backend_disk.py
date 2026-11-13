@@ -30,18 +30,29 @@ def restore_required(swap_bytes):
                swap_bytes + (GRAPH_GIB + BUILD_GROWTH_GIB + TEST_ARCHIVE_GIB + FLOOR_GIB) * GIB)
 
 
+def best_effort(command):
+    """Cleanup and diagnostics are optional; measured free space governs admission."""
+    try:
+        subprocess.run(command, check=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f'::warning::Optional disk preparation failed ({" ".join(command)}): {error}', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('phase', choices=('before-dependencies', 'before-incremental', 'before-save'))
     args = parser.parse_args()
-    subprocess.run(['df', '-h', '.'], check=True)
+    if args.phase == 'before-save':
+        subprocess.run(['df', '-h', '.'], check=True)
+    else:
+        best_effort(['df', '-h', '.'])
     if args.phase == 'before-dependencies':
-        # These SDKs are unused by the Rust jobs that call this composite.
+        # Only reserve-allocating jobs opt into this phase through the action.
         # Never remove host software outside an ephemeral GitHub runner.
         if os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and os.environ.get('RUNNER_OS') == 'Linux':
-            subprocess.run(['sudo', '-n', 'rm', '-rf', '/usr/local/lib/android',
-                            '/usr/share/dotnet', '/opt/ghc', '/usr/local/.ghcup'], check=True)
-            subprocess.run(['df', '-h', '.'], check=True)
+            best_effort(['sudo', '-n', 'rm', '-rf', '/usr/local/lib/android',
+                         '/usr/share/dotnet', '/opt/ghc', '/usr/local/.ghcup'])
+            best_effort(['df', '-h', '.'])
         return
     free = shutil.disk_usage('.').free
     if args.phase == 'before-save':
