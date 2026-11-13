@@ -474,6 +474,18 @@ function setup(
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "../notifications/NotificationBell": { NotificationBell: "NotificationBell" },
+    "../notifications/useNotifications": {
+      useNotificationIndicator: () => ({
+        enabled: false,
+        live: false,
+        unread: 0,
+        needsDecision: 0,
+        badge: "",
+      }),
+      useNotificationRuntime: () => ({ active: true, online: true }),
+      useVisibleThreadRead: () => {},
+    },
   });
   Object.assign(
     headerModule,

@@ -1585,6 +1585,12 @@ fn dispatch<'a>(
     delegation_approved: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "list_notifications" => Box::pin(async move {
+            Ok((
+                super::assistant_notifications::list_for_tool(state, &chat.user_id, args).await?,
+                false,
+            ))
+        }),
         "task_status" => Box::pin(async move {
             Ok((
                 crate::services::assistant_task_status::read(&state.db, chat, args).await?,
@@ -3897,6 +3903,7 @@ pub struct SettingsResponse {
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
     specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
+    notifications: crate::models::assistant_settings::NotificationPreferences,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -3921,6 +3928,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
             specialist_access_requests: row.specialist_access_requests,
+            notifications: row.notifications,
         }
     }
 }
@@ -3955,6 +3963,8 @@ pub struct SettingsRequest {
     max_group_handoffs_per_hour: Option<i32>,
     #[serde(default)]
     specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
+    #[serde(default)]
+    notifications: Option<crate::models::assistant_settings::NotificationPreferences>,
 }
 
 pub async fn update_settings(
@@ -3986,6 +3996,7 @@ pub async fn update_settings(
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
             specialist_access_requests: body.specialist_access_requests,
+            notifications: body.notifications,
         },
     )
     .await?;
@@ -4098,6 +4109,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());

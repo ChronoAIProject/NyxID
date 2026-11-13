@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Sse, sse::Event},
     routing::post as route_post,
 };
+use futures::TryStreamExt;
 use mongodb::bson::doc;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -2089,3 +2090,108 @@ async fn shared_agent_crew_name_collisions_require_exact_identity() {
 
 #[path = "assistant_group_retirement_tests.rs"]
 mod retirement;
+
+#[tokio::test]
+async fn real_member_replies_notify_once_per_public_post_and_delete_with_the_group() {
+    use crate::{
+        models::assistant_notification::{AssistantNotification, NotificationKind, SourceType},
+        services::{
+            assistant_notification_service as feed,
+            feature_flag_service::{self as flags, FlagTarget},
+        },
+    };
+    let (state, _, server) = setup("notifications_public_group_reply").await;
+    feed::ensure_indexes(&state.db).await.unwrap();
+    flags::set_platform_override(&state.db, feed::FLAG_KEY, &FlagTarget::Global, true, OWNER)
+        .await
+        .unwrap();
+    feed::reset_flag_cache(&state.db);
+    let agent = researcher(&state).await;
+    let group = groups::create(
+        &state.db,
+        OWNER,
+        "Reports",
+        std::slice::from_ref(&agent.id),
+        "user",
+    )
+    .await
+    .unwrap();
+    let notifications = state.db.collection::<AssistantNotification>(
+        crate::models::assistant_notification::COLLECTION_NAME,
+    );
+    for (index, prompt) in ["@researcher first report", "@researcher second report"]
+        .into_iter()
+        .enumerate()
+    {
+        post(&state, OWNER, &group.id, prompt, None).await.unwrap();
+        // Include the creation notice: private settlement clears working
+        // before the public member reply is appended.
+        let transcript = settled(&state, &group.id, 1 + (index + 1) * 2).await;
+        let reply = transcript
+            .iter()
+            .rev()
+            .find(|row| row.role == "agent")
+            .unwrap();
+        let rows: Vec<_> = notifications
+            .find(doc! {"user_id": OWNER})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the hidden member settlement must not duplicate its public post"
+        );
+        assert_eq!(rows[0].kind, NotificationKind::AgentUpdate);
+        assert_eq!(rows[0].source.source_type, SourceType::Group);
+        assert_eq!(rows[0].source.group_id.as_deref(), Some(group.id.as_str()));
+        assert_eq!(
+            rows[0].source.message_id.as_deref(),
+            Some(reply.id.as_str())
+        );
+        assert_eq!(rows[0].count, (index + 1) as i64);
+        let listed = feed::list(&state, OWNER, &feed::ListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].preview, reply.text);
+        assert!(listed.items[0].url.contains(&format!("c={}", group.id)));
+    }
+    groups::delete(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(
+        notifications
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notifications_are_purged_with_personal_group_transcript() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let (state, _, server) = setup("notifications_group_purge").await;
+    let agent = researcher(&state).await;
+    let group = groups::create(
+        &state.db,
+        OWNER,
+        "Reports",
+        std::slice::from_ref(&agent.id),
+        "user",
+    )
+    .await
+    .unwrap();
+    let removed = seed(&state.db, "another-recipient", doc! {"group_id":&group.id}).await;
+    let retained = seed(&state.db, OWNER, doc! {"group_id":"another-group"}).await;
+    groups::delete(&state.db, OWNER, &group.id).await.unwrap();
+    probe(&state.db, &removed, false).await;
+    probe(&state.db, &retained, true).await;
+    server.abort();
+    state.db.drop().await.unwrap();
+}

@@ -349,6 +349,13 @@ const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_NOTIFICATIONS_FLAG_KEY: &str = "assistant:notifications";
+const ASSISTANT_NOTIFICATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+    description: "NyxBot Notifications: the durable feed, bell, push preferences and the nyxid__list_notifications tool. Upgrade all replicas before enabling.",
+    default_enabled: false,
+};
+
 pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
 const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: MOBILE_MFA_FLAG_KEY,
@@ -486,6 +493,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
+    ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
@@ -548,6 +556,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
+    ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
@@ -3329,6 +3338,7 @@ mod tests {
                 "permissions:execution-v1",
                 "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
+                "assistant:notifications",
                 "assistant:org-agents",
                 "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",

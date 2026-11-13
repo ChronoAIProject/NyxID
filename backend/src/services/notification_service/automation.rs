@@ -105,6 +105,23 @@ pub async fn send(
             .url(&config.frontend_url),
         ),
     ]);
+    send_data(db, config, http, fcm, apns, channel, label, &body, data).await
+}
+
+/// Same device fan-out and outcome rules with a caller-built payload
+/// (NyxBot Notifications push).
+#[allow(clippy::too_many_arguments)]
+pub async fn send_data(
+    db: &Database,
+    config: &AppConfig,
+    http: &Client,
+    fcm: Option<&FcmAuth>,
+    apns: Option<&ApnsAuth>,
+    channel: &NotificationChannel,
+    label: &str,
+    body: &str,
+    data: HashMap<String, String>,
+) -> Outcome {
     let mut failure = Failure::new("push_devices_invalid");
     let mut accepted = false;
     for device in unique_devices_by_token(&channel.push_devices) {
@@ -118,7 +135,7 @@ pub async fn send(
                 config.fcm_project_id.as_deref().expect("configured"),
                 &device.token,
                 label,
-                &body,
+                body,
                 &data,
             )
             .await
@@ -144,7 +161,7 @@ pub async fn send(
                     .expect("configured"),
                 config.apns_sandbox,
                 label,
-                &body,
+                body,
                 &data,
             )
             .await

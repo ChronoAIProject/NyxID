@@ -315,6 +315,7 @@ pub mod assistant_instruction_context;
 pub mod assistant_job_service_use;
 pub mod assistant_live;
 pub mod assistant_native_execution;
+pub mod assistant_notification_service;
 pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;

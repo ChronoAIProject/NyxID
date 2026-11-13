@@ -178,6 +178,17 @@ never guess omitted IDs or widen to all operations to work around a partial
 result. Pages fit the assistant result budget without clipping policy fields.
 See [operation discovery pagination](../AGENT_OPERATION_SCOPES.md#native-discovery-pagination-2271).
 
+### Notifications and owner digests
+
+Behind the default-off `assistant:notifications` flag, NyxBot can call the
+read-only `nyxid__list_notifications` tool when the owner asks what they missed,
+or when an automation asks for a digest. It accepts `since`, `kinds`,
+`unread_only` (default true) and `limit` (at most 50). It returns authorized,
+bounded previews and canonical source links without marking them seen. NyxBot
+trigger turns may use it; specialists, guests, collaboration execution threads
+and external plugin clients may not. See [Notifications](12-notifications.md)
+for producers, coalescing, card resolution, retention, push and rollout.
+
 ## 8. Permission requests (specialist → NyxBot)
 
 NyxBot is involved in a specialist turn only when the turn's admission snapshot says so: `ActiveTurn.report_to` names the exact NyxBot thread that assigned the work (`origin: orchestrator`, or an `event` turn whose drained events are all bound to that same target), or `ActiveTurn.with_nyxbot` is set because the turn runs in a personal group whose current members include the owner's NyxBot. Everything else (a direct chat in the app or on a channel, a voice turn, a trigger run, a retry, a card continuation, an org group, any ambiguous, unbound or legacy event) is not involved, and ambiguity always resolves to "not involved". Non-involved specialist work never creates an access request, NyxBot event, message, outbox entry or card: an ungranted call returns a neutral, human-addressed `missing_access` result naming the scope and target, stating that no request was created and linking the agent's details (`AssistantPage::AgentDetails { agent, tab }`: `/assistant?agent=<id>&details=grants`, or `&details=skills` for skills), records audit metadata, and the specialist continues without the access. The rest of this section applies to involved work only.

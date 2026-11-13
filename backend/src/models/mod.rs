@@ -158,6 +158,7 @@ pub mod assistant_group;
 pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
+pub mod assistant_notification;
 pub mod assistant_onboarding;
 pub mod assistant_platform_model;
 pub mod assistant_profile_route;

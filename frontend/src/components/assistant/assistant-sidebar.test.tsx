@@ -876,6 +876,59 @@ describe("NyxBot agents in the sidebar", () => {
     expect(groups.onNewGroup).toHaveBeenCalledOnce();
   });
 
+  it("marks threads, channel chats and crews with unread notifications, leaving collaboration badges alone", () => {
+    const channelThread: Conversation = {
+      id: `nyxa-${"e".repeat(32)}`,
+      title: "Family",
+      created_at: at,
+      last_message_at: at,
+      channel: { platform: "telegram", channel_agent_id: "c1", bot_label: "Home", chat_id: "-100", chat_kind: "group", chat_title: "Family" },
+    };
+    const group = (fields: Partial<AssistantGroup>): AssistantGroup => ({
+      id: "nyxg-1",
+      name: "Launch crew",
+      members: [{ id: "agent-nyxbot", name: "NyxBot", kind: "nyxbot", destroyed: false, working: false }],
+      lead_agent_id: "agent-nyxbot",
+      working_agent_ids: [],
+      message_count: 3,
+      last_message_at: at,
+      created_at: at,
+      ...fields,
+    });
+    const groups: SidebarGroups = {
+      groups: [
+        group({}),
+        group({ id: "nyxg-2", name: "Quiet" }),
+        group({ id: "nyxg-3", name: "Shared", collaboration: { version: 1, creator_user_id: "owner", membership_revision: 1,
+          history_disclosure: "History", can_manage: true, your_request_ids: [], transfer_to_user_id: null,
+          guest_access: [], proposals: [], invites: [], unread_count: 4, mention_count: 0 } }),
+      ],
+      onSelectGroup: vi.fn(),
+      onNewGroup: vi.fn(),
+      unreadGroupIds: new Set(["nyxg-1", "nyxg-3"]),
+    };
+    renderAgents(
+      { threads: [thread, channelThread], unreadThreadIds: new Set([thread.id, channelThread.id]) },
+      { groups },
+    );
+    // The open thread keeps its name but says it is unread; its channel chat section does too.
+    expect(screen.getByRole("button", { name: "Morning briefing, unread" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Home on Telegram, 1 chat, unread$/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch crew, group with NyxBot, unread" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Quiet, group with NyxBot" })).toBeInTheDocument();
+    // A collaboration group keeps its own unread badge and gets no second marker.
+    const shared = screen.getByRole("button", { name: "Shared, group with NyxBot" });
+    expect(within(shared).getByLabelText("Unread messages")).toBeVisible();
+    expect(shared.querySelector("[data-unread-marker]")).toBeNull();
+    expect(document.querySelectorAll("[data-unread-marker]")).toHaveLength(3);
+  });
+
+  it("shows no unread markers without the notification summary", () => {
+    renderAgents({ threads: [thread] });
+    expect(screen.getByRole("button", { name: "Morning briefing" })).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-unread-marker]")).toHaveLength(0);
+  });
+
   it("invites a first group when there are none", async () => {
     const user = userEvent.setup();
     const onNewGroup = vi.fn();

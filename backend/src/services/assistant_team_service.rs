@@ -2359,6 +2359,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                 db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
                     .await?;
+                db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+                    .delete_many(doc! {"source.agent_id": &agent.id})
+                    .session(&mut *session)
+                    .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
                     db, &mut agent, session,
                 ))
@@ -2427,6 +2431,13 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                         )
                         .session(&mut *session)
                         .await?;
+                    super::assistant_notification_service::resolve_cards_in_session(
+                        db,
+                        session,
+                        super::assistant_notification_service::CardScope::Conversation(&row.id),
+                        "superseded",
+                    )
+                    .await?;
                 }
                 Ok((agent, children))
             }
@@ -2483,6 +2494,9 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     }
     // Clean derived authoring claims before the parent so a failed cleanup
     // remains retryable through the existing destroyed-agent purge endpoint.
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.agent_id": &agent.id})
+        .await?;
     db.collection::<bson::Document>(
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     )

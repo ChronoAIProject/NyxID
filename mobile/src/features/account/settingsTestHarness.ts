@@ -34,6 +34,7 @@ const EXPANDED = [
   "SettingsGroup",
   "SettingsRow",
   "SettingsMenuRow",
+  "NyxBotPushSwitches",
 ];
 
 function renderRows(node: Element, fontScale: number): Element {
@@ -70,11 +71,18 @@ export function setupSettingsScreen(
     connectedTelegram = false,
     pushDevices = 0,
     voiceEnabled = false,
+    nyxbotNotifications,
     params,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
     voiceEnabled?: boolean;
+    /** NyxBot notification flag and its saved push switches. */
+    nyxbotNotifications?: {
+      enabled: boolean;
+      push?: Record<string, boolean>;
+      pending?: boolean;
+    };
     params?: Record<string, unknown>;
   } = {},
 ) {
@@ -94,6 +102,8 @@ export function setupSettingsScreen(
   const dynamicText = {};
   const screenContainer = { ScreenContainer: "ScreenContainer" };
   const settingsList = {};
+  // The extracted switches render through the harness so their rows are real.
+  const pushSwitches = {};
   const theme = {
     useTheme: () => ({
       colors: lightColors,
@@ -106,7 +116,30 @@ export function setupSettingsScreen(
     {},
     { get: (_target, name) => (name === "__esModule" ? false : String(name)) },
   );
+  const pushPreferenceMutations: unknown[] = [];
   const harness = hookHarness<Element>({
+    "../notifications/useNotifications": {
+      useNotificationsEnabled: () => nyxbotNotifications?.enabled ?? false,
+      useNotificationPushPreferences: () => ({
+        data: nyxbotNotifications?.pending
+          ? undefined
+          : {
+              automation_result: false,
+              automation_problem: false,
+              needs_decision: false,
+              agent_update: false,
+              chat_update: false,
+              group_mention: false,
+              ...(nyxbotNotifications?.push ?? {}),
+            },
+        isPending: nyxbotNotifications?.pending ?? false,
+      }),
+      useUpdateNotificationPushPreferences: () => ({
+        mutate: (value: unknown) => pushPreferenceMutations.push(value),
+        isPending: false,
+      }),
+    },
+    "./NyxBotPushSwitches": pushSwitches,
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
       ...Object.fromEntries(
@@ -228,6 +261,7 @@ export function setupSettingsScreen(
     settingsList,
     load("../../components/settings/SettingsList.tsx"),
   );
+  Object.assign(pushSwitches, load("./NyxBotPushSwitches.tsx"));
   const module = load(file) as Record<string, (props: any) => Element>;
   const Screen = module[exportName]!;
   harness.mount(() =>
@@ -267,6 +301,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
+    pushPreferenceMutations,
     deviceChoices,
     sheets,
     pushes,
