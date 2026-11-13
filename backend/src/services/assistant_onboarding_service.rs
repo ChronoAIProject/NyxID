@@ -553,7 +553,7 @@ pub async fn save(db: &Database, owner: &str, answers: Answers) -> AppResult<Ass
     Ok(row)
 }
 
-/// Hide the home's suggestions until the owner retakes the intro.
+/// Hide the home's suggestions until the owner restores them or retakes the intro.
 pub async fn hide_suggestions(db: &Database, owner: &str) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
     // Hiding before the intro was ever answered records a skipped intro.
@@ -572,6 +572,21 @@ pub async fn hide_suggestions(db: &Database, owner: &str) -> AppResult<()> {
         },
     )
     .await?;
+    Ok(())
+}
+
+/// Restore suggestions on an existing row only. This plain update cannot
+/// resurrect an erased row, so it needs no erasure fence.
+pub async fn show_suggestions(db: &Database, owner: &str) -> AppResult<()> {
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": owner},
+            doc! {"$set": {
+                "suggestions_hidden_at": bson::Bson::Null,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
     Ok(())
 }
 
@@ -854,6 +869,91 @@ mod tests {
         .await
         .unwrap();
         assert!(row.suggestions_hidden_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn showing_suggestions_preserves_answers_and_intro_version() {
+        let db = crate::test_utils::connect_transaction_test_database("onboarding_show").await;
+        let owner = "32345678-1234-4123-8123-123456789abc";
+        let old = bson::DateTime::from_millis(1);
+        let original = doc! {
+            "_id": owner,
+            "intro_version": INTRO_VERSION - 1,
+            "outcome": "future_outcome",
+            "topics": ["inbox", "future_topic"],
+            "work_style": "team",
+            "suggestions_hidden_at": bson::Bson::Null,
+            "created_at": old,
+            "updated_at": old,
+        };
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        rows.insert_one(original.clone()).await.unwrap();
+        hide_suggestions(&db, owner).await.unwrap();
+        assert!(
+            get(&db, owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .suggestions_hidden_at
+                .is_some()
+        );
+        show_suggestions(&db, owner).await.unwrap();
+        let restored = rows.find_one(doc! {"_id": owner}).await.unwrap().unwrap();
+        assert_eq!(
+            restored.get("suggestions_hidden_at"),
+            Some(&bson::Bson::Null)
+        );
+        assert_ne!(restored.get("updated_at"), original.get("updated_at"));
+        for field in [
+            "outcome",
+            "topics",
+            "work_style",
+            "intro_version",
+            "created_at",
+        ] {
+            assert_eq!(restored.get(field), original.get(field), "{field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn showing_suggestions_without_a_row_creates_nothing() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("onboarding_show_absent").await;
+        show_suggestions(&db, "42345678-1234-4123-8123-123456789abc")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn showing_suggestions_only_changes_the_callers_row() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("onboarding_show_owner").await;
+        let owner = "52345678-1234-4123-8123-123456789abc";
+        let other = "62345678-1234-4123-8123-123456789abc";
+        hide_suggestions(&db, owner).await.unwrap();
+        hide_suggestions(&db, other).await.unwrap();
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        let before = rows.find_one(doc! {"_id": other}).await.unwrap().unwrap();
+        show_suggestions(&db, owner).await.unwrap();
+        assert!(
+            get(&db, owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .suggestions_hidden_at
+                .is_none()
+        );
+        assert_eq!(
+            rows.find_one(doc! {"_id": other}).await.unwrap().unwrap(),
+            before
+        );
     }
 
     #[tokio::test]

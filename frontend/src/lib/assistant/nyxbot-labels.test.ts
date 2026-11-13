@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { appI18n } from "@/i18n";
 import {
   agentHandle,
   agentTitle,
@@ -11,6 +12,53 @@ import {
   withDisplayName,
   workingLabel,
 } from "./nyxbot-labels";
+
+afterEach(async () => { await appI18n.changeLanguage("en"); });
+
+it.each([
+  ['Specialist researcher replied. Reply excerpt: "Original English detail"', "researcher replied", "researcher 已回复"],
+  ['Specialist researcher was stopped. Reply excerpt: "Original English detail"', "researcher was stopped", "researcher 已停止"],
+  ['Specialist researcher failed (busy). Reply excerpt: "Original English detail"', "researcher failed", "researcher 执行失败"],
+  ["Specialist researcher requests service github (request_id r). Original English detail", "researcher asks to use github", "researcher 请求使用 github"],
+  ["Specialist researcher requests read-only account access (request_id r). Original English detail", "researcher asks to read your account", "researcher 请求读取你的账号"],
+  ["NyxBot allowed your request for service github.", "NyxBot allowed github", "NyxBot 已允许使用 github"],
+  ["NyxBot denied your request for service github.", "NyxBot denied github", "NyxBot 已拒绝使用 github"],
+  ["The user allowed your request for service github.", "You allowed github", "你已允许使用 github"],
+  ["The user denied your request for service github.", "You denied github", "你已拒绝使用 github"],
+  ["NyxBot allowed your request for read-only account access.", "NyxBot allowed read-only account access", "NyxBot 已允许以只读方式访问账号"],
+  ["NyxBot denied your request for read-only account access.", "NyxBot denied read-only account access", "NyxBot 已拒绝以只读方式访问账号"],
+  ["The user allowed your request for read-only account access.", "You allowed read-only account access", "你已允许以只读方式访问账号"],
+  ["The user denied your request for read-only account access.", "You denied read-only account access", "你已拒绝以只读方式访问账号"],
+  ["The user approved the github approval request (Original English detail) via telegram.", "You approved the github request via Telegram", "你已通过 Telegram 批准 github 请求"],
+  ["The user rejected the github approval request (Original English detail) via telegram.", "You rejected the github request via Telegram", "你已通过 Telegram 拒绝 github 请求"],
+  ["The user approved the github approval request (Original English detail).", "You approved the github request", "你已批准 github 请求"],
+  ["The user rejected the github approval request (Original English detail).", "You rejected the github request", "你已拒绝 github 请求"],
+  ["The user finished connecting github.", "Finished connecting github", "已完成连接 github"],
+  ["The user declined connecting github.", "Declined connecting github", "已拒绝连接 github"],
+  ["The telegram channel bot Home the user just created is now linked to NyxBot.", "Telegram bot Home linked to NyxBot", "Telegram 机器人 Home 已关联到 NyxBot"],
+  ["The telegram channel bot Home was created but could not be linked", "Telegram bot Home could not be linked", "无法关联 Telegram 机器人 Home"],
+  ["The user verified their telegram account on channel bot Home;", "Verified your Telegram account on Home", "已在 Home 上验证你的 Telegram 账号"],
+  ['The owner sent another telegram message while you were working. Message: "Original English detail"', "New Telegram message", "新的 Telegram 消息"],
+  ["Asynchronous service operation finished: operation_cancelled.", "Background task cancelled", "后台任务已取消"],
+  ["Asynchronous service operation finished: timeout.", "Background tracking timed out", "后台跟踪已超时"],
+  ["Asynchronous service operation finished: done.", "Background task finished", "后台任务已完成"],
+  ["Asynchronous service operation finished: completed.", "Background task finished", "后台任务已完成"],
+  ["Asynchronous service operation finished: provider_error.", "Background task provider error", "后台任务：provider error"],
+  ["Skill weekly-review published and attached. Original English detail", "Skill publication", "技能发布"],
+  ["Skill weekly-review requires a corrected package. Original English detail", "Skill publication", "技能发布"],
+])("translates the summary for %s while preserving English notice parsing", async (source, english, chinese) => {
+  const original = describeEventNotice(source!);
+  expect(original.summary).toBe(english);
+  await appI18n.changeLanguage("zh-CN");
+  expect(describeEventNotice(source!)).toEqual({ ...original, summary: chinese });
+});
+
+it("preserves unknown notice text even when it happens to be a catalog key", async () => {
+  await appI18n.changeLanguage("zh-CN");
+  expect(describeEventNotice("Settings. Original English detail")).toMatchObject({
+    summary: "Settings", detail: "Settings. Original English detail",
+  });
+});
 
 describe("eventNotices", () => {
   it("strips the server's event header, whatever its parenthetical says", () => {

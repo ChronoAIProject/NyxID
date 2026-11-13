@@ -1,4 +1,5 @@
 import { StatusBadge } from "@/components/shared/status-badge";
+import { nodeStatusKey } from "@/lib/status-contract";
 
 /**
  * Renders the canonical node status (Online / Draining / Offline) as a
@@ -18,11 +19,7 @@ export function NodeStatusBadge({
   readonly status: string;
   readonly isConnected: boolean;
 }) {
-  const statusKey = isConnected
-    ? "Online"
-    : status === "draining"
-      ? "Draining"
-      : "Offline";
+  const statusKey = nodeStatusKey(status, isConnected);
 
   return <StatusBadge domain="node" statusKey={statusKey} />;
 }

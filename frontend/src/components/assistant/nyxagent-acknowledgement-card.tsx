@@ -14,18 +14,19 @@ function title(row: NyxAgentAcknowledgement): string {
   // A specialist's request that NyxBot decides.
   if (row.decider === "orchestrator") {
     if (row.kind === "service") {
-      return `Allow this agent to use ${row.service_name ?? row.service_slug ?? "this service"}?`;
+      return translateUi("Allow this agent to use {{service}}?", {
+        service: row.service_name ?? row.service_slug ?? translateUi("this service"),
+      });
     }
     if (row.kind === "account") return translateUi("Allow this agent to read your NyxID account?");
     return translateUi("Confirm: {{summary}}", { summary: row.summary });
   }
   if (row.kind === "service")
-    return `Allow this chat to use ${row.service_name ?? "this service"}?`;
+    return translateUi("Allow this chat to use {{service}}?", {
+      service: row.service_name ?? translateUi("this service"),
+    });
   if (row.kind === "account") {
-    return (
-      "Allow this chat to manage your NyxID account " +
-      "(keys, channel bots, services, nodes, approval settings)?"
-    );
+    return translateUi("Allow this chat to manage your NyxID account (keys, channel bots, services, nodes, approval settings)?");
   }
   return translateUi("Confirm: {{summary}}", { summary: row.summary });
 }
@@ -82,7 +83,7 @@ export function NyxAgentAcknowledgementCard({
     try {
       await onDecision(choice);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : translateUi("Could not save your decision. Try again."));
+      setError(cause instanceof Error ? cause.message : "Could not save your decision. Try again.");
     }
   }
 
@@ -130,8 +131,8 @@ export function NyxAgentAcknowledgementCard({
           : acknowledgement.kind === "operations"
           ? translateUi("This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode.")
           : routed
-          ? "NyxBot decides this specialist's request against what you asked for. " +
-            "You can decide it here instead; the agent resumes on its own."
+          ? <>{translateUi("NyxBot decides this specialist's request against what you asked for.")}{" "}
+            {translateUi("You can decide it here instead; the agent resumes on its own.")}</>
           : acknowledgement.kind === "action"
             ? translateUi("This confirmation applies once, to this action only.")
             : translateUi("This permission applies to this chat only.")}
@@ -166,7 +167,7 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
         setError(cause instanceof Error ? cause.message : "Could not create connection link.");
       });
     }}>{translateUi("Connect your own")}</Button>
-    {error ? <p role="alert" className="text-14 text-destructive">{error}</p> : null}
+    {error ? <p role="alert" className="text-14 text-destructive">{translateUi(error)}</p> : null}
     <AssistantLinkModal href={href} onClose={() => setHref(null)} />
   </>;
 }

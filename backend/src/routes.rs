@@ -3010,6 +3010,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::assistant_onboarding::hide_suggestions),
         )
         .route(
+            "/nyxagent/onboarding/suggestions/show",
+            post(handlers::assistant_onboarding::show_suggestions),
+        )
+        .route(
             "/nyxagent/channels",
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )

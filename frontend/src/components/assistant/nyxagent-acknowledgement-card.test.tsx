@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
+import { appI18n } from "@/i18n";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 const createConnect = vi.hoisted(() => vi.fn(async () => "/connect/personal"));
@@ -27,7 +28,10 @@ const acknowledgement: NyxAgentAcknowledgement = {
   decided_at: null,
   expires_at: "2099-09-17T00:15:00Z",
 };
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  await appI18n.changeLanguage("en");
+});
 
 it("hides a stale owner ask in Full access while keeping specialist requests routed to NyxBot", () => {
   const decide = vi.fn();
@@ -211,4 +215,31 @@ it("2072 expires visibly while open and asks afresh without deciding the old req
     expect(request).toHaveBeenCalledTimes(1);
     expect(decide).not.toHaveBeenCalled();
   } finally { vi.useRealTimers(); }
+});
+
+it.each([
+  ["service", "user", "Allow this chat to use GitHub?", "允许此聊天使用 GitHub？", "允許此聊天使用 GitHub？"],
+  ["service", "orchestrator", "Allow this agent to use GitHub?", "允许此智能体使用 GitHub？", "允許此代理程式使用 GitHub？"],
+  ["account", "user", "Allow this chat to manage your NyxID account (keys, channel bots, services, nodes, approval settings)?", "允许此聊天管理你的 NyxID 账号（密钥、频道机器人、服务、节点和审批设置）？", "允許此聊天管理你的 NyxID 帳號（金鑰、頻道機器人、服務、節點和核准設定）？"],
+  ["account", "orchestrator", "Allow this agent to read your NyxID account?", "允许此智能体读取你的 NyxID 账号？", "允許此代理程式讀取你的 NyxID 帳號？"],
+] as const)("updates a mounted %s title for %s", async (kind, decider, english, simplified, traditional) => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind, decider }} deciding={false} onDecision={vi.fn()} />);
+  const card = screen.getByRole("region", { name: english });
+  for (const [language, title] of [["zh-CN", simplified], ["zh-TW", traditional], ["en", english]]) {
+    await act(async () => { await appI18n.changeLanguage(language); });
+    expect(card).toHaveAccessibleName(title);
+    expect(card).toHaveTextContent(title!);
+  }
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  if (decider === "orchestrator") {
+    expect(card).toHaveTextContent("NyxBot 会对照你的要求来决定此专属智能体的请求。");
+    expect(card).toHaveTextContent("你也可在此决定，智能体会自动继续。");
+  }
+});
+
+it.each(["user", "orchestrator"] as const)("translates the missing service fallback for %s", async (decider) => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, decider, service_name: null, service_slug: null }} deciding={false} onDecision={vi.fn()} />);
+  expect(screen.getByRole("region")).toHaveAccessibleName(/this service/);
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByRole("region")).toHaveAccessibleName(/使用 此服务？/);
 });

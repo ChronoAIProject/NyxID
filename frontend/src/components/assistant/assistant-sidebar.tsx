@@ -5,7 +5,8 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
-import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
@@ -331,6 +332,7 @@ function agentAccessibleName(agent: AssistantAgent): string {
  */
 /** Chats of one channel bot shown before "Show more". */
 const CHANNEL_THREADS_SHOWN = 5;
+const AGENT_THREADS_SHOWN = 5;
 
 /**
  * One channel bot's chats under its agent: collapsed to a single row (open
@@ -410,7 +412,7 @@ function ChannelThreadsGroup({
               onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
               data-keep-drawer-open=""
               className="w-full rounded-lg px-3 py-1 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
-            >{translateUi("Show ")}{String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))}{translateUi(" more")}</button>
+            >{translateUi("Show {{count}} more", { count: Math.min(hidden, CHANNEL_THREADS_SHOWN * 4) })}</button>
           ) : null}
         </div>
       ) : null}
@@ -453,6 +455,27 @@ function AgentRow({
   const expanded = selected && !(folded && folded.active === activeThreadId);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
   const threads = expanded ? splitChannelThreads(model.threads) : { own: [], bots: [] };
+  const [showAllThreads, setShowAllThreads] = useState(false);
+  const threadListId = useId();
+  const ownerUserId = useAuthStore((state) => state.user?.id ?? null);
+  const draftedConversationIds = useAssistantDraftStore(
+    useShallow((state) =>
+      ownerUserId && state.ownerUserId === ownerUserId
+        ? Object.entries(state.drafts)
+            .filter(([key, draft]) => key.startsWith("conv:") && draft.text.trim())
+            .map(([key]) => key.slice("conv:".length))
+            .sort()
+        : [],
+    ),
+  );
+  const recentThreads = threads.own.filter(
+    (conversation, index) =>
+      index < AGENT_THREADS_SHOWN ||
+      conversation.id === activeThreadId ||
+      conversation.active_turn ||
+      draftedConversationIds.includes(conversation.id),
+  );
+  const hiddenThreads = threads.own.length - recentThreads.length;
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
   const handle = agentHandle(agent);
@@ -612,7 +635,21 @@ function AgentRow({
           aria-label={translateUi("Threads with {{value1}}", { value1: name })}
           className="mb-1 ml-[22px] mt-0.5 space-y-px border-l border-border/60 pl-1"
         >
-          {threads.own.map((conversation) => renderThread(conversation))}
+          <div id={threadListId} className="space-y-px">
+            {(showAllThreads ? threads.own : recentThreads).map(renderThread)}
+          </div>
+          {hiddenThreads > 0 ? (
+            <button
+              type="button"
+              aria-expanded={showAllThreads}
+              aria-controls={threadListId}
+              data-keep-drawer-open=""
+              onClick={() => setShowAllThreads((value) => !value)}
+              className="w-full rounded-lg px-3 py-1 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-input-focus"
+            >
+              {showAllThreads ? translateUi("Show fewer") : translateUi("Show {{count}} more", { count: hiddenThreads })}
+            </button>
+          ) : null}
           {model.threadsLoading && !model.threads.length ? (
             <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading threads...")}</p>
           ) : null}
