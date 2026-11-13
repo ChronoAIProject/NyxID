@@ -221,6 +221,7 @@ fn scope(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn create(
     db: &Database,
+    frontend: &str,
     keys: &Arc<EncryptionKeys>,
     context: &RequestContext,
     chat: &acks::ChatAuthority,
@@ -476,6 +477,9 @@ pub(super) async fn create(
         exact_service: None,
         created_at: now,
     };
+    // Claim only a representable model proposal. A fallback to the ordinary
+    // connected approval wait must keep its existing owner-chat behavior.
+    crate::services::assistant_model_observer::before_approval_request(frontend, true).await?;
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db,chat,&request,snapshot),|session,(db,chat,request,snapshot)|Box::pin(async move {
         let result:AppResult<ApprovalRequest>=async {

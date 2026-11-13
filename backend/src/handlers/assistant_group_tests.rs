@@ -2195,3 +2195,6 @@ async fn notifications_are_purged_with_personal_group_transcript() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[path = "assistant_group_model_approval_tests.rs"]
+mod model_approval_tests;

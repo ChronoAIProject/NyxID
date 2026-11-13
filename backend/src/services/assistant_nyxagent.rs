@@ -4379,7 +4379,8 @@ artifact_recovery_target: None,
                 {
                     Some(TurnError::internal("cancelled", "stop"))
                 } else {
-                    result.error.clone()
+                    result.error.clone().or_else(|| current.active_turn.as_ref()
+                        .and_then(super::assistant_model_observer::approval_error))
                 };
                 let mut error = error.map(|error| current.active_turn.as_ref().map_or_else(
                     || error.clone(),
@@ -4598,6 +4599,10 @@ artifact_recovery_target: None,
                     via: None,
                     report_to,
                 };
+                if let Some(error) = error.as_ref().filter(|e| super::assistant_model_observer::is_policy_failure(e.code)) {
+                    if !message.text.is_empty() { message.text.push_str("\n\n"); }
+                    message.text.push_str(&error.message);
+                }
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(write_checkpoint_in_session(
                         &db, session, &current, turn, &message, now,
@@ -7307,6 +7312,18 @@ impl TurnError {
             "billing_provider_unavailable" => (
                 "billing_provider_unavailable",
                 "NyxBot could not verify billing because the billing service is unavailable. Try again shortly; if this continues, contact support.",
+            ),
+            "model_policy_denied" => (
+                "model_policy_denied",
+                "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.",
+            ),
+            "model_org_approval_required" => (
+                "model_org_approval_required",
+                "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.",
+            ),
+            "model_approval_required" => (
+                "model_approval_required",
+                "This model request requires approval that this thread cannot present. Review Approval settings before retrying.",
             ),
             "model_interrupted" => (
                 "model_interrupted",

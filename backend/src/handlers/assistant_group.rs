@@ -588,12 +588,23 @@ pub(crate) async fn member_settled(
                 .await?;
             }
             Some(code) => {
+                let mut notice = format!("{} could not reply ({code}).", identifier(&agent.name));
+                if crate::services::assistant_model_observer::is_policy_failure(code) {
+                    notice.push_str("\n\n");
+                    notice.push_str(
+                        &crate::services::assistant_model_observer::approval_message(
+                            code,
+                            &crate::services::assistant_links::AssistantPage::ApprovalSettings
+                                .url(&state.config.frontend_url),
+                        ),
+                    );
+                }
                 let message = groups::append_member_reply(
                     &state.db,
                     row,
                     "notice",
                     &agent,
-                    &format!("{} could not reply ({code}).", identifier(&agent.name)),
+                    &notice,
                     Vec::new(),
                 )
                 .await?;

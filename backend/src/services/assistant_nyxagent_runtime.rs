@@ -1134,7 +1134,24 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
                     .await
             }
         } else {
-            engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await
+            match engine::get(&state.db, &row.user_id, &row.id).await {
+                Ok(current) => {
+                    let turn = engine::live_turn(&current, Utc::now());
+                    if let Some(turn) = turn.filter(|t| t.turn_id == turn_id && !t.stop_requested)
+                        && let Some(mut error) =
+                            super::assistant_model_observer::approval_error(turn)
+                    {
+                        error.message = super::assistant_model_observer::approval_message(
+                            error.code,
+                            &super::assistant_links::AssistantPage::ApprovalSettings
+                                .url(&state.config.frontend_url),
+                        );
+                        return error;
+                    }
+                    Ok(turn.is_none_or(|t| t.turn_id != turn_id || t.stop_requested))
+                }
+                Err(error) => Err(error),
+            }
         };
         match stopped {
             Ok(false) => tokio::time::sleep(Duration::from_millis(250)).await,

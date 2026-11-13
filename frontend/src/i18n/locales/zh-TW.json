@@ -12142,5 +12142,8 @@
   "Drafted by {{name}}": "由 {{name}} 起草",
   "System skill": "系統技能",
   "System skill for {{service}}": "{{service}} 的系統技能",
-  "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark 附件寫入：{{reason}}。重試前請檢查已記錄的結果。"
+  "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark 附件寫入：{{reason}}。重試前請檢查已記錄的結果。",
+  "This model request requires approval that this thread cannot present. Review Approval settings before retrying.": "此模型請求需要審批，但目前對話無法顯示審批。請先檢查審批設定，再重試。",
+  "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.": "審批政策拒絕了此次模型呼叫。請檢查審批設定中模型服務的拒絕規則；如果是組織政策，請聯絡組織管理員。",
+  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "組織要求對此模型服務進行審批。請組織管理員檢查審批設定中的政策。"
 }

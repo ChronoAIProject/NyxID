@@ -1027,6 +1027,8 @@ pub(crate) fn prepare<'a>(
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
         context.observation.stage(diagnostics::Stage::Proposal);
+        super::assistant_model_observer::before_approval_request(&state.config.frontend_url, false)
+            .await?;
         chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
             c.approval_options()
         })
@@ -1037,6 +1039,7 @@ pub(crate) fn prepare<'a>(
             && let Some(chat) = chat
             && let Some(request) = proposals::create(
                 db,
+                &state.config.frontend_url,
                 keys,
                 context,
                 chat,
@@ -1920,6 +1923,11 @@ pub(crate) fn admit_http<'a>(
             native.check(&state.db, None).await?;
         }
         if floors.is_empty()
+            && super::assistant_model_observer::stateless_for(&actor, &target.service.id)
+        {
+            return Ok(());
+        }
+        if floors.is_empty()
             && !(context.authoring_allowed()
                 && auth
                     .assistant_chat
@@ -2052,6 +2060,14 @@ pub(crate) fn approval<'a>(
                 .await?
                 && super::approval_policy::mandatory_review(&config, descriptor)
             {
+                if let Some(model) = super::assistant_model_observer::current() {
+                    model
+                        .block_policy(
+                            "model_org_approval_required",
+                            &AppError::ApprovalUnsupported,
+                        )
+                        .await?;
+                }
                 return Err(AppError::Forbidden("Mandatory organization operation review cannot be satisfied by an execution permission".into()));
             }
         }
