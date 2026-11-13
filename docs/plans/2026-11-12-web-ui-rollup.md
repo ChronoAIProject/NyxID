@@ -51,6 +51,25 @@ dialog typography and footer rules changed since (#2333, #2174). The
 implementer explores other heights, languages and text sizes before deciding
 between a root-cause fix and hardening plus a stronger regression check.
 
+### #2218 closure basis
+
+This PR closes #2218 because the issue's stated expectation now holds and is
+enforced by tests. Every focused control in the Telegram setup dialog stays
+fully inside the dialog without scrolling the page, at desktop and phone
+sizes, at 1× text and with larger text. It does not claim to have reproduced
+the original report or found its root cause:
+
+- The reported default-text clipping (0.944–0.980 at c8c74e0, Chrome 156) does
+  not reproduce on main 31f3d8969 or on this branch.
+- The same failure mode does reproduce at larger text sizes. Without the fix,
+  1440×900 at 2× fails at 0.998 and 390×844 at 1.5× fails at 0.991. Fable
+  reproduced both independently: 0.99825 and 0.99119.
+- `scroll-py-1` fixes those cases, and the tab-through regression fails when
+  the padding is removed.
+
+If the original default-text clipping reappears, #2218 should be reopened with
+the new environment details. No production QA run is claimed.
+
 ## Items, acceptance and ownership
 
 Implementers are Heca `codex` sessions on `gpt-6.1-sol` (xhigh, full access) in
@@ -269,6 +288,151 @@ Playwright, all APIs fixtured:
 
 Backend: `cargo fmt --check` passes locally; compile, clippy and tests run in
 the #2414 CI.
+
+## Independent review and remediation (2026-11-13)
+
+Fable 5.1 reviewed head 638ae7fb7
+(`~/.heca/plans/wild-beach-rollup/fable-independent-review-2026-11-13.md`). Its
+verdict was "valid with bounded gaps", with no correctness, authorization,
+data-preservation or compatibility defect. Following the remediation policy,
+Opus checked every item against the code before planning.
+
+### Findings and dispositions
+
+- **F1 (low, introduced by the #2050 commit): fix.**
+  `e2e/assistant-sidebar-threads.spec.ts:68,75` write screenshots to
+  `../.tmp/sol-b/…`, a fixed path outside Playwright's output directory, so
+  each run leaves untracked PNGs at the repository root. Confirmed by reading
+  the spec.
+  `e2e/channel-telegram-new.spec.ts:988–1072` writes to `../.tmp/telegram-ui/`
+  in the same way. That predates this PR, but this PR changes the spec and
+  runs it for #2218, so it is fixed in the same mechanical way.
+- **F2 (low, closure evidence for #2218): wording only, no code.** The basis is
+  recorded in "#2218 closure basis" above and in the PR body. No new issue
+  comment, no issue state change, no claimed QA run.
+- **O5 (low, introduced by the #2314 commit, not pre-existing): fix.** While an
+  Undo or Show request is pending, the restore row unmounts and the disabled
+  Hide button cannot take focus, so keyboard focus sits on `body` until the
+  response arrives.
+  - Reproduced with a throwaway unit test, deleted afterwards: after Enter on
+    Show suggestions with the request pending, Hide is disabled and
+    `document.activeElement === document.body`.
+  - The Hide direction has a shorter version of the same gap: the clicked
+    button is disabled before the optimistic flip.
+  - This contradicts the #2314 acceptance above: focus must not be lost.
+- **O6 (low, documentation made stale by #2314): fix.** The
+  `suggestions_hidden_at` comment in `backend/src/models/assistant_onboarding.rs`
+  still says the mark is cleared only by retaking the intro. The
+  `NYXBOT_FIRST_RUN.md` sentence "pending controls are disabled" must also
+  match the O5 behaviour.
+- **O1–O4: no change.** They predate this PR and none affects the acceptance
+  of an issue this PR closes:
+  - O1: no app-wide Button focus ring. Fixing it is a design-system change
+    that needs design approval.
+  - O2: the ambient status line casing. Enabling it adds a new alarm, which is
+    a product decision.
+  - O3: other fragment-built "N more" strings.
+  - O4: untranslated `telegram-prompt-status.tsx` sentences.
+  They stay recorded as follow-ups and were not silently added to scope.
+
+### Remediation acceptance
+
+- **F1:** each screenshot path uses `testInfo.outputPath(…)` with the same file
+  names. After running the full sidebar matrix (12 cases) and the Telegram
+  spec, `git status` shows no `.tmp/`, and the screenshots exist under the run's
+  output directory.
+- **O5:** Hide, Undo, Show suggestions and Retry stay focusable while a request
+  runs. They use `aria-disabled` with visually disabled styling and ignore
+  repeat activation, instead of the `disabled` attribute.
+  - After the optimistic flip, focus moves straight to the counterpart control
+    (Undo or Show suggestions after Hide; Hide after a restore), even while the
+    request is pending.
+  - Focus is never on `body` during either request.
+  - The serial mutation scope, rollback, Retry, announcements and focus ring
+    are unchanged.
+  - Unit tests cover both pending directions.
+  - The browser spec delays each response and asserts the focused element
+    during the delay.
+  - Root's review checkpoint: `aria-disabled` does not block activation.
+    Therefore every handler that can start a visibility mutation (Hide,
+    Undo/Show suggestions, and Retry for both failures) enforces the pending
+    guard itself. While a request is pending, repeated click, Enter or Space
+    must start no extra write and no opposite operation. Tests check, with a
+    deferred response, that focus stays on the intended control for the whole
+    interval and is valid after both success and failure. In the browser,
+    repeated Enter adds exactly one write per intended action, and a delayed
+    failure leaves focus valid with a single-write Retry.
+- **O6:** the model comment and first-run doc describe Show and the new pending
+  behaviour.
+
+Ownership: one Heca `codex` implementer (`gpt-6.1-sol`, full access, xhigh from
+`~/.codex/config.toml`). Opus reviews it personally. No other reviewer agents.
+
+### Remediation review log
+
+Sol-R round 1 (F1, O5 with root's guard checkpoint, O6) is approved:
+- `hideSuggestions` and `showSuggestions` return immediately while a request is
+  pending. Retry reuses those same guarded handlers.
+- Hide, Undo/Show suggestions and Retry use `aria-disabled` with a local
+  disabled look, and keep their labels and focus ring.
+- A layout effect keeps the focus intent through pending and rollback, so
+  focus moves straight to the counterpart control.
+- Unit tests check that click, Enter and Space are ignored while pending.
+  Focus stays on the intended control throughout, after success and after
+  rollback.
+- The browser spec adds 600 ms response delays. A requestAnimationFrame
+  watcher asserts zero frames with focus on `body`, repeated Enter adds exactly
+  one write per action, and a delayed Show failure keeps focus valid with a
+  single-write Retry (390, dark, en).
+- F1 paths use `outputPath` in both specs. A full run of the three specs left
+  no `.tmp`.
+- The O6 comment and doc are updated.
+- Targeted Vitest 50/50, tsc, lint and i18n, and Playwright 50/50 (12 + 13 + 25)
+  all pass.
+
+Opus review finding R1, sent back: if the visibility state flips while a
+visibility control has focus, the focused control unmounts and focus falls to
+`body`. This happens on a refetch after another tab changes the state, or when
+a request succeeds on the server but its response fails and the refetch
+reverses the rollback. Focus should move to the counterpart control, with no
+focus stealing when focus is elsewhere.
+
+Sol-R round 2 (R1) is approved:
+- A document `focusin` listener remembers the focused visibility control.
+- The layout effect also recovers focus when that control has been removed
+  and focus is on `body`.
+- Announcements now follow the user's own request. A success announces once,
+  a failure clears the outstanding request, and later refetches or background
+  flips announce nothing.
+- Seven new unit cases; targeted Vitest 29/29, tsc, ESLint and Playwright 13/13
+  pass.
+
+Findings sent back:
+- After a background flip, the screen-reader status region could still contain
+  the previous announcement (for example "Suggestions hidden." while
+  suggestions are shown). Clear it without announcing.
+- Background focus recovery should use `preventScroll` so it never jumps the
+  page.
+
+Sol-R round 3 is approved:
+- A stale announcement (one that no longer matches the visible state, with no
+  request outstanding) is cleared to an empty status region without
+  re-announcing.
+- Only the background recovery branch uses `focus({ preventScroll: true })`;
+  user-initiated transfers keep normal focus scrolling.
+- Unit tests spy on `focus` and check that the region empties after a
+  background flip in both directions.
+- Targeted Vitest 29/29, tsc, ESLint and Playwright 13/13 pass.
+
+No open review findings remain for this cycle.
+
+Validation:
+- the sidebar matrix (12 cases) and the Telegram spec, with no `.tmp` leakage;
+- the suggestion-restore matrix (12 cases);
+- targeted Vitest for the Home, hook and chat page tests;
+- tsc, lint (including the i18n audit) and `cargo fmt --check`;
+- full CI on the new head;
+- a Fable re-review, requested through root.
 
 ## Milestones
 
