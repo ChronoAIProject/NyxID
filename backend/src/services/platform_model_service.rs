@@ -74,18 +74,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// Publishing or enabling model authority requires a strictly clean fleet.
-pub async fn require_activation_ready(db: &Database) -> AppResult<()> {
-    for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
-        if !security_readiness_service::CAPABILITIES.contains(&capability) {
-            return Err(AppError::SecurityReadinessUnavailable);
-        }
-        security_readiness_service::require_activation(db, capability).await?;
-    }
-    Ok(())
-}
-
-/// Runtime use may continue under roster warnings after durable activation.
+/// Publication and runtime use require durable activation and live support.
 pub async fn require_execution_ready(db: &Database) -> AppResult<()> {
     for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
         security_readiness_service::require_serving(db, capability).await?;
@@ -285,7 +274,7 @@ pub async fn update(
     }
     if input.lifecycle == Lifecycle::Active && (row.lifecycle != Lifecycle::Active || input.enabled)
     {
-        require_activation_ready(db).await?;
+        require_execution_ready(db).await?;
     }
     if let Some(id) = &input.billing_service_id
         && (row.billing_service_id != input.billing_service_id || input.enabled)
@@ -542,7 +531,7 @@ pub async fn set_routes(
     }
     // An active route edit is a new contract publication, never an unchecked swap.
     if row.lifecycle == Lifecycle::Active {
-        require_activation_ready(db).await?;
+        require_execution_ready(db).await?;
     }
     increment(&mut row, true)?;
     let route_revision = RoutingRevision {

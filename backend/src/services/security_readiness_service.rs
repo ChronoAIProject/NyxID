@@ -1,6 +1,6 @@
-//! Readiness for security rollout, separate from flag precedence and node OS
-//! support. The roster is an operator assertion about the serving deployment;
-//! observations cannot discover an old, unregistered replica behind a balancer.
+//! Fleet capability support, separate from flag precedence and node OS support.
+//! Optional roster/drain declarations are diagnostic. Observations cannot discover
+//! binaries predating this observation protocol behind a load balancer.
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::{
@@ -10,7 +10,8 @@ use mongodb::{
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
+    time::Instant,
 };
 
 #[derive(Clone, Debug)]
@@ -18,6 +19,73 @@ pub struct Runtime {
     pub identity: ReplicaIdentity,
     pub config: RolloutConfig,
     pub platform_policy_required: bool,
+    activation_progress: Arc<Mutex<BTreeMap<String, ActivationProgress>>>,
+}
+
+#[derive(Debug)]
+struct ActivationProgress {
+    since: Instant,
+    last_observed: Instant,
+}
+
+impl Runtime {
+    pub fn new(
+        identity: ReplicaIdentity,
+        config: RolloutConfig,
+        platform_policy_required: bool,
+    ) -> Self {
+        Self {
+            identity,
+            config,
+            platform_policy_required,
+            activation_progress: Default::default(),
+        }
+    }
+
+    fn reset_activation(&self, capability: Option<&str>) {
+        let mut pending = self
+            .activation_progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(capability) = capability {
+            pending.remove(capability);
+        } else {
+            pending.clear();
+        }
+    }
+
+    fn settled(&self, capability: &str, now: Instant) -> bool {
+        let mut pending = self
+            .activation_progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let progress = pending
+            .entry(capability.to_owned())
+            .or_insert(ActivationProgress {
+                since: now,
+                last_observed: now,
+            });
+        // A longer gap could hide an unsupported generation's entire live observation.
+        if now.saturating_duration_since(progress.last_observed)
+            > std::time::Duration::from_secs(MAX_AGE_SECS as u64)
+        {
+            progress.since = now;
+        }
+        progress.last_observed = now;
+        now.saturating_duration_since(progress.since) >= ACTIVATION_SETTLE_WINDOW
+    }
+
+    fn pending_seconds(&self, capability: &str, now: Instant) -> Option<u64> {
+        self.activation_progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(capability)
+            .map(|progress| {
+                let remaining = ACTIVATION_SETTLE_WINDOW
+                    .saturating_sub(now.saturating_duration_since(progress.since));
+                remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0)
+            })
+    }
 }
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -81,6 +149,8 @@ pub const CAPABILITIES: &[&str] = &[
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 const MAX_AGE_SECS: i64 = 45;
+const ACTIVATION_SETTLE_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(2 * MAX_AGE_SECS as u64);
 
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     db.collection::<SecurityReplica>(COLLECTION_NAME)
@@ -155,31 +225,28 @@ pub async fn observe(
     config: &RolloutConfig,
     platform_policy_required: bool,
 ) -> AppResult<()> {
-    observe_with_automation(db, identity, config, platform_policy_required, false).await
+    observe_with_automation(
+        db,
+        &Runtime::new(identity.clone(), config.clone(), platform_policy_required),
+        false,
+    )
+    .await
 }
 
 /// Optional writer capability: disabled replicas retain the main heartbeat payload.
 pub async fn observe_with_automation(
     db: &Database,
-    identity: &ReplicaIdentity,
-    config: &RolloutConfig,
-    platform_policy_required: bool,
+    local: &Runtime,
     automation_enabled: bool,
 ) -> AppResult<()> {
     let mut capabilities = CAPABILITIES.to_vec();
     if automation_enabled {
         capabilities.push(AUTOMATION_COMPLETION);
     }
-    observe_with_capabilities(
-        db,
-        identity,
-        config,
-        platform_policy_required,
-        &capabilities,
-    )
-    .await
+    observe_for(db, local, &capabilities).await
 }
 
+#[cfg(test)]
 async fn observe_with_capabilities(
     db: &Database,
     identity: &ReplicaIdentity,
@@ -187,7 +254,38 @@ async fn observe_with_capabilities(
     platform_policy_required: bool,
     capabilities: &[&str],
 ) -> AppResult<()> {
-    if platform_policy_required {
+    observe_for(
+        db,
+        &Runtime::new(identity.clone(), config.clone(), platform_policy_required),
+        capabilities,
+    )
+    .await
+}
+
+async fn observe_for(db: &Database, local: &Runtime, capabilities: &[&str]) -> AppResult<()> {
+    let published = publish_observation(db, local, capabilities).await;
+    if published.is_err() {
+        local.reset_activation(None);
+        return published;
+    }
+    if let Err(error) = record_activations_with_clock(db, local, capabilities, Instant::now).await {
+        tracing::warn!(%error, "Security capability activation recording incomplete; next heartbeat will retry");
+    }
+    Ok(())
+}
+
+async fn publish_observation(
+    db: &Database,
+    local: &Runtime,
+    capabilities: &[&str],
+) -> AppResult<()> {
+    let Runtime {
+        identity,
+        config,
+        platform_policy_required,
+        ..
+    } = local;
+    if *platform_policy_required {
         db.collection::<bson::Document>(ROLLOUTS)
             .update_one(
                 doc! {"_id": PLATFORM_CUTOVER},
@@ -204,36 +302,19 @@ async fn observe_with_capabilities(
         capabilities: capabilities.iter().map(|s| (*s).to_owned()).collect(),
         expected_replicas: config.expected_replicas.clone(),
         drained: config.drained,
-        platform_policy_required,
+        platform_policy_required: *platform_policy_required,
         observed_at: Utc::now(),
     };
     db.collection::<SecurityReplica>(COLLECTION_NAME)
         .replace_one(doc! {"_id": &row.id}, &row)
         .upsert(true)
         .await?;
-    // Activation evidence is written only by startup/heartbeat work, never by
-    // a request. Assess the live fleet after publishing this generation.
-    if let Err(error) = record_clean_activations(
-        db,
-        &Runtime {
-            identity: identity.clone(),
-            config: config.clone(),
-            platform_policy_required,
-        },
-        capabilities,
-    )
-    .await
-    {
-        // Evidence is retried on the next heartbeat. Publishing this process's
-        // observation must not depend on optional activation reads or writes.
-        tracing::warn!(%error, "Security capability activation recording incomplete; next heartbeat will retry");
-    }
     Ok(())
 }
 
 #[derive(Debug, Serialize)]
 pub struct Readiness {
-    /// Strict activation readiness; its existing API meaning is unchanged.
+    /// Legacy clean-roster diagnostic and immediate-recording signal; never an admission gate.
     pub ready: bool,
     pub serving_ready: bool,
     pub serving_with_roster_warnings: bool,
@@ -241,6 +322,8 @@ pub struct Readiness {
     pub serving_blockers: Vec<String>,
     pub activated: bool,
     pub active_since: Option<DateTime<Utc>>,
+    /// Replica-local advisory countdown; never used to authorize serving.
+    pub activation_pending_seconds: Option<u64>,
     pub blockers: Vec<String>,
     pub expected_replicas: Vec<String>,
     pub live_generations: usize,
@@ -272,9 +355,9 @@ impl Blocker {
             Self::MissingOrDuplicateReplica(_)
             | Self::UndeclaredReplica(_)
             | Self::InconsistentServingRoster
-            | Self::ServingRosterNotDeclared => true,
+            | Self::ServingRosterNotDeclared
+            | Self::OldReplicasNotDeclaredDrained => true,
             Self::ExecutingProcessNotObserved
-            | Self::OldReplicasNotDeclaredDrained
             | Self::FutureObservation(_)
             | Self::UnsupportedReplica(_)
             | Self::PlatformPolicyConfigurationMismatch
@@ -286,7 +369,9 @@ impl Blocker {
     }
     fn code(&self) -> String {
         match self {
-            Self::MissingOrDuplicateReplica(name) => format!("missing_or_duplicate_replica:{name}"),
+            Self::MissingOrDuplicateReplica(name) => {
+                format!("missing_or_duplicate_replica:{name}")
+            }
             Self::UndeclaredReplica(name) => format!("undeclared_replica:{name}"),
             Self::InconsistentServingRoster => "inconsistent_serving_roster".into(),
             Self::ServingRosterNotDeclared => "serving_roster_not_declared".into(),
@@ -323,8 +408,8 @@ impl Readiness {
     fn with_activation(mut self, active_since: Option<DateTime<Utc>>) -> Self {
         self.activated = active_since.is_some();
         self.active_since = active_since;
-        self.serving_ready = self.ready || (self.activated && self.serving_blockers.is_empty());
-        if !self.ready && !self.activated {
+        self.serving_ready = self.activated && self.serving_blockers.is_empty();
+        if !self.activated {
             self.serving_blockers
                 .push(Blocker::CapabilityNotActivated.code());
         }
@@ -413,6 +498,7 @@ fn assess(
         serving_blockers: vec![],
         activated: false,
         active_since: None,
+        activation_pending_seconds: None,
         blockers: vec![],
         expected_replicas: expected.into_iter().collect(),
         live_generations: live.len(),
@@ -492,11 +578,33 @@ async fn rollout_state(
 }
 
 async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResult<Readiness> {
+    Ok(report_with_declarations(db, local, capability).await?.0)
+}
+
+async fn report_with_declarations(
+    db: &Database,
+    local: &Runtime,
+    capability: &str,
+) -> AppResult<(Readiness, bool)> {
     let rows = rows(db).await?;
+    // False is the historical default and cannot distinguish an explicit false
+    // from an unset env. Only a roster or a positive drain assertion declares
+    // something to compare; an entirely undeclared fleet is a supported default.
+    let declared = !local.config.expected_replicas.is_empty()
+        || local.config.drained
+        || rows
+            .iter()
+            .any(|row| !row.expected_replicas.is_empty() || row.drained);
     let (cutover, activations) = rollout_state(db, &[capability]).await?;
     let mut report = assess(&rows, local, capability, cutover, Utc::now());
     inventory(db, capability, &mut report).await?;
-    Ok(report.with_activation(activations.get(capability).copied()))
+    if report.serving_blockers.is_empty() && !activations.contains_key(capability) {
+        report.activation_pending_seconds = local.pending_seconds(capability, Instant::now());
+    }
+    Ok((
+        report.with_activation(activations.get(capability).copied()),
+        declared,
+    ))
 }
 
 async fn inventory(db: &Database, capability: &str, report: &mut Readiness) -> AppResult<()> {
@@ -519,20 +627,44 @@ async fn inventory(db: &Database, capability: &str, report: &mut Readiness) -> A
     Ok(())
 }
 
-async fn record_clean_activations(
+#[cfg(test)]
+async fn record_activations(
     db: &Database,
     local: &Runtime,
     capabilities: &[&str],
+    now: Instant,
 ) -> AppResult<()> {
-    let rows = rows(db).await?;
+    record_activations_with_clock(db, local, capabilities, || now).await
+}
+
+async fn record_activations_with_clock(
+    db: &Database,
+    local: &Runtime,
+    capabilities: &[&str],
+    clock: impl Fn() -> Instant,
+) -> AppResult<()> {
+    let rows = match rows(db).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            local.reset_activation(None);
+            return Err(error);
+        }
+    };
     let state = match rollout_state(db, capabilities).await {
         Ok(state) => Some(state),
-        // Isolate malformed/duplicate evidence to its own capability. A shared
-        // database failure still aborts this best-effort pass immediately.
+        // Retry malformed/duplicate evidence per capability in this pass. Only
+        // an incomplete individual assessment resets its window; resetting all
+        // here would starve healthy capabilities while one record stays corrupt.
         Err(AppError::SecurityReadinessUnavailable) => None,
-        Err(error) => return Err(error),
+        Err(error) => {
+            local.reset_activation(None);
+            return Err(error);
+        }
     };
     let mut failure = None;
+    let mut inserted = Vec::new();
+    let mut warnings = BTreeSet::new();
+    let mut live_generations = 0;
     for &capability in capabilities {
         let isolated;
         let (cutover, active) = if let Some(state) = &state {
@@ -544,6 +676,7 @@ async fn record_clean_activations(
                     &isolated
                 }
                 Err(error) => {
+                    local.reset_activation(Some(capability));
                     tracing::warn!(capability, %error, "Security capability activation evidence unavailable");
                     failure.get_or_insert(error);
                     continue;
@@ -551,29 +684,85 @@ async fn record_clean_activations(
             }
         };
         if active.contains_key(capability) {
+            local.reset_activation(Some(capability));
             continue;
         }
         let mut assessment = assess(&rows, local, capability, *cutover, Utc::now());
-        if !assessment.ready {
+        if !assessment.serving_blockers.is_empty() {
+            local.reset_activation(Some(capability));
             continue;
         }
         let result = async {
             inventory(db, capability, &mut assessment).await?;
-            if assessment.ready {
-                insert_activation(db, capability).await?;
+            // Start/advance the debounce only after the complete assessment.
+            // Database latency before observing support must not shorten it.
+            if !assessment.serving_blockers.is_empty() {
+                local.reset_activation(Some(capability));
+            } else if assessment.ready || local.settled(capability, clock()) {
+                if insert_activation(db, capability).await? {
+                    inserted.push(capability.to_owned());
+                    warnings.extend(assessment.roster_warnings);
+                    live_generations = assessment.live_generations;
+                }
+                local.reset_activation(Some(capability));
             }
             Ok::<_, AppError>(())
         }
         .await;
         if let Err(error) = result {
+            local.reset_activation(Some(capability));
             tracing::warn!(capability, %error, "Security capability activation recording failed");
             failure.get_or_insert(error);
         }
     }
+    if !inserted.is_empty() {
+        activation_audit(
+            db,
+            inserted,
+            warnings.into_iter().collect(),
+            live_generations,
+            &local.config.expected_replicas,
+        )
+        .await;
+    }
     failure.map_or(Ok(()), Err)
 }
 
-async fn insert_activation(db: &Database, capability: &str) -> AppResult<()> {
+async fn activation_audit(
+    db: &Database,
+    mut capabilities: Vec<String>,
+    roster_warnings: Vec<String>,
+    live_generations: usize,
+    expected_replicas: &[String],
+) {
+    capabilities.sort();
+    let roster_clean = roster_warnings.is_empty();
+    tracing::info!(
+        ?capabilities,
+        roster_clean,
+        ?roster_warnings,
+        live_generations,
+        ?expected_replicas,
+        "Security capabilities activated"
+    );
+    let work = super::audit_service::log_system_event(
+        db.clone(),
+        "security_capability_activated",
+        Some(serde_json::json!({
+            "capabilities": capabilities, "roster_clean": roster_clean, "roster_warnings": roster_warnings,
+            "live_generations": live_generations, "expected_replicas": expected_replicas,
+        })),
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(5), work).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "Security capability activation audit unavailable")
+        }
+        Err(_) => tracing::debug!("Security capability activation audit timed out"),
+    }
+}
+
+async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
     let record = SecurityCapabilityActivation {
         id: uuid::Uuid::new_v4().to_string(),
         record_kind: RECORD_KIND.into(),
@@ -582,7 +771,8 @@ async fn insert_activation(db: &Database, capability: &str) -> AppResult<()> {
     };
     // Equal unique-index predicates plus $setOnInsert make concurrent
     // heartbeats converge on one immutable first activation timestamp.
-    db.collection::<SecurityCapabilityActivation>(ROLLOUTS)
+    let result = db
+        .collection::<SecurityCapabilityActivation>(ROLLOUTS)
         .update_one(
             doc! {"record_kind": RECORD_KIND, "capability": capability},
             doc! {"$setOnInsert": bson::to_document(&record)
@@ -590,23 +780,35 @@ async fn insert_activation(db: &Database, capability: &str) -> AppResult<()> {
         )
         .upsert(true)
         .await?;
-    Ok(())
+    Ok(result.upserted_id.is_some())
 }
 
 /// Serving decisions still read every live generation, including undeclared
 /// and duplicate names. Only a recorded activation can tolerate roster churn.
 pub async fn serving_report(db: &Database, capability: &str) -> AppResult<Readiness> {
-    let report = report(db, capability).await?;
-    if report.serving_with_roster_warnings {
+    serving_report_for(db, runtime()?, capability).await
+}
+
+async fn serving_report_for(
+    db: &Database,
+    local: &Runtime,
+    capability: &str,
+) -> AppResult<Readiness> {
+    let (report, declared) = report_with_declarations(db, local, capability).await?;
+    if declared && report.serving_with_roster_warnings {
         diagnostics::warn(db, capability, &report);
     }
     Ok(report)
 }
 
-/// Execution requires a known capability. Unlike activation of arbitrary
-/// feature flags, an unknown execution contract must never bypass readiness.
+fn known_capability(capability: &str) -> bool {
+    CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION
+}
+
+/// Execution requires a known capability; unknown contracts fail closed.
+/// Flag enables have the deliberate asymmetry documented in require_flag_enable.
 pub async fn require_serving(db: &Database, capability: &str) -> AppResult<()> {
-    if !CAPABILITIES.contains(&capability) && capability != AUTOMATION_COMPLETION {
+    if !known_capability(capability) {
         return Err(AppError::SecurityReadinessUnavailable);
     }
     if !serving_report(db, capability).await?.serving_ready {
@@ -615,24 +817,38 @@ pub async fn require_serving(db: &Database, capability: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Platform rollout controls are strict for known capabilities. Unknown keys
-/// remain allowed because feature-flag writes also pass ordinary, ungated flags.
-pub async fn require_activation(db: &Database, capability: &str) -> AppResult<()> {
-    if capability == super::platform_model_service::FLAG {
-        // Keep this optional foundation out of every existing flag caller's
-        // inline future layout.
-        return Box::pin(super::platform_model_service::require_activation_ready(db)).await;
-    }
-    if (CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION)
-        && !report(db, capability).await?.ready
-    {
-        return Err(AppError::SecurityReadinessUnavailable);
+/// Gated flag enables require recorded activation and live serving support.
+/// Unknown flag keys are ungated and do no readiness I/O: flag writers accept
+/// arbitrary ordinary flags, whereas unknown execution contracts must refuse.
+pub async fn require_flag_enable(db: &Database, key: &str) -> AppResult<()> {
+    use super::platform_model_service as models;
+    let individual = [key];
+    let model_capabilities = [
+        models::REGISTRY_READINESS,
+        models::EXECUTION_READINESS,
+        models::BILLING_READINESS,
+    ];
+    let required = if key == models::FLAG {
+        if model_capabilities
+            .iter()
+            .any(|capability| !CAPABILITIES.contains(capability))
+        {
+            return Err(AppError::SecurityReadinessUnavailable);
+        }
+        &model_capabilities[..]
+    } else if known_capability(key) {
+        &individual[..]
+    } else {
+        return Ok(());
+    };
+    for capability in required {
+        require_serving(db, capability).await?;
     }
     Ok(())
 }
 
 /// A replica with the legacy env value must not bypass a sibling's enabled
-/// policy during a mixed deployment. A drained coordinated cutover is required.
+/// policy during a mixed deployment. The cutover marker remains sticky.
 pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<()> {
     let rows = rows(db).await?;
     if local_required
@@ -733,6 +949,7 @@ async fn ready_test_replica_inner(
             drained: true,
         },
         platform_policy_required: false,
+        activation_progress: Default::default(),
     };
     RUNTIME.get_or_init(|| local.clone());
     let db = db.clone();
@@ -765,8 +982,8 @@ async fn ready_test_replica_inner(
         .upsert(true)
         .await
         .expect("test replica observation");
-    // Fixtures seed the same clean evidence in one command. Production heartbeat
-    // recording and its failure/recovery tests still use record_clean_activations.
+    // Fixtures seed the same clean evidence in one command. Production recording
+    // and its failure/recovery tests retain the individual activation upserts.
     let live = rows(&db).await.expect("test live replicas");
     let (cutover, active) = rollout_state(&db, &capabilities)
         .await
@@ -847,3 +1064,12 @@ pub(crate) async fn legacy_org_guest_test_replica(db: &Database) -> tokio::task:
     )
     .await
 }
+
+#[cfg(test)]
+mod activation_tests;
+
+#[cfg(test)]
+mod flag_enable_tests;
+
+#[cfg(test)]
+mod convergence_tests;

@@ -6,11 +6,11 @@ for enrolled private owner, shared-recipient and collaboration chat turns using
 MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
 mapping is not included. Unmarked traffic gains no preparation or database reads.
 
-Platform rollout enables and clear-that-enables require strict activation readiness.
-After activation is recorded, proposal creation/decisions, version selection,
-channel-source admission and worker execution use serving readiness and tolerate
-supported roster overlaps. Hard readiness loss retains the existing refusals and
-legacy fallbacks. See the exhaustive [clean-roster action list](SECURITY_ROLLOUT_READINESS.md#activation-versus-serving-entry-points).
+Flag enables and clear-that-enables require the same durable activation and live
+observed support as proposal creation/decisions, version selection, channel-source
+admission and worker execution. Roster/drain declarations are optional advisories;
+no operator readiness step is required. Hard readiness loss retains existing
+refusals and legacy fallbacks. See [readiness entry points](SECURITY_ROLLOUT_READINESS.md#entry-points-and-what-requires-a-clean-roster).
 
 ## Representation and scope
 
@@ -154,8 +154,8 @@ old record; no widening by inference.
 ## Rollout and unsupported behavior
 
 1. Deploy all readers and dispatchers first, with `permissions:execution-v1`
-   default off. Activation requires reader, dispatch and authoring capabilities in the
-   all-replica roster and drained-writer gate. Person/org/global overrides are supported;
+   default off. Enabling requires recorded reader, dispatch and authoring capabilities
+   supported by every live observation; roster/drain assertions are unnecessary. Person/org/global overrides are supported;
    broad activation additionally requires enrollment readiness. Reads and disabling
    remain available.
 2. Authoring requires `permissions:execution-authoring-v1` in addition to reader
@@ -191,7 +191,7 @@ Global/org activation and clears that enable inherited access additionally requi
 `permissions:execution-enrollment-v1`. Explicit disabling remains available.
 Activation requires
 `permissions:execution-v1` (reader), `permissions:execution-dispatch-v1`
-(enforcement) and `permissions:execution-authoring-v1` (human authoring) in the existing all-replica readiness/drained-writer gate.
+(enforcement) and `permissions:execution-authoring-v1` (human authoring) in the observed-support readiness gate (no roster/drain declaration).
 
 A personal override and its `User.execution_permission_enrollment` hint are
 written in the same transaction; disabling/clearing recomputes scoped inheritance. Authentication
@@ -282,8 +282,8 @@ the existing 30-day retention projection. Reusable permissions are not consumed.
 The remote send is linearized at the dispatch barrier; cancellation after it can
 stop further sends but cannot undo an already admitted provider effect.
 
-Upgrade readers and dispatchers, drain older writers, then activate the intended
-person/org/global cohorts through the readiness gate. Old replicas ignore additive fields and keep their legacy behavior;
+Upgrade readers and dispatchers; once their observed support is recorded, enable
+the intended person/org/global cohorts through the serving-readiness gate. Old replicas ignore additive fields and keep their legacy behavior;
 they must not serve an activated cohort. Before binary rollback, disable and
 drain marked roots and claims on upgraded replicas. The `expires_at` TTL remains
 unchanged, including persistent permission sentinel retention. No legacy migration, native-policy-key cutover or version bump is included.
@@ -439,8 +439,8 @@ bearer authority. The original caller's normal billing lane remains unchanged.
 
 ### Authoring rollout
 
-Deploy readers, dispatchers and authoring support to every replica and drain old
-writers before activation. Global/org enrollment additionally requires the
+Deploy readers, dispatchers and authoring support to every replica; observed
+support and durable activation permit enabling without roster/drain declarations. Global/org enrollment additionally requires the
 broad-enrollment capability below. No new env var, TTL migration or backfill is required. Old replicas ignore proposal payloads and retain legacy
 behavior; they must not serve activated cohorts. Disable enrollment and drain
 pending resumes/claims on upgraded replicas before binary rollback. The unchanged
@@ -569,8 +569,9 @@ available when readiness is red.
 
 Rollout:
 
-1. Deploy every serving API replica and worker, drain old writers, and confirm the
-   configured readiness roster reports reader, dispatch, authoring and enrollment.
+1. Deploy supporting API replicas/workers. Reader, dispatch, authoring and
+   enrollment activation converges automatically from their live observations;
+   inspect `serving_ready`, not the legacy diagnostic `ready`.
 2. Pilot an org or selected users. Watch the admin flag response's
    `execution_enrollment` job progress; new members get scoped hints at membership
    admission, and new people enter a global cohort without a signup hook.
@@ -690,9 +691,9 @@ permission does not prolong an expired key, admission deadline or stopped task.
 Activation additionally requires `permissions:execution-authoring-v2` across all
 replicas, alongside the existing reader, dispatch, v1 authoring and broad-enrollment
 capabilities. Global activation is already live, so v2 becomes applicable to that
-cohort as soon as all replicas advertise the new capability.
-Deploy readers, source runners, indexes, refusal paths and web DTOs first; drain
-old writers before enrolling a cohort. Unenrolled requests perform no new
+cohort once every live observation advertises the new capability and activation is recorded.
+Deploy readers, source runners, indexes, refusal paths and web DTOs first; no
+roster/drain assertion is needed before enrolling a cohort. Unenrolled requests perform no new
 preparation or reads. V1 and legacy card decisions are unchanged, and legacy
 handlers refuse any proposal before mutation. Disable and drain pending v2 work
 on upgraded replicas before rollback. The existing `expires_at` TTL and
@@ -848,8 +849,8 @@ Invalid or overflowing counters refuse admission. Source fence counters remain
 transaction locks and do not count as policy changes in authority snapshots.
 
 The optional `permissions:execution-authoring-channel-v1` readiness capability
-requires every reader, worker and channel policy writer to be upgraded and old
-writers drained. Unknown/unready fresh sources remain legacy; marked work
+requires durable activation and observed support from every live reader, worker
+and channel policy writer; no roster/drain assertion is required. Unknown/unready fresh sources remain legacy; marked work
 refuses/drains when readiness, enrollment or original-source authority is lost.
 The channel ingress has no loaded person row: its zero-command candidacy uses
 only bounded global/personal snapshot hints. Org-only enrollment is not inferred

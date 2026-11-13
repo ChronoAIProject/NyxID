@@ -686,6 +686,18 @@ async fn unreachable_upstream_fails_at_connect() {
     let (state, _, server) = setup_stream("nyxa_connect", Duration::ZERO, vec![]).await;
     server.abort();
     let _ = server.await;
+    // Port zero cannot host a listener. A released ephemeral port can otherwise
+    // be reused by another process before this request.
+    assert!(tokio::net::TcpStream::connect("127.0.0.1:0").await.is_err());
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"base_url": "http://127.0.0.1:0"}},
+        )
+        .await
+        .unwrap();
     let reply = run_turn_to_reply(&state).await;
     assert_eq!(
         reply.error_code.as_deref(),

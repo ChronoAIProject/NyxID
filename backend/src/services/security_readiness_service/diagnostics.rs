@@ -12,7 +12,7 @@ use super::Readiness;
 use crate::services::{audit_service, coordination_service::RateWindowStore, transaction_service};
 
 pub(super) const EVENT: &str = "security_readiness_serving_with_roster_warnings";
-pub(super) const INTERVAL: Duration = Duration::from_secs(3600);
+pub(super) const INTERVAL: Duration = Duration::from_secs(24 * 3600);
 const RETRY_DELAY: Duration = Duration::from_secs(60);
 const MAX_LOCAL_CONDITIONS: usize = 256;
 static THROTTLE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
@@ -22,6 +22,9 @@ fn condition_key(report: &Readiness) -> String {
     warnings.sort();
     warnings.dedup();
     let mut digest = Sha256::new();
+    // Old binaries still use hourly buckets. Keep their writes from resetting
+    // this daily window during a rolling upgrade on the shared collection.
+    digest.update(b"security-readiness-roster-daily-v1");
     for warning in warnings {
         digest.update((warning.len() as u64).to_be_bytes());
         digest.update(warning.as_bytes());
@@ -114,7 +117,7 @@ fn warn_at(
                     "live_generations": live_generations,
                     "expected_replicas": expected_replicas,
                 });
-                // An audit failure must not consume the shared hour. Both facts
+                // An audit failure must not consume the shared day. Both facts
                 // commit together, so a short retry can actually emit the event.
                 let context = (db.clone(), condition.clone(), key, event_data);
                 let emitted = transaction_service::run_db_only(
@@ -200,13 +203,92 @@ mod tests {
         assert!(!admit_local(
             &mut throttle,
             "1".into(),
-            start + Duration::from_secs(3599)
+            start + INTERVAL - Duration::from_secs(1)
         ));
         assert!(admit_local(
             &mut throttle,
             "1".into(),
             start + INTERVAL + Duration::from_secs(1)
         ));
+    }
+
+    #[tokio::test]
+    async fn declared_mismatch_uses_one_shared_daily_window_per_condition() {
+        use super::super::{CAPABILITIES, controlled_ready_test_replica, overlapping_test_replica};
+        use crate::models::{audit_log, coordination::RATE_WINDOW_COLLECTION_NAME};
+        let db = crate::test_utils::connect_transaction_test_database("roster_daily").await;
+        let heartbeat = controlled_ready_test_replica(&db).await;
+        heartbeat.abort();
+        overlapping_test_replica(&db).await;
+        let report = super::super::report(&db, CAPABILITIES[0]).await.unwrap();
+        assert_eq!(INTERVAL, Duration::from_secs(86_400));
+        let start = Instant::now();
+        warn_at(&db, CAPABILITIES[0], &report, start)
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(
+            warn_at(
+                &db,
+                CAPABILITIES[1],
+                &report,
+                start + INTERVAL - Duration::from_secs(1)
+            )
+            .is_none()
+        );
+        let windows = db.collection::<mongodb::bson::Document>(RATE_WINDOW_COLLECTION_NAME);
+        let window = windows
+            .find_one(doc! {"namespace": EVENT})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            window
+                .get_datetime("expires_at")
+                .unwrap()
+                .timestamp_millis()
+                - window
+                    .get_datetime("window_start")
+                    .unwrap()
+                    .timestamp_millis(),
+            2 * 86_400_000
+        );
+        // A different process has no local throttle, but shares the same daily budget.
+        reset_local(&db, &report);
+        warn(&db, CAPABILITIES[1], &report).unwrap().await.unwrap();
+        let audits = db.collection::<mongodb::bson::Document>(audit_log::COLLECTION_NAME);
+        assert_eq!(
+            audits
+                .count_documents(doc! {"event_type": EVENT})
+                .await
+                .unwrap(),
+            1
+        );
+        // Moving the persisted bucket back one day simulates its expiry without sleeping.
+        windows.update_one(doc! {"_id": window.get_str("_id").unwrap()}, doc! {"$set": {
+            "window_start": mongodb::bson::DateTime::from_millis(window.get_datetime("window_start").unwrap().timestamp_millis() - 86_400_000)
+        }}).await.unwrap();
+        reset_local(&db, &report);
+        warn(&db, CAPABILITIES[0], &report).unwrap().await.unwrap();
+        assert_eq!(
+            audits
+                .count_documents(doc! {"event_type": EVENT})
+                .await
+                .unwrap(),
+            2
+        );
+        let mut changed = report;
+        changed
+            .roster_warnings
+            .push("old_replicas_not_declared_drained".into());
+        warn(&db, CAPABILITIES[0], &changed).unwrap().await.unwrap();
+        assert_eq!(
+            audits
+                .count_documents(doc! {"event_type": EVENT})
+                .await
+                .unwrap(),
+            3
+        );
     }
 
     #[tokio::test]

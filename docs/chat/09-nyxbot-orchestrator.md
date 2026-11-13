@@ -967,8 +967,8 @@ guest authorization; their catalog inclusion grants no execution access.
 
   Configuration of these new limits is default-off behind
   `assistant:guest-operation-scopes`, resolved for the managing person. Deploy
-  all auth/proxy/MCP replicas before enabling it; the existing security-readiness
-  roster must attest this capability. Old readers deserialize the
+  all auth/proxy/MCP replicas before enabling it; security readiness requires
+  durable activation and observed support for this capability. Old readers deserialize the
   additive fields without a new `GuestAccess` enum value, but cannot enforce
   them. Disabling the flag stops configuration, never enforcement. Before a
   rollback to old binaries, stop guest admission for affected agents (or remove
@@ -1788,7 +1788,7 @@ Personal credential catalogs, including OAuth/device-code/API-key providers with
 
 Specialists never mint links, even in routed mode. Their refusal includes only same-catalog connection facts already within the key's effective grants (including active auto/platform rows only when authentication grants them) and asks the owner to have NyxBot perform setup, followed by a separate specialist grant; direct specialist work never transfers automatically to NyxBot. An org-owned specialist thread keeps the acting member as its key owner, while the owner-bound grant resolver limits its connection IDs to the agent organization's own rows; personal or other-organization rows are excluded. Guests receive no inventory. Organization cards retain exact operation approval and current connection facts; their `connect_own` is setup guidance, not a minted link or approval. When the owner requests personal setup, use the connect tool immediately with its existing-connection narration. Unsupported hosted card offers share the connect tool's reason codes; `no_separate_account` instead explains the one-step setup contract. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Hosted preview carries the declared credential fields so a failed catalog/pricing lookup cannot hide them (clients retain catalog fallback for older servers). Web and mobile hosted credential forms render declared token-exchange fields separately (for example, App ID and App Secret), then submit one JSON credential. Lark/Feishu startup corrects only exact prior system-seed instructions, preserving admin text and explicit clears.
 
-`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Use compatible readers/UI; observed support from every live writer/completer gates automatic activation without roster/drain declarations. Old readers that ignore the stored lock remain incompatible. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 ### Automatic visitor model setup
 
@@ -1934,8 +1934,9 @@ route or key; work resumes when availability returns. Guest-policy changes inval
 Relay/native/gateway use the same local validator; CMA never decides membership
 or payer. A verified private chat moves between relay and gateway with its member
 home reply binding and guest execution lane; adoption is atomic and keeps the
-relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
-workers, then enable for an admin. Disable and retire before binary downgrade.
+relay alias for flag-off return, without merging already established chats. Roll out
+with the flag off; observed support from all executing workers and recorded
+activation then permit enabling for an admin, without roster/drain declarations. Disable and retire before binary downgrade.
 
 ### Guest settings and binding recovery
 
@@ -1990,7 +1991,7 @@ arguments for compatibility, now deprecated; new calls need only `enabled` and
 opens private guest admission; group audience settings remain independent.
 
 Rollout requires every executing replica to advertise
-`nyxbot:org-guest-grants-v1` via the existing readiness roster/drain system.
+`nyxbot:org-guest-grants-v1` through automatic observed-support readiness; roster/drain declarations are optional.
 Before ready, old and new binaries enforce the old cap/list; adoption is refused.
 Ready removes caps for everyone while preserving legacy service restrictions.
 Recorded active Grants execution tolerates roster warnings while every live

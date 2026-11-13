@@ -683,7 +683,7 @@ claim.
 
 `AUTOMATION_CONTINUATION_V2_ENABLED=false` preserves legacy completion. With it
 on, first assistant admission uses `automation:coordinator-completion-v2` serving
-readiness. After a clean activation is recorded, supported roster overlaps retain
+readiness. After activation is recorded, advisory roster/drain conditions retain
 v2 enrollment. Hard serving-readiness loss falls back to legacy admission. Started runs and confirmation waits admitted by legacy code
 finish using legacy behavior. No trigger protocol stamp or data migration exists.
 
@@ -737,17 +737,15 @@ run. Use Cancel on a waiting run in Automations history, or the first-party huma
 `POST /api/v1/triggers/{id}/runs/{run_id}/cancel` route. Cancel is owner-scoped,
 idempotent after termination, and fences descendants and queued results.
 
-Deploy upgraded binaries with the option off first. Drain old/unregistered
-writers, configure the complete identical `SECURITY_ROLLOUT_REPLICAS` roster,
-unique `INSTANCE_NAME`s and `SECURITY_ROLLOUT_DRAINED=true`, then enable the option
-on every replica. `GET /api/v1/admin/automation-continuations/readiness` is a
+Deploy compatible binaries and enable the option on participating replicas.
+Capability activation converges after observed support settles for 90 seconds;
+no readiness roster, unique instance names or drain assertion is required. `GET /api/v1/admin/automation-continuations/readiness` is a
 metadata-only admin/operator diagnostic for admission readiness and indexed drain
 blockers. Disabling prevents new enrollment while existing v2 runs and their
 children continue draining. Before downgrading, disable everywhere, drain or
 cancel enrolled runs, and require no nonterminal runs, bound queued events,
 active children, pending receipts, group followers, cards or async watches in the
-diagnostic. The roster is an operator assertion; it cannot discover hidden old
-writers. A disabled option alone does not make a downgrade safe.
+diagnostic. Observation cannot discover writers predating the observation protocol. A disabled option alone does not make a downgrade safe.
 
 Completion records the coordinator's settled result; verifying external business
 outcomes such as published post IDs remains the coordinator agent's job and is

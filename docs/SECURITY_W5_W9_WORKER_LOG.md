@@ -3,6 +3,9 @@
 > Bundle note: this is the W5, W6, W7 and W9.1–W9.5 subset of this log at
 > `e68e4276e`. W8 and W9.6 entries remain with draft PR #1944. Entry statuses
 > are historical; current bundle verification is recorded in its PR.
+> The roster/drain readiness prerequisites recorded below are superseded by
+> [automatic observed-support readiness](SECURITY_ROLLOUT_READINESS.md);
+> independent required-approval and data-format cutovers still apply.
 
 This file records worker changes and executed evidence. It does not replace the
 PM-owned execution/review ledgers, and a worker test pass is not a PM review

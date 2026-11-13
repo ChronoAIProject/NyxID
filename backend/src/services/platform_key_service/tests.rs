@@ -2432,3 +2432,38 @@ async fn mcp_discovery_and_callable_services_share_grants_and_providers_per_requ
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn model_only_config_serves_overlap_and_refuses_unsupported_or_unrecorded_capability() {
+    use crate::models::{security_capability_activation as activation, security_replica};
+    use crate::services::{platform_model_service, security_readiness_service as readiness};
+    let db = crate::test_utils::connect_transaction_test_database("model_key_publication").await;
+    readiness::ready_test_replica(&db).await;
+    readiness::stop_test_replica(&db).await;
+    let sibling = readiness::overlapping_test_replica(&db).await;
+    let capability = platform_model_service::REGISTRY_READINESS;
+    let mut config = PlatformKeyConfig {
+        enabled: true,
+        purpose: crate::models::downstream_service::PlatformKeyPurpose::ModelRoute,
+        audience: PlatformKeyAudience::Restricted,
+        ..Default::default()
+    };
+    validate_config(&db, &mut config, None).await.unwrap();
+    readiness::remove_test_replica_capability(&db, &sibling, capability).await;
+    assert!(matches!(
+        validate_config(&db, &mut config, None).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    db.collection::<security_replica::SecurityReplica>(security_replica::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&sibling.id}, &sibling)
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(activation::COLLECTION_NAME)
+        .delete_one(doc! {"record_kind":activation::RECORD_KIND,"capability":capability})
+        .await
+        .unwrap();
+    assert!(matches!(
+        validate_config(&db, &mut config, None).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+}

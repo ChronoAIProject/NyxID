@@ -7,8 +7,8 @@ use crate::crypto::aes::EncryptionDecryptStats;
 use crate::errors::AppResult;
 use crate::services::feature_flag_service;
 
-/// GET /api/v1/admin/security-readiness. Process observations and an explicit
-/// serving roster are prerequisites, not an automatic rollout controller.
+/// GET /api/v1/admin/security-readiness. Observed support and durable activation,
+/// including the optional legacy roster/drain diagnostics.
 pub async fn security_readiness(
     State(state): State<AppState>,
     auth: crate::mw::auth::AuthUser,

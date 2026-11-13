@@ -526,5 +526,6 @@ Usage retains org `billing_owner_id` and additive `org_channel_guest` metadata
 org's billing usage and bot settings show spend; settings also show reserved
 credits and named guest access from Grants or the frozen legacy restriction. Financial rows follow accounting
 retention and are never discarded while unsettled. Every executing replica must
-support the typed lane before exposure is enabled; use the existing security
-readiness roster and drain controls, not a new environment variable.
+support the typed lane before exposure is enabled; its observed-support
+readiness converges automatically without roster/drain declarations. Independent
+billing migration and rollback requirements above remain unchanged.
