@@ -985,12 +985,12 @@ for (const width of [390, 1440]) {
     await page.goto(`/channel-bots?connect=telegram-new&request_id=${requestId}`);
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByText(/Telegram rejected the creation message/)).toBeVisible();
-    await page.screenshot({ path: `../.tmp/telegram-ui/rejected-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`rejected-${width}.png`), fullPage: true });
     const button = dialog.getByRole("button", { name: "Open creation form", exact: true });
     await button.focus();
     await expect(button).toBeFocused();
     await expect(button).toBeInViewport({ ratio: 1 });
-    await page.screenshot({ path: `../.tmp/telegram-ui/recovery-focused-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`recovery-focused-${width}.png`), fullPage: true });
     const popup = page.waitForEvent("popup");
     await button.press("Enter");
     const form = await popup;
@@ -1001,11 +1001,11 @@ for (const width of [390, 1440]) {
     if (state.request?.prompt_delivery) state.request.prompt_delivery.outcome = "unknown";
     await page.reload();
     await expect(dialog.getByText(/Delivery of the Create bot message is unconfirmed/)).toBeVisible();
-    await page.screenshot({ path: `../.tmp/telegram-ui/unknown-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`unknown-${width}.png`), fullPage: true });
     if (state.request?.prompt_delivery) state.request.prompt_delivery.outcome = "accepted";
     await page.reload();
     await expect(dialog.getByText(/does not confirm the button appeared/)).toBeVisible();
-    await page.screenshot({ path: `../.tmp/telegram-ui/accepted-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`accepted-${width}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 }
@@ -1051,7 +1051,7 @@ for (const width of [390, 1440]) {
       const button = page.getByRole("button", { name: "Open creation form", exact: true });
       await button.focus();
       await expect(button).toBeInViewport({ ratio: 1 });
-      await page.screenshot({ path: `../.tmp/telegram-ui/${hosted ? "hosted" : "full-page"}-recovery-${width}.png`, fullPage: true });
+      await page.screenshot({ path: test.info().outputPath(`${hosted ? "hosted" : "full-page"}-recovery-${width}.png`), fullPage: true });
       const popup = page.waitForEvent("popup");
       await button.press("Enter");
       const form = await popup;
@@ -1069,7 +1069,7 @@ for (const width of [390, 1440]) {
         await expect(page.getByText("Saved research specialist is connected.")).toBeVisible();
         await expect(page.getByRole("heading", { name: "Your Telegram channel bot is created", exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "Open creation form", exact: true })).toHaveCount(0);
-        await page.screenshot({ path: `../.tmp/telegram-ui/hosted-source-return-${width}.png`, fullPage: true });
+        await page.screenshot({ path: test.info().outputPath(`hosted-source-return-${width}.png`), fullPage: true });
         await page.getByRole("button", { name: "Continue", exact: true }).click();
       } else {
         await page.getByRole("link", { name: "Back to chat", exact: true }).click();

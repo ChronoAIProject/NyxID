@@ -30,7 +30,7 @@ async function seedThreads(page: Page) {
 for (const width of [1440, 390]) {
   for (const mode of ["light", "dark"] as const) {
     for (const language of ["en", "zh-CN", "zh-TW"] as const) {
-      test(`regular chat disclosure at ${width}px in ${mode}, ${language}`, async ({ page }) => {
+      test(`regular chat disclosure at ${width}px in ${mode}, ${language}`, async ({ page }, testInfo) => {
         await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
         await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
         await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
@@ -65,14 +65,14 @@ for (const width of [1440, 390]) {
         }
         await expect(toggle).toBeFocused();
         await expect(toggle).toBeInViewport({ ratio: 1 });
-        await page.screenshot({ path: `../.tmp/sol-b/sidebar-${width}-${mode}-${language}-collapsed.png` });
+        await page.screenshot({ path: testInfo.outputPath(`sidebar-${width}-${mode}-${language}-collapsed.png`) });
         await page.keyboard.press("Enter");
         await expect(toggle).toHaveAccessibleName(fewer);
         await expect(toggle).toHaveAttribute("aria-expanded", "true");
         await expect(toggle).toBeFocused();
         await expect(toggle).toBeInViewport({ ratio: 1 });
         await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(12);
-        await page.screenshot({ path: `../.tmp/sol-b/sidebar-${width}-${mode}-${language}-expanded.png` });
+        await page.screenshot({ path: testInfo.outputPath(`sidebar-${width}-${mode}-${language}-expanded.png`) });
         await page.keyboard.press("Space");
         await expect(toggle).toHaveAccessibleName(more);
         await expect(toggle).toHaveAttribute("aria-expanded", "false");
