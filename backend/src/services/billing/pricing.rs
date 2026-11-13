@@ -96,6 +96,9 @@ pub async fn sync_service_price(
 ) -> AppResult<bool> {
     let mut changed = false;
     for tariff in super::model_tariffs::load_for(db, std::slice::from_ref(service)).await? {
+        if !super::reconcile::continue_reconcile() {
+            return Ok(changed);
+        }
         changed |= super::model_tariffs::sync(db, lago, plan_code, &tariff).await?;
     }
     if service.platform_key.as_ref().is_some_and(|p| {
@@ -397,6 +400,9 @@ async fn sync_lane_price(
     service: &DownstreamService,
     field: &str,
 ) -> AppResult<bool> {
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
+    }
     let Some(billing) = &service.billing else {
         return Ok(false);
     };
@@ -505,6 +511,9 @@ async fn sync_lane_component(
     lane: &LanePriceComponent,
     label: &str,
 ) -> AppResult<bool> {
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
+    }
     let collection = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
     let operation = path.contains(".operations.");
     let input = ServicePriceSync {
@@ -604,6 +613,9 @@ async fn cleanup_components(
     };
     let mut changed = false;
     for code in &billing.component_cleanup_metric_codes {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if super::taxes::remove_charge(db, lago, plan_code, code)
             .await
             .is_err()
@@ -629,6 +641,9 @@ async fn sync_legacy_price(
     plan_code: &str,
     service: &DownstreamService,
 ) -> AppResult<bool> {
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
+    }
     let Some(billing) = service.billing.as_ref() else {
         return Ok(false);
     };
@@ -812,6 +827,9 @@ pub async fn retry_pending_service_prices(
         .await?;
     let mut synced = 0;
     for service in services {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if sync_service_price(db, lago, plan_code, &service).await? {
             synced += 1;
         }

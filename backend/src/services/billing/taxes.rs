@@ -400,6 +400,9 @@ pub async fn reconcile(db: &Database, lago: &dyn LagoApi, ttl: u64) -> AppResult
     let mut completed = 0;
     let refresh_batch = async {
         for row in rows {
+            if !super::reconcile::continue_reconcile() {
+                break;
+            }
             attempted += 1;
             let wallet: BillingWallet =
                 bson::from_document(row).map_err(|e| AppError::Internal(e.to_string()))?;

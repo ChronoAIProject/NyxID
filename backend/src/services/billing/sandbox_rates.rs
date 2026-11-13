@@ -336,8 +336,14 @@ impl BillingService {
             .await?;
         let mut synced = 0;
         for card in cards {
-            let result: AppResult<()> = async {
+            if !super::reconcile::continue_reconcile() {
+                break;
+            }
+            let result: AppResult<bool> = async {
                 for price in &card.prices {
+                    if !super::reconcile::continue_reconcile() {
+                        return Ok(false);
+                    }
                     super::taxes::sync_charge(
                         &self.db,
                         lago,
@@ -372,9 +378,13 @@ impl BillingService {
                         .upsert(true)
                         .await?;
                 }
-                Ok(())
+                Ok(true)
             }
             .await;
+            if matches!(result, Ok(false)) {
+                // Partial cards stay pending; do not publish a partial sync.
+                break;
+            }
             if let Err(error) = &result {
                 tracing::warn!(
                     rate_card_id = %card.id,

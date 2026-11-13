@@ -859,6 +859,9 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
 pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<u64> {
     let mut n = 0;
     for _ in 0..100 {
+        if !crate::services::billing::reconcile::continue_reconcile() {
+            break;
+        }
         let token = uuid::Uuid::new_v4().to_string();
         let row = db
             .collection::<Document>(ATTEMPTS)

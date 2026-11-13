@@ -510,6 +510,9 @@ pub async fn recover_terminal_releases(db: &mongodb::Database) -> AppResult<u64>
         .try_collect()
         .await?;
     for row in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         release_usage_reservations(db, &row).await?;
         recovered += 1;
     }
@@ -597,12 +600,18 @@ async fn recover_resource_settlement_locks(db: &mongodb::Database) -> AppResult<
 
     let mut recovered = 0;
     for period in allowance_periods {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if let Some(lock) = period.active_settlement {
             complete_allowance_lock(db, &period.id, &period.allowance_id, &lock).await?;
             recovered += 1;
         }
     }
     for grant in grants {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if let Some(lock) = grant.active_settlement {
             complete_grant_lock(db, &grant.id, &lock).await?;
             recovered += 1;

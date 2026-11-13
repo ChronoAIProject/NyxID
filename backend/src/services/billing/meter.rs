@@ -763,6 +763,9 @@ pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> Ap
         .try_collect()
         .await?;
     for coordinator in components {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let rows = materialize_component_intent(db, &coordinator).await?;
         settle_persisted(db, rows).await?;
     }
@@ -779,6 +782,9 @@ pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> Ap
 
     let mut recovered = 0;
     for coordinator in coordinators {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if materialize_pending_resale_intent(db, &coordinator)
             .await?
             .is_some()

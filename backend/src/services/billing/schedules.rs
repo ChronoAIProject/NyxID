@@ -408,6 +408,9 @@ pub async fn disburse_due(
 
     let mut remaining_budget = budget.min(MAX_RECIPIENTS_PER_TICK);
     for schedule in schedules {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if remaining_budget == 0 {
             stats.budget_exhausted = true;
             break;
@@ -424,6 +427,11 @@ pub async fn disburse_due(
         };
 
         loop {
+            if !super::reconcile::continue_reconcile() {
+                // Period progress has no ownership token. Leave its existing
+                // lease to expire rather than clear a successor's claim.
+                return Ok(stats);
+            }
             if remaining_budget == 0 {
                 release_period_lease(db, &period.id, now).await?;
                 stats.budget_exhausted = true;
@@ -431,6 +439,9 @@ pub async fn disburse_due(
             }
             let chunk_limit = DISBURSEMENT_CHUNK.min(remaining_budget);
             let recipients = next_recipients(db, &period, chunk_limit).await?;
+            if !super::reconcile::continue_reconcile() {
+                return Ok(stats);
+            }
             if recipients.is_empty() {
                 complete_period(db, &schedule.id, &period, now).await?;
                 stats.periods_completed += 1;
@@ -443,6 +454,10 @@ pub async fn disburse_due(
             stats.grants_created += outcome.inserted_indices.len();
             stats.already_disbursed += outcome.duplicate_count;
             for index in outcome.inserted_indices {
+                if !super::reconcile::continue_reconcile() {
+                    // Inserted grants remain unspendable until journal recovery.
+                    break;
+                }
                 let grant = &grants[index];
                 if super::ledger::record_grant_event(
                     db,
@@ -458,6 +473,11 @@ pub async fn disburse_due(
                     super::grants::mark_issued_ledgered(db, &grant.id, Utc::now()).await?;
                     stats.grants_ledgered += 1;
                 }
+            }
+            if !super::reconcile::continue_reconcile() {
+                // Inserted grants are durable identities; replay of this chunk
+                // is deduplicated. Do not publish progress after losing ownership.
+                return Ok(stats);
             }
             advance_cursor(
                 db,
@@ -843,6 +863,9 @@ async fn abandon_elapsed_periods(
         .try_collect()
         .await?;
     for period in periods {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let disbursed_count =
             progress::count_period_grants(db, &period.schedule_id, period.period_start).await?;
         let result = db

@@ -644,6 +644,9 @@ pub async fn sync(
         return Err(unavailable("invalid_tariff"));
     }
     for c in &t.components {
+        if !super::reconcile::continue_reconcile() {
+            return Ok(false);
+        }
         if c.explicit_free {
             continue;
         }
@@ -685,6 +688,9 @@ pub async fn sync(
             )
             .upsert(true)
             .await?;
+    }
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
     }
     publish(db, t).await
 }
@@ -759,6 +765,9 @@ pub async fn retry_pending(db: &Database, lago: &dyn LagoApi, plan: &str) -> App
         .await?;
     let mut count = 0;
     for t in pending {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         count += u64::from(sync(db, lago, plan, &t).await?);
     }
     Ok(count)

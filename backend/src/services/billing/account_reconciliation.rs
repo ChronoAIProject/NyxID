@@ -323,6 +323,7 @@ async fn verify_snapshot(
         .session(&mut *session)
         .await?;
     let status = ChainVerifyStatus {
+        revision: None,
         id: CHECK_ID.into(),
         outcome,
         cursor_seq: 1,
