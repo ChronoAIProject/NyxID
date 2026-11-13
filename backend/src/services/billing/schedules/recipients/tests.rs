@@ -1,0 +1,572 @@
+use super::*;
+use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
+use crate::models::user::UserType;
+use crate::test_utils::{connect_transaction_test_database, test_user};
+use chrono::TimeZone;
+
+#[test]
+fn recipient_windows_preserve_join_time_and_original_month_day() {
+    let anchor = Utc.with_ymd_and_hms(2028, 1, 31, 13, 42, 7).unwrap();
+    let feb = recipient_period(
+        ScheduleRecurrence::Monthly,
+        anchor,
+        Utc.with_ymd_and_hms(2028, 2, 29, 13, 42, 7).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        feb.start,
+        Utc.with_ymd_and_hms(2028, 2, 29, 13, 42, 7).unwrap()
+    );
+    assert_eq!(
+        feb.end,
+        Utc.with_ymd_and_hms(2028, 3, 31, 13, 42, 7).unwrap()
+    );
+    let before = recipient_period(
+        ScheduleRecurrence::Monthly,
+        anchor,
+        feb.start - Duration::milliseconds(1),
+    )
+    .unwrap();
+    assert_eq!(before.start, anchor);
+    assert_eq!(before.end, feb.start);
+    let week = recipient_period(
+        ScheduleRecurrence::Weekly,
+        anchor,
+        anchor + Duration::days(16),
+    )
+    .unwrap();
+    assert_eq!(week.start, anchor + Duration::days(14));
+    assert_eq!(week.end, anchor + Duration::days(21));
+    let daily = recipient_period(
+        ScheduleRecurrence::Daily,
+        anchor,
+        anchor + Duration::days(3) + Duration::hours(2),
+    )
+    .unwrap();
+    assert_eq!(daily.start, anchor + Duration::days(3));
+    assert_eq!(daily.end, anchor + Duration::days(4));
+    let non_leap = recipient_period(
+        ScheduleRecurrence::Monthly,
+        anchor,
+        Utc.with_ymd_and_hms(2029, 2, 28, 13, 42, 7).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        non_leap.end,
+        Utc.with_ymd_and_hms(2029, 3, 31, 13, 42, 7).unwrap()
+    );
+}
+
+async fn setup() -> (mongodb::Database, CreditSchedule, DateTime<Utc>) {
+    let db = connect_transaction_test_database("recipient_credit_cycles").await;
+    db.collection::<Document>(RECIPIENTS)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! { "schedule_id": 1, "recipient_user_id": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+    let now = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+    db.collection::<Group>(GROUPS)
+        .insert_one(Group {
+            id: "group".into(),
+            name: "Group".into(),
+            slug: "group".into(),
+            description: None,
+            role_ids: vec![],
+            parent_group_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let schedule = create_schedule(
+        &db,
+        CreateScheduleInput {
+            amount_credits: 100,
+            amount: None,
+            service_limits: vec![],
+            request_id: None,
+            recurrence: ScheduleRecurrence::Monthly,
+            timing: ScheduleTiming::Recipient,
+            expiry: CreditExpiryPolicy::EndOfPeriod,
+            target_kind: BillingTargetKind::Groups,
+            target_group_ids: vec!["group".into()],
+            target_org_ids: vec![],
+            target_user_ids: vec![],
+            all_services: true,
+            service_refs: vec![],
+            reason: None,
+            created_by: "admin".into(),
+        },
+    )
+    .await
+    .unwrap();
+    (db, schedule, now + Duration::seconds(1))
+}
+
+async fn join(db: &mongodb::Database, id: &str, at: DateTime<Utc>) {
+    let mut user = test_user(id, UserType::Person);
+    user.group_ids = vec!["group".into()];
+    user.created_at = at;
+    db.collection::<User>(USERS).insert_one(user).await.unwrap();
+    enroll_group_member(db, "group", id, at).await.unwrap();
+}
+
+async fn tick(db: &mongodb::Database, now: DateTime<Utc>) -> DisbursementStats {
+    disburse_due(db, now, MAX_RECIPIENTS_PER_TICK)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn new_group_members_get_full_grants_and_independent_monthly_renewals() {
+    let (db, schedule, start) = setup().await;
+    join(&db, "first", start).await;
+    assert_eq!(tick(&db, start).await.grants_created, 1);
+    let later = start + Duration::days(10);
+    join(&db, "new-signup", later).await;
+    assert_eq!(tick(&db, later).await.grants_created, 1);
+    let renewal = start.checked_add_months(Months::new(1)).unwrap();
+    let (one, two) = tokio::join!(tick(&db, renewal), tick(&db, renewal));
+    assert_eq!(one.grants_created + two.grants_created, 1);
+    assert_eq!(tick(&db, renewal).await.grants_created, 0);
+    let grants: Vec<CreditGrant> = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "schedule_origin.schedule_id": &schedule.id })
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 3);
+    assert!(
+        grants
+            .iter()
+            .all(|g| g.amount == Credits::from_whole(100) && g.issued_ledgered_at.is_some())
+    );
+    let first = grants
+        .iter()
+        .find(|g| {
+            g.recipient_user_id == "first"
+                && g.schedule_origin.as_ref().unwrap().period_start == start
+        })
+        .unwrap();
+    assert_eq!(first.expires_at, Some(renewal));
+    let second = grants
+        .iter()
+        .find(|g| g.recipient_user_id == "new-signup")
+        .unwrap();
+    assert_eq!(second.schedule_origin.as_ref().unwrap().period_start, later);
+    assert_eq!(second.expires_at, later.checked_add_months(Months::new(1)));
+}
+
+#[tokio::test]
+async fn rejoining_recovers_eligibility_without_resetting_or_double_granting() {
+    let (db, schedule, start) = setup().await;
+    join(&db, "person", start).await;
+    tick(&db, start).await;
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": "person" },
+            doc! { "$set": { "group_ids": [] } },
+        )
+        .await
+        .unwrap();
+    let renewal = start.checked_add_months(Months::new(1)).unwrap();
+    assert_eq!(tick(&db, renewal).await.grants_created, 0);
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": "person" },
+            doc! { "$set": { "group_ids": ["group"] } },
+        )
+        .await
+        .unwrap();
+    let rejoin = renewal + Duration::days(4);
+    enroll_group_member(&db, "group", "person", rejoin)
+        .await
+        .unwrap();
+    assert_eq!(tick(&db, rejoin).await.grants_created, 1);
+    enroll_group_member(&db, "group", "person", rejoin)
+        .await
+        .unwrap();
+    assert_eq!(tick(&db, rejoin).await.grants_created, 0);
+    let recipient = db
+        .collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .find_one(recipient_filter(&schedule.id, "person"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recipient.anchor_at, start);
+    assert_eq!(
+        recipient.next_due_at,
+        start.checked_add_months(Months::new(2)).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn discovery_repairs_missed_joins_and_pause_skips_elapsed_periods() {
+    let (db, schedule, start) = setup().await;
+    let mut user = test_user("person", UserType::Person);
+    user.group_ids = vec!["group".into()];
+    db.collection::<User>(USERS).insert_one(user).await.unwrap();
+    assert_eq!(tick(&db, start).await.grants_created, 1);
+    update_schedule(
+        &db,
+        &schedule.id,
+        UpdateScheduleInput {
+            is_active: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let later = start.checked_add_months(Months::new(3)).unwrap();
+    assert_eq!(tick(&db, later).await.grants_created, 0);
+    update_schedule(
+        &db,
+        &schedule.id,
+        UpdateScheduleInput {
+            is_active: Some(true),
+            amount_credits: Some(200),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(tick(&db, later).await.grants_created, 1);
+    assert_eq!(
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .count_documents(doc! { "schedule_origin.schedule_id": &schedule.id })
+            .await
+            .unwrap(),
+        2
+    );
+    let latest = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": grant_id(&schedule.id, later, "person") })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.amount, Credits::from_whole(200));
+}
+
+#[tokio::test]
+async fn group_service_records_join_anchor_and_retry_keeps_persisted_grant_policy() {
+    let (db, schedule, _) = setup().await;
+    db.collection::<User>(USERS)
+        .insert_one(test_user("person", UserType::Person))
+        .await
+        .unwrap();
+    let before = Utc::now() - Duration::milliseconds(1);
+    crate::services::group_service::add_member(&db, "group", "person")
+        .await
+        .unwrap();
+    let recipient = db
+        .collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .find_one(recipient_filter(&schedule.id, "person"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(recipient.anchor_at >= before && recipient.anchor_at <= Utc::now());
+    tick(&db, Utc::now()).await;
+    update_schedule(
+        &db,
+        &schedule.id,
+        UpdateScheduleInput {
+            amount_credits: Some(200),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Simulate a crash after grant insertion but before scheduling its renewal.
+    db.collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .update_one(
+            doc! { "_id": &recipient.id },
+            doc! { "$set": { "next_due_at": bson::DateTime::from_chrono(recipient.anchor_at) } },
+        )
+        .await
+        .unwrap();
+    assert_eq!(tick(&db, Utc::now()).await.grants_created, 0);
+    let grants: Vec<CreditGrant> = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "schedule_origin.schedule_id": &schedule.id })
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].amount, Credits::from_whole(100));
+    assert_eq!(
+        db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME)
+            .count_documents(doc! { "dedupe_key": format!("grant-issued:{}", grants[0].id) })
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn recipient_discovery_respects_each_target_kind_and_personal_membership() {
+    use crate::models::org_membership::{OrgMembership, OrgRole};
+    use crate::test_utils::test_membership;
+    for kind in [
+        BillingTargetKind::AllUsers,
+        BillingTargetKind::SelectedUsers,
+        BillingTargetKind::OrgMembers,
+        BillingTargetKind::Groups,
+    ] {
+        let (db, schedule, start) = setup().await;
+        let mut person = test_user("person", UserType::Person);
+        person.group_ids = vec!["group".into()];
+        db.collection::<User>(USERS)
+            .insert_many([
+                person,
+                test_user("org", UserType::Org),
+                test_user("other", UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(test_membership("org", "person", OrgRole::Viewer, None))
+            .await
+            .unwrap();
+        update_schedule(
+            &db,
+            &schedule.id,
+            UpdateScheduleInput {
+                target_kind: Some(kind),
+                target_user_ids: Some(if kind == BillingTargetKind::SelectedUsers {
+                    vec!["person".into(), "org".into()]
+                } else {
+                    vec![]
+                }),
+                target_org_ids: Some(if kind == BillingTargetKind::OrgMembers {
+                    vec!["org".into()]
+                } else {
+                    vec![]
+                }),
+                target_group_ids: Some(if kind == BillingTargetKind::Groups {
+                    vec!["group".into()]
+                } else {
+                    vec![]
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let expected = match kind {
+            BillingTargetKind::AllUsers => 3,
+            BillingTargetKind::SelectedUsers => 2,
+            _ => 1,
+        };
+        assert_eq!(tick(&db, start).await.grants_created, expected);
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": "person" },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tick(&db, start.checked_add_months(Months::new(1)).unwrap())
+                .await
+                .grants_created,
+            expected - 1
+        );
+    }
+}
+
+#[tokio::test]
+async fn delayed_worker_does_not_mint_an_already_expired_short_grant() {
+    let (db, schedule, start) = setup().await;
+    update_schedule(
+        &db,
+        &schedule.id,
+        UpdateScheduleInput {
+            expiry: Some(CreditExpiryPolicy::AfterDays { days: 1 }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    join(&db, "person", start).await;
+    assert_eq!(tick(&db, start + Duration::days(2)).await.grants_created, 0);
+    assert_eq!(
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        tick(&db, start.checked_add_months(Months::new(1)).unwrap())
+            .await
+            .grants_created,
+        1
+    );
+}
+
+#[tokio::test]
+async fn group_join_is_discovered_even_behind_an_unfinished_cursor() {
+    let (db, schedule, start) = setup().await;
+    join(&db, "z-existing", start).await;
+    let first = disburse_due(&db, start, 1).await.unwrap();
+    assert_eq!(first.grants_created, 1);
+    assert!(first.budget_exhausted);
+    // The existing discovery cursor is z-existing; the new id sorts before it.
+    let later = start + Duration::days(2);
+    join(&db, "a-new-member", later).await;
+    assert_eq!(disburse_due(&db, later, 1).await.unwrap().grants_created, 1);
+    assert!(
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .find_one(doc! {
+                "_id": grant_id(&schedule.id, later, "a-new-member")
+            })
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_rejoin_fences_a_stale_ineligibility_write_even_with_the_same_timestamp() {
+    let (db, schedule, start) = setup().await;
+    join(&db, "person", start).await;
+    let stale = db
+        .collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .find_one(recipient_filter(&schedule.id, "person"))
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": "person" },
+            doc! { "$set": { "group_ids": [] } },
+        )
+        .await
+        .unwrap();
+    assert!(
+        eligible_ids(&db, &schedule, &["person".into()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": "person" },
+            doc! { "$set": { "group_ids": ["group"] } },
+        )
+        .await
+        .unwrap();
+    // The hook runs while the row still says eligible, before the stale write.
+    enroll_group_member(&db, "group", "person", start)
+        .await
+        .unwrap();
+    mark_ineligible(&db, &stale, start).await.unwrap();
+    let current = db
+        .collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .find_one(recipient_filter(&schedule.id, "person"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(current.is_eligible);
+    assert!(current.eligibility_version > stale.eligibility_version);
+    assert_eq!(current.anchor_at, stale.anchor_at);
+    assert_eq!(tick(&db, start).await.grants_created, 1);
+    assert_eq!(tick(&db, start).await.grants_created, 0);
+}
+
+#[tokio::test]
+async fn joins_while_paused_keep_the_join_anchor_without_issuing_until_resumed() {
+    let (db, schedule, start) = setup().await;
+    update_schedule(
+        &db,
+        &schedule.id,
+        UpdateScheduleInput {
+            is_active: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    join(&db, "person", start).await;
+    assert_eq!(tick(&db, start).await.grants_created, 0);
+    update_schedule(
+        &db,
+        &schedule.id,
+        UpdateScheduleInput {
+            is_active: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(tick(&db, start + Duration::days(2)).await.grants_created, 1);
+    let grant = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": grant_id(&schedule.id, start, "person") })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.expires_at, start.checked_add_months(Months::new(1)));
+}
+
+#[tokio::test]
+async fn daily_and_weekly_recipient_grants_renew_once_and_skip_elapsed_windows() {
+    for (recurrence, days) in [
+        (ScheduleRecurrence::Daily, 1),
+        (ScheduleRecurrence::Weekly, 7),
+    ] {
+        let (db, schedule, start) = setup().await;
+        db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
+            .update_one(
+                doc! { "_id": &schedule.id },
+                doc! { "$set": { "recurrence": encode(&recurrence, "recurrence").unwrap() } },
+            )
+            .await
+            .unwrap();
+        join(&db, "person", start).await;
+        assert_eq!(tick(&db, start).await.grants_created, 1);
+        assert_eq!(
+            tick(&db, start + Duration::days(days)).await.grants_created,
+            1
+        );
+        assert_eq!(
+            tick(&db, start + Duration::days(days)).await.grants_created,
+            0
+        );
+        assert_eq!(
+            tick(&db, start + Duration::days(days * 4))
+                .await
+                .grants_created,
+            1
+        );
+        let grants: Vec<CreditGrant> = db
+            .collection::<CreditGrant>(CREDIT_GRANTS)
+            .find(doc! { "schedule_origin.schedule_id": &schedule.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(grants.len(), 3);
+        assert!(
+            grants
+                .iter()
+                .all(|grant| grant.amount == Credits::from_whole(100)
+                    && grant.issued_ledgered_at.is_some())
+        );
+        assert!(grants.iter().all(|grant| grant.expires_at
+            == Some(grant.schedule_origin.as_ref().unwrap().period_start + Duration::days(days))));
+    }
+}

@@ -228,7 +228,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BILLING_ALLOCATIONS_ENABLED` | `false` | Authoring capability for exact credit allocations, service/group ceilings and reclaim during holds. Enable only after upgrading every API replica and billing worker; see the allocation rollout contract below. Does not disable enforcement on existing allocations. |
+| `BILLING_ALLOCATIONS_ENABLED` | `false` | Authoring capability for exact credit allocations, service/group ceilings and reclaim during holds. Enable only after upgrading every API replica and billing worker; see the allocation rollout contract below. Does not disable enforcement on existing allocations. Recipient schedules additionally require `billing:recipient-schedules-v1` fleet readiness. |
 | `BILLING_ENABLED` | `false` | Enables platform usage capture and the prepaid wallet charging gate. When Lago is configured, owner wallets are provisioned idempotently on startup backfill, wallet access, registration best-effort, and first proxy use. |
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |

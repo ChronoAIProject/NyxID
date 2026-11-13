@@ -28,12 +28,14 @@ export function SchedulesTable({
   updatePending,
   onEdit,
   onToggle,
+  onSeed,
 }: {
   readonly schedules: readonly CreditSchedule[];
   readonly canWrite: boolean;
   readonly updatePending: boolean;
   readonly onEdit: (schedule: CreditSchedule) => void;
   readonly onToggle: (schedule: CreditSchedule) => void;
+  readonly onSeed?: (schedule: CreditSchedule) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
@@ -70,6 +72,11 @@ export function SchedulesTable({
               </TableCell>
               <TableCell className="capitalize">
                 {schedule.recurrence}
+                <p className="text-11 normal-case text-muted-foreground">
+                  {schedule.timing === "recipient"
+                    ? "From recipient start date"
+                    : "Calendar periods (UTC)"}
+                </p>
               </TableCell>
               <TableCell>{expiryLabel(schedule.expiry)}</TableCell>
               <TableCell>
@@ -111,6 +118,19 @@ export function SchedulesTable({
               {canWrite ? (
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-3">
+                    {onSeed &&
+                    schedule.is_active &&
+                    schedule.timing !== "recipient" ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={updatePending}
+                        onClick={() => onSeed(schedule)}
+                      >
+                        Grant missing credits
+                      </Button>
+                    ) : null}
                     <Button
                       type="button"
                       size="icon"
@@ -187,6 +207,7 @@ function expiryLabel(expiry: CreditExpiryPolicy) {
 }
 
 function periodLabel(schedule: CreditSchedule) {
+  if (schedule.timing === "recipient") return "Individual recipient cycles";
   const period = schedule.current_period;
   if (!period) return schedule.is_active ? "Pending" : "No open period";
   if (period.status === "disbursing") {

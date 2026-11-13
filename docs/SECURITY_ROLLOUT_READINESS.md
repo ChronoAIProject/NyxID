@@ -54,6 +54,7 @@ feature flags requires deployment readiness:
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
+| `billing:recipient-schedules-v1` | Recipient-cycle schedule readers and billing workers. New authoring and its overview capability require this readiness plus allocation authoring. Pause every recipient schedule and drain upgraded workers before any binary rollback. |
 | `permissions:execution-v1` | Explicit execution-contract reader. Per-person activation requires reader/dispatch/authoring; broad activation additionally requires enrollment readiness below. See [contract](EXECUTION_PERMISSIONS.md). |
 | `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
 | `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Upgrade/drain every writer before activation. |

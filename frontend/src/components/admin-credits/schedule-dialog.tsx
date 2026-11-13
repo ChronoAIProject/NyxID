@@ -49,11 +49,13 @@ export function ScheduleDialog({
   editingSchedule,
   onSubmit,
   allocationPolicies = false,
+  recipientSchedules = false,
   servicesError = false,
   servicesLoading = false,
   retryServices,
 }: {
   readonly allocationPolicies?: boolean;
+  readonly recipientSchedules?: boolean;
   readonly servicesError?: boolean;
   readonly servicesLoading?: boolean;
   readonly retryServices?: () => void;
@@ -70,8 +72,13 @@ export function ScheduleDialog({
   const values = form.watch();
   const exactAmount = allocationPolicies || values.amount !== undefined;
   const valid = scheduleFormSchema.safeParse(values).success;
+  const recipientUnavailable =
+    editingSchedule === null &&
+    values.timing === "recipient" &&
+    !recipientSchedules;
   const blocked =
     lookupBlocked ||
+    recipientUnavailable ||
     ((servicesError || servicesLoading) &&
       (!values.all_services || Boolean(values.service_limits?.length)));
   const expiry = form.watch("expiry");
@@ -92,8 +99,8 @@ export function ScheduleDialog({
               : "Create credit schedule"}
           </DialogTitle>
           <DialogDescription>
-            Issue a fresh shared credit total on a UTC cycle. Each issuance has
-            its own service ceilings. Changes affect future periods only.
+            Issue a fresh credit total per recipient each cycle. Each issuance
+            has its own service ceilings. Changes affect future issuances only.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -205,15 +212,63 @@ export function ScheduleDialog({
                   />
                 </div>
 
+                {recipientSchedules || values.timing === "recipient" ? (
+                  <FormField
+                    control={form.control}
+                    name="timing"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Renewal cycle</FormLabel>
+                        <Select
+                          value={field.value ?? "calendar"}
+                          disabled={editingSchedule !== null}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem
+                              value="recipient"
+                              disabled={!recipientSchedules}
+                            >
+                              From when each recipient joins
+                            </SelectItem>
+                            <SelectItem value="calendar">
+                              Calendar periods (UTC)
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {editingSchedule ? (
+                          <FormDescription>
+                            Pause this schedule and create another to change its
+                            renewal cycle.
+                          </FormDescription>
+                        ) : null}
+                        {recipientUnavailable ? (
+                          <FormDescription>
+                            Recipient scheduling is currently unavailable.
+                            Choose calendar periods or try again later.
+                          </FormDescription>
+                        ) : null}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
                 <FormField
                   control={form.control}
                   name="expiry"
                   render={({ field }) => (
                     <FormItem>
                       <fieldset className="space-y-2">
-                        <Label asChild><legend className="text-muted-foreground">
-                          Expiry policy
-                        </legend></Label>
+                        <Label asChild>
+                          <legend className="text-muted-foreground">
+                            Expiry policy
+                          </legend>
+                        </Label>
                         <div className="grid gap-2 sm:grid-cols-3">
                           <ExpiryOption
                             label="End of each period"
@@ -225,7 +280,11 @@ export function ScheduleDialog({
                           />
                           <ExpiryOption
                             label="After a fixed number of days"
-                            description="From disbursement"
+                            description={
+                              values.timing === "recipient"
+                                ? "From cycle start"
+                                : "From disbursement"
+                            }
                             checked={field.value.kind === "after_days"}
                             onChange={() =>
                               field.onChange({ kind: "after_days", days: 30 })
@@ -273,7 +332,11 @@ export function ScheduleDialog({
 
                 <RecipientTargetFields
                   onLookupBlocked={setLookupBlocked}
-                  description="Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period."
+                  description={
+                    values.timing === "recipient"
+                      ? "New members receive a full first allocation on the next billing update, then renew from their own start date. Monthly renewals use the same date each month."
+                      : "Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period."
+                  }
                 />
 
                 <FormField

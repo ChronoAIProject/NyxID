@@ -15,7 +15,7 @@ use crate::models::credit_grant::{
 };
 use crate::models::credit_schedule::{
     COLLECTION_NAME as CREDIT_SCHEDULES, CreditExpiryPolicy, CreditSchedule, SchedulePeriod,
-    ScheduleRecurrence,
+    ScheduleRecurrence, ScheduleTiming,
 };
 use crate::models::credit_schedule_period::{
     COLLECTION_NAME as CREDIT_SCHEDULE_PERIODS, CreditSchedulePeriod, SchedulePeriodStatus,
@@ -25,6 +25,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use super::grants::{MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
 mod progress;
+pub mod recipients;
+pub mod seeding;
 
 pub const DISBURSEMENT_CHUNK: usize = 200;
 pub const MAX_RECIPIENTS_PER_TICK: usize = 5_000;
@@ -35,6 +37,8 @@ const MAX_SCHEDULES_PER_TICK: i64 = 500;
 pub struct CreateScheduleInput {
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
+    #[serde(skip_serializing_if = "calendar_timing")]
+    pub timing: ScheduleTiming,
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
@@ -84,6 +88,10 @@ pub struct DisbursementStats {
     pub budget_exhausted: bool,
 }
 
+fn calendar_timing(timing: &ScheduleTiming) -> bool {
+    *timing == ScheduleTiming::Calendar
+}
+
 pub async fn create_schedule(
     db: &mongodb::Database,
     input: CreateScheduleInput,
@@ -128,6 +136,7 @@ pub async fn create_schedule(
         amount_credits: amount.display_whole(),
         amount,
         recurrence: input.recurrence,
+        timing: input.timing,
         expiry: input.expiry,
         target_kind: input.target_kind,
         target_user_ids,
@@ -413,6 +422,11 @@ pub async fn disburse_due(
             break;
         }
         stats.schedules_examined += 1;
+        if schedule.timing == ScheduleTiming::Recipient {
+            recipients::disburse(db, &schedule, now, &mut remaining_budget, &mut stats).await?;
+            stats.budget_exhausted |= remaining_budget == 0;
+            continue;
+        }
         let window = schedule_period(schedule.recurrence, now);
         let claim = claim_period(db, &schedule, window, now, schedule.is_active).await?;
         let mut period = match claim {

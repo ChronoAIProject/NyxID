@@ -14,6 +14,15 @@ pub enum ScheduleRecurrence {
     Monthly,
 }
 
+/// Calendar is the compatibility default for schedules authored before recipient cycles.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleTiming {
+    #[default]
+    Calendar,
+    Recipient,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreditExpiryPolicy {
@@ -42,6 +51,8 @@ crate::exact_credit_model! {
         #[serde(with = "crate::models::credits::whole")]
         pub amount: crate::models::credits::Credits,
         pub recurrence: ScheduleRecurrence,
+        #[serde(default)]
+        pub timing: ScheduleTiming,
         pub expiry: CreditExpiryPolicy,
         pub target_kind: BillingTargetKind,
         #[serde(default)]

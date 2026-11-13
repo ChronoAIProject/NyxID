@@ -174,6 +174,12 @@ pub(super) async fn member_recipients(
             MEMBERSHIPS,
             vec![
                 doc! { "$match": membership },
+                doc! { "$lookup": {
+                    "from": USERS, "localField": "org_user_id", "foreignField": "_id",
+                    "pipeline": [{ "$match": { "is_active": true, "user_type": "org" } }, { "$project": { "_id": 1 } }],
+                    "as": "active_org",
+                } },
+                doc! { "$match": { "active_org.0": { "$exists": true } } },
                 doc! { "$group": { "_id": "$member_user_id" } },
                 doc! { "$sort": { "_id": 1 } },
                 doc! { "$lookup": {

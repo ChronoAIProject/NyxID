@@ -220,6 +220,7 @@ pub async fn add_member(db: &mongodb::Database, group_id: &str, user_id: &str) -
         return Err(AppError::GroupMembershipExists);
     }
 
+    let joined_at = Utc::now();
     db.collection::<User>(USERS)
         .update_one(
             doc! { "_id": user_id },
@@ -227,6 +228,15 @@ pub async fn add_member(db: &mongodb::Database, group_id: &str, user_id: &str) -
         )
         .await?;
 
+    if let Err(error) = crate::services::billing::schedules::recipients::enroll_group_member(
+        db, group_id, user_id, joined_at,
+    )
+    .await
+    {
+        // Membership succeeded. The bounded billing discovery walk repairs a
+        // missed enrollment without turning a successful join into an error.
+        tracing::warn!(%error, "Credit schedule enrollment deferred to billing reconciliation");
+    }
     Ok(())
 }
 

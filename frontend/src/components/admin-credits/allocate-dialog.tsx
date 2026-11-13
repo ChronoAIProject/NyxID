@@ -65,6 +65,7 @@ export function AllocateDialog({
   servicesLoading,
   retryServices,
   canRecurring,
+  recipientSchedules = false,
   initialRecurrence = "one_time",
 }: {
   readonly open: boolean;
@@ -74,6 +75,7 @@ export function AllocateDialog({
   readonly servicesLoading: boolean;
   readonly retryServices: () => void;
   readonly canRecurring: boolean;
+  readonly recipientSchedules?: boolean;
   readonly initialRecurrence?: AllocationForm["recurrence"];
 }) {
   const [lookupBlocked, setLookupBlocked] = useState(false);
@@ -83,15 +85,26 @@ export function AllocateDialog({
     mode: "onChange",
   });
   const mutation = useAllocateCredits();
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (open) form.reset({ ...defaults, recurrence: initialRecurrence });
-  }, [open, initialRecurrence, form]);
+    if (open && !wasOpen.current)
+      form.reset({
+        ...defaults,
+        recurrence: initialRecurrence,
+        timing: recipientSchedules ? "recipient" : undefined,
+      });
+    wasOpen.current = open;
+  }, [open, initialRecurrence, recipientSchedules, form]);
   const submission = useRef<{ payload: string; key: string } | null>(null);
   const inFlight = useRef(false);
   const value = form.watch();
   const needsServices = !value.all_services || value.service_limits.length > 0;
   const blocked =
-    lookupBlocked || (needsServices && (servicesError || servicesLoading));
+    lookupBlocked ||
+    (needsServices && (servicesError || servicesLoading)) ||
+    (value.recurrence !== "one_time" &&
+      value.timing === "recipient" &&
+      !recipientSchedules);
   const close = (next: boolean) => {
     if (inFlight.current || mutation.isPending) return;
     if (!next) {
@@ -127,7 +140,7 @@ export function AllocateDialog({
         if (warning) toast.warning(warning);
       } else
         toast.success(
-          "Recurring allocation created. The current period is issued on the next billing update.",
+          "Recurring allocation created. Credits are issued on the next billing update.",
         );
       form.reset(defaults);
       submission.current = null;
@@ -199,12 +212,54 @@ export function AllocateDialog({
                     </FormItem>
                   )}
                 />
+                {value.recurrence !== "one_time" &&
+                (recipientSchedules || value.timing === "recipient") ? (
+                  <FormField
+                    control={form.control}
+                    name="timing"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Renewal cycle</FormLabel>
+                        <Select
+                          value={field.value ?? "calendar"}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem
+                              value="recipient"
+                              disabled={!recipientSchedules}
+                            >
+                              From when each recipient joins
+                            </SelectItem>
+                            <SelectItem value="calendar">
+                              Calendar periods (UTC)
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {!recipientSchedules ? (
+                          <p className="text-13 text-muted-foreground">
+                            Recipient scheduling is currently unavailable.
+                            Choose calendar periods or try again later.
+                          </p>
+                        ) : null}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
                 <RecipientTargetFields
                   onLookupBlocked={setLookupBlocked}
                   description={
                     value.recurrence === "one_time"
                       ? "Recipients are captured when this allocation is submitted. Retrying preserves that snapshot."
-                      : "Each UTC period captures eligible recipients. Later signups and organization joins wait until the next period. Each issuance gets a fresh total and fresh service limits."
+                      : value.timing === "recipient"
+                        ? "New members receive a full first allocation on the next billing update. Each recipient renews from their own start date; monthly renewals use the same date each month. Existing members start when first covered by this schedule."
+                        : "Each UTC period captures eligible recipients. Later signups and organization joins wait until the next period. Each issuance gets a fresh total and fresh service limits."
                   }
                 />
                 {value.recurrence === "one_time" ? (
