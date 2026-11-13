@@ -1989,6 +1989,92 @@ async fn reply_state(f: &Fixture, source: &str) -> bson::Document {
 }
 
 #[tokio::test]
+async fn gateway_thread_prepared_reply_carries_verified_capability_through_dispatch() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_carried_capability")).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages/om_root/reply"))
+            .and(body_partial_json(json!({"reply_in_thread":true})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"om_sent"}})),
+            )
+            .expect(1)
+            .mount(&f.platform)
+            .await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+        let request = serde_json::from_value(
+            json!({"message_id":id,"thread_reply":true,"reply":{"text":"answer"}}),
+        )
+        .unwrap();
+        let context = crate::handlers::channel_relay::resolve_reply_request_context(
+            &f.state, &headers, None, &request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("reply_token_uses")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let adapter = thread_follow::TEST_ADAPTERS
+            .lock()
+            .unwrap()
+            .get(&f.row.channel_bot_id)
+            .cloned()
+            .unwrap();
+        // Internal prepared delivery carries the verified capability even without
+        // the HTTP Authorization header; it still crosses the unique-use barrier.
+        let response = crate::handlers::channel_relay::deliver_prepared_reply(
+            &f.state,
+            &HeaderMap::new(),
+            context,
+            crate::services::channel_platform::OutboundReply {
+                text: Some("answer".into()),
+                metadata: None,
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+            },
+            true,
+            adapter.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0.platform_message_id.as_deref(), Some("om_sent"));
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("reply_token_uses")
+                .count_documents(doc! {"_id":jti})
+                .await
+                .unwrap(),
+            1
+        );
+        let before = reply_state(&f, &id).await;
+        assert_eq!(
+            post_thread_answer(&f.state, &f.row, &id, &headers)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(reply_state(&f, &id).await, before);
+        f.platform.verify().await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn gateway_thread_reply_concurrent_success_and_replay_leave_health_and_receipt_unchanged() {
     Box::pin(async {
         let f = Box::pin(Fixture::new("thread_token_success")).await;

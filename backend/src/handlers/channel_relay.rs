@@ -442,6 +442,38 @@ pub(crate) struct ReplyRequestContext {
     conversation: ChannelConversation,
     attributed_api_key_id: String,
     validated_bot: Option<ChannelBot>,
+    reply_claims: Option<ValidatedReplyClaims>,
+}
+
+struct ValidatedReplyClaims(Box<jwt::RelayReplyClaims>);
+
+impl std::fmt::Debug for ValidatedReplyClaims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ValidatedReplyClaims([redacted])")
+    }
+}
+
+#[derive(Debug)]
+struct ReplyContextError {
+    error: AppError,
+    class: ReplyFailure,
+    reply_claims: Option<ValidatedReplyClaims>,
+}
+
+impl From<ReplyError> for ReplyContextError {
+    fn from(failure: ReplyError) -> Self {
+        Self {
+            error: failure.error,
+            class: failure.class,
+            reply_claims: None,
+        }
+    }
+}
+
+impl From<AppError> for ReplyContextError {
+    fn from(error: AppError) -> Self {
+        ReplyError::from(error).into()
+    }
 }
 
 pub(crate) fn image_reply_audience(
@@ -644,6 +676,11 @@ fn reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
     })
 }
 
+fn thread_reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
+    claims.require_unexpired()?;
+    reply_token_use(claims)
+}
+
 async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult<bool> {
     Ok(state
         .db
@@ -687,18 +724,13 @@ async fn resolve_reply_token_context_classified(
     state: &AppState,
     token: &str,
     body: &AsyncReplyRequest,
-) -> ReplyResult<ReplyRequestContext> {
-    if body.thread_reply {
-        let claims = jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, token)?;
-        if reply_token_has_been_consumed(state, &claims.jti).await? {
-            return Err((AppError::Unauthorized("Reply token already used".into())).into());
-        }
-    }
+) -> Result<ReplyRequestContext, ReplyContextError> {
     resolve_reply_token_message_context_classified(
         state,
         token,
         &body.message_id,
         !body.thread_reply,
+        body.thread_reply,
     )
     .await
 }
@@ -709,7 +741,7 @@ async fn resolve_reply_token_message_context(
     message_id: &str,
     consume: bool,
 ) -> AppResult<ReplyRequestContext> {
-    resolve_reply_token_message_context_classified(state, token, message_id, consume)
+    resolve_reply_token_message_context_classified(state, token, message_id, consume, false)
         .await
         .map_err(|failure| failure.error)
 }
@@ -719,66 +751,90 @@ async fn resolve_reply_token_message_context_classified(
     token: &str,
     message_id: &str,
     consume: bool,
-) -> ReplyResult<ReplyRequestContext> {
+    reject_used: bool,
+) -> Result<ReplyRequestContext, ReplyContextError> {
     let claims = jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, token)?;
-    let original = channel_relay_service::get_message(&state.db, message_id).await?;
-    if claims.inbound_message_id != message_id || original.direction != "inbound" {
-        return Err((AppError::Unauthorized("Reply token message_id mismatch".to_string())).into());
-    }
-
-    let conversation = load_active_conversation(state, &original.conversation_id)
-        .await
-        .map_err(ReplyError::authority)?;
-    if claims.conversation_id != conversation.id || original.conversation_id != conversation.id {
-        return Err(
-            (AppError::Unauthorized("Reply token conversation mismatch".to_string())).into(),
-        );
-    }
-
-    // Device conversations have no bot and no reply surface (ADR-013).
-    // Reject with the shared device error before `load_active_bot` would
-    // surface an `Internal` 500 on the missing `channel_bot_id`.
-    if is_device_reply_forbidden(&original.platform, &conversation.platform) {
-        return Err((AppError::DeviceChannelReplyNotAllowed).into());
-    }
-
-    // Legacy chat tokens do not re-check conversation assignment. The token
-    // was minted for this specific inbound message; allowing the agent who
-    // received that callback to complete its reply — even if the
-    // conversation has since been reassigned — avoids dropping in-flight
-    // LLM responses. Scope narrowness is enforced by the token's other
-    // bindings (conversation_id, inbound_message_id) and by the live
-    // `api_key.is_active` re-check below. Adapters with durable reply attempts
-    // additionally revalidate the current route before accepting a retry.
-    let api_key = load_active_api_key(state, &claims.api_key_id).await?;
-    let bot = load_active_bot(state, &original)
-        .await
-        .map_err(ReplyError::authority)?;
-    validate_message_bot_scope(&original, &conversation, &bot).map_err(ReplyError::target)?;
-
-    if claims.platform != conversation.platform {
-        return Err((AppError::Unauthorized("Reply token platform mismatch".to_string())).into());
-    }
-
-    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-    if adapter.persists_reply_attempt() {
-        if original.agent_api_key_id.as_deref() != Some(&claims.api_key_id)
-            || conversation.agent_api_key_id != claims.api_key_id
-        {
+    let result: ReplyResult<ReplyRequestContext> = async {
+        if reject_used && reply_token_has_been_consumed(state, &claims.jti).await? {
+            return Err(AppError::Unauthorized("Reply token already used".into()).into());
+        }
+        let original = channel_relay_service::get_message(&state.db, message_id).await?;
+        if claims.inbound_message_id != message_id || original.direction != "inbound" {
             return Err(
-                (AppError::Unauthorized("Email reply route has been reassigned".into())).into(),
+                (AppError::Unauthorized("Reply token message_id mismatch".to_string())).into(),
             );
         }
-    } else if consume {
-        consume_reply_token_use(state, &claims).await?;
-    }
 
-    Ok(ReplyRequestContext {
-        original,
-        conversation,
-        attributed_api_key_id: api_key.id,
-        validated_bot: Some(bot),
-    })
+        let conversation = load_active_conversation(state, &original.conversation_id)
+            .await
+            .map_err(ReplyError::authority)?;
+        if claims.conversation_id != conversation.id || original.conversation_id != conversation.id
+        {
+            return Err(
+                (AppError::Unauthorized("Reply token conversation mismatch".to_string())).into(),
+            );
+        }
+
+        // Device conversations have no bot and no reply surface (ADR-013).
+        // Reject with the shared device error before `load_active_bot` would
+        // surface an `Internal` 500 on the missing `channel_bot_id`.
+        if is_device_reply_forbidden(&original.platform, &conversation.platform) {
+            return Err((AppError::DeviceChannelReplyNotAllowed).into());
+        }
+
+        // Legacy chat tokens do not re-check conversation assignment. The token
+        // was minted for this specific inbound message; allowing the agent who
+        // received that callback to complete its reply — even if the
+        // conversation has since been reassigned — avoids dropping in-flight
+        // LLM responses. Scope narrowness is enforced by the token's other
+        // bindings (conversation_id, inbound_message_id) and by the live
+        // `api_key.is_active` re-check below. Adapters with durable reply attempts
+        // additionally revalidate the current route before accepting a retry.
+        let api_key = load_active_api_key(state, &claims.api_key_id).await?;
+        let bot = load_active_bot(state, &original)
+            .await
+            .map_err(ReplyError::authority)?;
+        validate_message_bot_scope(&original, &conversation, &bot).map_err(ReplyError::target)?;
+
+        if claims.platform != conversation.platform {
+            return Err(
+                (AppError::Unauthorized("Reply token platform mismatch".to_string())).into(),
+            );
+        }
+
+        let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+        if adapter.persists_reply_attempt() {
+            if original.agent_api_key_id.as_deref() != Some(&claims.api_key_id)
+                || conversation.agent_api_key_id != claims.api_key_id
+            {
+                return Err((AppError::Unauthorized(
+                    "Email reply route has been reassigned".into(),
+                ))
+                .into());
+            }
+        } else if consume {
+            consume_reply_token_use(state, &claims).await?;
+        }
+
+        Ok(ReplyRequestContext {
+            original,
+            conversation,
+            attributed_api_key_id: api_key.id,
+            validated_bot: Some(bot),
+            reply_claims: None,
+        })
+    }
+    .await;
+    match result {
+        Ok(mut context) => {
+            context.reply_claims = Some(ValidatedReplyClaims(Box::new(claims)));
+            Ok(context)
+        }
+        Err(failure) => Err(ReplyContextError {
+            reply_claims: Some(ValidatedReplyClaims(Box::new(claims))),
+            ..failure.into()
+        }),
+    }
 }
 
 /// Reject relay access tokens (`X-NyxID-User-Token`) on the reply/edit paths.
@@ -845,6 +901,7 @@ async fn resolve_api_key_reply_context_classified(
         conversation,
         attributed_api_key_id: caller_api_key_id.to_string(),
         validated_bot: None,
+        reply_claims: None,
     })
 }
 
@@ -953,7 +1010,7 @@ async fn resolve_reply_request_context_classified(
     headers: &HeaderMap,
     auth_user: Option<&AuthUser>,
     body: &AsyncReplyRequest,
-) -> ReplyResult<ReplyRequestContext> {
+) -> Result<ReplyRequestContext, ReplyContextError> {
     if let Some(token) = extract_bearer_token(headers)?
         && token_targets_reply_audience(&token)
     {
@@ -963,7 +1020,9 @@ async fn resolve_reply_request_context_classified(
     let auth_user = auth_user.ok_or_else(|| {
         AppError::Unauthorized("API key or relay reply token required".to_string())
     })?;
-    resolve_api_key_reply_context_classified(state, auth_user, body).await
+    resolve_api_key_reply_context_classified(state, auth_user, body)
+        .await
+        .map_err(Into::into)
 }
 
 async fn resolve_edit_request_context(
@@ -1488,7 +1547,6 @@ pub async fn async_reply(
                 if body.thread_reply {
                     record_thread_preflight_failure(
                         &state,
-                        &headers,
                         auth_user.as_ref(),
                         &body.message_id,
                         &failure,
@@ -1507,10 +1565,9 @@ pub async fn async_reply(
 
 async fn record_thread_preflight_failure(
     state: &AppState,
-    headers: &HeaderMap,
     auth: Option<&AuthUser>,
     source: &str,
-    failure: &ReplyError,
+    failure: &ReplyContextError,
 ) {
     if failure.class.reason().is_none() {
         return;
@@ -1521,18 +1578,14 @@ async fn record_thread_preflight_failure(
     let Ok(original) = channel_relay_service::get_message(&state.db, source).await else {
         return;
     };
-    let token_bound = extract_bearer_token(headers)
-        .ok()
-        .flatten()
-        .and_then(|token| {
-            jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, &token).ok()
-        })
-        .is_some_and(|claims| {
-            claims.inbound_message_id == original.id
-                && claims.conversation_id == original.conversation_id
-                && claims.platform == original.platform
-                && original.agent_api_key_id.as_deref() == Some(&claims.api_key_id)
-        });
+    let token_bound = failure.reply_claims.as_ref().is_some_and(|validated| {
+        let claims = &validated.0;
+        claims.require_unexpired().is_ok()
+            && claims.inbound_message_id == original.id
+            && claims.conversation_id == original.conversation_id
+            && claims.platform == original.platform
+            && original.agent_api_key_id.as_deref() == Some(&claims.api_key_id)
+    });
     let key_bound = auth.is_some_and(|auth| {
         auth.auth_method == AuthMethod::ApiKey
             && reject_relay_auth(auth).is_ok()
@@ -1679,6 +1732,7 @@ async fn deliver_reply(
         conversation,
         attributed_api_key_id,
         validated_bot,
+        reply_claims,
     } = context;
 
     // Device channels are one-way (HTTP Event Gateway, NyxID#221 / ADR-013):
@@ -1796,14 +1850,13 @@ async fn deliver_reply(
             billing: billing.as_ref(), token: &bot_token,
             platform_bot_id: Some(&bot.platform_bot_id), platform_secrets: platform_secrets.as_ref(),
         };
-        let one_use = if let Some(token) = extract_bearer_token(headers)?
-            && token_targets_reply_audience(&token) {
-            let claims = jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, &token)?;
+        let one_use = if let Some(validated) = reply_claims {
+            let claims = &validated.0;
             if claims.inbound_message_id != original.id || claims.api_key_id != attributed_api_key_id
-                || claims.conversation_id != conversation.id {
+                || claims.conversation_id != conversation.id || claims.platform != conversation.platform {
                 return Err(AppError::Unauthorized("Reply token binding changed".into()));
             }
-            Some(reply_token_use(&claims)?)
+            Some(thread_reply_token_use(claims)?)
         } else { None };
         let outcome = crate::services::channel_thread_service::delivery::send_reply_with_token(
             &state.db,
@@ -2937,6 +2990,7 @@ mod tests {
             conversation: fixture.conversation.clone(),
             attributed_api_key_id: fixture.api_key.id.clone(),
             validated_bot: Some(fixture.bot.clone()),
+            reply_claims: None,
         };
         let request = AsyncReplyRequest {
             thread_reply: false,
@@ -4642,6 +4696,170 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn thread_preflight_health_requires_verified_claims_bound_to_retained_message() {
+        Box::pin(async {
+            let f = setup_reply_token_fixture("thread_preflight_claims")
+                .await
+                .expect("MongoDB on 27022");
+            f.state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&f.conversation.id},
+                    doc! {"$set":{"is_active":false}},
+                )
+                .await
+                .unwrap();
+            let before = f
+                .state
+                .db
+                .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .find_one(doc! {"_id":&f.bot.id})
+                .await
+                .unwrap()
+                .unwrap();
+            for mismatch in [
+                "signature",
+                "inbound",
+                "conversation",
+                "platform",
+                "key",
+                "none",
+            ] {
+                let mut claims = valid_reply_claims(&f);
+                match mismatch {
+                    "inbound" => claims.inbound_message_id = Uuid::new_v4().to_string(),
+                    "conversation" => claims.conversation_id = Uuid::new_v4().to_string(),
+                    "platform" => claims.platform = "lark".into(),
+                    "key" => claims.api_key_id = Uuid::new_v4().to_string(),
+                    _ => {}
+                }
+                let mut token = encode_reply_claims(&f.state, &claims);
+                if mismatch == "signature" {
+                    token.truncate(token.rfind('.').unwrap() + 1);
+                    token.push_str("invalid-signature");
+                }
+                let mut request = reply_request(&f.message.id);
+                request.thread_reply = true;
+                let failure = resolve_reply_request_context_classified(
+                    &f.state,
+                    &bearer_headers(&token),
+                    None,
+                    &request,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(failure.reply_claims.is_some(), mismatch != "signature");
+                record_thread_preflight_failure(&f.state, None, &f.message.id, &failure).await;
+                let bot = f
+                    .state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&f.bot.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let audits = f
+                    .state
+                    .db
+                    .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed"})
+                    .await
+                    .unwrap();
+                if mismatch == "none" {
+                    assert_eq!(audits, 1);
+                    let current = channel_bot_service::get_bot(&f.state.db, &f.bot.id)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        current
+                            .diagnostics
+                            .last_outbound_error
+                            .unwrap()
+                            .thread_reason
+                            .as_deref(),
+                        Some("thread_target_rejected")
+                    );
+                } else {
+                    assert_eq!(bot, before, "unbound capability changed bot: {mismatch}");
+                    assert_eq!(
+                        audits, 0,
+                        "unbound capability wrote failure audit: {mismatch}"
+                    );
+                }
+            }
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(REPLY_TOKEN_USES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            f.state.db.drop().await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn thread_reply_claims_expiring_during_preparation_cannot_create_use_or_record_health() {
+        Box::pin(async {
+            let f = setup_reply_token_fixture("thread_claims_expiry")
+                .await
+                .expect("MongoDB on 27022");
+            let mut request = reply_request(&f.message.id);
+            request.thread_reply = true;
+            let mut context =
+                resolve_reply_token_context(&f.state, &valid_reply_token(&f), &request)
+                    .await
+                    .unwrap();
+            let mut validated = context.reply_claims.take().unwrap();
+            assert!(thread_reply_token_use(&validated.0).is_ok());
+            // Model preparation crossing both expiry and the skew allowance.
+            validated.0.exp = Utc::now().timestamp() - REPLY_TOKEN_USE_TTL_BUFFER_SECS;
+            assert!(matches!(
+                thread_reply_token_use(&validated.0),
+                Err(AppError::TokenExpired)
+            ));
+            let failure = ReplyContextError {
+                error: AppError::ChannelConversationNotAddressable,
+                class: ReplyFailure::Target,
+                reply_claims: Some(validated),
+            };
+            record_thread_preflight_failure(&f.state, None, &f.message.id, &failure).await;
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(REPLY_TOKEN_USES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed"})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(
+                channel_bot_service::get_bot(&f.state.db, &f.bot.id)
+                    .await
+                    .unwrap()
+                    .diagnostics
+                    .last_outbound_error
+                    .is_none()
+            );
+            f.state.db.drop().await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn ordinary_reply_materializes_media_before_platform_secret_preparation() {
         Box::pin(async {
             let mut f = setup_reply_token_fixture("ordinary_media_order").await.expect("MongoDB on 27022");
@@ -4656,6 +4874,7 @@ mod tests {
             let context = ReplyRequestContext {
                 original: f.message.clone(), conversation: f.conversation.clone(),
                 attributed_api_key_id: f.api_key.id.clone(), validated_bot: Some(f.bot.clone()),
+                reply_claims: None,
             };
             let error = deliver_reply(&f.state, &HeaderMap::new(), context, request, &adapter, None).await.unwrap_err();
             assert!(matches!(error, AppError::ValidationError(ref message) if message == "Attachment data must be valid base64"));
@@ -5741,6 +5960,7 @@ mod tests {
                 conversation: fixture.conversation.clone(),
                 attributed_api_key_id: fixture.api_key.id.clone(),
                 validated_bot: Some(fixture.bot.clone()),
+                reply_claims: None,
             };
             let result = deliver_async_reply(
                 &fixture.state,
