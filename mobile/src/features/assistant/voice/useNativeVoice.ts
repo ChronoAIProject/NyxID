@@ -1,6 +1,7 @@
+import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { waitForVoiceForeground } from "./voicePermission";
 import { useEffect, useRef, useState } from "react";
-import { AppState } from "react-native";
+import { AppState, Platform } from "react-native";
 import { Camera } from "expo-camera";
 import * as Crypto from "expo-crypto";
 import { getAuthEpoch } from "../../../lib/auth/authEpoch";
@@ -20,6 +21,13 @@ import type {
 } from "./voiceContracts";
 
 type Environment = ReturnType<typeof nativeVoiceEnvironment>;
+const MICROPHONE_PERMISSION_TIMEOUT_MS = 60_000;
+type PermissionAttempt = {
+  generation: number;
+  androidBackgroundAllowed: boolean;
+  androidBackgrounded: boolean;
+  requestTimer?: ReturnType<typeof setTimeout>;
+};
 
 type RecoveryTarget = {
   session: VoiceSession | null;
@@ -39,6 +47,9 @@ export function useNativeVoice(
   environment: Environment,
   onUpdate: () => void,
 ) {
+  const { t } = useAppLanguage();
+  const translate = useRef(t);
+  translate.current = t;
   const [media, setMedia] = useState<NativeVoiceMedia | null>(null);
   const [mediaAttempt, setMediaAttempt] = useState(0);
   const [starting, setStarting] = useState(false);
@@ -81,7 +92,7 @@ export function useNativeVoice(
     thread: conflictThread,
     unknown: conflictUnknown,
   };
-  const permissionAttempt = useRef<number | undefined>(undefined);
+  const permissionAttempt = useRef<PermissionAttempt | undefined>(undefined);
   const pending = useRef<AbortController | undefined>(undefined);
   const update = useRef(onUpdate);
   const errorOrigin = useRef<"call" | "status" | "playback" | undefined>(
@@ -162,6 +173,7 @@ export function useNativeVoice(
     for (const controller of taskCancellations.current.values())
       controller.abort();
     taskCancellations.current.clear();
+    clearTimeout(permissionAttempt.current?.requestTimer);
     permissionAttempt.current = undefined;
     busy.current = false;
     conflictBusy.current = false;
@@ -244,17 +256,30 @@ export function useNativeVoice(
     setEndingConflict(false);
     setCheckingConflict(false);
     const subscription = AppState.addEventListener("change", (state) => {
+      const permission = permissionAttempt.current;
+      const awaitingPermission = permission?.generation === ticket.current;
       if (state === "active") {
-        // A scheduled check may have fired while backgrounded. Resume only
-        // the remaining bounded checks; foreground never starts or ends a call.
+        if (permission?.androidBackgrounded) {
+          // A subsequent background event is no longer the permission prompt.
+          permission.androidBackgroundAllowed = false;
+          permission.androidBackgrounded = false;
+        }
+        // Foreground resumes bounded recovery checks, never an audio call.
         if (sameScope()) setConflictCheckAttempt((attempt) => attempt + 1);
         return;
       }
-      // System permission prompts may briefly inactivate the app before any
-      // microphone is acquired. Actual background always cancels the attempt.
+      // Android's permission activity reports background before capture starts.
       if (
-        !(state === "inactive" && permissionAttempt.current === ticket.current)
+        state === "background" &&
+        permission &&
+        awaitingPermission &&
+        permission.androidBackgroundAllowed &&
+        !current.current
       ) {
+        permission.androidBackgrounded = true;
+        return;
+      }
+      if (!(state === "inactive" && awaitingPermission)) {
         const hadVoiceWork = busy.current || current.current !== null;
         stopRef.current();
         if (hadVoiceWork) reportError();
@@ -340,10 +365,8 @@ export function useNativeVoice(
     const generation = ++ticket.current;
     const controller = new AbortController();
     pending.current = controller;
-    const valid = () =>
-      sameScope() &&
-      ticket.current === generation &&
-      !controller.signal.aborted;
+    const ownsOperation = () => sameScope() && ticket.current === generation;
+    const valid = () => ownsOperation() && !controller.signal.aborted;
     setStarting(true);
     setConnectedAt(undefined);
     setDisconnectedAt(undefined);
@@ -358,7 +381,9 @@ export function useNativeVoice(
       // selection; POST admission still resolves live credentials and authority.
       const options = selectedOption
         ? { options: [selectedOption] }
-        : await environment.api.options(thread, controller.signal);
+        : await withVoiceRequestDeadline(controller, () =>
+            environment.api.options(thread, controller.signal),
+          );
       if (!valid()) return;
       const selected = options.options.find(
         (option) =>
@@ -379,23 +404,58 @@ export function useNativeVoice(
           (key) => preferences[key] !== savedPreferences[key],
         )
       )
-        await environment.api.savePreferences(preferences, controller.signal);
+        await withVoiceRequestDeadline(controller, () =>
+          environment.api.savePreferences(preferences, controller.signal),
+        );
       if (!valid()) return;
-      permissionAttempt.current = generation;
-      let permission;
-      try {
-        permission = await Camera.requestMicrophonePermissionsAsync();
-        if (!valid()) return;
-        if (!permission.granted)
-          throw new Error(
-            "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
-          );
-        await waitForVoiceForeground(AppState, controller.signal, valid);
-      } finally {
-        if (permissionAttempt.current === generation)
-          permissionAttempt.current = undefined;
+      let permission = await withVoiceRequestDeadline(controller, () =>
+        Camera.getMicrophonePermissionsAsync(),
+      );
+      if (!valid()) return;
+      if (!permission.granted) {
+        const attempt: PermissionAttempt = {
+          generation,
+          androidBackgroundAllowed: Platform.OS === "android",
+          androidBackgrounded: false,
+        };
+        permissionAttempt.current = attempt;
+        try {
+          // Give people time to read the system prompt. The shorter foreground
+          // handoff timeout starts only once they have answered it.
+          attempt.requestTimer = setTimeout(() => {
+            if (permissionAttempt.current !== attempt) return;
+            stopRef.current();
+            reportError(
+              translate.current(
+                "Microphone permission took too long. Try voice again and respond to the permission prompt.",
+              ),
+            );
+          }, MICROPHONE_PERMISSION_TIMEOUT_MS);
+          permission = await Camera.requestMicrophonePermissionsAsync();
+          clearTimeout(attempt.requestTimer);
+          attempt.requestTimer = undefined;
+          if (!valid()) return;
+          if (!permission.granted)
+            throw new Error(
+              translate.current(
+                "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
+              ),
+            );
+          await waitForVoiceForeground(AppState, controller.signal, valid, {
+            allowInitialBackground: attempt.androidBackgroundAllowed,
+          });
+        } finally {
+          clearTimeout(attempt.requestTimer);
+          if (permissionAttempt.current === attempt) {
+            permissionAttempt.current = undefined;
+          }
+        }
       }
       if (!valid()) return;
+      if (AppState.currentState !== "active")
+        throw new Error(
+          translate.current("Keep NyxID open to start a voice call."),
+        );
       const nextMedia = new NativeVoiceMedia();
       const owner = claimRecovery();
       let connectedOnce = false;
@@ -502,17 +562,23 @@ export function useNativeVoice(
       await next.start(preferences, protocol);
       if (valid() && next.isClosed) current.current = null;
     } catch (cause) {
-      if (valid())
+      if (ownsOperation())
         reportError(
           cause &&
             typeof cause === "object" &&
-            "message" in cause &&
-            typeof cause.message === "string"
-            ? cause.message
-            : "Voice could not start. Try again.",
+            "name" in cause &&
+            cause.name === "VoiceRequestTimeoutError"
+            ? translate.current("Voice could not start. Try again.")
+            : cause &&
+                typeof cause === "object" &&
+                "message" in cause &&
+                typeof cause.message === "string"
+              ? cause.message
+              : "Voice could not start. Try again.",
         );
     } finally {
-      if (valid()) {
+      // A deadline abort still owns its UI until a newer action takes over.
+      if (ownsOperation()) {
         busy.current = false;
         if (!current.current) setStarting(false);
       }

@@ -38,25 +38,27 @@ pnpm install
 
 > `EXPO_PUBLIC_API_BASE_URL` 直接设置会被 `app.config.ts` 覆盖。请改 `DEV_API_BASE_URL`（或 `PROD_API_BASE_URL` 若运行 `APP_ENV=prod`）。
 
+开发包使用独立的 `DEV_ANDROID_PACKAGE` 时，不要复用包名不匹配的 `google-services.json`。如果需要在开发包测试 FCM，把对应 Firebase 应用下载的 JSON 放到本地，并设置 `DEV_GOOGLE_SERVICES_FILE`；Android 原生生成时会校验 JSON 中的包名，iOS 构建不依赖此文件。省略这个变量时，仅当现有 `./google-services.json` 包含开发包的实际包名才沿用旧配置；文件缺失、无效或包名不匹配时关闭开发 FCM。显式设置为空会关闭开发 FCM，即使默认文件匹配。生产变量省略或为空时仍使用 `./google-services.json`。历史测试矩阵中没有远程 FCM 的开发包记录仍是当时的实测结果。
+
 ---
 
 ## 3. 运行与调试
 
-### 3.1 首次运行（会生成 `android/`）
+### 3.1 运行 Android（每次按开发 profile 重生成原生目录）
 
 ```bash
 pnpm android
 ```
 
-等价于 `expo run:android`：若没有 `android/` 目录会先 **prebuild** 再编译安装。首次较慢属正常。
+这个命令会先执行 `expo prebuild --platform android --clean`，再编译安装开发包。每次清理重生成可以移除之前生产构建留下的 `google-services.json` 和 Gradle 配置，避免从 `APP_ENV=prod` 切换到 `APP_ENV=dev` 时误用生产 Firebase。首次运行和切换 profile 时较慢属正常。
 
 ### 3.2 指定设备
 
 多设备时指定一个：
 
 ```bash
-npx expo run:android --device   # 选真机
-npx expo run:android            # 默认选模拟器或唯一设备
+pnpm run android -- --device    # 选真机；脚本仍会先 clean prebuild
+pnpm run android                # 默认选模拟器或唯一设备
 ```
 
 ### 3.3 仅启动 Metro（不编译原生）

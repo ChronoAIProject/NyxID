@@ -5,14 +5,28 @@ import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import type { StoredAuthSession } from "../auth/sessionCoordinator";
+import { createSessionRefresh } from "../auth/sessionRefresh";
 import { createAssistantVoiceApi } from "./assistantVoiceTransport";
 
-function setup(input?: { status: number; body: string; network?: boolean } | ((url: string, init?: RequestInit) => Promise<Response>)) {
-  const respond = typeof input === 'function' ? input : undefined;
-  const reply = typeof input === 'object' ? input : undefined;
+function setup(
+  input?:
+    | { status: number; body: string; network?: boolean }
+    | ((url: string, init?: RequestInit) => Promise<Response>),
+  realRefresh = false,
+) {
+  const respond = typeof input === "function" ? input : undefined;
+  const reply = typeof input === "object" ? input : undefined;
   let generation = 1;
   let invalidations = 0;
   let sends = 0;
+  let commits = 0;
+  let session: StoredAuthSession = {
+    accessToken: "synthetic",
+    refreshToken: "synthetic-refresh",
+    accessTokenExpiresAt: 0,
+    sessionGeneration: generation,
+  };
   let sessionReadGate: Promise<void> | null = null;
   let afterRead = () => {};
   const filename = fileURLToPath(new URL("./http.ts", import.meta.url));
@@ -30,12 +44,30 @@ function setup(input?: { status: number; body: string; network?: boolean } | ((u
         throw new Error("JSON must use its native JSON transport");
       },
     },
-    "../auth/sessionRefresh": { createSessionRefresh: () => async () => null },
+    "../auth/sessionRefresh": {
+      createSessionRefresh: realRefresh
+        ? createSessionRefresh
+        : () => async () => null,
+    },
     "../auth/sessionStore": {
       authSessionGeneration: () => generation,
       loadStoredAuthSession: async () => {
         if (sessionReadGate) await sessionReadGate;
-        return { accessToken: "synthetic" };
+        return realRefresh ? { ...session } : { accessToken: "synthetic" };
+      },
+      commitRefreshedAuthSession: async (
+        expected: StoredAuthSession,
+        next: StoredAuthSession,
+      ) => {
+        if (
+          expected.sessionGeneration !== generation ||
+          expected.accessToken !== session.accessToken ||
+          expected.refreshToken !== session.refreshToken
+        )
+          return false;
+        commits++;
+        session = { ...next, sessionGeneration: generation };
+        return true;
       },
       clearStoredAuthSession: async () => {
         invalidations++;
@@ -62,6 +94,11 @@ function setup(input?: { status: number; body: string; network?: boolean } | ((u
       process: { env: {} },
       __DEV__: false,
       Headers,
+      AbortController,
+      setTimeout: (...args: Parameters<typeof setTimeout>) =>
+        setTimeout(...args),
+      clearTimeout: (timeout: ReturnType<typeof setTimeout>) =>
+        clearTimeout(timeout),
       fetch: async (url: string, init?: RequestInit) => {
         sends++;
         if (respond) return respond(url, init);
@@ -86,6 +123,9 @@ function setup(input?: { status: number; body: string; network?: boolean } | ((u
     ) => Promise<unknown>,
     invalidations: () => invalidations,
     sends: () => sends,
+    refresh: exports.refreshAccessTokenIfNeeded as () => Promise<boolean>,
+    session: () => ({ ...session }),
+    commits: () => commits,
     blockSessionRead: () => {
       let release!: () => void;
       sessionReadGate = new Promise<void>((resolve) => {
@@ -273,4 +313,210 @@ test("malformed successful JSON is safe and still honors a replacement session",
   env.switchDuringRead();
   await assert.rejects(env.request("/users/me", {}), /auth_session_changed/);
   assert.equal(env.invalidations(), 0);
+});
+
+async function settleMicrotasks() {
+  for (let step = 0; step < 64; step++) await Promise.resolve();
+}
+
+function expectRefreshNetworkError(cause: unknown) {
+  const error = cause as {
+    name: string;
+    statusCode: number;
+    errorKey: string;
+    message: string;
+  };
+  assert.equal(error.name, "ApiError");
+  assert.equal(error.statusCode, 0);
+  assert.equal(error.errorKey, "network_error");
+  assert.equal(
+    error.message,
+    "Couldn't reach NyxID. Check your connection and try again.",
+  );
+  return true;
+}
+
+test("a stalled 401 refresh keeps login and never blindly replays the original POST", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const requests: string[] = [];
+  let refreshSignal: AbortSignal | null | undefined;
+  const env = setup(async (url, init) => {
+    requests.push(new URL(url).pathname);
+    assert.equal(init?.method, "POST");
+    if (url.endsWith("/auth/refresh")) {
+      refreshSignal = init?.signal;
+      return new Promise<Response>(() => {});
+    }
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }, true);
+  const pending = assert.rejects(
+    env.request("/assistant/nyxagent/turns", { method: "POST", body: {} }),
+    expectRefreshNetworkError,
+  );
+  await settleMicrotasks();
+  assert.equal(env.sends(), 2);
+  context.mock.timers.tick(9_999);
+  await settleMicrotasks();
+  assert.equal(refreshSignal?.aborted, false);
+  context.mock.timers.tick(1);
+  await pending;
+  assert.equal(refreshSignal?.aborted, true);
+  assert.equal(env.invalidations(), 0);
+  assert.equal(env.commits(), 0);
+  assert.equal(env.session().accessToken, "synthetic");
+  assert.deepEqual(requests, [
+    "/api/v1/assistant/nyxagent/turns",
+    "/api/v1/auth/refresh",
+  ]);
+});
+
+for (const phase of ["fetch", "body"] as const) {
+  test(`a stalled refresh ${phase} releases all shared callers and a late success cannot overwrite explicit retry`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    let releaseFetch!: (response: Response) => void;
+    let releaseBody!: (body: string) => void;
+    const oldFetch = new Promise<Response>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const oldBody = new Promise<string>((resolve) => {
+      releaseBody = resolve;
+    });
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const env = setup(async (url, init) => {
+      assert.ok(url.endsWith("/auth/refresh"));
+      signals.push(init?.signal);
+      if (signals.length > 1)
+        return Response.json({
+          access_token: "retry-access",
+          refresh_token: "retry-refresh",
+          expires_in: 3_600,
+        });
+      return phase === "fetch"
+        ? oldFetch
+        : ({
+            status: 200,
+            ok: true,
+            headers: new Headers(),
+            text: () => oldBody,
+          } as Response);
+    }, true);
+    const first = assert.rejects(env.refresh(), expectRefreshNetworkError);
+    const joined = assert.rejects(env.refresh(), expectRefreshNetworkError);
+    await settleMicrotasks();
+    assert.equal(
+      env.sends(),
+      1,
+      "both attempts must share the pending refresh",
+    );
+    context.mock.timers.tick(10_000);
+    await Promise.all([first, joined]);
+    assert.equal(signals[0]?.aborted, true);
+    assert.equal(env.invalidations(), 0);
+    assert.equal(env.commits(), 0);
+
+    assert.equal(
+      await env.refresh(),
+      true,
+      "explicit retry must create a fresh request",
+    );
+    assert.equal(env.sends(), 2);
+    assert.equal(env.commits(), 1);
+    const current = env.session();
+    assert.equal(current.accessToken, "retry-access");
+    assert.equal(current.refreshToken, "retry-refresh");
+
+    const late = {
+      access_token: "late-access",
+      refresh_token: "late-refresh",
+      expires_in: 3_600,
+    };
+    releaseFetch(Response.json(late));
+    releaseBody(JSON.stringify(late));
+    await settleMicrotasks();
+    assert.deepEqual(env.session(), current);
+    assert.equal(env.commits(), 1);
+    context.mock.timers.tick(10_000);
+    assert.equal(
+      signals[1]?.aborted,
+      false,
+      "successful refresh must clear its deadline",
+    );
+  });
+
+  test(`a late refresh 409 from ${phase} never sends another refresh POST after the deadline`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    let releaseFetch!: (response: Response) => void;
+    let releaseBody!: (body: string) => void;
+    const oldFetch = new Promise<Response>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const oldBody = new Promise<string>((resolve) => {
+      releaseBody = resolve;
+    });
+    const env = setup(
+      async () =>
+        phase === "fetch"
+          ? oldFetch
+          : ({
+              status: 409,
+              ok: false,
+              headers: new Headers(),
+              text: () => oldBody,
+            } as Response),
+      true,
+    );
+    const pending = assert.rejects(env.refresh(), expectRefreshNetworkError);
+    await settleMicrotasks();
+    context.mock.timers.tick(10_000);
+    await pending;
+    releaseFetch(
+      Response.json({ error: "refresh_in_progress" }, { status: 409 }),
+    );
+    releaseBody('{"error":"refresh_in_progress"}');
+    await settleMicrotasks();
+    context.mock.timers.tick(160);
+    await settleMicrotasks();
+    assert.equal(env.sends(), 1);
+    assert.equal(env.commits(), 0);
+    assert.equal(env.invalidations(), 0);
+  });
+}
+
+test("refresh still coordinates a 409 conflict and commits a rotating token within its deadline", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const env = setup(async (_url, init) => {
+    signals.push(init?.signal);
+    return signals.length === 1
+      ? Response.json({ error: "refresh_in_progress" }, { status: 409 })
+      : Response.json({
+          access_token: "updated-access",
+          refresh_token: "updated-refresh",
+          expires_in: 3_600,
+        });
+  }, true);
+  const pending = env.refresh();
+  await settleMicrotasks();
+  assert.equal(env.sends(), 1);
+  context.mock.timers.tick(160);
+  assert.equal(await pending, true);
+  assert.equal(env.sends(), 2);
+  assert.equal(env.commits(), 1);
+  assert.equal(env.session().refreshToken, "updated-refresh");
+  context.mock.timers.tick(10_000);
+  assert.ok(signals.every((signal) => signal?.aborted === false));
+});
+
+test("an explicit server rejection of refresh retains the existing 401 sign-out behavior", async () => {
+  const env = setup(
+    async () => Response.json({ error: "unauthorized" }, { status: 401 }),
+    true,
+  );
+  await assert.rejects(
+    env.request("/users/me", {}),
+    (error: unknown) => (error as { statusCode: number }).statusCode === 401,
+  );
+  assert.equal(env.sends(), 2);
+  assert.equal(env.commits(), 0);
+  assert.equal(env.invalidations(), 1);
 });

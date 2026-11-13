@@ -126,6 +126,7 @@ for (const order of [
     const h = hookHarness<any>(
       {
         "react-native": {
+          Platform: { OS: "ios" },
           AppState: {
             currentState: "active",
             addEventListener: () => ({ remove: () => {} }),
@@ -133,6 +134,7 @@ for (const order of [
         },
         "expo-camera": {
           Camera: {
+            getMicrophonePermissionsAsync: async () => ({ granted: true }),
             requestMicrophonePermissionsAsync: async () => ({ granted: true }),
           },
         },

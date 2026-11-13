@@ -314,6 +314,31 @@ test("an unavailable existing grant survives removal, reselecting and connection
   assert.equal(state.closed(), 1);
 });
 
+test("saving preserves an unknown existing grant until the owner explicitly removes it", async () => {
+  for (const remove of [false, true]) {
+    const state = setup({
+      value: {
+        ...plain(baseline),
+        services: ["github", "unknown-service"],
+        guest_access: { github: "read", "unknown-service": "all" },
+      },
+    });
+    assert.equal(
+      state.checkbox("unknown-service").props.accessibilityState.checked,
+      true,
+    );
+    if (remove) state.select("unknown-service");
+    state.select("Spreadsheets");
+    state.action().props.onPress();
+    await state.harness.settle();
+    assert.deepEqual(
+      state.saves[0]?.services,
+      remove ? ["github", "sheets"] : ["github", "unknown-service", "sheets"],
+    );
+    state.harness.unmount();
+  }
+});
+
 test("cancel and native modal dismissal discard edits without saving", () => {
   for (const method of ["cancel", "requestClose"] as const) {
     const state = setup();
