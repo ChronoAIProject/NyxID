@@ -41,7 +41,6 @@ import {
   AgentOperationControls,
 } from "./AgentCollaborationPanel";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { servicesApi } from "../../lib/api/servicesApi";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { fonts } from "../../theme/designTokens";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
@@ -62,7 +61,7 @@ import {
 } from "./AgentPermissionsField";
 import { useTheme } from "../../theme/ThemeContext";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
-import type { ServiceConnection } from "../services/serviceContracts";
+import type { GrantService } from "./agentContracts";
 import {
   agentProfile,
   buildAgentPatch,
@@ -159,10 +158,12 @@ export function AgentsScreen({
         ? 5000
         : false,
   });
+  const grantOwner = !creating && detail.data?.agent.owner_kind === "org"
+    ? detail.data.agent.owner_id : undefined;
   const connections = useQuery({
-    queryKey: ["workspace", "services", "connections"],
-    queryFn: ({ signal }) => servicesApi.connections(signal),
-    enabled: focused && foreground && (creating || Boolean(selectedId)),
+    queryKey: [...ROOT, "grant-services", grantOwner ?? null],
+    queryFn: ({ signal }) => agentsApi.grantServices(grantOwner, signal),
+    enabled: focused && foreground && (creating || Boolean(detail.data?.agent.can_maintain)),
     retry: false,
   });
   const creationAtLimit =
@@ -1010,7 +1011,7 @@ function CreateAgentForm({
   available,
   onDirtyChange,
 }: {
-  connections: ServiceConnection[];
+  connections: GrantService[];
   connectionsLoading: boolean;
   connectionsError: boolean;
   busy: boolean;
@@ -1093,7 +1094,7 @@ function AgentGrantsForm({
   onSave,
 }: {
   agent: AssistantAgent;
-  connections: ServiceConnection[];
+  connections: GrantService[];
   connectionsLoading: boolean;
   connectionsError: boolean;
   saveError?: string;

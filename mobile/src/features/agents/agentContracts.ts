@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { conversationIdSchema } from "../assistant/assistantTypes";
-import type { ServiceConnection } from "../services/serviceContracts";
 
 export const accessModeSchema = z.enum([
   "autopilot",
@@ -181,38 +180,23 @@ export function grantSignature(
   });
 }
 
-/** Org agents require exact UserService IDs. Personal agents accept service slugs. */
-export function grantOptions(
-  connections: ServiceConnection[],
-  agent?: AssistantAgent,
-) {
-  const org = agent?.owner_kind === "org" ? agent.owner_id : undefined;
-  const rows = connections.filter(
-    (connection) =>
-      connection.is_active &&
-      // NyxBot Voice has no published MCP endpoints, so the backend's
-      // authorization catalog cannot grant it as a specialist tool.
-      (connection.catalog_service_slug ?? connection.slug) !== "nyxbot-voice" &&
-      (org
-        ? connection.credential_source?.type === "org" &&
-          connection.credential_source.org_id === org &&
-          connection.credential_source.allowed
-        : connection.credential_source?.type !== "org" ||
-          connection.credential_source.allowed),
-  );
+export const grantServiceSchema = z.object({
+  id: z.string(), slug: z.string(), label: z.string(), executable: z.boolean(),
+  catalog_slug: z.string().optional(), icon_url: z.string().optional(),
+});
+export type GrantService = z.infer<typeof grantServiceSchema>;
+
+/** Eligibility/owner scope comes from the same server resolver used by save. */
+export function grantOptions(connections: GrantService[], agent?: AssistantAgent) {
+  const org = agent?.owner_kind === "org";
   const seen = new Set<string>();
-  return rows.flatMap((row) => {
+  return connections.flatMap((row) => {
+    // Voice powers the chat experience rather than a specialist tool choice.
+    if ((row.catalog_slug ?? row.slug) === "nyxbot-voice") return [];
     const value = org ? row.id : row.slug;
     if (seen.has(value)) return [];
     seen.add(value);
-    return [
-      {
-        value,
-        label: row.label,
-        iconSlug: row.catalog_service_slug ?? row.slug,
-        iconUrl: row.icon_url || row.catalog_icon_url,
-      },
-    ];
+    return [{ value, label: row.label, iconSlug: row.catalog_slug ?? row.slug, iconUrl: row.icon_url }];
   });
 }
 

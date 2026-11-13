@@ -17,12 +17,12 @@ pub async fn enrollment_ready(db: &Database, configured: bool) -> bool {
     if !configured {
         return false;
     }
-    super::super::security_readiness_service::report(
+    super::super::security_readiness_service::serving_report(
         db,
         super::super::security_readiness_service::AUTOMATION_COMPLETION,
     )
     .await
-    .is_ok_and(|report| report.ready)
+    .is_ok_and(|report| report.serving_ready)
 }
 
 pub fn state(now: DateTime<Utc>, expires_at: DateTime<Utc>) -> CoordinatorState {

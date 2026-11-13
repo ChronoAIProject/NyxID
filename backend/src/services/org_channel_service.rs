@@ -38,13 +38,13 @@ pub(crate) async fn enabled(db: &Database, admin: &str) -> AppResult<()> {
     if !super::feature_flag_service::personal_flag_enabled(db, admin, FLAG).await? {
         return Err(denied());
     }
-    super::security_readiness_service::require(db, FLAG).await
+    super::security_readiness_service::require_serving(db, FLAG).await
 }
 
 /// Readiness is checked only on organization guest paths, never ordinary billing.
 pub(crate) async fn guest_grants_ready(db: &Database) -> AppResult<bool> {
-    match super::security_readiness_service::report(db, GUEST_GRANTS_READINESS).await {
-        Ok(report) => Ok(report.ready),
+    match super::security_readiness_service::serving_report(db, GUEST_GRANTS_READINESS).await {
+        Ok(report) => Ok(report.serving_ready),
         Err(AppError::SecurityReadinessUnavailable) => Ok(false),
         Err(error) => Err(error),
     }

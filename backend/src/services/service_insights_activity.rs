@@ -525,6 +525,7 @@ fn recent_request(
 /// A response header is not stream completion, so successful HTTP responses keep
 /// the explicit `response_received` state and WS upgrades use `connection_opened`.
 pub struct RequestAudit {
+    attachment_diagnostic: Option<super::lark_attachment_tool::diagnostics::Handle>,
     business: Option<super::assistant_real_work::Signal>,
     db: Database,
     actor: audit_service::AuditActor,
@@ -602,6 +603,7 @@ impl RequestAudit {
         credential_class: crate::models::usage_meter::CredentialClass,
     ) -> Self {
         Self {
+            attachment_diagnostic: None,
             business: None,
             db: db.clone(),
             actor: attribution.actor,
@@ -614,6 +616,11 @@ impl RequestAudit {
                 "outcome": "unknown",
             }),
         }
+    }
+
+    /// Explicit opt-in: ordinary service events retain their exact shape.
+    pub(crate) fn attachment_write(&mut self) {
+        self.attachment_diagnostic = super::lark_attachment_tool::diagnostics::current();
     }
 
     pub fn assistant(
@@ -693,6 +700,16 @@ impl Drop for RequestAudit {
     fn drop(&mut self) {
         if self.event["user_service_id"].is_null() {
             return;
+        }
+        if let Some(diagnostic) = &self.attachment_diagnostic {
+            let mut diagnostic = diagnostic.lock().expect("attachment diagnostic");
+            if diagnostic.reason.is_none() && diagnostic.fields()["outcome"] != "succeeded" {
+                diagnostic.reason =
+                    Some(super::lark_attachment_tool::diagnostics::Reason::Internal);
+            }
+            for (key, value) in diagnostic.fields().as_object().expect("diagnostic object") {
+                self.event[key] = value.clone();
+            }
         }
         audit_service::log_async(
             self.db.clone(),

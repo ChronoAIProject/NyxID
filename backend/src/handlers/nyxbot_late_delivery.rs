@@ -83,12 +83,12 @@ pub(super) async fn prepare(
             &state.db,
             &channel.user_id,
         )
-        && crate::services::security_readiness_service::report(
+        && crate::services::security_readiness_service::serving_report(
             &state.db,
             crate::services::execution_permission_channel::READINESS,
         )
         .await?
-        .ready
+        .serving_ready
         && crate::services::execution_permission_enrollment::live_enabled(
             &state.db,
             &channel.user_id,

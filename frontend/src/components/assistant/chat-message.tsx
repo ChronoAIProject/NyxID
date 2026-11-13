@@ -1,3 +1,4 @@
+import { larkAttachmentFailureReason } from "../../../../shared/larkAttachmentDiagnostics";
 import { activityPresentationStatus } from "@/schemas/assistant-history-compat";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -129,7 +130,10 @@ function ThinkingBlock({
 
 function toolFailureCopy(
   failure: { kind: string; status?: number; reason?: string } | null | undefined,
+  tool?: string,
 ): string {
+  const reason = failure?.kind === "retry_duplicate_action" ? null : larkAttachmentFailureReason(tool, failure?.reason);
+  if (reason) return translateUi("Lark attachment write: {{reason}}. Check the saved outcome before retrying.", { reason });
   // Fixed native diagnostics only. Unknown/legacy reasons keep the generic copy;
   // neither note contents nor arbitrary tool error messages reach this panel.
   switch (failure?.reason) {
@@ -412,7 +416,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                       status === "error" && "text-destructive",
                     )}
                   >
-                    {status === "skipped" ? toolFailureCopy(tool.failure) : status === "unknown" ? translateUi("Activity details unavailable in this app version.") : decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
+                    {status === "skipped" ? toolFailureCopy(tool.failure, tool.name) : status === "unknown" ? translateUi("Activity details unavailable in this app version.") : decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
                   <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", status === "error" ? "text-destructive" : "text-text-tertiary")}>
@@ -425,7 +429,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                 </span>
                 {decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{decision.detail}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
-                    {toolFailureCopy(tool.failure)}{translateUi(" The assistant can continue after a failed step.")}</span>
+                    {toolFailureCopy(tool.failure, tool.name)}{translateUi(" The assistant can continue after a failed step.")}</span>
                 ) : null}
               </summary>
               {tool.result ? (

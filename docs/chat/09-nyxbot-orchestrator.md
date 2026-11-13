@@ -105,8 +105,10 @@ notice).
   (fixed in 0.37.1). Its allowlist and MCP tools stay the grants. Every account write,
   including destructive tools, is NyxBot-only; NyxBot's destructive actions still
   show the owner a confirmation card unless the owner turned confirmations off.
-- Grants resolve through the owner's MCP catalog, so NyxBot can grant only what
-  it can reach. `nyxid__grant_subagent` resolves each service on its own: what
+- Grants and the web/mobile grant inventory share the owner's authorization
+  catalog, including authorized HTTP/inference connections without published MCP
+  tools. NyxBot can grant only what the owner can reach; execution/tool discovery
+  retain their live checks. `nyxid__grant_subagent` resolves each service on its own: what
   resolves is granted and the rest come back in `not_granted` (or `not_revoked`)
   with the reason, so one unusable service never blocks the others. NyxAgent's
   own service (`llm-nyx`) is never granted: every agent already runs on it.
@@ -1636,7 +1638,12 @@ keeps its base pin's disabled state.
 
 Per attached pin the app offers **Test** (`GET /agents/{id}/skills/{skill_id}/preview`:
 verifies the exact pinned version in Ornn, then reads SKILL.md through the same
-reader as `nyxid__skill_read`; a disabled pin reports `readable: false`) and
+reader as `nyxid__skill_read`; a disabled pin reports `readable: false`). For an
+organization agent both use an accessible organization Ornn connection and the
+acting person's signed identity, including Ornn's narrowly scoped membership
+callback. This certifies that person's current visibility; a different member,
+changed grants or runtime key/turn/policy can still refuse. See
+[Agent skills](../AGENT_SKILLS.md#storage-and-authority). The app also offers
 **Edit** (`POST /agents/{id}/skills/{skill_id}/improve`: an authored improve
 draft prefilled from the exact package's SKILL.md body and `.md`/`.txt` files,
 with its review card raised in NyxBot's home thread; organization agents are
@@ -1975,7 +1982,9 @@ Rollout requires every executing replica to advertise
 `nyxbot:org-guest-grants-v1` via the existing readiness roster/drain system.
 Before ready, old and new binaries enforce the old cap/list; adoption is refused.
 Ready removes caps for everyone while preserving legacy service restrictions.
-If readiness is lost, retained legacy restrictions apply again. To roll back,
+Recorded active Grants execution tolerates roster warnings while every live
+generation supports it, including new binding/adoption.
+If serving readiness is lost to a hard blocker, retained legacy restrictions apply again. To roll back,
 disable guests and drain/settle on upgraded binaries before downgrading. Prior
 cap-free spending may exceed the retained old cap; do not erase it to restore
 admission. Review old lists/digests/caps before re-enabling on an old binary.

@@ -4140,7 +4140,39 @@ async fn execute_resolved_proxy_inner<'a>(
                 "jwt" | "both"
             ))
     {
+        if request
+            .extensions()
+            .get::<super::agent_skills::OrnnOrgRead>()
+            .is_some()
+        {
+            return Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::OwnerConnectionUnavailable,
+            ));
+        }
         return Err(AppError::Forbidden("Ornn skills require your own signed identity; shared master credentials are not supported".into()));
+    }
+
+    if request
+        .extensions()
+        .get::<super::agent_skills::OrnnOrgRead>()
+        .is_some()
+    {
+        // Ornn uses Authorization ONLY for its NyxID org-membership callback.
+        // Never substitute a connection credential for that capability (or
+        // overwrite a configured bearer credential with another principal).
+        if catalog_service_slug.as_deref() != Some("ornn-api")
+            || target.service.inject_delegation_token
+            || !crate::services::agent_skill_org_access::compatible_auth(
+                &target.auth_method,
+                &target.auth_key_name,
+            )
+        {
+            return Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::OwnerConnectionUnavailable,
+            ));
+        }
+        assistant_projection.org_skill_lookup = true;
+        assistant_projection.apply(&mut target);
     }
 
     // Assistant agents publish skill content only through the reviewed draft
@@ -7256,6 +7288,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         resource_proof.as_ref(),
                         Some(&dispatch_admission),
                         Some(&dispatch_caller),
+                        None,
                     )
                 }),
             )

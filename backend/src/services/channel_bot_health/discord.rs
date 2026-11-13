@@ -173,7 +173,7 @@ pub async fn load(db: &Database, bots: &[ChannelBot]) -> AppResult<HashMap<Strin
         .collect();
     let enabled = relay_enabled_owners(db, &relay_owners).await?;
     let ready = enabled.is_empty()
-        || crate::services::security_readiness_service::require(
+        || crate::services::security_readiness_service::require_serving(
             db,
             crate::services::feature_flag_service::DISCORD_GATEWAY_FLAG_KEY,
         )

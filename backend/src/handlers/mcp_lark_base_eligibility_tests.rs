@@ -8,8 +8,8 @@ const OPERATIONS: [&str; 4] = [
     attachment::CREATE_OPERATION,
 ];
 
-async fn second_connection(slug: &str) -> BaseFixture {
-    let mut u = setup("lark_2327").await;
+async fn second_connection(slug: &'static str) -> BaseFixture {
+    let mut u = setup_catalog("lark_2327", slug).await;
     u.catalog.slug = slug.into();
     u.f.state
         .db
@@ -514,7 +514,7 @@ async fn legacy_second_connection_empty_fields_uploads_original_bytes_creates_on
             assert_eq!(payload(&response)["already_created"], replay);
         }
         let requests = requests(&u).await;
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), if slug.ends_with("-bot") { 4 } else { 3 });
         let upload = requests
             .iter()
             .find(|r| r.url.path().ends_with("upload_all"))

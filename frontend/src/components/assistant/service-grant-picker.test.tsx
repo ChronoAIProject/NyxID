@@ -7,25 +7,15 @@ const platform = vi.hoisted(() => ({ models: [] as { id: string; display_name: s
 vi.mock("@/hooks/use-platform-models", () => ({ usePlatformModels: () => ({ data: { pages: [{ models: platform.models }] }, hasNextPage: false }) }));
 afterEach(() => { platform.models = []; });
 
-vi.mock("@/hooks/use-keys", () => ({
-  useKeys: () => ({
-    data: [
-      {
-        id: "first",
-        slug: "calendar",
-        label: "Calendar one",
-        execution_unavailable_reason: "node home-server offline",
-        is_active: true,
-        credential_source: { type: "org", org_id: "team", allowed: true },
-      },
-      {
-        id: "second",
-        slug: "calendar",
-        label: "Calendar two",
-        is_active: true,
-        credential_source: { type: "org", org_id: "team", allowed: true },
-      },
-      { id: "other", slug: "private", label: "Private", is_active: true },
+vi.mock("@/hooks/use-agent-grant-services", () => ({
+  useAgentGrantServices: (org?: string) => ({
+    data: org ? [
+      { id: "first", slug: "calendar", label: "Calendar one", executable: false },
+      { id: "second", slug: "calendar", label: "Calendar two", executable: true },
+    ] : [
+      { id: "first", slug: "calendar", label: "Calendar one", executable: false },
+      { id: "other", slug: "private", label: "Private", executable: true },
+      { id: "public", slug: "chrono-llm-public", label: "Chrono LLM (public)", executable: true },
     ],
   }),
 }));
@@ -57,7 +47,7 @@ it("keeps separate organization connection IDs even when their slugs match", asy
 it("keeps an offline service selectable and shows an availability advisory", async () => {
   const change = vi.fn();
   render(<ServiceGrantPicker org="team" value={["first"]} onChange={change} />);
-  expect(screen.getByText(/Currently not executable \(node home-server offline\)/)).toBeVisible();
+  expect(screen.getByText(/Currently not executable \(credential or node unavailable\)/)).toBeVisible();
   const row = screen.getByRole("checkbox", { name: /Calendar one/ });
   expect(row).toBeChecked();
   expect(row).toBeEnabled();
@@ -73,4 +63,11 @@ it("offers entitled logical models alongside connections using public IDs", asyn
   await userEvent.setup().click(screen.getByRole("checkbox", { name: /GPT-5/ }));
   expect(change).toHaveBeenCalledWith(["first", "nyxid/gpt-5"]);
   expect(screen.getAllByRole("checkbox", { name: /Calendar/ })).toHaveLength(2);
+});
+
+it("offers public inference from the shared grant inventory", async () => {
+  const change = vi.fn();
+  render(<ServiceGrantPicker value={[]} onChange={change} />);
+  await userEvent.setup().click(screen.getByRole("checkbox", { name: /Chrono LLM/ }));
+  expect(change).toHaveBeenCalledWith(["chrono-llm-public"]);
 });

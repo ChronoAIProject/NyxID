@@ -753,6 +753,24 @@ pub async fn admit(
         &operation,
         Operation::CreateAgent { .. } | Operation::WorkspaceAgent { .. }
     );
+    // Only slot-allocating CMA creates may recover an older unknown sandbox.
+    // The gateway's exact replay re-enters admission with this internal selector;
+    // it must not recursively start another recovery.
+    if creates_sandbox
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(RECOVERY_SUBMISSION_HEADER))
+    {
+        recover_occupied_sandbox(
+            &db,
+            keys,
+            &permit.gateway,
+            owner,
+            permit.key.as_deref().ok_or_else(invalid)?,
+            body,
+        )
+        .await?;
+    }
     let pending_creation = if creates_sandbox || creates_agent {
         db.collection::<AssistantCmaCreation>(COLLECTION_NAME)
             .find_one(doc! {"user_id":owner,"idempotency_key":&permit.key})
@@ -764,9 +782,16 @@ pub async fn admit(
         if previous.cma_service_id != target.service.id
             || previous.path != path
             || previous.method != method
-            || previous.request_hash != sandboxes::prepare_creation_request(body)?.hash
             || previous.deployment_fingerprint != deployment_fingerprint
         {
+            return Err(drift());
+        }
+        if previous.request_hash != sandboxes::prepare_creation_request(body)?.hash {
+            if path == "/api/v1/sandboxes" && previous.submission_state == "confirmed_not_created" {
+                return Err(AppError::Conflict(
+                    "cma_creation_authority_changed: the original request was confirmed not created; submit the corrected request with a new Idempotency-Key (CMA binds the original key to its original body)".into(),
+                ));
+            }
             return Err(drift());
         }
         if previous.submission_state == "confirmed" {
@@ -851,7 +876,8 @@ pub async fn admit(
             .map(|row| row.id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let context = RecordContext::new(COLLECTION_NAME, &id, owner, &["request_ciphertext"])?;
-        let request_ciphertext = keys.encrypt_record(body, &context).await?;
+        let request_ciphertext =
+            super::record_field_service::encrypt_context(keys, &context, body).await?;
         let expected_workspace_id = match &operation {
             Operation::CreateAgent { workspace, .. } => workspace.clone(),
             Operation::WorkspaceAgent { id } => Some(id.clone()),
@@ -881,7 +907,7 @@ pub async fn admit(
             recovery_checked_at: None,
             first_dispatched_at: None,
             request_ciphertext: Some(request_ciphertext),
-            request_context_version: Some(3),
+            request_context_version: keys.contextual_record_writes().then_some(3),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -916,6 +942,31 @@ pub(super) fn require_available_parent(row: &AssistantCmaSandbox) -> AppResult<(
 }
 
 fn creation_refusal_confirms_no_resource(path: &str, status: u16, value: &Value) -> bool {
+    // CMA 68f26f17: sandbox trust validation precedes resource admission, but
+    // follows generic idempotency reservation (which caches this refusal).
+    // Workspace trust failures concern an existing parent; lifecycle workers
+    // run after durable admission. Neither is proof of sandbox absence here.
+    if path == "/api/v1/sandboxes"
+        && status == 409
+        && value.get("status").and_then(Value::as_u64) == Some(409)
+        && value.get("type").and_then(Value::as_str)
+            == Some("https://spec.chrono-ai.fun/cma/1.0/problems/trust-confirmation-required")
+        && value.get("code").and_then(Value::as_str) == Some("trust_confirmation_required")
+        && value
+            .get("commands_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        && ["id", "operation_id", "agent_id", "sandbox_id"]
+            .iter()
+            .all(|field| value.get(field).is_none_or(Value::is_null))
+    {
+        return true;
+    }
     let code = value
         .get("code")
         .or_else(|| value.get("error"))
@@ -1267,6 +1318,86 @@ pub async fn record_creation_observation(
     Ok(())
 }
 
+/// A new slot-allocating create may first settle one stranded sandbox request.
+/// Never infer absence from a list, replay a pending (not dispatched) request,
+/// or automatically replay a lifecycle Agent creation. All original replay
+/// fences, including the generic cache lifetime, remain in recover_creation_core.
+fn recover_occupied_sandbox<'a>(
+    db: &'a Database,
+    keys: &'a EncryptionKeys,
+    gateway: &'a CatalogCmaGateway,
+    owner: &'a str,
+    incoming_key: &'a str,
+    incoming_body: &'a [u8],
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    // Replay re-enters admission. Erase that future at this boundary so its
+    // size and Send contract do not recursively depend on admission itself.
+    Box::pin(async move {
+        let Some(parent) = db
+            .collection::<AssistantCmaSandbox>(
+                crate::models::assistant_cma_sandbox::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id":owner,"occupies_account_slot":true,
+            "source":sandboxes::NYXID_CREATED_SOURCE,"submission_state":"unknown",
+            "cma_sandbox_id":bson::Bson::Null})
+            .await?
+        else {
+            return Ok(());
+        };
+        // The incoming exact original request already takes the normal replay path.
+        if parent.idempotency_key.as_deref() == Some(incoming_key)
+            && parent.request_hash.as_deref()
+                == Some(
+                    sandboxes::prepare_creation_request(incoming_body)?
+                        .hash
+                        .as_str(),
+                )
+        {
+            return Ok(());
+        }
+        let recoverable = db
+            .collection::<AssistantCmaCreation>(COLLECTION_NAME)
+            .find_one(
+                doc! {"user_id":owner,"cma_service_id":&parent.cma_service_id,
+                "sandbox_ref_id":&parent.id,"sandbox_generation":parent.generation,
+                "idempotency_key":&parent.idempotency_key,"creates_sandbox":true,
+                "method":"POST","path":"/api/v1/sandboxes","submission_state":"unknown",
+                "operation_id":bson::Bson::Null,"cma_agent_id":bson::Bson::Null,
+                "cma_sandbox_id":bson::Bson::Null},
+            )
+            .await
+            .map_err(|_| recovery_slot_occupied())?;
+        if recoverable.is_some() {
+            recover_creation_core(
+                db,
+                keys,
+                gateway,
+                owner,
+                &parent.id,
+                parent.generation,
+                CreationRecoveryAccess::Admission,
+            )
+            .await
+            .map_err(|_| recovery_slot_occupied())?;
+        }
+        Ok(())
+    })
+}
+
+fn recovery_slot_occupied() -> AppError {
+    AppError::Conflict(
+        "cma_sandbox_account_slot_occupied: the earlier creation is not confirmed absent; retry later to recheck its original request; do not delete or reconnect".into(),
+    )
+}
+
+/// Only management recovery requires the optional NyxBot management feature.
+/// Admission recovery can only re-observe a previously dispatched owner intent.
+#[derive(Clone, Copy)]
+pub(super) enum CreationRecoveryAccess {
+    Management,
+    Admission,
+}
+
 /// Explicit owner recovery of the original Sandbox creation. The local identity
 /// and generation select recovery material; the caller cannot replace it.
 pub async fn recover_creation(
@@ -1277,7 +1408,32 @@ pub async fn recover_creation(
     id: &str,
     generation: i64,
 ) -> AppResult<sandboxes::SandboxCommandDto> {
+    let db = &super::transaction_service::durable_database(db);
     super::assistant_cma_agent_service::require_enabled(db, owner).await?;
+    recover_creation_core(
+        db,
+        keys,
+        gateway,
+        owner,
+        id,
+        generation,
+        CreationRecoveryAccess::Management,
+    )
+    .await
+}
+
+async fn recover_creation_core(
+    db: &Database,
+    keys: &EncryptionKeys,
+    gateway: &CatalogCmaGateway,
+    owner: &str,
+    id: &str,
+    generation: i64,
+    access: CreationRecoveryAccess,
+) -> AppResult<sandboxes::SandboxCommandDto> {
+    // Absence is terminal evidence, including after an indeterminate replay
+    // response. Read the transaction's outcome from the primary with majority.
+    let db = &super::transaction_service::durable_database(db);
     let parent = sandboxes::get_owned(db, owner, id).await?;
     sandboxes::require_generation(&parent, generation)?;
     let creation = db
@@ -1291,10 +1447,10 @@ pub async fn recover_creation(
         .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?;
     require_parent(&creation, &parent)?;
     verify_creation(gateway, &creation).await?;
-    if creation.submission_state == "confirmed_not_created" {
-        return Err(drift());
-    }
-    if creation.submission_state != "confirmed" {
+    if !matches!(
+        creation.submission_state.as_str(),
+        "confirmed" | "confirmed_not_created"
+    ) {
         if let Some(operation) = &creation.operation_id {
             let value = gateway.get_lifecycle(owner, operation).await?;
             record_creation_observation(
@@ -1316,7 +1472,22 @@ pub async fn recover_creation(
             if sandboxes::prepare_creation_request(&body)?.hash != creation.request_hash {
                 return Err(drift());
             }
-            gateway.replay_creation(keys, &creation, &body).await?;
+            if let Err(error) = gateway
+                .replay_creation(keys, &creation, &body, access)
+                .await
+            {
+                // A cached refusal is an HTTP error but can have committed the
+                // exact NoResource proof. Only that durable state settles it;
+                // unavailable/ambiguous responses must retain the reservation.
+                let settled = db
+                    .collection::<AssistantCmaCreation>(COLLECTION_NAME)
+                    .find_one(creation_filter(&creation))
+                    .await?
+                    .ok_or_else(drift)?;
+                if settled.submission_state != "confirmed_not_created" {
+                    return Err(error);
+                }
+            }
         }
     }
     let current = db
@@ -1328,7 +1499,10 @@ pub async fn recover_creation(
     require_parent(&current, &parent)?;
     Ok(sandboxes::SandboxCommandDto {
         sandbox: sandboxes::SandboxDto::from(&parent),
-        pending: current.submission_state != "confirmed",
+        pending: !matches!(
+            current.submission_state.as_str(),
+            "confirmed" | "confirmed_not_created"
+        ),
     })
 }
 
@@ -1414,6 +1588,16 @@ mod tests {
     mod fingerprint_regressions {
         use super::*;
         include!("assistant_cma_admission_fingerprint_tests.rs");
+
+        mod writer_cutover {
+            use super::*;
+            include!("assistant_cma_writer_cutover_tests.rs");
+        }
+
+        mod trust_confirmation {
+            use super::*;
+            include!("assistant_cma_trust_tests.rs");
+        }
     }
 
     #[test]

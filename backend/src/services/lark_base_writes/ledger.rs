@@ -23,6 +23,10 @@ fn state_name(state: WriteState) -> &'static str {
 }
 
 fn conflict(row: &LarkBaseWrite) -> AppError {
+    diagnostic::failure(Failure::Ledger(row.state), None, None);
+    if matches!(row.state, WriteState::Dispatching | WriteState::Uncertain) {
+        diagnostic::outcome(diagnostic::Outcome::Uncertain);
+    }
     match row.state {
         WriteState::Succeeded => AppError::Conflict(format!(
             "Photo already belongs to record {}; use bitable_record_update to change its fields",

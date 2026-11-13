@@ -295,17 +295,19 @@ pub async fn persist(
             expires_at,
             purge_after: expires_at + Duration::days(30),
         };
-        // New collection always uses authenticated v3 context, independently of legacy write migration.
         let path = context_path(&row);
         row.data_encrypted = Some(
-            keys.encrypt_record(
-                &file.bytes,
+            super::record_field_service::encrypt_context(
+                keys,
                 &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?,
+                &file.bytes,
             )
             .await?,
         );
-        row.secret_context_versions
-            .insert("data_encrypted".into(), 3);
+        if keys.contextual_record_writes() {
+            row.secret_context_versions
+                .insert("data_encrypted".into(), 3);
+        }
         check_bson(&row)?;
         rows.push(row);
     }
@@ -867,7 +869,7 @@ async fn materialize(
             attachments.push(meta);
             continue;
         }
-        if row.state != "pending" || row.secret_context_versions.get("data_encrypted") != Some(&3) {
+        if row.state != "pending" {
             return Err(invalid());
         }
         let size = usize::try_from(row.size).map_err(|_| invalid())?;
@@ -875,17 +877,7 @@ async fn materialize(
             .checked_add(size)
             .filter(|n| *n <= sandbox::TOTAL_BYTES)
             .ok_or_else(invalid)?;
-        let path = context_path(&row);
-        let bytes = keys
-            .decrypt_record(
-                row.data_encrypted.as_deref().ok_or_else(invalid)?,
-                &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?,
-            )
-            .await?;
-        use sha2::{Digest, Sha256};
-        if bytes.len() != size || hex::encode(Sha256::digest(&*bytes)) != row.sha256 {
-            return Err(invalid());
-        }
+        let bytes = storage::decrypt(keys, &row).await?;
         let mut attachment = AssistantAttachment {
             artifact: meta.artifact.clone(),
             id: meta.id.clone(),
@@ -901,9 +893,11 @@ async fn materialize(
         };
         attachment.data_encrypted =
             super::assistant_record_service::encrypt_image(keys, &attachment, &bytes).await?;
-        attachment
-            .secret_context_versions
-            .insert("data_encrypted".into(), 3);
+        if keys.contextual_record_writes() {
+            attachment
+                .secret_context_versions
+                .insert("data_encrypted".into(), 3);
+        }
         db.collection::<AssistantAttachment>(ATTACHMENTS)
             .insert_one(&attachment)
             .session(&mut *session)
