@@ -1845,6 +1845,15 @@ means the model route is ready (not proof of complete business information or te
 warm-up message. The first admitted visitor waits in a source-bound guest queue,
 then receives its answer automatically. Concurrent visitors share one setup.
 Guests never become owner events, acquire owner tools or choose setup's model.
+For an organization guest in a followed thread, hidden setup validates the
+originating admitted guest lane at admission, before the engine and before
+credential dispatch. Its own hidden conversation/key still own setup and
+settlement; source or policy revocation refuses further work. Setup uses the
+same admitted-turn validator as the guest: subscription stop/expiry alone does
+not revoke either already-admitted turn. A failed attempt
+without model dispatch retries on the next admitted message after the existing
+60-second backoff; dispatched model failures back off up to 3,600 seconds. Setup failures add a closed optional `failure_step`, projected
+as `failure_reason.guest_setup_step`; public failure codes are unchanged.
 See [engine guest model routes](08-nyxagent-engine.md) for admission, retention,
 recovery and mixed-replica details.
 
@@ -1941,6 +1950,16 @@ a sender revocation tombstone until channel/org erasure to preserve that refusal
 Member DMs continue their private org-agent home. Groups/topics publish one
 public transcript, with hidden execution and confirmation cards per actor.
 Private DM context, tool traces and another actor's approvals are never public.
+Followed-child context status reflects the actual org turn. Its conversation
+link is only the viewing member's materialized lane; guest-only children and
+another member's lane remain unlinked. Follow guidance uses the negotiated
+gateway capability. Closed target/authority rejections and actual immediate or
+delayed send failures appear in existing bot Health with metadata-only audit;
+replay and transient preflight errors do not. Failed sends preserve the existing
+provider reason and add a separate bounded thread reason. Health describes the
+missing reply without asking the owner to inspect internal delivery logs.
+Expired delayed references report
+expiry without an owner action. Confirmed bot outbound clears the thread error.
 Queued questions enter that transcript atomically with source acceptance; queue
 instructions and unfinished/failed reply drafts remain private execution state.
 

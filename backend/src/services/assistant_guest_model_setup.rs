@@ -10,6 +10,7 @@ use crate::{
     models::{
         assistant_agent::{AssistantAgent, OwnerModelRoute},
         assistant_conversation::{AssistantConversation, TurnOrigin},
+        assistant_message::GuestSetupStep,
     },
 };
 use bson::{Document, doc};
@@ -65,6 +66,10 @@ pub(crate) async fn fence_dispatch(
         engine::live_turn(&row, Utc::now()).filter(|active|
             active.turn_id == *turn && !active.stop_requested && active.origin == TurnOrigin::Event
                 && active.platform_origin.is_none()).ok_or(AppError::AssistantTurnRequired)?;
+        if let Some(origin) = row.channel.as_ref().filter(|o| o.thread.is_some() && o.org_execution.is_some()) {
+            let conversation = super::org_channel_service::follow_conversation(db, &row, origin, Some(&mut *tx)).await?;
+            Box::pin(super::channel_thread_follow_service::validate_in_session(db, owner, origin, &conversation, true, tx)).await?;
+        }
         let super::assistant_agent_credential_service::KeyAuthority::ModelSetup(agent_owner) =
             super::assistant_agent_credential_service::authority_in_session(db, &row, tx).await? else {
                 return Err(AppError::AssistantTurnRequired);
@@ -477,9 +482,12 @@ fn run(
     budget: Duration,
 ) -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async move {
-        let outcome = tokio::time::timeout(budget, run_inner(&state, &token, &row)).await;
+        let mut step = GuestSetupStep::Capacity;
+        let outcome =
+            tokio::time::timeout(budget, run_inner(&state, &token, &row, &mut step)).await;
         let (route, reason) = match outcome {
             Ok(Ok(Some(route))) => {
+                step = GuestSetupStep::RouteValidation;
                 match valid_route(&state.db, &state.encryption_keys, &row.user_id, &route).await {
                     Ok(true) => (Some(route), None),
                     Ok(false) => (None, Some("model_route_unavailable")),
@@ -497,7 +505,8 @@ fn run(
             doc! {"kind":KIND,"claim":token,"conversation_id":&row.id,"status":"setting_up"};
         let updated=state.db.collection::<Document>(execution::COLLECTION).update_one(filter,backoff::terminal(doc!{
         "status":if route.is_some(){"ready"}else{"failed"},"route":bson::to_bson(&route).unwrap_or(bson::Bson::Null),
-        "cleanup_thread_id":&row.id,"notice_pending":reason.is_some(),"reason":reason},
+        "cleanup_thread_id":&row.id,"notice_pending":reason.is_some(),"reason":reason,
+        "failure_step":bson::to_bson(&reason.map(|_|step)).unwrap_or(bson::Bson::Null)},
         doc!{"conversation_id":"","api_key_id":""},route.is_some())).await;
         let Ok(updated) = updated else {
             // Retain the hidden thread and claim for crash recovery if the
@@ -539,6 +548,7 @@ async fn run_inner(
     state: &AppState,
     token: &str,
     row: &AssistantConversation,
+    step: &mut GuestSetupStep,
 ) -> AppResult<Option<OwnerModelRoute>> {
     let limit = super::assistant_settings_service::get(&state.db, &row.user_id)
         .await?
@@ -578,7 +588,9 @@ async fn run_inner(
         access_mode: None,
     });
     start.origin = TurnOrigin::Event;
+    *step = GuestSetupStep::OrgAccess;
     start.org_access = super::org_channel_service::conversation_access(&state.db, row).await?;
+    *step = GuestSetupStep::AgentAccess;
     let agent = team::agent_for_conversation(&state.db, row).await?;
     if !eligible(&state.db, &row.user_id, &agent).await? {
         return Err(AppError::Forbidden("Shared setup refused".into()));
@@ -598,6 +610,7 @@ async fn run_inner(
         token.to_owned(),
         ids,
     );
+    *step = GuestSetupStep::TurnAdmission;
     let active=super::transaction_service::run_db_only(&state.db,&context,|tx,(db,keys,row,start,agent,token,ids)|Box::pin(async move {
         let live=db.collection::<Document>(execution::COLLECTION).update_one(doc!{"kind":KIND,"claim":token,"conversation_id":&row.id,"status":"setting_up","until":{"$gt":bson::DateTime::now()}},doc!{"$inc":{"admission_fence":1_i64}}).session(&mut *tx).await?;
         if live.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
@@ -609,6 +622,7 @@ async fn run_inner(
     if let Some(turn) = active.active_turn.as_ref() {
         crate::turn_trace::admitted(&turn.turn_id, turn.started_at, turn.retry_of.as_deref());
     }
+    *step = GuestSetupStep::CredentialLoad;
     let credential = super::assistant_agent_credential_service::load_for_conversation(
         &state.db,
         &state.encryption_keys,
@@ -617,6 +631,7 @@ async fn run_inner(
     )
     .await?
     .ok_or(AppError::AssistantTurnRequired)?;
+    *step = GuestSetupStep::ModelExecution;
     let (sender, _) = tokio::sync::broadcast::channel(32);
     let mut execution = Box::pin(super::assistant_nyxagent_runtime::run_owner_turn(
         state.clone(),
@@ -665,6 +680,7 @@ async fn run_inner(
             Ok(None)
         };
     }
+    *step = GuestSetupStep::RouteValidation;
     Ok(engine::get(&state.db, &row.user_id, &row.id)
         .await?
         .owner_model_route
@@ -706,7 +722,7 @@ pub(crate) async fn expire_wait(
         .find_one_and_update(
             filter,
             backoff::terminal(
-                doc! {"status":"failed","reason":"setup_timeout","notice_pending":true},
+                doc! {"status":"failed","reason":"setup_timeout","failure_step":"lease_expired","notice_pending":true},
                 doc! {},
                 false,
             ),
@@ -743,7 +759,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         let _ = engine::request_stop(&state.db, actor, id).await;
         let updated=state.db.collection::<Document>(execution::COLLECTION).update_one(
             doc!{"kind":KIND,"claim":token,"status":"setting_up"},
-            backoff::terminal(doc!{"status":"failed","reason":"setup_timeout","notice_pending":true,"cleanup_thread_id":id},doc!{"conversation_id":"","api_key_id":""},false)
+            backoff::terminal(doc!{"status":"failed","reason":"setup_timeout","failure_step":"lease_expired","notice_pending":true,"cleanup_thread_id":id},doc!{"conversation_id":"","api_key_id":""},false)
         ).await?;
         let _ = updated;
     }
@@ -819,15 +835,24 @@ pub(crate) async fn failure(
         assistant_conversation::ModelRouteDiagnostic,
         assistant_message::{TurnFailureReason, TurnMetadata},
     };
-    let reason = if let Some(agent) = row.agent_id.as_deref() {
+    #[derive(serde::Deserialize, Default)]
+    struct Diagnostic {
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        failure_step: Option<GuestSetupStep>,
+    }
+    let diagnostic = if let Some(agent) = row.agent_id.as_deref() {
         record(db, &row.user_id, agent, &row.model)
             .await
             .ok()
             .flatten()
-            .and_then(|r| r.get_str("reason").ok().map(str::to_owned))
+            .and_then(|record| bson::from_document::<Diagnostic>(record).ok())
+            .unwrap_or_default()
     } else {
-        None
+        Diagnostic::default()
     };
+    let reason = diagnostic.reason;
     let mut error = engine::TurnError::internal("guest_model_route_required", "guest_setup");
     if let Some(reason) = reason.filter(|s| failure_code(s)) {
         error = error.with_model_route_reason(Some(&reason));
@@ -835,6 +860,7 @@ pub(crate) async fn failure(
             artifact_recovery_target: None,
             artifact_delivery: None,
             failure_reason: Some(Box::new(TurnFailureReason {
+                guest_setup_step: diagnostic.failure_step,
                 source: "nyxid".into(),
                 stage: "guest_setup".into(),
                 code: reason.clone(),
@@ -1551,4 +1577,346 @@ async fn org_channel_setup_uses_verified_org_payer_and_shared_durable_claim_with
         .is_err()
     );
     f.org.state.db.drop().await.unwrap();
+}
+
+#[cfg(test)]
+async fn org_follow_setup_revocation(change: &str) {
+    let mut f =
+        super::org_channel_service::tests::Fixture::new(&format!("org_follow_setup_{change}"))
+            .await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let guest = match change {
+        "flag_off" | "stopped" | "expired" => Box::pin(f.followed_guest_with_policy(change)).await,
+        _ => Box::pin(f.followed_guest()).await,
+    };
+    let origin = guest.channel.as_ref().unwrap();
+    let (token, row) = claim(
+        &f.org.state,
+        &f.org.org,
+        &f.agent,
+        &f.agent.model,
+        false,
+        WAIT,
+        Some(origin),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let db = &f.org.state.db;
+    assert!(row.guest_model_setup && !row.guest_turn);
+    assert_eq!(
+        super::org_channel_service::follow_conversation(db, &row, origin, None)
+            .await
+            .unwrap(),
+        guest.id
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::org_channel::LANES)
+            .count_documents(doc! {"conversation_id":&row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(row.id.clone()),
+        agent_id: None,
+        text: INSTRUCTION.into(),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = TurnOrigin::Event;
+    start.org_access = super::org_channel_service::conversation_access(db, &row)
+        .await
+        .unwrap();
+    let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
+        conversation_id: row.id.clone(),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    assert_eq!(
+        super::org_channel_service::follow_conversation(db, &row, origin, Some(&mut tx))
+            .await
+            .unwrap(),
+        guest.id
+    );
+    let event = team::bound_event(KIND, INSTRUCTION.into(), None, None);
+    engine::append_events_in_session(db, &row.user_id, &row.id, &[event], &mut tx)
+        .await
+        .unwrap();
+    let active = Box::pin(engine::begin_owner_turn_in_session(
+        db,
+        &mut tx,
+        &f.org.state.encryption_keys,
+        &row.user_id,
+        &start,
+        &ids,
+        &f.agent,
+        None,
+        None,
+        None,
+    ))
+    .await
+    .unwrap()
+    .into_started()
+    .unwrap()
+    .conversation;
+    tx.commit_transaction().await.unwrap();
+    let turn = active.active_turn.as_ref().unwrap().turn_id.as_str();
+    Box::pin(fence_dispatch(
+        db,
+        &row.user_id,
+        &row.id,
+        turn,
+        &row.credential_api_key_id,
+    ))
+    .await
+    .unwrap();
+    let key = f.org.key(&row).await;
+    let auth = Box::pin(crate::mw::auth::api_key_auth_user(
+        db, &key, None, None, None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(auth.user_id.to_string(), f.org.org);
+    assert!(!key.allow_all_services && !key.allow_all_nodes && key.allowed_service_ids.is_empty());
+    match change {
+        "none" | "flag_off" | "stopped" | "expired" => {}
+        "guests_off" => {
+            let channel = super::org_channel_service::management::load(
+                db,
+                &f.org.admin,
+                &origin.nyxbot_channel_id,
+                true,
+            )
+            .await
+            .unwrap();
+            super::org_channel_service::management::update(
+                db,
+                &f.org.admin,
+                &channel,
+                super::org_channel_service::management::GuestSettings {
+                    expected_revision: None,
+                    enabled: false,
+                    service_ids: None,
+                    daily_credits: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        "binding" => {
+            db.collection::<Document>("nyxbot_channels")
+                .update_one(
+                    doc! {"_id":&origin.nyxbot_channel_id},
+                    doc! {"$set":{"org_specialist.revision":uuid::Uuid::new_v4().to_string()}},
+                )
+                .await
+                .unwrap();
+        }
+        "follow_stopped" => {
+            let binding = origin.thread.as_ref().unwrap();
+            super::channel_thread_follow_service::stop(
+                db,
+                &f.org.admin,
+                &origin.nyxbot_channel_id,
+                "parent",
+                &binding.child_id,
+            )
+            .await
+            .unwrap();
+        }
+        "sender" => {
+            db.collection::<Document>("channel_messages")
+                .update_one(
+                    doc! {"_id":"source"},
+                    doc! {"$set":{"sender_platform_id":"different-sender"}},
+                )
+                .await
+                .unwrap();
+        }
+        "member_link" => {
+            f.link(&f.org.member, "fixture-sender").await;
+        }
+        _ => panic!("unknown test case"),
+    }
+    let guest_allowed = super::org_channel_service::conversation_access(db, &guest)
+        .await
+        .is_ok();
+    let setup_allowed = super::org_channel_service::conversation_access(db, &row)
+        .await
+        .is_ok();
+    assert_eq!(
+        setup_allowed, guest_allowed,
+        "setup must have admitted guest authority: {change}"
+    );
+    if matches!(
+        change,
+        "none" | "flag_off" | "stopped" | "expired" | "follow_stopped"
+    ) {
+        assert!(guest_allowed, "{change}");
+        Box::pin(fence_dispatch(
+            db,
+            &row.user_id,
+            &row.id,
+            turn,
+            &row.credential_api_key_id,
+        ))
+        .await
+        .unwrap();
+    } else {
+        assert!(
+            super::org_channel_service::conversation_access(db, &row)
+                .await
+                .is_err(),
+            "{change}"
+        );
+        assert!(
+            Box::pin(fence_dispatch(
+                db,
+                &row.user_id,
+                &row.id,
+                turn,
+                &row.credential_api_key_id
+            ))
+            .await
+            .is_err(),
+            "{change}"
+        );
+        run(f.org.state.clone(), token, row.clone(), WAIT).await;
+        let failed = record(db, &f.org.org, &f.agent.id, &f.agent.model)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.get_str("status"), Ok("failed"));
+        assert_eq!(failed.get_str("reason"), Ok("model_connection_unavailable"));
+        assert_eq!(failed.get_str("failure_step"), Ok("org_access"));
+        let error = failure(db, &guest).await;
+        assert_eq!(
+            error
+                .metadata
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_ref()
+                .unwrap()
+                .guest_setup_step,
+            Some(GuestSetupStep::OrgAccess)
+        );
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        super::assistant_turn_observability::failed_in_session(
+            db,
+            &mut tx,
+            &guest,
+            guest.active_turn.as_ref().unwrap(),
+            &error,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        tx.commit_transaction().await.unwrap();
+        let audit = db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(
+                doc! {"event_type":"assistant_turn_failed","event_data.conversation_id":&guest.id},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get_document("failure_reason")
+                .unwrap()
+                .get_str("guest_setup_step"),
+            Ok("org_access")
+        );
+        assert_eq!(
+            db.collection::<Document>("assistant_conversations")
+                .count_documents(doc! {"_id":&row.id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Document>("assistant_agent_credentials")
+                .count_documents(doc! {"conversation_id":&row.id})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn org_follow_setup_uses_originating_lane_in_admission_and_dispatch() {
+    Box::pin(org_follow_setup_revocation("none")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn org_follow_setup_revokes_when_guests_disabled() {
+    Box::pin(org_follow_setup_revocation("guests_off")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn org_follow_setup_revokes_when_binding_changes() {
+    Box::pin(org_follow_setup_revocation("binding")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn org_follow_setup_preserves_admitted_guest_authority_when_follow_stops() {
+    Box::pin(org_follow_setup_revocation("follow_stopped")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn org_follow_setup_revokes_when_sender_changes() {
+    Box::pin(org_follow_setup_revocation("sender")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn org_follow_setup_revokes_when_sender_becomes_member() {
+    Box::pin(org_follow_setup_revocation("member_link")).await;
+}
+
+#[cfg(test)]
+#[test]
+fn guest_setup_step_is_optional_and_unknown_codes_remain_bounded() {
+    use crate::models::assistant_message::TurnFailureReason;
+    let old = serde_json::json!({"source":"guest_setup","code":"model_connection_unavailable","stage":"guest_setup","http_status":null,"nyxid_error_code":null});
+    let reason: TurnFailureReason = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(reason.guest_setup_step, None);
+    let mut future = old;
+    future["guest_setup_step"] = serde_json::json!("future_closed_step");
+    let reason: TurnFailureReason = serde_json::from_value(future).unwrap();
+    assert_eq!(reason.guest_setup_step, Some(GuestSetupStep::Unknown));
+    assert_eq!(
+        serde_json::to_value(reason).unwrap()["guest_setup_step"],
+        "unknown"
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn cold_org_setup_admits_mention_when_thread_follow_flag_is_off() {
+    Box::pin(org_follow_setup_revocation("flag_off")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn cold_org_setup_admits_all_replies_with_stopped_child() {
+    Box::pin(org_follow_setup_revocation("stopped")).await;
+}
+#[cfg(test)]
+#[tokio::test]
+async fn cold_org_setup_admits_all_replies_with_expired_child() {
+    Box::pin(org_follow_setup_revocation("expired")).await;
 }

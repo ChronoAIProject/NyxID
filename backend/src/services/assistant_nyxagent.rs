@@ -2658,11 +2658,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             row.channel = Some(origin.clone());
         }
+        let origin = row.channel.as_ref().unwrap();
+        let conversation =
+            super::org_channel_service::follow_conversation(db, &row, origin, Some(&mut *session))
+                .await?;
         super::channel_thread_follow_service::validate_in_session(
             db,
             user_id,
-            row.channel.as_ref().unwrap(),
-            &id,
+            origin,
+            &conversation,
             true,
             session,
         )

@@ -244,12 +244,29 @@ pub async fn followed(
         .ok_or_else(crate::services::channel_thread_follow_service::not_found)?;
     let event = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {
         "channel_id":&channel.id,"user_id":&channel.user_id,"event_id":&binding.source_message_id,
-        "resolved_conversation_id":conversation,"resolved_thread_id":&binding.child_id,
+        "resolved_thread_id":&binding.child_id,
     }).await?;
     let Some(event) = event else {
         decision.skip(Reason::SourceUnavailable);
         return Ok(());
     };
+    let Ok((actor, admitted_origin, admitted_conversation)) =
+        crate::services::channel_thread_service::gateway::admitted_reply(
+            &event,
+            channel,
+            &binding.source_message_id,
+        )
+    else {
+        decision.skip(Reason::SourceUnavailable);
+        return Ok(());
+    };
+    if actor != owner
+        || admitted_conversation != conversation
+        || !super::gateway_threads::same_reply_identity(admitted_origin, origin)
+    {
+        decision.skip(Reason::SourceUnavailable);
+        return Ok(());
+    }
     decision.event = Some(event.id.clone());
     decision.anchor = Anchor::ThreadBinding;
     if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {

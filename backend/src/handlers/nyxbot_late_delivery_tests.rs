@@ -888,6 +888,7 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
                 artifact_delivery: None,
                 failure_reason: reason.map(|reason| {
                     Box::new(crate::models::assistant_message::TurnFailureReason {
+                        guest_setup_step: None,
                         source: "nyxid".into(),
                         stage: "model_proxy".into(),
                         code: "guest_model_route_required".into(),

@@ -2012,12 +2012,17 @@ async fn execute_turn_inner(
             _ => Vec::new(),
         };
         for origin in origins.into_iter().filter(|o| o.thread.is_some()) {
+            let conversation = crate::services::org_channel_service::follow_conversation(
+                &state.db, row, origin, None,
+            )
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
             Box::pin(
                 crate::services::channel_thread_follow_service::validate_delivery(
                     &state.db,
                     &row.user_id,
                     origin,
-                    &row.id,
+                    &conversation,
                 ),
             )
             .await
