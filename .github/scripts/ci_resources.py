@@ -219,6 +219,12 @@ def run(label, command, interval=30, cancellation_grace=10):
         if sampler.is_alive():
             sampler.join(timeout=2)
         sample()
+        if os.environ.get('NYXID_SWAP_MODE'):
+            try:
+                subprocess.run([sys.executable, str(Path(__file__).with_name('compressed_swap.py')), 'stats'],
+                               timeout=45, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                emit('compressed_swap_stats_unavailable')
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
         if log is not None:

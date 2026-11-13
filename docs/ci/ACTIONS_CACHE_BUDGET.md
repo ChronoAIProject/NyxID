@@ -40,16 +40,18 @@ environment value for local reports.
   `v1-rust-incremental-<lane>-<os>-<arch>-<8 hex>-<8 hex>`) keep the newest main
   generation and remove older or non-main copies only after that main
   replacement exists with the same key prefix and cache version. Incremental
-  jobs publish the `v1-rust-incremental` Swatinem prefix; a leftover `v0-rust`
+  jobs keep the `v1-rust-incremental` Swatinem prefix; a leftover `v0-rust`
   entry cannot replace it because the reader cannot restore that prefix.
   Non-incremental lanes stay on `v0-rust`. Billing and wizard lanes share their
   current backend/CLI replacements as configured in the script.
-- **Incremental Rust caches** (`v0-rust-incremental-<lane>-<os>-<arch>-<manifest>-<commit>`)
-  use the same newest-main rule, grouped by lane, runner OS/architecture, and
+- **Incremental Rust caches** (`v1-rust-graph-<lane>-<os>-<arch>-<manifest>-<commit>`,
+  and legacy `v0-rust-incremental-…`) use the same newest-main rule, grouped
+  by prefix, lane, runner OS/architecture, and
   the actions cache `version`. That version is the hash of the exact path list.
   The one-path version `a625e3a14900daf5` and the two-path version
   `f98f77cfa579f3b1` do not replace each other. A branch-scoped manual save is
-  kept until a main entry with the same version exists. An inventory row with
+  kept for at least 48 hours from creation, and until a main entry with the
+  same prefix and version exists. An inventory row with
   no version is not a replacement for a versioned row.
   The obsolete one-path main entries are deliberately left to GitHub's
   seven-day unused-cache eviction, not retired by this script. They occupy
@@ -60,6 +62,12 @@ environment value for local reports.
   temporary cost fits the 100 GB repository limit. The 40 GB soft cap can warn
   during the transition but does not force eviction. Version-aware retention
   still protects new branch caches from incompatible old main entries.
+- **Branch Rust grace period:** both dependency/artifact and incremental
+  entries are protected for 48 hours from creation even when main already has
+  a compatible entry. This covers two roughly hour-long cold dispatches plus
+  engineer review time across multiple six-hour maintenance cycles. Missing,
+  malformed and future creation times are preserved. After 48 hours, removal
+  still requires a compatible main replacement; age alone never deletes one.
 - **Retired Docker BuildKit blobs/indexes** are removable because Docker jobs now
   import and export the per-platform registry cache. No workflow restores these
   GitHub Actions cache records.
@@ -134,10 +142,13 @@ peak RSS, and swap, and each warm job uploads those samples.
 
 Coverage archive producers preserve compiler artifacts with `--no-clean` after
 clearing raw counters using `clean --profraw-only`. The pinned
-llvm-cov's default archive command otherwise deletes the workspace graph just
-restored from cache. Coverage reports select objects from the current nextest
-archive; a real-tool regression fixture checks deleted sources, renamed test
-binaries, unchanged-build reuse and equality with a clean coverage report.
+llvm-cov's default archive command otherwise deletes workspace compiler
+artifacts. Backend archive CI now disables incremental and restores dependencies
+only; `--no-clean` still preserves local repeat-build artifacts. Reports select
+objects from the current nextest archive. A real-tool fixture checks deleted
+sources, renamed binaries, unchanged-build reuse, exact equality with a clean
+incremental report, and equal coverage fields/test IDs without incremental
+(only compiler-generated function symbols differ).
 
 The backend warm jobs release only their own compile-time swap reserve after
 all compilation finishes and before cache compression. Ordinary cache saves in
@@ -153,8 +164,8 @@ and cancels older warm runs on the same ref. Manual branch measurements do not
 cancel main warming.
 It covers ten separate lanes: ordinary and instrumented backend archives,
 clippy, three KMS feature variants, CLI tests (also used by wizard freshness),
-CLI coverage, permissions and backend image inputs. No lanes are combined and
-no cache contents are reduced. Tests compare runner, toolchain, cache-prefix
+CLI coverage, permissions and backend image inputs. No lanes are combined. Saved graphs exclude compilation units not selected
+by the successful build; no test selection or compiled proof is removed. Tests compare runner, toolchain, cache-prefix
 mode, hashed environment inputs, and incremental save/restore keys for every
 reader/writer pair. Feature flags are resolved from a static mapping inside the
 build step, after cache restoration, so their environment does not change keys.
@@ -171,10 +182,42 @@ Skipped or missing PR jobs always run on main. For example, a backend-only PR
 that did not exercise Machine Container E2E cannot reuse that check, so it may
 still determine publication time even when Rust checks are reusable.
 
+Bounded incremental archives use the new `v1-rust-graph` prefix. Old
+`v0-rust-incremental` archives have no size bound and contain accumulated
+obsolete graphs; readers must not restore them under the new disk budget.
+Seven lanes retain graphs: Clippy, three KMS variants, CLI tests, CLI coverage
+and permissions. Their dependency/workspace prefix stays `v1-rust-incremental`: native rustc paths
+and compiler flags are unchanged. Old main maintenance leaves the unknown new
+graph prefix alone but can still remove branch dependency entries until the
+48-hour grace rule merges. There is no graph fallback to the old prefix.
+Obsolete graph generations are left to GitHub's seven-day unused eviction.
+Both backend archive lanes now compile without incremental and save only
+`v0-rust` dependency caches. Their old graphs and `v1-rust-incremental`
+dependency entries likewise receive no new access and expire unused. The
+[eight-commit replay](../CI_PERFORMANCE.md#eight-commit-incremental-replay)
+explains this policy; their full archive compilation and validation remain.
+
+The broad manifest fallback remains within the bounded graph prefix. After
+restore and before any build, a marker records the start time. Fresh-checkout
+mtimes force selected workspace units to compile. Before save, pruning removes
+native crate directories with no finalized session newer than the marker.
+Retained crates keep only their newest finalized session using rustc's encoded
+timestamp and exclusive lock checks; the previously locked input session is
+not carried forward. One marker spans all Cargo commands in the job. There is
+no compiler wrapper or Cargo debug-log parser. An absent marker, empty graph,
+busy lock, unknown layout or graph above 16 GiB refuses the save.
+
+Graph readers build with `CARGO_INCREMENTAL=0` on a miss or disk-guard skip.
+The seven graph producers keep it enabled on misses; the two archive jobs
+keep it disabled and do not produce unused graphs. A compiler OOM/kill or
+stale graph triggers one retry with the graphs removed and incremental off.
+See [the disk budget](../CI_PERFORMANCE.md#restore-disk-budget-and-graph-pruning)
+for the pre-extraction admission check, swap ordering and size diagnostics.
+
 The tests cover newest-per-target dist retention, non-main dist cleanup, node
 family retention, coverage newest-30 plus 14-day retention, known Rust lanes
-including the `v1-rust-incremental` prefix, incremental retention per cache
-version, Docker retirement, unknown-family protection, malformed-date
+including the legacy and current prefixes, incremental retention per cache
+version/prefix, 48-hour branch grace and boundary cases, Docker retirement, unknown-family protection, malformed-date
 conservatism and soft-cap warning behavior.
 
 The [hosted confirmation checklist](../CI_PERFORMANCE.md#github-actions-confirmation-checklist)

@@ -23,6 +23,8 @@ elif (($# != 0)); then
   exit 1
 fi
 
+python3 "$(dirname "${BASH_SOURCE[0]}")/compressed_swap.py" configure || echo 'Optional compressed swap setup unavailable; continuing.'
+
 # A measured backend test compile used 2.4 GiB of the runner's 3 GiB swap;
 # by October 2026 a single nyxid rustc exhausted 16 GiB RAM plus 8 GiB swap,
 # and later that month the test-binary compile peaked at 29.7-31.5 GiB of
@@ -35,18 +37,21 @@ minimum_swap_kib=$((40 * 1024 * 1024))
 current_swap_kib="$(awk '$1 == "SwapTotal:" { print $2 }' /proc/meminfo)"
 [[ "$current_swap_kib" =~ ^[0-9]+$ ]]
 echo 'Backend memory capacity before preparation:'
+df -h "$RUNNER_TEMP"
 free -m
-if ((current_swap_kib >= minimum_swap_kib)); then
-  free -m
-  exit 0
+additional_mib=0
+if ((current_swap_kib < minimum_swap_kib)); then
+  additional_mib=$(((minimum_swap_kib - current_swap_kib + 1023) / 1024 + 1))
 fi
-
-additional_mib=$(((minimum_swap_kib - current_swap_kib + 1023) / 1024 + 1))
 available_disk_kib="$(df -Pk "${RUNNER_TEMP:?}" | awk 'END { print $4 }')"
 [[ "$available_disk_kib" =~ ^[0-9]+$ ]]
-if ((available_disk_kib < additional_mib * 1024 + 8 * 1024 * 1024)); then
-  echo 'Insufficient disk to provide backend swap reserve and retain 8 GiB free.' >&2
+if ((available_disk_kib < additional_mib * 1024 + 36 * 1024 * 1024)); then
+  echo 'Insufficient disk for swap plus 24 GiB build growth, 4 GiB archive and 8 GiB free.' >&2
   exit 1
+fi
+
+if ((additional_mib == 0)); then
+  exit 0
 fi
 
 swap_file="$(mktemp "$RUNNER_TEMP/nyxid-ci-swap.XXXXXX")"
@@ -71,3 +76,4 @@ if ((actual_swap_kib < minimum_swap_kib)); then
 fi
 echo 'Backend runner has at least 40 GiB total swap; concurrency is unchanged.'
 free -m
+df -h "$RUNNER_TEMP"

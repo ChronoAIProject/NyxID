@@ -5,9 +5,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
+
+ROOT = Path(__file__).resolve().parents[2]
 
 TOOLS = ("cargo", "cargo-nextest", "cargo-llvm-cov")
 HAVE_TOOLS = all(shutil.which(tool) for tool in TOOLS)
@@ -23,7 +26,7 @@ class CoverageArchiveCacheTests(unittest.TestCase):
             env = {**os.environ, "CARGO_TARGET_DIR": str(target), "CARGO_INCREMENTAL": "1", "CARGO_TERM_COLOR": "never",
                    "RUSTFLAGS": "-Dwarnings", "LLVM_PROFILE_FILE_NAME": "fixture-%4m.profraw"}
             for name in ("CARGO_ENCODED_RUSTFLAGS", "LLVM_PROFILE_FILE", "CARGO_LLVM_COV_TARGET_DIR",
-                         "CARGO_LLVM_COV_BUILD_DIR", "CARGO_BUILD_TARGET_DIR"):
+                         "CARGO_LLVM_COV_BUILD_DIR", "CARGO_BUILD_TARGET_DIR", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
                 env.pop(name, None)
 
             def cargo(*args):
@@ -72,16 +75,23 @@ class CoverageArchiveCacheTests(unittest.TestCase):
             measure(old)
             old_objects = list((target / "llvm-cov-target/debug/deps").glob("old_binary-*"))
             self.assertTrue(old_objects)
+            subprocess.run([sys.executable, str(ROOT / ".github/scripts/incremental_cache.py"), "mark"],
+                           cwd=root, env=env, check=True)
             sources("current-binary", "current")
             (root / "src/removed.rs").unlink()
             cargo("llvm-cov", "clean", "--profraw-only")
             cached = archive("cached", cached=True)
             unchanged = cargo("llvm-cov", "nextest-archive", "--package", "coverage-fixture",
                               "--archive-file", str(cached), "--no-clean")
-            self.assertNotIn("Compiling coverage-fixture", unchanged.stderr)
+            self.assertNotIn("Compiling coverage-fixture", unchanged.stdout + unchanged.stderr)
             # The old objects really remain, so equality below tests selection,
             # rather than accidentally relying on a clean target directory.
             self.assertTrue(all(path.exists() for path in old_objects))
+            prune = subprocess.run([sys.executable, str(ROOT / ".github/scripts/incremental_cache.py"), "prune"],
+                                   cwd=root, env=env, text=True, capture_output=True)
+            self.assertEqual(prune.returncode, 0, prune.stdout + prune.stderr)
+            self.assertTrue(all(p.name.startswith("current_binary-") for p in
+                                (target / "llvm-cov-target/debug/incremental").iterdir()))
             cached_inventory, cached_report = measure(cached)
             self.assertEqual(set(cached_inventory), {"coverage-fixture::bin/current-binary"})
             self.assertEqual(set(next(iter(cached_inventory.values()))),
@@ -93,6 +103,17 @@ class CoverageArchiveCacheTests(unittest.TestCase):
             clean_inventory, clean_report = measure(archive("clean"))
             self.assertEqual(cached_inventory, clean_inventory)
             self.assertEqual(cached_report, clean_report)
+            # Reader misses and memory retries compile non-incrementally. Cargo
+            # changes symbol disambiguators, but all coverage fields other than
+            # those internal names, and every test ID, must stay identical.
+            env['CARGO_INCREMENTAL'] = '0'
+            nonincremental_inventory, nonincremental_report = measure(archive("nonincremental"))
+            self.assertEqual(cached_inventory, nonincremental_inventory)
+            for report in (clean_report, nonincremental_report):
+                for data in report['data']:
+                    for function in data['functions']:
+                        del function['name']
+            self.assertEqual(clean_report, nonincremental_report)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ sudo() {
         return subprocess.run(
             ["bash", str(SCRIPT), *args], env={**os.environ, "BASH_ENV": str(self.harness),
                 "RUNNER_TEMP": str(self.root), "TEST_DISK_KIB": str(disk),
+                "NYXID_SWAP_MODE": "unchanged",
                 "TEST_FAIL": fail, "TEST_RESULT_KIB": str(result)},
             capture_output=True, text=True, timeout=10,
         )
@@ -71,6 +72,11 @@ sudo() {
 
     def test_insufficient_disk_fails_before_allocation(self):
         result = self.invoke(disk=10 * 1024**2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "calls").exists())
+
+    def test_existing_swap_still_needs_build_disk_headroom(self):
+        result = self.invoke(initial=RESERVE_KIB, disk=35 * 1024**2)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "calls").exists())
 

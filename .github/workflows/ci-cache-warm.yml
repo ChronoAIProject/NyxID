@@ -35,6 +35,16 @@ on:
       - '.github/scripts/**'
       - '.github/workflows/**'
   workflow_dispatch:
+    inputs:
+      swap-mode:
+        description: Cold-build experiment; disk swap capacity stays at 40 GiB.
+        type: choice
+        options: [zswap, 'off']
+        default: zswap
+      zswap-pool-percent:
+        description: Maximum compressed pool as a percentage of RAM (1–100); used only with zswap.
+        type: string
+        default: '20'
 
 concurrency:
   group: ci-cache-warm-${{ github.ref }}
@@ -44,25 +54,27 @@ permissions:
   contents: read
 
 env:
+  NYXID_SWAP_MODE: ${{ inputs.swap-mode || 'zswap' }}
+  NYXID_ZSWAP_POOL_PERCENT: ${{ inputs.zswap-pool-percent || '20' }}
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  # Archive readers do not consume graphs after the eight-commit replay.
+  # Warm their non-incremental dependencies; keep the full compile commands.
   backend-test-archive:
     name: Warm backend test archive cache
     continue-on-error: true
     runs-on: ubuntu-24.04
     env:
-      CARGO_INCREMENTAL: 1
+      CARGO_INCREMENTAL: 0
       RUST_MIN_STACK: 8388608
       LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
       NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -72,7 +84,9 @@ jobs:
         with:
           save-if: 'true'
           shared-key: backend-build
-          incremental: 'true'
+          incremental: 'false'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
@@ -85,12 +99,6 @@ jobs:
           --archive-file backend-tests.tar.zst
       - name: Release compile reserve before caching
         run: bash .github/scripts/prepare-backend-runner.sh --release
-      - name: Save incremental cache
-        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
-        uses: ./.github/actions/ci-rust-incremental-save
-        with:
-          key: ${{ steps.rust-cache.outputs.incremental-key }}
-          path: ${{ steps.rust-cache.outputs.incremental-path }}
       - name: Upload resource samples
         if: always()
         continue-on-error: true
@@ -106,14 +114,12 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-24.04
     env:
-      CARGO_INCREMENTAL: 1
+      CARGO_INCREMENTAL: 0
       RUST_MIN_STACK: 8388608
       LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
       NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -125,7 +131,9 @@ jobs:
         with:
           save-if: 'true'
           shared-key: coverage-backend-build
-          incremental: 'true'
+          incremental: 'false'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
@@ -140,12 +148,6 @@ jobs:
           --archive-file backend-tests.tar.zst --no-clean
       - name: Release compile reserve before caching
         run: bash .github/scripts/prepare-backend-runner.sh --release
-      - name: Save incremental cache
-        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
-        uses: ./.github/actions/ci-rust-incremental-save
-        with:
-          key: ${{ steps.rust-cache.outputs.incremental-key }}
-          path: ${{ steps.rust-cache.outputs.incremental-path }}
       - name: Upload resource samples
         if: always()
         continue-on-error: true
@@ -165,8 +167,6 @@ jobs:
       CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -179,6 +179,8 @@ jobs:
           save-if: 'true'
           shared-key: rust-clippy
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Compile clippy
         run: >-
           python3 .github/scripts/retry_incremental.py
@@ -216,8 +218,6 @@ jobs:
       CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -228,6 +228,8 @@ jobs:
           save-if: 'true'
           shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Build feature set
         env:
           FEATURES: ${{ fromJSON('{"aws-kms":"aws-kms","gcp-kms":"gcp-kms","aws-and-gcp-kms":"aws-kms,gcp-kms"}')[matrix.variant] }}
@@ -401,8 +403,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -412,6 +412,8 @@ jobs:
         with:
           save-if: 'true'
           shared-key: backend-image-inputs-backend-image-inputs
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Check backend release inputs
         run: |
           python3 .github/scripts/ci_resources.py backend-image-inputs \

@@ -102,10 +102,10 @@ jobs:
           shared-key: dist-${{ join(matrix.targets, '-') }}
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install dist
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'pull_request' || steps.cache.outputs.cache-hit != 'true'
         run: ${{ matrix.install_dist.run }}
       - name: Install dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'pull_request' || steps.cache.outputs.cache-hit != 'true'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -114,7 +114,7 @@ jobs:
           fi
           ${{ matrix.packages_install }}
       - name: Build artifacts
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'pull_request' || steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           if [[ ",${{ join(matrix.targets, ',') }}," == *",aarch64-unknown-linux-gnu,"* ]]; then

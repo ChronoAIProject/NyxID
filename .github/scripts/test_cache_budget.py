@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -10,7 +10,7 @@ ONE_PATH_VERSION = "a625e3a14900daf5d70e679b2bd959ebc2ce876f8150b2f4098d8f7a77ce
 TWO_PATH_VERSION = "f98f77cfa579f3b146ee7fba8fc56f03acdd1be27fccb109484811818a8d1aa3"
 V1_CLI = "v1-rust-incremental-cli-cli-test-Linux-x64-3b8f8af3-ae3d9491"
 
-NOW = datetime(2026, 10, 28, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 30, tzinfo=timezone.utc)
 
 
 def cache(id, lane, ref='refs/heads/main', date='2026-10-27T00:00:00Z', size=100,
@@ -47,6 +47,22 @@ def coverage(id, sha, ref='refs/heads/main', date='2026-10-27T00:00:00Z'):
 
 
 class CacheBudgetTests(unittest.TestCase):
+    def test_new_graph_prefix_is_isolated_and_receives_branch_grace(self):
+        for old, new, expected_family in (
+            (incremental(1, 'backend-build')['key'],
+             incremental(1, 'backend-build')['key'].replace('v0-rust-incremental', 'v1-rust-graph'),
+             'rust-incremental'),
+        ):
+            branch = cache(1, 'backend-build', ref='refs/heads/test', date=(NOW - timedelta(hours=1)).isoformat())
+            branch['key'] = new
+            main = {**branch, 'id': 2, 'ref': 'refs/heads/main', 'key': old}
+            self.assertEqual(family(new), expected_family)
+            self.assertEqual(plan([branch, main], NOW), [])
+            main['key'] = new
+            self.assertEqual(plan([branch, main], NOW), [])
+            branch['createdAt'] = (NOW - timedelta(hours=49)).isoformat()
+            self.assertEqual([r['id'] for r in plan([branch, main], NOW)], [1])
+
     def test_dist_keeps_newest_per_target_and_prunes_non_main(self):
         rows = [
             dist(1, 'x86_64-unknown-linux-gnu', date='2026-10-20T00:00:00Z'),
@@ -193,6 +209,21 @@ class CacheBudgetTests(unittest.TestCase):
             "--json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version",
             text,
         )
+
+    def test_manual_rust_caches_have_48_hours_even_with_main_replacement(self):
+        for factory in (cache, incremental):
+            for age in (timedelta(minutes=15), timedelta(hours=47, minutes=59),
+                        timedelta(hours=48), timedelta(hours=49)):
+                main = factory(1, 'backend-build')
+                branch = factory(2, 'backend-build', ref='refs/heads/measurement',
+                                 date=(NOW - age).isoformat())
+                with self.subTest(factory=factory.__name__, age=age):
+                    expected = [2] if age >= timedelta(hours=48) else []
+                    self.assertEqual([r['id'] for r in plan([main, branch], NOW)], expected)
+                    self.assertEqual(plan([branch], NOW), [])
+            for bad in ('invalid', None, (NOW + timedelta(days=1)).isoformat()):
+                branch = factory(2, 'backend-build', ref='refs/heads/measurement', date=bad)
+                self.assertEqual(plan([main, branch], NOW), [])
 
     def test_malformed_dates_are_retained_conservatively(self):
         rows = [coverage(i, 'a' * 40, date=f'2026-09-01T00:00:00Z') for i in range(1, 35)]

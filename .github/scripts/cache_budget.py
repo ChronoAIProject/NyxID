@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 MAIN = "refs/heads/main"
+BRANCH_GRACE = timedelta(hours=48)
 # Swatinem keys are 8-hex environment and lock hashes. Incremental jobs use
 # v1-rust-incremental; non-incremental lanes stay on v0-rust. The separate
 # actions/cache incremental entries use a longer manifest hash and are matched
@@ -23,7 +24,7 @@ RUST = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{8}$"
 )
 INCREMENTAL = re.compile(
-    r"^v0-rust-incremental-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-"
+    r"^(?P<prefix>v0-rust-incremental|v1-rust-graph)-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-"
     r"[0-9a-f]+-[0-9a-f]+$"
 )
 DIST = re.compile(
@@ -150,7 +151,7 @@ def plan(rows, now=None):
         match = INCREMENTAL.fullmatch(row["key"])
         if not match:
             continue
-        family_key = (match["lane"], match["os"], match["arch"], cache_version(row))
+        family_key = (match["prefix"], match["lane"], match["os"], match["arch"], cache_version(row))
         if family_key not in incremental_newest or rank(row) > rank(incremental_newest[family_key]):
             incremental_newest[family_key] = row
 
@@ -190,13 +191,19 @@ def plan(rows, now=None):
                     incremental = INCREMENTAL.fullmatch(key)
                     if incremental:
                         family_key = (
-                            incremental["lane"], incremental["os"], incremental["arch"],
+                            incremental["prefix"], incremental["lane"], incremental["os"], incremental["arch"],
                             cache_version(row),
                         )
                         replacement = incremental_newest.get(family_key)
                         if replacement and row["id"] != replacement["id"]:
                             reason = f"superseded incremental cache by main cache {replacement['id']}"
         if reason:
+            # Manual warm runs need time for a second dispatch and a small-edit
+            # comparison, even when main already has a compatible generation.
+            if row["ref"] != MAIN and family(key) in {"rust-lane", "rust-incremental"}:
+                created = timestamp(row.get("createdAt"))
+                if created is None or created > now - BRANCH_GRACE:
+                    continue
             removals.append({**row, "reason": reason})
     return removals
 

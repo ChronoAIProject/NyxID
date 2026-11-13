@@ -1,10 +1,55 @@
 # CI performance and validation contracts
 
-Measured on 2026-11-12–13 at `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`.
+Initial local measurements were taken on 2026-11-12–13 at
+`31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses
+PR #2428 at `df20e4869` and its PR merge commit.
 Local compiler measurements used stable Rust 1.98.1, an 18-core/128 GiB Apple
 Silicon Mac and four Cargo jobs. This is a shared machine. These observations
 are not Linux runner benchmarks or confidence intervals. Peak RSS below is
 `/usr/bin/time -l` maximum resident set size, converted from bytes to GiB.
+
+## Hosted validation and remaining measurements
+
+These are observed standard-runner results, not projections. Read them with
+`gh run view <run> --json jobs` and `gh run view <run> --job <job> --log`.
+PR CI **43310337142** passed in about 79 minutes cold. CodeQL was
+**43310337099**, Release Build Cache **43310337092**, and the two manual warm
+runs were **43310342885** (cold) and **43323188823** (same commit). These
+hosted measurements predate the round-six archive policy: the 301-second
+same-commit coverage result is not the expected behavior of the final
+non-incremental archive jobs. The other seven lanes retain graph reuse.
+
+| Work | Cold / old | Exact-commit warm / new |
+| --- | ---: | ---: |
+| Backend Image Inputs, PR job | 26–39 min before this PR | 4.9 min |
+| CodeQL Rust, job | 65.9 min full scope (43323193873) | 28.3 min PR scope (43310337099) |
+| Warm ordinary backend compilation | 2,279 s wall / 1,476 s CPU | Restore failed with ENOSPC; no warm measurement |
+| Warm backend coverage compilation | 3,440 s wall / 2,058 s CPU | 301 s wall / 175 s CPU / 14.3 GiB peak RSS |
+| Warm Clippy | 1,606 s | 311 s |
+| Warm GCP build | 1,103 s | 83 s |
+| Warm AWS + GCP build | 1,110 s | 78 s |
+
+Cold ordinary job **131504474372** and cold coverage job **131504474644**
+saved their incremental archives successfully after releasing swap. Exact-hit
+coverage **131548887185**, Clippy **131548887191**, GCP **131548887210** and
+both-KMS **131548887217** establish reuse on the same commit. They do not
+establish reuse for an arbitrary source change or a main-to-PR transfer.
+
+Ordinary warm job **131548887478** exhausted disk during restoration; the
+check-run annotation records `System.IO.IOException: No space left on device`
+while writing the worker log, and the job log was never uploaded. The old
+0.76.0 fallback archive was 8,096,551,974 compressed bytes; saving it alongside
+the new 0.78.0 graphs produced about 10,036 MiB. The cold job reported a
+145 GiB filesystem with 100 GiB used and 45 GiB free **after** releasing its
+37 GiB swap file: only about 8 GiB had remained with that file present.
+Coverage archives similarly grew from about 2,792 to 5,096 MiB. A successful
+build does not establish that its next restore fits.
+
+Maintenance **43312760683** ran during the first dispatch and deleted several
+branch entries. Consequently CLI tests, AWS-only and permissions missed in the
+second run, and CLI coverage fell back to main. Those are not warm benchmarks.
+Release Build Cache executed packaging only for Linux arm64; three exact hits
+skipped it. The revised PR conditions require all four builds to execute.
 
 ## Why the hosted gates were slow
 
@@ -81,6 +126,10 @@ proof that backend incremental reuse worked.
 
 ## Cache contract and pre-merge measurements
 
+The final policy disables graphs for both backend archives after the
+[eight-commit replay](#eight-commit-incremental-replay). Seven other lanes keep
+graph reuse. The two archive warm jobs still compile and save dependencies.
+
 `ci-rust-cache` now defines the incremental key and ordered path list once.
 Its restore consumes that contract, and every writer passes the same outputs
 to `ci-rust-incremental-save`. Tests check each writer's key/path expression
@@ -88,7 +137,7 @@ and execute the contract's shell derivation. No writer restates those values.
 
 The broad lane/OS/architecture restore fallback is retained. An unrelated
 member manifest or lock entry can change the workspace hash without changing
-the backend dependency graph. Removing the fallback would force those builds
+a KMS/Clippy dependency graph. Removing the fallback would force those builds
 cold. A package-version change may instead waste 3–6 minutes downloading an
 unusable graph. That bounded cost is preferable to losing reusable graphs;
 Cargo remains responsible for dependency and metadata validity. No global
@@ -99,9 +148,9 @@ Only `ci-cache-warm.yml` opts into ordinary dependency and incremental saves.
 Push saves are main-only; manual dispatch can save on its selected branch.
 Actions provides ref scoping. Readers remain read-only. Concurrency is per
 ref, so a branch measurement does not cancel main warming. Retention protects
-a branch cache until a compatible main replacement exists: dependency caches
-must match prefix and cache version, incremental caches must match cache
-version. The old one-path main caches cannot evict new two-path branch caches.
+a branch cache for at least 48 hours from creation, and longer when no
+compatible main replacement exists. Both cache kinds must match prefix and
+cache version. Missing, malformed or future timestamps are preserved. The old one-path main caches cannot evict new two-path branch caches.
 See [cache retention](ci/ACTIONS_CACHE_BUDGET.md) for the complete policy.
 
 Each warm compilation runs under `ci_resources.py`, recording elapsed time,
@@ -118,7 +167,278 @@ and before cache compression. On the inspected runner this returns roughly
 The helper records ownership, disables exactly that swap file, and preserves
 the file and ownership record if `swapoff` fails. Tests exercise these paths
 without changing developer-machine swap. Compile-time capacity is unchanged.
-Actual disk recovery and successful uploads still need Actions evidence.
+Cold warm run 43310342885 confirmed the recovery and all nine incremental
+uploads. Restore capacity is a separate contract described below.
+
+### Restore disk budget and graph pruning
+
+Archive jobs now skip graph restoration entirely. This admission budget still
+protects the seven remaining incremental lanes; the archive jobs retain the
+swap allocation/build-space check and dependency restore diagnostics.
+
+Restoration now precedes swap allocation. Before dependency restore, Linux
+hosted jobs remove unused Android, .NET, GHC and ghcup SDK directories and log
+`df`. They do not remove these directories on developer machines. The next
+check measures actual free bytes **after** dependency extraction, so runner
+image growth and the dependency target are charged to the budget rather than
+assumed constant. On a 145 GiB filesystem, restoring a graph requires the
+image, checkout, tools and extracted dependencies together to occupy at most
+about **56 GiB** (145 minus 89). Their separate sizes vary with runner images;
+there is no measured fixed image-baseline claim.
+
+| Reserved use after dependency restore | GiB |
+| --- | ---: |
+| Extra disk swap above the runner's existing 3 GiB | 37, rounded up to MiB plus 1 MiB |
+| Extracted incremental graph, enforced at save | at most 16 |
+| Compressed download while extracting | at most 17 |
+| Build growth, including a successor graph and linked output | 24 |
+| Nextest archive | 4 |
+| Free-space floor | 8 |
+
+The download disappears before compilation, so it is not added to build
+usage. Required free space is the maximum of `16 + 17 + 8 = 41 GiB`
+for extraction and `37 + 16 + 24 + 4 + 8 = 89 GiB` for compilation (plus
+swap rounding to MiB and a 1 MiB margin). An insufficient budget **skips the optional incremental
+restore before download**, then builds normally. The reserve script separately
+requires swap plus 36 GiB remaining build/archive/floor capacity before
+allocating. It still establishes at least 40 GiB total swap or fails before
+compilation. After the reserve is released, a save needs 25 GiB for the
+worst-case archive and free-space floor. These are enforced admission budgets;
+24 GiB build growth is a provision, not a hard bound on arbitrary future Rust
+source growth. Every phase prints `df`; resource samples include free bytes.
+
+The new graph prefix is `v1-rust-graph`; it never restores old unbounded
+`v0-rust-incremental` archives. The dependency/artifact prefix remains
+`v1-rust-incremental`; non-incremental lanes retain `v0-rust`. Native rustc
+storage and compiler arguments do not require an artifact-cache generation
+change. Release dist keys are unchanged. Only the bounded graph prefix needs
+a cold seed. Main's old maintenance script does not recognize that prefix;
+it can still delete branch dependency entries until the grace rule merges.
+
+`incremental_cache.py mark` records a timestamp after restoration and before
+any Cargo command. On a fresh CI checkout, source mtimes are newer than
+restored dep-info, so selected workspace units finalize new sessions. Before
+save, `prune` removes each native crate directory with no finalized session
+newer than that marker. A single marker covers all Cargo commands in the job.
+There is no rustc wrapper, path rewriting, or Cargo debug-log parsing.
+
+Within each retained crate, pruning keeps only the finalized session with the
+greatest timestamp encoded in its name, matching rustc 1.98.1 selection. It
+acquires every session lock before deleting older or unfinished sessions; a
+busy lock or unknown layout refuses the save. Rustc can leave its previous
+input session after compilation because it was locked during GC. The real
+Cargo fixture verifies removal of obsolete package versions, recompilation
+from fresh-checkout mtimes, preservation across multiple Cargo commands, and
+an unchanged build after pruning that compiles nothing. A new marker on a
+locally fresh target produces no sessions and refuses an empty save; these
+writers only run after fresh Actions checkouts.
+
+Pruning measures logical bytes plus 4 KiB per entry, counting hardlinks more
+than once and rejecting symlinks. It refuses missing markers, empty graphs
+and saves above 16 GiB. That bound, with zstd overhead and tar headers covered
+by the 17 GiB download allowance, makes extraction admission independent of
+compression ratio. Inventories print native crate/session directories and
+sizes after restore, after each build, and before/after pruning. Broad manifest
+fallback remains, but obsolete crate directories and prior input sessions
+cannot accumulate across saved generations.
+
+The native version-change fixture shrank from **1,964,788** to **982,394 bytes**
+(including the conservative per-entry allowance), retaining two of four crate
+directories. The instrumented fixture compares current test identities and
+coverage against a clean build while obsolete binaries remain in the target;
+its report is identical. A separate non-incremental rebuild preserves every
+coverage field except compiler-generated function symbol names, and every
+test ID. Run these checks with:
+
+```sh
+python3 -m unittest discover -s .github/scripts -p 'test_incremental_cache.py'
+python3 .github/scripts/test_coverage_archive_cache.py
+```
+
+The full native graph was remeasured on `da70dddc9` with the reviewed build
+scripts copied into the disposable snapshot, the same ordinary archive
+command and four jobs. A cold workspace graph with warm dependencies took
+**460.23 s / 39.34 GiB**; a comment edit plus fresh-checkout mtimes took
+**50.28 s / 20.72 GiB**. After initializing the normal detached HEAD reflog,
+a fresh-mtime rebuild took **49.38 s / 20.56 GiB**. Pruning then reduced
+**17,574,359,360 bytes (16.37 GiB)** to **8,787,202,332 bytes (8.18 GiB)**.
+The tar/zstd archive is **2,477,815,736 bytes (2.31 GiB)**. The following plain
+Cargo archive command took **0.75 s / 272.78 MiB**, with no `Compiling` line.
+Its **12,452 binary/test IDs** match both the pre-prune archive and the final
+non-incremental reference, including `nyxid::bin/nyxid-server`.
+
+The synthetic snapshot initially lacked a HEAD reflog. In that case an
+unchanged build correctly took 48.10 s because the build scripts deliberately
+rerun. The freshness result above uses a real HEAD reflog; pruning did not
+invalidate the retained graph. These measurements verify the pruner even
+though the final archive policy no longer uploads this particular graph.
+
+Reproduce the size check in the disposable clone from the replay recipe.
+Use the reviewed `backend/build.rs` and `cli/build.rs`, a normal Git checkout
+with a HEAD reflog, and the same environment with `CARGO_INCREMENTAL=1`.
+Build once, record a marker, then touch the tracked regular files and add one
+comment to the snapshot's `backend/src/main.rs`. Build again, prune, and repeat
+the identical command; the last invocation must compile nothing. For a custom
+scratch target, call the real helper with its roots set explicitly:
+
+```python
+import importlib.util, os, shutil, subprocess
+from pathlib import Path
+study = Path('target/incremental-replay').resolve()
+source, target = study / 'source', study / 'build'
+subprocess.run(['git', '-C', str(source), 'reflog', 'exists', 'HEAD'], check=True)
+for name in ('backend/build.rs', 'cli/build.rs'):
+    shutil.copyfile(name, source / name)
+spec = importlib.util.spec_from_file_location('cache', '.github/scripts/incremental_cache.py')
+cache = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cache)
+cache.ROOTS = (target / 'debug/incremental',)
+cache.MARKER = study / 'build-start'
+env = os.environ.copy()
+for name in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTC_BOOTSTRAP',
+             'CARGO_LOG', 'CARGO_ENCODED_RUSTFLAGS', 'NYXID_GIT_HASH', 'CARGO_BUILD_TARGET'):
+    env.pop(name, None)
+env.update(RUSTUP_TOOLCHAIN='1.98.1', CARGO_BUILD_JOBS='4', CARGO_INCREMENTAL='1',
+           CARGO_TARGET_DIR=str(target), RUSTFLAGS='-Dwarnings', RUST_MIN_STACK='8388608',
+           CARGO_PROFILE_DEV_DEBUG='line-tables-only', CARGO_PROFILE_TEST_DEBUG='line-tables-only')
+def build(label):
+    subprocess.run(['/usr/bin/time', '-l', 'cargo', 'nextest', 'archive',
+                    '-p', 'nyxid', '-p', 'nyxid-service-adapters', '--timings',
+                    '--archive-file', str(study / (label + '.tar.zst'))],
+                   cwd=source, env=env, check=True)
+build('pruning-cold')
+cache.mark()
+for name in subprocess.check_output(['git', 'ls-files', '-z'], cwd=source).split(b'\0'):
+    if name:
+        file = source / os.fsdecode(name)
+        if file.is_file() and not file.is_symlink():
+            file.touch()
+with (source / 'backend/src/main.rs').open('a') as output:
+    output.write('\n// Incremental pruning measurement.\n')
+build('pruning-edited')
+cache.prune()
+build('pruning-fresh')
+```
+
+`tar --zstd -cf <archive> -C <target>/debug incremental` measures compressed
+size. Compare `cargo nextest list --archive-file <archive> --message-format json`
+binary/test pairs before and after pruning and against the non-incremental
+archive. This compiles and inventories tests; it does not execute MongoDB tests.
+
+Readers set `CARGO_INCREMENTAL=0` when no graph was restored, including when
+the disk guard skipped extraction. Exact and prefix hits both count as a
+restore. Only the seven graph-producing warm lanes enable incremental on a miss to
+create a reusable graph. The two backend archives stay non-incremental even
+when an old graph is available. The selected policy is printed in every cache step.
+
+`retry_incremental.py` retries once after exits 137/143, killed compiler
+children, allocation/OOM messages or stale incremental errors. It deletes
+both graph roots and sets `CARGO_INCREMENTAL=0` for that retry and subsequent
+Actions steps. Thus later plain-Cargo test steps reuse the fallback binary
+instead of switching modes and rebuilding it. Ordinary
+compiler/test failures are returned unchanged; a second failure is final.
+Subprocess fixtures exercise signals, exit codes, graph removal and the retry
+environment. This can recover a killed compiler while the job supervisor is
+alive; it cannot recover a terminated runner VM or a killed retry process.
+Job cancellation terminates the supervisor rather than launching more work.
+
+### Coverage graph transfer investigation
+
+PR coverage job **131505064154** restored main's `b7c67e961` archive and then
+used 3,754 s wall / 1,507 s CPU, with about 31 GiB swap. Main warm
+**43281997481**, job **131405416421**, and that PR used the same Rust 1.98.1,
+llvm-cov 0.9.1, warning flags and line-table settings. The manifest delta is
+only workspace dist metadata. However, the intervening main commit
+`b7c67e961..66a15dad2` changes **19 backend Rust files: 2,058 insertions and
+144 deletions**, including the shared proxy forwarding function signature.
+There are no further backend runtime changes from that base to `df20e4869`.
+
+The following controlled local archive builds retain one target directory:
+
+| Successive change from b7 source | Wall | Peak RSS | Native graph directory names |
+| --- | ---: | ---: | --- |
+| Cold baseline | 543.03 s | 39.71 GiB | Ten directories created |
+| Root dist metadata only, plus `--no-clean` | 48.89 s | 21.00 GiB | Same ten |
+| Then the two revised build scripts | 48.96 s | 20.84 GiB | Same ten |
+| Then the actual 19-file runtime/test delta and changed backend stamp | 429.65 s | 48.22 GiB | Same ten |
+
+Thus neither the metadata edit, archive option nor build-script implementation
+created a different local crate identity. The real source delta reproduced a
+large incremental rebuild and higher memory use. Unchanged manifest hashes do
+not mean unchanged compiler queries in the monolithic crate. The latter build
+left two finalized `nyxid_server` sessions of **8,701,074,574** and
+**8,855,631,811 bytes** under the same native crate directory; all graphs
+totaled **17,956,968,887 logical bytes**. Their compiler/header and option-hash
+prefixes matched. This is direct evidence that archive doubling can come from
+retained sessions, without a new crate directory.
+
+The old hosted logs contain neither native directory inventories nor rustc
+cache-invalidation diagnostics. They cannot establish whether that particular
+main graph was rejected outright or loaded and invalidated by source changes.
+The local results above do **not** prove a historical hosted cause. This uncertainty no longer determines the archive policy: the ordinary
+replay below rejects incremental reuse for those two lanes. Source-change
+transfers still need hosted measurement in the remaining graph lanes. New logs expose native crate/session sizes after restore and build, resolving the previously invisible distinction
+between new directories and retained sessions.
+
+Reproduce in a disposable directory under `target/`, with pinned nextest
+0.9.146 and llvm-cov 0.9.1 on PATH:
+
+```sh
+study="$PWD/target/coverage-transfer"
+mkdir -p "$study/source"
+git archive b7c67e961 | tar -x -C "$study/source"
+export RUSTUP_TOOLCHAIN=1.98.1 CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=1
+export CARGO_TARGET_DIR="$study/build" RUSTFLAGS=-Dwarnings
+export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-tables-only
+export RUST_MIN_STACK=8388608 LLVM_PROFILE_FILE_NAME='nyxid-%4m.profraw'
+export NYXID_GIT_HASH=repro
+/usr/bin/time -l cargo llvm-cov nextest-archive \
+  --manifest-path "$study/source/Cargo.toml" --package nyxid \
+  --archive-file "$study/base.tar.zst"
+```
+
+Save the names and sizes under `$study/build/llvm-cov-target/debug/incremental`.
+Replace only the source copy's root manifest using `git show df20e4869:Cargo.toml`
+and repeat with `--no-clean`. Replace its two build scripts using `git show`
+and repeat. Finally apply the files listed by
+`git diff --name-only b7c67e961 df20e4869 -- backend/src` to that copy, change
+`NYXID_GIT_HASH` to `pr-repro`, and repeat. Add
+`CARGO_LOG=cargo::core::compiler::fingerprint=info` for the dirty reasons.
+Compare directory names and each finalized session's logical size at each step.
+These commands compile archives; they do not execute MongoDB tests. Remove
+`$study` after recording results. They never change the current source tree.
+
+### Compressed-swap experiment
+
+`NYXID_SWAP_MODE` selects `zswap` or `off`; manual **CI Cache Warm** exposes
+`swap-mode` alongside `zswap-pool-percent` (default `20`). The latter maps to
+`NYXID_ZSWAP_POOL_PERCENT`, accepts integers 1–100, and leaves settings unchanged
+with an explicit log on invalid input. The candidate is zstd with a maximum
+compressed pool of 20% of RAM (about 3.2 GiB on a 16 GiB runner); 50% is 8 GiB. This is an
+experiment, not a measured winner. Archive warm jobs now compile without
+incremental, so compare off/20/50 against each other to isolate zswap; comparing
+against run 43310342885 also includes the incremental-policy change. The serial compiler leaves CPU capacity
+available, so compression is worth testing against the observed disk wait.
+Swappiness and page-cluster remain at runner defaults, and their effective
+values are logged. No Rust flags or cache identities depend on this choice.
+
+[Kernel zswap documentation](https://docs.kernel.org/admin-guide/mm/zswap.html)
+describes the compressed cache in front of backing swap, dynamic pool growth
+and eviction to that backing device. It preserves the mandatory 40 GiB disk
+swap capacity. [zram](https://docs.kernel.org/admin-guide/blockdev/zram.html)
+would need a separate device and writeback policy to preserve that property;
+it is not used. Documentation does not establish which compressor/pool size
+wins for this compiler workload, so compare cold `off`, `zswap`/20 and
+`zswap`/50 dispatches on separate scratch branches with identical source.
+
+Missing sysfs, rejected writes or counter access never fail the job. Failed
+configuration attempts restore prior values where possible and explicitly
+log incomplete rollback. Effective parameters and compressed-pool counters
+are printed before and after the build. On hosted machines only, debugfs is
+mounted if necessary and permitted; unavailable counters are explicitly null.
+The existing swap reserve remains mandatory in either mode. Once hosted
+measurements choose a winner, remove the experiment selector in that reviewed
+change; this document makes no claim that zswap has reduced elapsed time yet.
 
 ## Plain Cargo freshness and coverage archives
 
@@ -193,6 +513,121 @@ python3 -m unittest discover -s scripts -p test_git_build_scripts.py
 python3 .github/scripts/test_coverage_archive_cache.py
 ```
 
+## Eight-commit incremental replay
+
+Main was frozen at `da70dddc9ad9a8de7026b4319909a6927cd2d3e1`. The eight
+most recent first-parent commits touching `backend/src` were replayed in
+order, starting by building parent `b4b03036ff24d363799adb24f66c396b4350c166`.
+Every snapshot used fresh source mtimes and one shared target directory.
+Cargo manifests and lockfiles did not change across this window. The parent
+includes cold dependencies; subsequent rows reuse dependencies and the
+previous graph. The reference deletes the graph and disables incremental
+on the last commit, with dependencies warm. There is one sample per commit,
+not repeated trials or a Linux memory-pressure simulation.
+
+Wall time includes the entire nextest archive command. Backend rustc time is
+Cargo's stable `--timings` duration for `nyxid-server (test)`. Peak RSS is the
+maximum child RSS reported by macOS `/usr/bin/time -l`, not the sum of all
+concurrent processes. Files and added/deleted lines count `backend/src` changes
+from the previous snapshot. No tests are executed by these archive builds.
+
+| Revision / mode | Files | Added / deleted | Wall | Backend rustc | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Parent `b4b03036f` | — | — | 535.98 s | 456.57 s | 39.52 GiB |
+| `0aa535b17` | 2 | 16 / 3 | 127.11 s | 125.01 s | 32.48 GiB |
+| `31f3d8969` | 10 | 712 / 59 | 188.24 s | 186.27 s | 37.31 GiB |
+| `6470f486c` | 5 | 263 / 20 | 182.57 s | 180.44 s | 36.59 GiB |
+| `524d13896` | 2 | 904 / 7 | 350.17 s | 348.19 s | 45.43 GiB |
+| `890a2f7bb` | 49 | 2452 / 195 | 400.70 s | 398.56 s | 47.76 GiB |
+| `b7c67e961` | 4 | 219 / 22 | 386.08 s | 383.95 s | 47.64 GiB |
+| `66a15dad2` | 19 | 2058 / 144 | 421.68 s | 419.53 s | 47.90 GiB |
+| `da70dddc9` | 5 | 964 / 11 | 375.21 s | 373.02 s | 46.91 GiB |
+| `da70dddc9` / non-incremental reference | — | — | 399.95 s | 395.99 s | 40.60 GiB |
+
+The median incremental wall time is **362.69 s**, 90.7% of the **399.95 s**
+non-incremental reference; the mean is **303.97 s**. Three commits benefit
+substantially (127.11–188.24 s). The other **five of eight take 350.17–421.68 s**,
+87.6–105.4% of the reference, with **45.43–47.90 GiB RSS** versus **40.60 GiB**
+without incremental. This distribution does not justify downloading and
+retaining the ordinary/instrumented test graphs on a 16 GiB runner. The
+instrumented lane follows the same policy; it was not independently replayed.
+The earlier instrumented 19-file rebuild (429.65 s / 48.22 GiB) corroborates
+its memory risk, but is not substituted into the ordinary replay table.
+
+**Both archive readers and their matching warm jobs now use
+`CARGO_INCREMENTAL=0` and do not restore or save graphs.** Warm archive jobs
+still execute their full compile commands and save non-incremental dependency
+caches using the existing `v0-rust` prefix. Their graph saves are removed
+because no archive reader consumes them. Seven remaining graph producers
+(Clippy, three KMS variants, CLI tests, CLI coverage and permissions) retain
+incremental even on misses; their readers enable it only after a restore.
+They keep the original `v1-rust-incremental` dependency prefix. All job names,
+nextest packages, eight shards, inventory verification, coverage counters,
+73% threshold, base/head comparison and linked KMS validation are unchanged.
+The policy trades away the three faster archive cases for lower memory and
+no graph transfer cost in the five nearly-cold cases. Linux elapsed improvement
+is not yet measured; no hosted speedup is inferred from the macOS ratios.
+
+The worst RSS in this replay is **47.90 GiB**, leaving **8.10 GiB** below the
+nominal 16 + 40 = 56 GiB capacity. The non-incremental reference leaves
+**15.40 GiB**. These are arithmetic margins for the maximum individual child,
+not guarantees for the sum of OS, other processes and compressed-pool memory.
+The earlier coverage maximum was **48.22 GiB**, a **7.78 GiB** nominal margin.
+A single retry without incremental state handles a killed compiler while the
+supervisor survives, as described above.
+
+Reproduce with stable 1.98.1 and nextest 0.9.146 on PATH, using a fresh owned
+scratch directory. The following creates an independent disposable clone;
+it does not create or change any other worktree:
+
+```sh
+git fetch --no-write-fetch-head origin da70dddc9ad9a8de7026b4319909a6927cd2d3e1
+python3 - <<'PY'
+import os, shutil, subprocess
+from pathlib import Path
+repo = Path.cwd()
+study = repo / 'target/incremental-replay'
+source, target = study / 'source', study / 'build'
+study.mkdir()
+subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', str(repo), str(source)], check=True)
+main = 'da70dddc9ad9a8de7026b4319909a6927cd2d3e1'
+def git(*args):
+    return subprocess.check_output(['git', *args], cwd=repo, text=True).strip()
+commits = git('rev-list', '--first-parent', '-8', main, '--', 'backend/src').splitlines()[::-1]
+parent = git('rev-parse', commits[0] + '^')
+env = os.environ.copy()
+for name in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTC_BOOTSTRAP',
+             'CARGO_LOG', 'CARGO_ENCODED_RUSTFLAGS', 'NYXID_GIT_HASH', 'CARGO_BUILD_TARGET'):
+    env.pop(name, None)
+env.update(RUSTUP_TOOLCHAIN='1.98.1', CARGO_BUILD_JOBS='4', RUSTFLAGS='-Dwarnings',
+           CARGO_PROFILE_DEV_DEBUG='line-tables-only', CARGO_PROFILE_TEST_DEBUG='line-tables-only',
+           CARGO_TARGET_DIR=str(target), RUST_MIN_STACK='8388608', CARGO_TERM_COLOR='never', GIT_OPTIONAL_LOCKS='0',
+           LLVM_PROFILE_FILE_NAME='nyxid-%4m.profraw',
+           NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true')
+for index, (sha, incremental) in enumerate([(parent, True), *[(s, True) for s in commits], (commits[-1], False)]):
+    if incremental:
+        subprocess.run(['git', '-C', str(source), 'checkout', '--quiet', '--force', '--detach', sha], check=True)
+        for path in subprocess.check_output(['git', 'ls-files', '-z'], cwd=source).split(b'\0'):
+            if path:
+                file = source / os.fsdecode(path)
+                if file.is_file() and not file.is_symlink():
+                    file.touch()
+    else:
+        shutil.rmtree(target / 'debug/incremental')
+    env['CARGO_INCREMENTAL'] = str(int(incremental))
+    with (study / f'{index:02}-{sha[:9]}.log').open('w') as output:
+        subprocess.run(['/usr/bin/time', '-l', 'cargo', 'nextest', 'archive',
+                        '-p', 'nyxid', '-p', 'nyxid-service-adapters', '--timings',
+                        '--archive-file', str(study / 'tests.tar.zst')],
+                       cwd=source, env=env, stdout=output, stderr=subprocess.STDOUT, check=True)
+    shutil.copyfile(target / 'cargo-timings/cargo-timing.html', study / f'{index:02}-timing.html')
+PY
+```
+
+Read the per-command time/RSS lines and backend row in each timing report;
+`git diff --numstat <previous> <sha> -- backend/src` supplies the change counts.
+Remove only this owned scratch directory after recording the measurements.
+
 ## Compiler costs and rejected alternatives
 
 The following baseline observations used the test command above before fixing
@@ -208,8 +643,9 @@ restored the source byte-for-byte. Dependencies were warm except where stated.
 | Non-incremental, unchanged | 411.60 s | — | 40.28 GiB |
 | Non-incremental, small edit | 411.03 s | — | 40.25 GiB |
 
-Disabling incremental did not reduce peak RSS and made invalidated warm builds
-far slower. These numbers do not support disabling it on hosted test lanes.
+This single small-edit sample made incremental look favorable, but does not
+establish its behavior across real PRs. The eight-commit replay above governs
+the archive policy; cache misses build without incremental bookkeeping.
 The unchanged rebuilds were caused by invalid Git watches; they are not an
 inherent cost of plain Cargo.
 
@@ -361,7 +797,9 @@ repackaging took 81.68 s / 3.52 GiB. The original and final macOS arm64 packaged
 CLI were byte-identical (SHA-256
 `9c2a9d2e12d149e942b5f0bd6378460f36062f7bbabc7b469b3992a9866f1e66`), with identical
 README/LICENSE members, version and help output. Other targets' retained unit
-features matched; actual packaging on those platforms still needs Actions.
+features matched. Hosted run 43310337092 subsequently passed actual packaging
+for Linux arm64 inside Focal; its other three targets skipped on cache hits.
+Those targets still need executed hosted builds under the new PR condition.
 
 ```sh
 env RUSTUP_TOOLCHAIN=1.98.1 CARGO_BUILD_JOBS=4 RUSTFLAGS=-Dwarnings \
@@ -472,7 +910,10 @@ Actions cache policy. On the same shared Mac:
 
 Combined time fell 55.8%; analysis alone fell 64.7%. This exceeds the 25%
 selection threshold. It is a local result, not a promised 55.8% reduction on
-Linux. Both runs retained extractor diagnostics: the full run reported five
+Linux. Hosted CodeQL run 43310337099 subsequently measured the Rust job at
+28.3 minutes. Full-scope manual run **43323193873** passed all four
+languages; Rust took **65m55s (65.9 minutes)**. This confirms branch full-scope
+execution alongside the scoped PR result. Both local runs retained extractor diagnostics: the full run reported five
 files with extractor warnings, and the scoped analysis metric reported four
 files with extraction errors. Neither run is described as complete extraction
 of every source construct. No queries or existing diagnostic checks are removed.
@@ -732,6 +1173,31 @@ sentinel name. Formatting and `git diff --check` passed. Clippy was not repeated
 the only Rust change is the fallback expression and its comment, and the
 fixtures compile both actual build scripts with stable 1.98.1 and `-Dwarnings`.
 
+Rounds five and six change only CI helpers, actions, workflows and documents;
+no Rust source or build script changes. The round-six verification
+results and replay above supersede the discarded wrapper experiment. The
+full MongoDB suites are not rerun locally; the new PR CI run must execute
+them after these cache/policy changes. The previous hosted PR CI run
+43310337142 was green before those changes.
+
+Round six passed **209 CI helper tests** (24.959 s), **41 script helper tests**
+(34.512 s), and **8 dependency-recipe tests** (0.277 s), with no skips. All four
+reusable-workflow permission checks, actionlint **1.7.12**, workspace formatting
+and `git diff --check` passed. The real Cargo fixtures cover native session
+pruning, version changes, fresh checkout mtimes, unchanged builds, multiple
+Cargo commands and coverage equality. Retry fixtures cover exit 137/143,
+SIGKILL/SIGTERM, OOM output, exactly one non-incremental retry, graph deletion,
+persistence to later Actions steps, ordinary-error propagation and cancellation.
+The replay and native-graph measurements compile full ordinary archives with
+stable **1.98.1** and `RUSTFLAGS=-Dwarnings`; they do not execute the backend
+suites. No Rust file changed in this round, so workspace Clippy was not repeated.
+The prior accepted real-workspace Clippy results and the newly passing fixtures
+remain the applicable evidence. No Docker resources were started this round. The owned 35 GiB scratch tree,
+including source snapshots, compiler targets, archives, downloaded tools and
+Python environment, was removed after recording these results. `target/`
+then measured 4 KiB, no owned benchmark processes remained, and HEAD stayed
+at `df20e4869`; all round-five/six edits remain uncommitted.
+
 Reproduce the real-workspace checks from the repository root:
 
 ```sh
@@ -803,14 +1269,17 @@ project with `down -v` even on failure.
 
 Cleanup removed all measurement targets, CodeQL databases, tools and evidence
 under the scratch directory, the nextest extraction output, and 368 untracked
-coverage profiles. `target/` is now 4 KiB. No owned build/test processes,
-temporary archive directories, Docker containers or volumes remain. The
+coverage profiles. The initial cleanup left `target/` at 4 KiB with no owned build/test processes,
+temporary archive directories, Docker containers or volumes. The
 dedicated builders, custom images and known test-only image download were
 removed; shared Docker builders and pre-existing base images were preserved.
 The second round's scratch tools/logs and newly pulled Focal image were also
 removed after verification; its disposable container left no volumes.
 The third round's 9.9 GiB of build output and scratch tools/logs were removed
-after the final Clippy and CLI checks.
+after the final Clippy and CLI checks. Round five removed its 16 GiB scratch
+target, source copies, archives and installed measurement tools; `target/`
+returned to 4 KiB. No owned compiler/test processes remained, and no Docker
+resources were started in that round.
 The measurements above and their reproduction commands are self-contained;
 the document does not depend on the deleted logs.
 
@@ -820,12 +1289,13 @@ the document does not depend on the deleted logs.
 | --- | --- |
 | `.github/actions/ci-rust-cache/action.yml`, `.github/actions/ci-rust-incremental-save/action.yml` | One save/restore key and path contract, explicit manual-ref save policy, manifest fallback. |
 | `.github/workflows/ci-cache-warm.yml`, `.github/scripts/test_ci_cache_warm.py` | Matching producers, resource measurements, owned swap release before saves, contract regression checks. |
-| `.github/scripts/cache_budget.py`, `.github/scripts/test_cache_budget.py`, `.github/workflows/cache-maintenance.yml`, `docs/ci/ACTIONS_CACHE_BUDGET.md` | Preserve ref-scoped caches until a restorable main replacement exists, including cache versions and prefixes. |
-| `.github/scripts/prepare-backend-runner.sh`, `.github/scripts/test_prepare_backend_runner.py` | Release only the helper's own swap reserve after compilation. |
+| `.github/scripts/cache_budget.py`, `.github/scripts/test_cache_budget.py`, `.github/workflows/cache-maintenance.yml`, `docs/ci/ACTIONS_CACHE_BUDGET.md` | Preserve ref-scoped Rust caches for 48 hours and until a restorable main replacement exists, including cache versions and prefixes. |
+| `.github/scripts/prepare-backend-runner.sh`, `backend_disk.py`, `compressed_swap.py` and tests | Restore admission budgets, delayed swap allocation, owned reserve release and optional measured zswap experiment. |
+| `.github/scripts/incremental_cache.py`, `retry_incremental.py` and tests | Native session inventory, graph pruning, bounded archives and build/restore size diagnostics. |
 | `backend/build.rs`, `cli/build.rs`, `scripts/test_git_build_scripts.py` | Plain Cargo freshness, real per-worktree Git watches and SDK-sensitive macOS linker paths. |
-| `.github/workflows/backend-tests.yml`, `.github/scripts/test_coverage_archive_cache.py` | Reuse instrumented compiler artifacts while resetting counters and selecting current archive objects. |
+| `.github/workflows/backend-tests.yml`, `.github/scripts/test_coverage_archive_cache.py` | Non-incremental archive policy, isolated counters/current objects, coverage equivalence across compilation modes. |
 | `.github/workflows/ci.yml`, `scripts/check-backend-docker-embeds.py`, `scripts/test_backend_docker_embeds.py` | Release-check image inputs, fail-closed current-unit collection, real build/check closure fixture, Git-stamp fixture wiring and updater cache imports. |
-| `Cargo.toml`, `scripts/dist-build.sh`, `.github/scripts/dist_cargo.py`, `.github/scripts/test_dist_cargo.py`, `.github/workflows/release.yml`, `.github/workflows/release-cache.yml` | Compile only cargo-dist's distributed binary while retaining workspace feature unification. |
+| `Cargo.toml`, `scripts/dist-build.sh`, `.github/scripts/dist_cargo.py`, `.github/scripts/test_dist_cargo.py`, `.github/workflows/release.yml`, `.github/workflows/release-cache.yml` | Compile only cargo-dist's distributed binary while retaining workspace feature unification; PR release-cache jobs build even on exact hits. |
 | `cli/Dockerfile.machine-updater`, `scripts/check-updater-docker-embeds.py`, `scripts/test_updater_docker_embeds.py`, `.github/workflows/publish-images.yml` | Portable production/test build layers and exact Docker input validation. |
 | `docker-compose.yml`, `docker-compose.test.yml`, `CONTRIBUTING.md` | Disposable local test replica set, Git-stamp semantics and current validation contracts. |
 | `.github/workflows/codeql.yml`, `.github/codeql/codeql-config.yml` | Uncapped Git change detection, conservative language selection, generated Rust PR scope and historical default categories. |
@@ -838,51 +1308,60 @@ There is no crate split, binary rename, KMS feature change or test-ID migration.
 
 ## GitHub Actions confirmation checklist
 
-No workflow was triggered during this work. This is the complete remaining
-hosted checklist; the local measurements above are not hosted speedup claims.
-Record the run IDs, cache save/restore messages, elapsed times, resource samples
-and check conclusions for each applicable item. Windows is not a cargo-dist
-target in this repository.
+The engineer performed the runs listed above; the agent did not trigger them.
+This list separates new required measurements from already-observed results.
+Record run IDs, actual save/restore messages, resource samples and check
+conclusions. A green warm job alone does not prove a cache was saved.
 
 ### Before merge
 
-1. Dispatch **CI Cache Warm** twice on the same non-main ref. For all ten lanes,
-   verify the first run's dependency and incremental saves where applicable,
-   then the second run's actual hits and resource logs. Check the two-path
-   incremental version and ordinary backend save after owned swap release.
-   Repeat after a small Rust edit to measure useful incremental recompilation.
-   Confirm the branch cache entries remain until compatible main entries exist;
-   a successful job alone does not prove a successful cache save.
-2. Run this PR's **CI** gate. All eight ordinary and eight instrumented shards
-   must pass inventory verification; the 73% threshold and existing base/head
-   comparison must run. Verify the unchanged **Backend Image Inputs** name,
-   release/GCP check and successful complete-input guard on Linux. Verify all
-   linked KMS builds, **Backend Release Image**'s optimized amd64 link, and
-   **Machine Container E2E** including the production updater checks.
-3. Run **CodeQL** on a Rust-changing PR and on a non-Rust-only PR carrying this
-   workflow. Confirm the dynamic matrix includes Rust only in the first,
-   the other three languages always run, and categories match historical base
-   categories without explicit overrides. Confirm no blocking pending check;
-   inspect new production alerts normally, plus the expected PR-only fixed
-   test alerts. Download the Rust scope artifact and inspect its generated
-   exclusion list. Measure extraction and Analyze time on the standard runner.
-   The local large-diff and failed-fetch fixtures prove the selection logic;
-   a hosted PR with over 3,000 changed files, if used, must also include a late
-   Rust change and select Rust.
-4. Dispatch **CodeQL** on the branch to verify non-PR full scope: all four
-   languages, an empty added-exclusion list, all Rust queries, and only the
-   historical category per language. This proves the full-scan workflow on a
-   branch, not default-branch alert state or the schedule trigger.
-5. Use this PR's **Release Build Cache** run (or dispatch it on the branch) to
-   confirm actual cargo-dist builds for `aarch64-apple-darwin`,
-   `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu` in Focal, and
-   `x86_64-unknown-linux-gnu`. Require executed **Build artifacts** steps and
-   successful binary selection/packaging on each target; cache-hit-only jobs
-   are not new packaging evidence. A skipped build without a prior successful
-   build of this change leaves this pre-merge item unconfirmed.
+1. After committing/pushing the round-six changes, dispatch **CI Cache Warm**
+   on the PR branch with `swap-mode=zswap`, `zswap-pool-percent=20`. Verify
+   seven graph saves, `after-prune` sizes at most 16 GiB, and one finalized
+   session per retained crate. The two archive jobs must log `enabled=0`,
+   skip graph restore/save and still compile full archives. Check `df` before
+   dependencies, after restore, after swap allocation and after reserve
+   release; graph lanes also check disk before their extraction. Require
+   zswap effective settings/counters or an explicit unavailable result.
+2. Dispatch **CI Cache Warm** again at the same commit. The seven graph lanes
+   must hit and pass extraction admission; a safe restore skip does not prove
+   reuse. Inspect inventories for obsolete crates/sessions. Archive jobs stay
+   non-incremental and should hit dependency caches only. Old main maintenance
+   does not recognize the new graph prefix, but can still delete branch
+   dependency entries; only after merge does the 48-hour grace protect both.
+3. Make a small backend Rust edit without manifest/version changes and dispatch
+   again. Record Clippy/KMS restore, wall/CPU/RSS/swap and pruned sizes to test
+   their cross-commit reuse. Record the ordinary and coverage archive costs
+   under the new non-incremental policy. They deliberately do not read main's
+   or the branch's old archive graphs.
+4. For the compressed-swap comparison, create three scratch branches at the
+   same revision and dependency-cache state. Dispatch **CI Cache Warm** in
+   parallel with (`swap-mode=off`), (`swap-mode=zswap`, `zswap-pool-percent=20`),
+   and (`swap-mode=zswap`, `zswap-pool-percent=50`). The per-ref concurrency
+   allows all three. The two archive jobs must log `enabled=0` and empty
+   graph inventories; no archive-graph cache deletion is needed under the
+   final policy. Compare build-phase wall/CPU/RSS/swap and pool statistics
+   across these three runs. Run 43310342885 is the previous incremental-policy
+   baseline, so a difference from it cannot be attributed to zswap alone.
+   Keep the measured winner and remove the experiment inputs in the ensuing
+   reviewed change. The workflow itself never deletes remote caches.
+5. The new PR **CI** run must keep all ordinary/instrumented shards, inventory
+   verification, 73% line gate, base/head comparison, linked KMS builds and
+   image proofs green. The previous PR run already passed; the miss policy, pruning
+   and restore order need their own hosted validation. Require a cache miss or
+   skipped restore to log `enabled=0` in every PR lane. **Release Build Cache**
+   must execute **Install dist**, **Install dependencies** and **Build artifacts**
+   for all four targets even on exact cache hits, with PR saves disabled.
+   No manual release-cache dispatch is needed: this workflow edit triggers the
+   PR matrix. A manual dispatch can still skip exact hits by design.
+6. CodeQL Rust's 28.3-minute PR and 65.9-minute full-scope branch results
+   are established (runs 43310337099 and 43323193873); no repeat dispatch is
+   required. Still confirm a non-Rust-only PR omits Rust without a pending
+   code-scanning check. The generated list remains inspectable in the scope artifact.
+   The local large-diff/error fixtures cover fail-open selection beyond the
+   GitHub API diff limits; no workflow-level path filter is used.
 
-Do not use **Publish Images** as a pre-merge dry run: its manual trigger really
-publishes images and registry caches. Its main-only behavior is checked below.
+Do not use **Publish Images** as a pre-merge dry run: it really publishes.
 
 ### After merge
 
@@ -893,9 +1372,15 @@ publishes images and registry caches. Its main-only behavior is checked below.
    published with the unchanged fingerprint/denominator contract. Cold
    monolithic release compilation still exceeds 16 GiB locally; no hosted
    cold-build speedup is claimed for it.
-2. Confirm main **CI Cache Warm** publishes restorable dependency/incremental
-   entries. Inspect trusted **CI Cache Maintenance** output: compatible main
-   entries replace branch generations, and incompatible versions do not.
+2. Confirm main **CI Cache Warm** publishes the seven bounded graphs and the
+   matching dependency caches, including non-incremental archive dependencies.
+   On the next backend PR with a small edit and unchanged dependency closure,
+   verify Clippy/KMS main-to-PR reuse and record their compiler/resource profile.
+   Both archive jobs must stay non-incremental and complete the full suites.
+   Inspect trusted **CI Cache Maintenance** output: compatible main
+   entries replace branch generations only after 48 hours from creation, and
+   incompatible prefixes/versions never replace them. Check one protected row
+   inside the grace period and one eligible row after it.
    After seven unused days from their last old-writer save/access, confirm
    that GitHub evicts the obsolete one-path entries. The approximately 9 GiB
    temporary cost and eviction policy are documented in
@@ -915,5 +1400,6 @@ publishes images and registry caches. Its main-only behavior is checked below.
    branch build proves compilation/packaging; it does not prove tag-triggered
    publication permissions or artifact delivery.
 
-The worktree remains uncommitted. No push, PR creation, workflow dispatch,
-remote cache deletion or remote configuration change was performed.
+The engineer committed df20e4869, opened PR #2428 and triggered the hosted
+runs above. Round-five and round-six edits are left uncommitted; the agent did not push,
+dispatch workflows or delete remote caches.

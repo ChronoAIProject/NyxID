@@ -10,6 +10,11 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Prune unused crates and bound the saved graph
+      shell: bash
+      run: |
+        python3 .github/scripts/incremental_cache.py prune
+        python3 .github/scripts/backend_disk.py before-save
     - name: Save incremental cache
       continue-on-error: true
       uses: actions/cache/save@v4

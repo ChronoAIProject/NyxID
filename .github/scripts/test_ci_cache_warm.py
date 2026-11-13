@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from ci_gate_reuse import strict_load_workflow
+from incremental_cache import ROOTS as INCREMENTAL_ROOTS
 
 
 CACHE_ACTION = "./.github/actions/ci-rust-cache"
@@ -143,11 +144,12 @@ class CacheWarmTests(unittest.TestCase):
         self.assertEqual(set(key for key, *_ in readers), set(keys))
 
     def test_incremental_key_and_paths_have_one_contract(self):
+        self.assertEqual(tuple(map(str, INCREMENTAL_ROOTS)), INCREMENTAL_PATHS)
         self.assertEqual(self.action["outputs"]["incremental-key"]["value"],
                          "${{ steps.incremental-contract.outputs.key }}")
         self.assertEqual(self.action["outputs"]["incremental-path"]["value"],
                          "${{ steps.incremental-contract.outputs.path }}")
-        self.assertEqual(self.action_text.count("v0-rust-incremental-"), 1)
+        self.assertEqual(self.action_text.count("v1-rust-graph-"), 1)
         definition = "printf '%s\\n' " + " ".join(INCREMENTAL_PATHS)
         self.assertEqual(self.action_text.count(definition), 1)
         save_text = Path(".github/actions/ci-rust-incremental-save/action.yml").read_text()
@@ -176,7 +178,7 @@ class CacheWarmTests(unittest.TestCase):
                     if step.get("uses") == "actions/cache/save@v4")
         self.assertEqual(save["with"], {"path": "${{ inputs.path }}", "key": "${{ inputs.key }}"})
         sample = (
-            "v0-rust-incremental-backend-build-Linux-X64-"
+            "v1-rust-graph-backend-build-Linux-X64-"
             + "ab" * 32 + "-" + "cd" * 20
         )
         emitted = run_bash(contract["run"], {"INCREMENTAL_KEY": sample})
@@ -184,7 +186,7 @@ class CacheWarmTests(unittest.TestCase):
         self.assertEqual(emitted["path"].splitlines(), list(INCREMENTAL_PATHS))
         manifest, broad = emitted["restore-keys"].splitlines()
         self.assertEqual(manifest, sample.removesuffix("cd" * 20))
-        self.assertEqual(broad, "v0-rust-incremental-backend-build-Linux-X64-")
+        self.assertEqual(broad, "v1-rust-graph-backend-build-Linux-X64-")
         self.assertNotEqual(manifest, broad)
         for lane, _, inputs, job, _, _ in cache_lanes(self.warm, self.action):
             saves = [step for step in job["steps"] if step.get("uses") == SAVE_ACTION]
@@ -199,6 +201,24 @@ class CacheWarmTests(unittest.TestCase):
                 "key": "${{ steps.rust-cache.outputs.incremental-key }}",
                 "path": "${{ steps.rust-cache.outputs.incremental-path }}",
             })
+
+    def test_archive_policy_and_remaining_graph_producers(self):
+        for coverage in (False, True):
+            lanes = cache_lanes(self.backend, self.action, coverage)
+            self.assertTrue(lanes)
+            self.assertTrue(all(inputs['incremental'] == 'false' for _, _, inputs, *_ in lanes))
+        graph_lanes = {lane for lane, _, inputs, *_ in cache_lanes(self.warm, self.action)
+                       if inputs.get('incremental') == 'true'}
+        self.assertEqual(graph_lanes, {
+            'rust-clippy', 'features-aws-kms-rust-features', 'features-gcp-kms-rust-features',
+            'features-aws-and-gcp-kms-rust-features', 'cli-cli-test',
+            'coverage-cli-coverage-cli', 'permissions-test',
+        })
+        self.assertEqual(self.backend['env']['CARGO_INCREMENTAL'], 0)
+        for name in ('backend-test-archive', 'coverage-backend-archive'):
+            self.assertEqual(self.warm['jobs'][name]['env']['CARGO_INCREMENTAL'], 0)
+        inventory = next(s for s in self.action['runs']['steps'] if s.get('name') == 'Record restored graph sizes')
+        self.assertNotIn('if', inventory)
 
     def test_manual_dispatch_saves_branch_caches_and_push_saves_main_only(self):
         policy = next(step for step in self.action["runs"]["steps"] if step.get("id") == "save-policy")
@@ -238,6 +258,62 @@ class CacheWarmTests(unittest.TestCase):
             self.assertLess(max(compiles), release)
             saves = [i for i, s in enumerate(steps) if s.get("uses") == SAVE_ACTION]
             self.assertTrue(all(release < i for i in saves))
+
+    def test_restore_precedes_swap_and_new_graphs_have_bounded_producers(self):
+        for workflow in (self.warm, self.ci, self.backend):
+            for job in workflow['jobs'].values():
+                steps = job.get('steps', [])
+                caches = [i for i, s in enumerate(steps) if s.get('uses') == CACHE_ACTION]
+                reserves = [i for i, s in enumerate(steps)
+                            if s.get('run') == 'bash .github/scripts/prepare-backend-runner.sh']
+                if caches and reserves:
+                    self.assertLess(caches[0], reserves[0])
+        steps = self.action['runs']['steps']
+        restore = next(s for s in steps if s.get('uses') == 'actions/cache/restore@v4')
+        self.assertIn("steps.incremental-space.outputs.allowed == 'true'", restore['if'])
+        guard = next(s for s in steps if s.get('id') == 'incremental-space')
+        self.assertEqual(guard['run'], 'python3 .github/scripts/backend_disk.py before-incremental')
+        self.assertLess(steps.index(guard), steps.index(restore))
+        self.assertIn('incremental_cache.py prune', self.save['runs']['steps'][0]['run'])
+        self.assertIn('backend_disk.py before-save', self.save['runs']['steps'][0]['run'])
+
+    def test_swap_experiment_preserves_capacity_and_is_selectable(self):
+        choice = self.warm['on']['workflow_dispatch']['inputs']['swap-mode']
+        self.assertEqual(choice['options'], ['zswap', 'off'])
+        self.assertEqual(self.warm['env']['NYXID_SWAP_MODE'], "${{ inputs.swap-mode || 'zswap' }}")
+        pool = self.warm['on']['workflow_dispatch']['inputs']['zswap-pool-percent']
+        self.assertEqual(pool['default'], '20')
+        self.assertEqual(self.warm['env']['NYXID_ZSWAP_POOL_PERCENT'], "${{ inputs.zswap-pool-percent || '20' }}")
+        for workflow in (self.ci, self.backend):
+            self.assertEqual(workflow['env']['NYXID_SWAP_MODE'], 'zswap')
+            self.assertEqual(workflow['env']['NYXID_ZSWAP_POOL_PERCENT'], '20')
+
+    def test_readers_compile_without_incremental_on_miss_or_skipped_restore(self):
+        step = next(s for s in self.action['runs']['steps'] if s.get('name') == 'Select incremental compilation policy')
+        self.assertEqual(step['env'], {
+            'REQUESTED': '${{ inputs.incremental }}',
+            'PRODUCER': '${{ steps.save-policy.outputs.enabled }}',
+            'RESTORED_KEY': '${{ steps.incremental-restore.outputs.cache-matched-key }}',
+        })
+        restore = next(s for s in self.action['runs']['steps'] if s.get('id') == 'incremental-restore')
+        self.assertEqual(restore['uses'], 'actions/cache/restore@v4')
+        for requested, producer, matched in itertools.product(('true', 'false'), ('true', 'false'), ('', 'fallback-key')):
+            with self.subTest(requested=requested, producer=producer, matched=matched), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                script = root / '.github/scripts/incremental_cache.py'
+                script.parent.mkdir(parents=True)
+                script.write_text('from pathlib import Path\nPath("marked").touch()\n')
+                output = root / 'environment'
+                result = subprocess.run(['bash', '-c', step['run']], cwd=root, env={**os.environ,
+                    'REQUESTED': requested, 'PRODUCER': producer, 'RESTORED_KEY': matched,
+                    'GITHUB_ENV': str(output)}, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                enabled = requested == 'true' and (producer == 'true' or bool(matched))
+                self.assertEqual(output.read_text(), f'CARGO_INCREMENTAL={int(enabled)}\n')
+                self.assertEqual((root / 'marked').exists(), enabled)
+        dependency = next(s for s in self.action['runs']['steps'] if s.get('uses') == 'Swatinem/rust-cache@v2')
+        self.assertEqual(dependency['with']['prefix-key'],
+                         "${{ inputs.incremental == 'true' && 'v1-rust-incremental' || 'v0-rust' }}")
 
     def test_backend_archive_preserves_compiler_cache_but_clears_counters(self):
         for job in (self.backend["jobs"]["build"], self.warm["jobs"]["coverage-backend-archive"]):

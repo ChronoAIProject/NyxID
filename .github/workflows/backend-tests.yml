@@ -15,11 +15,15 @@ permissions:
   contents: read
 
 env:
+  NYXID_SWAP_MODE: zswap
+  NYXID_ZSWAP_POOL_PERCENT: '20'
   # The execution matrix below must contain exactly SHARD_COUNT shards.
   SHARD_COUNT: 8
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  CARGO_INCREMENTAL: 1
+  # The eight-commit replay favors non-incremental archives on 16 GiB runners.
+  # See docs/CI_PERFORMANCE.md; other lanes retain graph reuse.
+  CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # libtest runs each #[tokio::test] body on a 2 MiB thread by default. Debug
@@ -40,8 +44,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
@@ -53,7 +55,9 @@ jobs:
         with:
           save-if: 'false'
           shared-key: ${{ inputs.coverage && 'coverage-backend-build' || 'backend-build' }}
-          incremental: 'true'
+          incremental: 'false'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}

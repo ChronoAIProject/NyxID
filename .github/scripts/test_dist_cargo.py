@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 
+from ci_gate_reuse import strict_load_workflow
+
 
 SCRIPT = Path(__file__).with_name("dist_cargo.py")
 SPEC = importlib.util.spec_from_file_location("dist_cargo", SCRIPT)
@@ -15,6 +17,16 @@ SPEC.loader.exec_module(dist_cargo)
 
 
 class DistCargoTests(unittest.TestCase):
+    def test_pr_release_matrix_builds_even_on_exact_cache_hit(self):
+        workflow = strict_load_workflow(Path('.github/workflows/release-cache.yml').read_text())
+        steps = workflow['jobs']['warm']['steps']
+        for name in ('Install dist', 'Install dependencies', 'Build artifacts'):
+            step = next(s for s in steps if s.get('name') == name)
+            self.assertEqual(step['if'],
+                             "github.event_name == 'pull_request' || steps.cache.outputs.cache-hit != 'true'")
+        cache = next(s for s in steps if s.get('id') == 'cache')
+        self.assertEqual(cache['with']['save-if'], "${{ github.event_name != 'pull_request' }}")
+
     def test_workspace_features_and_dist_options_are_retained(self):
         args = ["build", "--profile", "dist", "--message-format=json-render-diagnostics",
                 "--target", "aarch64-apple-darwin", "--workspace"]

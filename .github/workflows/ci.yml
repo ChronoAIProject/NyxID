@@ -44,6 +44,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  NYXID_SWAP_MODE: zswap
+  NYXID_ZSWAP_POOL_PERCENT: '20'
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   # Preserve file/line diagnostics while shrinking compiled dependency caches.
@@ -459,8 +461,6 @@ jobs:
       CARGO_INCREMENTAL: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -472,6 +472,8 @@ jobs:
           save-if: 'false'
           shared-key: rust-clippy
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Check Clippy with resource samples
         run: >-
           python3 .github/scripts/retry_incremental.py
@@ -505,8 +507,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -515,6 +515,8 @@ jobs:
         with:
           save-if: 'false'
           shared-key: backend-image-inputs-backend-image-inputs
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Check dependency recipe invariants
         run: python3 scripts/test-docker-dependency-recipe.py
       - name: Verify check and build input collection
@@ -746,8 +748,6 @@ jobs:
         variant: [aws-kms, gcp-kms, aws-and-gcp-kms]
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -757,6 +757,8 @@ jobs:
           save-if: 'false'
           shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Build feature set
         env:
           FEATURES: ${{ fromJSON('{"aws-kms":"aws-kms","gcp-kms":"gcp-kms","aws-and-gcp-kms":"aws-kms,gcp-kms"}')[matrix.variant] }}

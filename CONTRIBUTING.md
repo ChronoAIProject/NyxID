@@ -234,6 +234,11 @@ The pre-commit hook remains a lint hook, not the full validation gate: tests,
 KMS feature builds, coverage, frontend checks, and image validation are separate
 checks. See [CI build measurements](docs/CI_PERFORMANCE.md) for costs and commands.
 
+CI compiles ordinary and instrumented backend archives with `CARGO_INCREMENTAL=0`;
+the eight-commit replay found nearly cold compile times and higher memory use in
+five cases. Other graph readers disable incremental on cache misses, while their
+warm jobs produce graphs; this CI policy does not change local Cargo defaults.
+
 The backend CI archive build preserves instrumented compiler artifacts but clears
 raw coverage counters. Reports take their object list from the current nextest
 archive, and a regression fixture compares this cached path against a clean
