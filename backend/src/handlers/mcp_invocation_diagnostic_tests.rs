@@ -281,7 +281,7 @@ async fn conversation_agent_key_redeems_with_the_same_child_and_raw_key() {
     let response = handle_invocation_diagnostic(
         &state,
         &auth,
-        &json!({"handle": issued.handle}),
+        &json!({"handle": &issued.handle}),
         Some(json!(1)),
     )
     .await;
@@ -298,6 +298,138 @@ async fn conversation_agent_key_redeems_with_the_same_child_and_raw_key() {
     assert!(!body.to_string().contains(raw_key));
     assert!(!body.to_string().contains(&id));
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+    let replay = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &issued.handle}),
+        Some(json!(2)),
+    )
+    .await;
+    let replay_body: Value =
+        serde_json::from_slice(&to_bytes(replay.into_body(), 16384).await.unwrap()).unwrap();
+    assert_eq!(
+        replay_body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"],
+        body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"]
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "completed replay must not start another probe"
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_diagnostic_tool_bounds_validation_not_ready_and_internal_failures() {
+    let (state, actor, id, server) = fixture().await;
+    let mut auth = McpAuthContext::user(actor.clone(), AuthMethod::AccessToken);
+    auth.scope = "proxy".into();
+    auth.caller_token = Some(proxy_service::CallerToken::from_verified("original-caller"));
+
+    for arguments in [json!({}), json!({"handle": 7})] {
+        let response =
+            handle_invocation_diagnostic(&state, &auth, &arguments, Some(json!(1))).await;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], -32602, "{body}");
+        assert_eq!(body["error"]["message"], "Missing handle", "{body}");
+    }
+
+    let running = crate::services::invocation_diagnostic_service::tests::legacy_handle(
+        &state.db,
+        &state.config,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            None,
+        ),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("running diagnostic handle");
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::invocation_diagnostic::COLLECTION_NAME,
+        )
+        .update_one(
+            mongodb::bson::doc! {
+                "handle_hash": crate::crypto::token::hash_token(&running.handle)
+            },
+            mongodb::bson::doc! {
+                "$set": {
+                    "state": "running",
+                    "claim_id": "other-worker",
+                    "claimed_at": mongodb::bson::DateTime::now(),
+                }
+            },
+        )
+        .await
+        .unwrap();
+    let response = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &running.handle}),
+        Some(json!(2)),
+    )
+    .await;
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    assert_eq!(
+        body["result"]["content"][0]["text"], r#"{"error":"diagnostic_not_ready","retry_after":1}"#,
+        "{body}"
+    );
+
+    let malformed = crate::services::invocation_diagnostic_service::tests::legacy_handle(
+        &state.db,
+        &state.config,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            None,
+        ),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("malformed completed diagnostic handle");
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::invocation_diagnostic::COLLECTION_NAME,
+        )
+        .update_one(
+            mongodb::bson::doc! {
+                "handle_hash": crate::crypto::token::hash_token(&malformed.handle)
+            },
+            mongodb::bson::doc! {"$set": {"state": "completed"}},
+        )
+        .await
+        .unwrap();
+    let response = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &malformed.handle}),
+        Some(json!(3)),
+    )
+    .await;
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    assert_eq!(
+        body["result"]["content"][0]["text"], "Invocation diagnostic unavailable",
+        "{body}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
     state.db.drop().await.unwrap();
 }
 

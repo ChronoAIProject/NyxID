@@ -475,7 +475,7 @@ pub(crate) fn apply_server_owned_headers(
     headers
 }
 
-/// Request-local bearer material. Never persisted in MCP sessions or exposed by Debug.
+/// Request-local verified credential material. Never persisted in MCP sessions or exposed by Debug.
 #[derive(Clone)]
 pub(crate) struct CallerToken(zeroize::Zeroizing<String>);
 
