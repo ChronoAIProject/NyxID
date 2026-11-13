@@ -1,7 +1,6 @@
 """Prove cached nextest archives report only the current instrumented objects."""
 
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,25 +11,25 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
-TOOLS = ("cargo", "cargo-nextest", "cargo-llvm-cov")
-HAVE_TOOLS = all(shutil.which(tool) for tool in TOOLS)
+sys.path.insert(0, str(ROOT / "scripts"))
+from rust_fixture import requires_rust, rust_command, rust_environment
 
 
-@unittest.skipUnless(HAVE_TOOLS, "requires the pinned nextest and llvm-cov tools")
 class CoverageArchiveCacheTests(unittest.TestCase):
+    @requires_rust(components=("llvm-tools",), tools=("cargo-nextest", "cargo-llvm-cov"))
     def test_removed_sources_and_renamed_binary_match_a_clean_report(self):
         with tempfile.TemporaryDirectory(prefix="coverage archive ") as directory:
             root = Path(directory)
             (root / "src").mkdir()
             target = root / "target"
-            env = {**os.environ, "CARGO_TARGET_DIR": str(target), "CARGO_INCREMENTAL": "1", "CARGO_TERM_COLOR": "never",
+            env = {**rust_environment(), "CARGO_TARGET_DIR": str(target), "CARGO_INCREMENTAL": "1", "CARGO_TERM_COLOR": "never",
                    "RUSTFLAGS": "-Dwarnings", "LLVM_PROFILE_FILE_NAME": "fixture-%4m.profraw"}
             for name in ("CARGO_ENCODED_RUSTFLAGS", "LLVM_PROFILE_FILE", "CARGO_LLVM_COV_TARGET_DIR",
                          "CARGO_LLVM_COV_BUILD_DIR", "CARGO_BUILD_TARGET_DIR", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
                 env.pop(name, None)
 
             def cargo(*args):
-                result = subprocess.run(["cargo", *args], cwd=root, env=env,
+                result = subprocess.run(rust_command("cargo", *args), cwd=root, env=env,
                                         capture_output=True, text=True, timeout=120)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 return result
@@ -117,6 +116,4 @@ class CoverageArchiveCacheTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if not HAVE_TOOLS:
-        raise SystemExit("Install the workflow's pinned cargo-nextest and cargo-llvm-cov first")
     unittest.main()

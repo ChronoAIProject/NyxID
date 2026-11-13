@@ -1195,6 +1195,121 @@ these are not warning-free logs. A dependency also reports future
 incompatibility for proc-macro-error2. The `-Dwarnings` and Clippy
 `-D warnings` bars remain enabled.
 
+## Helper test prerequisites and Detect Changes
+
+PR CI **43351448710**, Detect Changes job **131643209637**, failed because
+`test_incremental_cache.py` found a Cargo proxy, selected Rust 1.98.1 and
+compiled before discovering that Clippy was absent. That optional local
+fixture must never provision its own toolchain or block change detection.
+
+`scripts/rust_fixture.py` checks executable availability, `rustup toolchain
+list --quiet`, and installed components for **1.98.1** before running a Rust
+fixture. Missing prerequisites skip locally. Commands use `rustup run 1.98.1`
+without `--install`, plus `RUSTUP_AUTO_INSTALL=0` and offline Cargo, so the
+fixtures cannot download compilers, components or dependencies. Ordinary
+Cargo/build-script freshness semantics are unchanged. Unit tests cover missing
+proxies, missing pins/components, inventory errors and mandatory failures.
+
+Detect Changes sets `NYXID_SKIP_RUST_FIXTURES=1`. It runs all inexpensive
+helper checks, but skips the three compiler fixtures and the full-repository
+CodeQL scope assertion. Profiling measured that assertion at **13.760 s**;
+it now runs in Rust Clippy alongside the real CodeQL syntax and incremental
+fixtures. Resource-supervision tests stub their incidental Cargo/rustc
+version probes, so those tests cannot download a default toolchain either.
+
+Rust Clippy, Backend Image Inputs and the instrumented archive build set
+`NYXID_REQUIRE_RUST_FIXTURES=1` on their fixture steps. A missing prerequisite
+fails those steps rather than skipping. A workflow-contract test checks every
+caller, installation order, toolchain/component/tool versions, strict mode
+and the CI path filter for the shared helper. The existing macOS-only SDK
+assertion still skips on Linux; all portable Git-stamp assertions are mandatory.
+
+| Measurement | Command wall | unittest time and outcome |
+| --- | ---: | --- |
+| Pre-PR hosted helper step: 43210236259 / 131155785727 | 8.18 s between log timestamps; Jobs API rounds to 9 s | 133 tests, 7.915 s, passed |
+| Failed hosted step: 43351448710 / 131643209637 | 58.31 s between log timestamps | 210 tests, 58.107 s, one failure / one skip |
+| Local final step, empty Rust/Cargo homes and unreachable distribution server | 4.051 s | 219 tests, 3.980 s, passed / four skips |
+| Local final step, no Cargo/rustc/rustup on PATH | 3.990 s | 219 tests, 3.922 s, passed / four skips |
+| Local final step with all tools installed (same opt-out) | 4.039 s | 219 tests, 3.971 s, passed / four skips |
+| Local full CI helper suite with installed tools and strict mode | 23.146 s | 219 tests, 23.078 s, passed / no skips |
+
+The first hosted interval is `11:34:22.9879336Z` to `11:34:31.1670233Z`
+on 2026-11-12 (log lines 139 and 153); the failed interval is
+`02:20:28.5165378Z` to `02:21:26.8298802Z` on 2026-11-13. Reproduce the hosted
+read with `gh run view <run> --job <job> --log`. Local numbers are macOS
+measurements, not a claim that the hosted step will take four seconds. Its
+new hosted duration remains to be measured on the next push.
+
+The three compiler tests were also invoked directly **without** the job
+opt-out in each stripped environment: all three skipped, with no downloads.
+With strict mode and an absent pin, the incremental fixture exited 1 and
+reported `requires installed Rust 1.98.1`, with no skip. The full `scripts/`
+suite passed **41 tests in 36.929 s**, including the macOS SDK test, under
+strict mode. The eight dependency-recipe tests (0.303 s), actionlint 1.7.12,
+all four permission checks and `git diff --check` passed. No Rust source or
+build script changed, and no full-workspace compile or backend suite was
+needed for this test/wiring correction.
+The round-nine scratch tools, environments and logs (83 MiB) were removed;
+`target/` is 4 KiB. No Docker resources or agents were started, and no owned
+test processes remain running.
+
+Reproduce the stripped environments from the repository root using Python
+3.11+ with PyYAML already available. On the measured Mac, `/usr/bin:/bin:/usr/sbin:/sbin`
+contains no Cargo or rustup. Verify that assumption if using a different host.
+
+```sh
+python_bin="$(command -v python3)"
+rustup_bin="$(command -v rustup)"
+fixture_scratch="$(mktemp -d)"
+mkdir -p "$fixture_scratch/bin" "$fixture_scratch/rustup" "$fixture_scratch/cargo"
+ln -s "$rustup_bin" "$fixture_scratch/bin/rustup"
+ln -s "$rustup_bin" "$fixture_scratch/bin/cargo"
+ln -s "$rustup_bin" "$fixture_scratch/bin/rustc"
+# Run first with proxies visible, then without any Rust executable.
+for fixture_path in "$fixture_scratch/bin:/usr/bin:/bin:/usr/sbin:/sbin" /usr/bin:/bin:/usr/sbin:/sbin; do
+  env PATH="$fixture_path" RUSTUP_HOME="$fixture_scratch/rustup" \
+    CARGO_HOME="$fixture_scratch/cargo" RUSTUP_TOOLCHAIN=1.98.1 \
+    RUSTUP_DIST_SERVER=http://127.0.0.1:9 RUSTUP_UPDATE_ROOT=http://127.0.0.1:9 \
+    NYXID_SKIP_RUST_FIXTURES=1 NYXID_REQUIRE_RUST_FIXTURES=0 \
+    "$python_bin" -m unittest discover -s .github/scripts -p 'test_*.py'
+done
+rm -rf "$fixture_scratch"
+# With the workflow-pinned Rust, Clippy, LLVM tools, nextest and llvm-cov installed:
+NYXID_SKIP_RUST_FIXTURES=0 NYXID_REQUIRE_RUST_FIXTURES=1 \
+  "$python_bin" -m unittest discover -s .github/scripts -p 'test_*.py'
+NYXID_SKIP_RUST_FIXTURES=0 NYXID_REQUIRE_RUST_FIXTURES=1 \
+  "$python_bin" -m unittest discover -s scripts -p 'test_*.py'
+```
+
+The audit below covers every added test file in this PR and the related files
+modified by the cache/fixture work. `Detect Changes` uses the runner's Python;
+the complete helper suite requires **Python 3.11+ and PyYAML**. The failed hosted
+run imported `tomllib` and `yaml` and reached all 210 tests with only the Clippy
+failure, confirming those prerequisites were available. No PyPI installation
+is added to this job. All callers below are Linux jobs except local discovery.
+Git comes with the checked-out runner; the old-Git fixtures reject
+`--path-format` explicitly and do not require Git 2.31. None of these unit
+fixtures requires a Docker daemon or a CodeQL CLI/database.
+
+| Test file | Workflow caller | Additional prerequisites / execution contract |
+| --- | --- | --- |
+| `.github/scripts/test_backend_disk.py` | Detect Changes | POSIX Python (`fcntl` import); disk, `df` and `sudo` calls mocked. |
+| `.github/scripts/test_cache_budget.py` | Detect Changes | Standard library; no `gh`, cache API or Docker calls. |
+| `.github/scripts/test_ci_cache_warm.py` | Detect Changes | PyYAML, Bash and Python subprocesses; compilation commands are inspected or replaced by fixture scripts. |
+| `.github/scripts/test_codeql_cfg_test_files.py` | Detect Changes; Rust Clippy | Small parser cases in detection. Rust 1.98.1 syntax fixture and full-tree assertion mandatory in Clippy. Uses `tomllib`; no CodeQL install. |
+| `.github/scripts/test_codeql_compare_sarif.py` | Detect Changes | Standard library and synthetic SARIF; no CodeQL install. |
+| `.github/scripts/test_codeql_rust_scope.py` | Detect Changes | PyYAML, `tomllib` and local Git for the 3,101-file/rename fixture; no network or Rust compiler. |
+| `.github/scripts/test_coverage_archive_cache.py` | Backend coverage / Build test archive | Rust 1.98.1, installed `llvm-tools-preview` (inventory name `llvm-tools`), cargo-nextest 0.9.146, cargo-llvm-cov 0.9.1 and system linker. Mandatory there; skipped in detection. |
+| `.github/scripts/test_dist_cargo.py` | Detect Changes | PyYAML and a fake Cargo executable; no cargo-dist or Rust required. |
+| `.github/scripts/test_incremental_cache.py` | Detect Changes; Rust Clippy | Pure pruning cases need POSIX locks/`df`. Real fixture requires Rust 1.98.1, Clippy and linker; mandatory in Clippy, skipped in detection. |
+| `.github/scripts/test_prepare_backend_runner.py` | Detect Changes | Bash/core utilities; fake `sudo`, swap and disk commands. No privilege or kernel swap change. |
+| `.github/scripts/test_retry_incremental.py` | Detect Changes | Python children, POSIX signals and `df`; no actual Rust compiler. |
+| `.github/scripts/test_ci_resources.py` | Detect Changes | POSIX process groups, `fork`, signals, `ps`, shell stubs and optional local Git metadata; Rust version probes stubbed. |
+| `.github/scripts/test_rust_fixtures.py` | Detect Changes | PyYAML; fake tool inventories and workflow assertions. No real compiler invocation. |
+| `scripts/test_backend_docker_embeds.py` | Backend Image Inputs | Local Git; real build/check fixture requires Rust 1.98.1 and linker, mandatory in this job. Docker files are parsed, not built. |
+| `scripts/test_git_build_scripts.py` | Rust Clippy; local discovery | Rust 1.98.1, linker, Git/worktree support. Portable cases mandatory in Clippy; macOS SDK case requires local Xcode and intentionally skips on Linux. |
+| `scripts/test_updater_docker_embeds.py` | Machine Container E2E / Verify updater Docker input closure | Standard library and synthetic dep-info/Dockerfiles. The surrounding image-build job installs/uses Docker; this test itself does not. |
+
 ## Local verification
 
 The first review round's Rust verification used stable 1.98.1, `RUSTFLAGS=-Dwarnings`, four
@@ -1271,7 +1386,7 @@ sentinel name. Formatting and `git diff --check` passed. Clippy was not repeated
 the only Rust change is the fallback expression and its comment, and the
 fixtures compile both actual build scripts with stable 1.98.1 and `-Dwarnings`.
 
-Rounds five through eight change only CI helpers, actions, workflows and documents;
+Rounds five through nine change only CI helpers, actions, workflows and documents;
 no Rust source or build script changes. The round-six verification
 results and replay above supersede the discarded wrapper experiment. The
 full MongoDB suites are not rerun locally; the new PR CI run must execute
@@ -1421,6 +1536,7 @@ the document does not depend on the deleted logs.
 | `docker-compose.yml`, `docker-compose.test.yml`, `CONTRIBUTING.md` | Disposable local test replica set, Git-stamp semantics and current validation contracts. |
 | `.github/workflows/codeql.yml`, `.github/codeql/codeql-config.yml` | Uncapped Git change detection, conservative language selection, generated Rust PR scope and historical default categories. |
 | `.github/scripts/codeql_cfg_test_files.py`, `codeql_rust_scope.py`, `codeql_compare_sarif.py` and their `test_codeql_*.py` files | Conservative module-tree traversal, language/config contracts and alert-equivalence verification. |
+| `scripts/rust_fixture.py`, `.github/scripts/test_rust_fixtures.py` and fixture callers | Installed-only Rust prerequisites, fast change detection and mandatory execution in prepared jobs. |
 | `docs/CI_PERFORMANCE.md` | Reproducible measurements, rejected alternatives, verification and limits. |
 
 No backend or CLI runtime source is changed. The Git-stamp wrapper and its
@@ -1436,7 +1552,7 @@ conclusions. A green warm job alone does not prove a cache was saved.
 
 ### Before merge
 
-1. After committing/pushing the round-eight changes, dispatch **CI Cache Warm**
+1. After committing/pushing the round-nine changes, dispatch **CI Cache Warm**
    on the PR branch; it has no experiment inputs. Verify seven graph saves,
    `after-prune` sizes at most 16 GiB, and one finalized session per retained
    crate. The two archive jobs must log `enabled=0`, skip graph restore/save
@@ -1460,8 +1576,12 @@ conclusions. A green warm job alone does not prove a cache was saved.
    or the branch's old archive graphs.
 4. The new PR **CI** run must keep all ordinary/instrumented shards, inventory
    verification, 73% line gate, base/head comparison, linked KMS builds and
-   image proofs green. The previous PR run already passed; the final PR policy
-   still needs a hosted run. Cold pruning/save and disk admission are verified
+   image proofs green. Run 43351448710 stopped in Detect Changes; confirm its
+   helper step now skips four expensive fixtures without compiling/downloading
+   Rust, and record its elapsed time. Rust Clippy must execute the incremental,
+   CodeQL syntax/full-tree and portable Git-stamp fixtures; coverage and image
+   input jobs must execute their strict fixtures. The final PR policy still
+   needs a successful hosted run. Cold pruning/save and disk admission are verified
    below the hosted timing table; restored-graph extraction and reuse remain
    unverified. Require a graph miss or skipped restore to log `enabled=0` in
    every PR cache consumer. **Release Build Cache**
@@ -1515,6 +1635,7 @@ Do not use **Publish Images** as a pre-merge dry run: it really publishes.
    branch build proves compilation/packaging; it does not prove tag-triggered
    publication permissions or artifact delivery.
 
-The engineer committed df20e4869, c40a5d95c and 4b38ed193, opened PR #2428 and
-triggered the hosted runs above. Round-eight edits are left uncommitted on
-4b38ed193; the agent did not push, dispatch workflows or delete remote caches.
+The engineer committed/rebased the reviewed work through b831d9642, opened
+PR #2428 and triggered the hosted runs above. Round-nine edits are left
+uncommitted on b831d9642; the agent did not push, dispatch workflows or delete
+remote caches.

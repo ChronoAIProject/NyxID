@@ -98,6 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Test CI helpers
+        env:
+          NYXID_SKIP_RUST_FIXTURES: '1'
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Check private security-report routing
         run: |
@@ -267,6 +269,7 @@ jobs:
               - '.github/actions/**'
               - '.github/scripts/**'
               - 'scripts/test_git_build_scripts.py'
+              - 'scripts/rust_fixture.py'
               - 'scripts/dist-build.sh'
 
   # ---------------------------------------------------------------------------
@@ -478,7 +481,15 @@ jobs:
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
+      - name: Verify incremental cache and CodeQL Rust fixtures
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_incremental_cache.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_codeql_cfg_test_files.py'
       - name: Verify Git build stamp freshness
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
         run: python3 -m unittest discover -s scripts -p 'test_git_build_scripts.py'
 
   # ---------------------------------------------------------------------------
@@ -520,6 +531,8 @@ jobs:
       - name: Check dependency recipe invariants
         run: python3 scripts/test-docker-dependency-recipe.py
       - name: Verify check and build input collection
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
         run: python3 -m unittest discover -s scripts -p 'test_backend_docker_embeds.py'
       - name: Check backend release inputs
         run: |

@@ -1,10 +1,14 @@
 import tempfile
 import unittest
-import shutil
+import sys
+import os
 import subprocess
 from pathlib import Path
 
 from codeql_cfg_test_files import analyze_tree, exclusion_list
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from rust_fixture import requires_rust, rust_command, rust_environment
 
 
 def crate(root: Path, files: dict[str, str], manifest: str | None = None) -> None:
@@ -14,6 +18,26 @@ def crate(root: Path, files: dict[str, str], manifest: str | None = None) -> Non
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
+
+
+PRODUCTION_REFERENCES = [
+    ('#[cfg(test)] #[path="shared.rs"] mod tests; const fn helper() {} '
+     'mod shared; pub fn run() { helper(); shared::run(); }',
+     {"src/shared.rs": 'pub fn run() {}'}),
+    ('/* outer /* inner */ #[cfg(test)] */ mod shared; '
+     'pub fn run() { shared::run(); }', {"src/shared.rs": 'pub fn run() {}'}),
+    ('#[cfg(test)] #[path="shared.rs"] mod tests; '
+     'pub fn run() { #[path="shared.rs"] mod nested; nested::run(); }',
+     {"src/shared.rs": 'pub fn run() {}'}),
+    ('macro_rules! load { () => { #[path="shared.rs"] mod nested; }; } load!(); '
+     '#[cfg(test)] #[path="shared.rs"] mod tests; pub fn run() { nested::run(); }',
+     {"src/shared.rs": 'pub fn run() {}'}),
+    ('#[cfg_attr(feature="alternate",path="alternate")] mod parent { pub mod child; } '
+     '#[cfg(test)] #[path="parent/child.rs"] mod tests; '
+     'pub fn run() { parent::child::run(); }',
+     {"src/parent/child.rs": 'pub fn run() {}',
+      "src/alternate/child.rs": 'pub fn run() {}'}),
+]
 
 
 class CfgTestFileTests(unittest.TestCase):
@@ -259,39 +283,30 @@ class CfgTestFileTests(unittest.TestCase):
         }), ["src/shared.rs"])
 
     def test_production_references_hidden_in_comments_blocks_macros_and_paths(self):
-        cases = [
-            ('#[cfg(test)] #[path="shared.rs"] mod tests; const fn helper() {} '
-             'mod shared; pub fn run() { helper(); shared::run(); }',
-             {"src/shared.rs": 'pub fn run() {}'}),
-            ('/* outer /* inner */ #[cfg(test)] */ mod shared; '
-             'pub fn run() { shared::run(); }', {"src/shared.rs": 'pub fn run() {}'}),
-            ('#[cfg(test)] #[path="shared.rs"] mod tests; '
-             'pub fn run() { #[path="shared.rs"] mod nested; nested::run(); }',
-             {"src/shared.rs": 'pub fn run() {}'}),
-            ('macro_rules! load { () => { #[path="shared.rs"] mod nested; }; } load!(); '
-             '#[cfg(test)] #[path="shared.rs"] mod tests; pub fn run() { nested::run(); }',
-             {"src/shared.rs": 'pub fn run() {}'}),
-            ('#[cfg_attr(feature="alternate",path="alternate")] mod parent { pub mod child; } '
-             '#[cfg(test)] #[path="parent/child.rs"] mod tests; '
-             'pub fn run() { parent::child::run(); }',
-             {"src/parent/child.rs": 'pub fn run() {}',
-              "src/alternate/child.rs": 'pub fn run() {}'}),
-        ]
-        for source, files in cases:
+        for source, files in PRODUCTION_REFERENCES:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 crate(root, {"src/lib.rs": source, **files})
-                # These are valid production Rust, not merely lexer strings.
-                if shutil.which("rustc"):
-                    result = subprocess.run(
-                        ["rustc", "--edition=2021", "--crate-type=lib", "src/lib.rs"],
-                        cwd=root, text=True, capture_output=True, timeout=60,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(exclusion_list(root), [])
+
+
+class RustSyntaxTests(unittest.TestCase):
+    @requires_rust()
+    def test_production_reference_fixtures_compile(self):
+        for source, files in PRODUCTION_REFERENCES:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                crate(root, {"src/lib.rs": source, **files})
+                result = subprocess.run(
+                    rust_command("rustc", "--edition=2021", "--crate-type=lib", "src/lib.rs"),
+                    cwd=root, env=rust_environment(), text=True, capture_output=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(exclusion_list(root), [])
 
 
 class WorkspaceTests(unittest.TestCase):
+    @unittest.skipIf(os.environ.get('NYXID_SKIP_RUST_FIXTURES') == '1',
+                     'full Rust-tree scope check runs in Rust Clippy')
     def test_this_repo_keeps_production_files(self):
         root = Path(__file__).resolve().parents[2]
         result = analyze_tree(root)

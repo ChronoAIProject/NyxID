@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from rust_fixture import requires_rust, rust_command, rust_environment
+
 SPEC = importlib.util.spec_from_file_location('embeds', Path(__file__).with_name('check-backend-docker-embeds.py'))
 embeds = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(embeds)
@@ -98,8 +100,8 @@ class DepInfoTests(unittest.TestCase):
                     self.assertEqual(embeds.git_stamp_inputs(), set())
 
 
-@unittest.skipUnless(shutil.which('cargo'), 'requires Cargo')
 class CargoCheckInputsTests(unittest.TestCase):
+    @requires_rust()
     def test_exact_inputs_cached_units_and_stale_dep_info(self):
         with tempfile.TemporaryDirectory(prefix='docker inputs ') as directory:
             root = Path(directory).resolve()
@@ -119,13 +121,13 @@ class CargoCheckInputsTests(unittest.TestCase):
                 'println!("cargo::rerun-if-changed=../watched file"); }\n')
             (root / 'backend/src/main.rs').write_text('mod extra; fn main() { println!("{}", leaf::value() + extra::value()); }\n')
             (root / 'backend/src/extra.rs').write_text('pub fn value() -> usize { 1 }\n')
-            env = {**os.environ, 'CARGO_TARGET_DIR':str(root / 'target'), 'RUSTUP_TOOLCHAIN':'1.98.1',
+            env = {**rust_environment(), 'CARGO_TARGET_DIR':str(root / 'target'),
                    'RUSTFLAGS':'-Dwarnings', 'CARGO_INCREMENTAL':'0'}
             env.pop('CARGO_ENCODED_RUSTFLAGS', None)
 
             def cargo(mode):
-                result = subprocess.run(['cargo', mode, '--release', '-p', 'nyxid', '--bin', 'nyxid-server',
-                                         '--features', 'gcp-kms', '--message-format=json'],
+                result = subprocess.run(rust_command('cargo', mode, '--release', '-p', 'nyxid', '--bin', 'nyxid-server',
+                                         '--features', 'gcp-kms', '--message-format=json'),
                                         cwd=root, env=env, capture_output=True, text=True, timeout=120)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 path = root / (mode + '.jsonl')

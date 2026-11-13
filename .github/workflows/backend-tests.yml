@@ -74,6 +74,8 @@ jobs:
           --archive-file backend-tests.tar.zst
       - name: Verify cached coverage archive isolation
         if: inputs.coverage
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
         run: python3 .github/scripts/test_coverage_archive_cache.py
       - name: Clear coverage counters
         if: inputs.coverage

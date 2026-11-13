@@ -13,16 +13,19 @@ import incremental_cache as cache
 import backend_disk
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from rust_fixture import requires_rust, rust_command, rust_environment
 
 
 class IncrementalTests(unittest.TestCase):
+    @requires_rust(components=("clippy",))
     def test_real_cargo_prunes_old_version_and_preserves_fresh_graphs(self):
         with tempfile.TemporaryDirectory(prefix='incremental cache ') as tmp:
             root = Path(tmp)
             (root / 'src').mkdir()
             source = root / 'src/lib.rs'
             source.write_text('pub fn answer() -> u32 { 42 }\n#[test] fn test() { assert_eq!(answer(), 42); }')
-            env = {**os.environ, 'RUSTUP_TOOLCHAIN': '1.98.1', 'CARGO_INCREMENTAL': '1',
+            env = {**rust_environment(), 'CARGO_INCREMENTAL': '1',
                    'RUSTFLAGS': '-Dwarnings', 'CARGO_TERM_COLOR': 'never', 'CARGO_TARGET_DIR': str(root / 'target')}
             for name in ('CARGO_ENCODED_RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'):
                 env.pop(name, None)
@@ -33,7 +36,7 @@ class IncrementalTests(unittest.TestCase):
             def helper(command):
                 return run(sys.executable, str(ROOT / '.github/scripts/incremental_cache.py'), command)
             def build():
-                return run('cargo', 'test', '--no-run')
+                return run(*rust_command('cargo', 'test', '--no-run'))
             def version(value):
                 (root / 'Cargo.toml').write_text('[package]\nname="fixture"\nversion="' + value + '"\n[workspace]\n')
             graphs = root / 'target/debug/incremental'
@@ -56,7 +59,7 @@ class IncrementalTests(unittest.TestCase):
             source.touch()
             self.assertIn('Compiling fixture', build().stderr)
             # A job's marker covers all its Cargo commands, including clippy.
-            run('cargo', 'clippy', '--all-targets', '--', '-D', 'warnings')
+            run(*rust_command('cargo', 'clippy', '--all-targets', '--', '-D', 'warnings'))
             helper('prune')
             self.assertTrue(after <= {p.name for p in graphs.iterdir()})
             for crate in graphs.iterdir():

@@ -8,11 +8,16 @@ import subprocess
 import tempfile
 import unittest
 
+from rust_fixture import requires_rust, rust_command, rust_environment
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
-@unittest.skipUnless(shutil.which("cargo"), "requires Cargo")
 class GitBuildScriptsTests(unittest.TestCase):
+    @requires_rust(tools=("git",))
+    def setUp(self):
+        pass
+
     def fixture(self, package, old_git=False):
         temporary = tempfile.TemporaryDirectory(prefix="git build fixture ")
         self.addCleanup(temporary.cleanup)
@@ -29,7 +34,7 @@ class GitBuildScriptsTests(unittest.TestCase):
         shutil.copyfile(ROOT / package / "build.rs", source / "build.rs")
         (source / "src/main.rs").write_text('fn main() { println!("{}", env!("NYXID_GIT_HASH")); }\n')
         (repo / "README").write_text("first\n")
-        env = {k: v for k, v in os.environ.items()
+        env = {k: v for k, v in rust_environment().items()
                if not k.startswith("GIT_") and k not in (
                    "NYXID_GIT_HASH", "CARGO_ENCODED_RUSTFLAGS",
                    "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "DEVELOPER_DIR", "TOOLCHAINS", "SDKROOT")}
@@ -52,7 +57,7 @@ class GitBuildScriptsTests(unittest.TestCase):
 
         def build(cwd=repo, extra=None):
             result = subprocess.run(
-                ["cargo", "run", "--locked", "--manifest-path", str(cwd / package / "Cargo.toml")],
+                rust_command("cargo", "run", "--locked", "--manifest-path", str(cwd / package / "Cargo.toml")),
                 cwd=cwd, env={**env, "CARGO_TARGET_DIR": str(directory / (cwd.name + "-target")),
                               **(extra or {})}, capture_output=True, text=True, timeout=120,
             )
