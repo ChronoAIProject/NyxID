@@ -784,6 +784,7 @@ pub fn failure_reason(
         && let Some(fact) = &turn.model_refusal
     {
         return Some(Box::new(TurnFailureReason {
+            guest_setup_step: None,
             source: "nyxid".into(),
             stage: "model_approval".into(),
             code: error.code.into(),
@@ -827,6 +828,7 @@ pub fn failure_reason(
         })
     {
         return Some(Box::new(TurnFailureReason {
+            guest_setup_step: None,
             model_route: model_route.clone(),
             source: "nyxid".into(),
             stage: "model_proxy".into(),
@@ -837,6 +839,7 @@ pub fn failure_reason(
     }
     error.upstream_code.as_ref().map(|code| {
         Box::new(TurnFailureReason {
+            guest_setup_step: None,
             model_route: model_route.clone(),
             source: "nyxagent".into(),
             stage: error.stage.into(),

@@ -21,6 +21,9 @@ pub const COLLECTION_NAME: &str = "channel_bots";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotError {
+    /// Additive thread outcome; the ordinary provider reason remains intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_reason: Option<String>,
     /// Numeric `AppError` code, kept for compatibility with earlier rows.
     #[serde(deserialize_with = "deserialize_error_code")]
     pub code: String,

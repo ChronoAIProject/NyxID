@@ -112,13 +112,13 @@ pub async fn retain(
 
 /// A gateway can request only a target reconstructed from original persisted
 /// ingress and (for admitted work) its exact live child binding.
-pub async fn reply_target(
+pub(crate) async fn reply_target(
     db: &mongodb::Database,
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
     credentials: &crate::services::channel_platform::BotCredentials<'_>,
     source: &ChannelMessage,
-) -> AppResult<Option<ThreadReplyTarget>> {
+) -> ReplyResult<ThreadReplyTarget> {
     use crate::models::nyxbot_channel::{EVENTS_COLLECTION_NAME as EVENTS, NyxbotEvent};
     let Some(channel) = db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -128,20 +128,189 @@ pub async fn reply_target(
         })
         .await?
     else {
-        return Ok(None);
+        return Err(ReplyError::target(reply_unavailable()));
     };
     let message = source.id.as_str();
     if !negotiated(&channel) {
-        return Ok(None);
+        return Err(ReplyError::target(reply_unavailable()));
     }
     if let Some(event) = db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {
         "channel_id":&channel.id,"event_id":message,"delivery.origin.thread.source_message_id":message,
-    }).await?
-        && let Some(delivery) = event.delivery
-        && let Some(conversation) = event.resolved_conversation_id
-    {
-        return super::resolution::resolve_admitted(db, adapter, bot, credentials,
-            &channel.user_id, &delivery.origin, &conversation).await;
+    }).await? {
+        let (owner, origin, conversation) = admitted_reply(&event, &channel, message).map_err(ReplyError::target)?;
+        crate::services::channel_thread_follow_service::validate_delivery(db, owner, origin, conversation)
+            .await.map_err(ReplyError::authority)?;
+        let mut target = super::resolution::resolve_for_reply(db, adapter, bot, credentials, message).await?;
+        target.admitted = Some((owner.into(), origin.clone(), conversation.into()));
+        return Ok(target);
     }
-    super::resolution::resolve_retained(db, adapter, bot, credentials, message).await
+    super::resolution::resolve_for_reply(db, adapter, bot, credentials, message).await
+}
+
+/// The committed admission is authoritative, including events from old
+/// replicas whose resolved ID still names an unused child reservation.
+pub(crate) fn admitted_reply<'a>(
+    event: &'a crate::models::nyxbot_channel::NyxbotEvent,
+    channel: &NyxbotChannel,
+    source: &str,
+) -> AppResult<(
+    &'a str,
+    &'a crate::models::assistant_conversation::ChannelOrigin,
+    &'a str,
+)> {
+    let origin = &event.delivery.as_ref().ok_or_else(unavailable)?.origin;
+    let binding = origin.thread.as_deref().ok_or_else(unavailable)?;
+    if event.channel_id != channel.id
+        || event.user_id != channel.user_id
+        || event.event_id != source
+        || binding.source_message_id != source
+        || event.resolved_thread_id.as_deref() != Some(&binding.child_id)
+        || origin.nyxbot_channel_id != channel.id
+        || origin.platform != channel.platform
+    {
+        return Err(unavailable());
+    }
+    let conversation = event
+        .conversation_id
+        .as_deref()
+        .or_else(|| {
+            origin
+                .org_execution
+                .is_none()
+                .then_some(event.resolved_conversation_id.as_deref())
+                .flatten()
+        })
+        .ok_or_else(unavailable)?;
+    Ok((
+        crate::services::org_channel_service::event_actor(event),
+        origin,
+        conversation,
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplyFailure {
+    Target,
+    Send,
+    Delayed,
+    Expired,
+    Transient,
+    Authorization,
+}
+
+impl ReplyFailure {
+    pub(crate) fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Target => Some("thread_target_rejected"),
+            Self::Send => Some("thread_reply_failed"),
+            Self::Delayed => Some("thread_delayed_reply_failed"),
+            Self::Expired => Some("thread_reply_reference_expired"),
+            Self::Transient | Self::Authorization => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ReplyError {
+    pub error: crate::errors::AppError,
+    pub class: ReplyFailure,
+}
+
+pub(crate) type ReplyResult<T> = Result<T, ReplyError>;
+
+impl From<crate::errors::AppError> for ReplyError {
+    fn from(error: crate::errors::AppError) -> Self {
+        let class = if matches!(
+            error,
+            crate::errors::AppError::Unauthorized(_) | crate::errors::AppError::Forbidden(_)
+        ) {
+            ReplyFailure::Authorization
+        } else {
+            ReplyFailure::Transient
+        };
+        Self { error, class }
+    }
+}
+
+impl From<mongodb::error::Error> for ReplyError {
+    fn from(error: mongodb::error::Error) -> Self {
+        crate::errors::AppError::from(error).into()
+    }
+}
+
+impl ReplyError {
+    pub(crate) fn target(error: crate::errors::AppError) -> Self {
+        Self {
+            error,
+            class: ReplyFailure::Target,
+        }
+    }
+
+    /// Call only at a live target/authority validator, never at caller auth or
+    /// provider lookup. These variants denote that validator's closed refusal.
+    pub(crate) fn authority(error: crate::errors::AppError) -> Self {
+        use crate::errors::AppError;
+        match error {
+            AppError::NotFound(_)
+            | AppError::Forbidden(_)
+            | AppError::Conflict(_)
+            | AppError::ChannelBotNotFound(_)
+            | AppError::ChannelBotInactive(_)
+            | AppError::ChannelConversationNotAddressable
+            | AppError::ChannelConversationNotReachable(_) => Self::target(error),
+            _ => Self::from(error),
+        }
+    }
+}
+
+/// Preflight failures add diagnostics only for known target refusals. Used
+/// capabilities and inconclusive lookups never alter bot health.
+pub(crate) async fn record_failure(
+    db: &mongodb::Database,
+    bot: &str,
+    owner: &str,
+    source: &str,
+    class: ReplyFailure,
+    error: &crate::errors::AppError,
+) {
+    if class.reason().is_some() {
+        record_outcome(db, bot, owner, source, class, error).await;
+    }
+}
+
+/// The part sender always preserves main's outbound diagnostic. Thread detail
+/// is additive; even an unclassified failure after the barrier is retained.
+pub(crate) async fn record_outcome(
+    db: &mongodb::Database,
+    bot: &str,
+    owner: &str,
+    source: &str,
+    class: ReplyFailure,
+    error: &crate::errors::AppError,
+) {
+    crate::services::channel_bot_service::record_outbound_outcome_with_reason(
+        db,
+        bot,
+        Some(error),
+        Some(class),
+    )
+    .await;
+    let Some(reason) = class.reason() else {
+        return;
+    };
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: owner.into(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    let _ = crate::services::audit_service::log_actor_event(db.clone(), &actor,
+        "nyxbot_thread_reply_failed", Some(serde_json::json!({
+            "channel_bot_id":bot,"source_message_id":source,"reason":reason,"error_code":error.error_code()
+        }))).await;
+}
+
+pub(super) fn reply_unavailable() -> crate::errors::AppError {
+    crate::errors::AppError::Conflict("thread_target_unavailable".into())
 }

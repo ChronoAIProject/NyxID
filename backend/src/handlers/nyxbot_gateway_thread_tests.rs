@@ -32,8 +32,16 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new(name: &str) -> Self {
+        Box::pin(Self::with_org(name, false)).await
+    }
+    async fn with_org(name: &str, org: bool) -> Self {
         let (state, calls, model) = setup(name).await;
-        let (mut row, key) = Box::pin(channel(&state, "gateway")).await;
+        let (mut row, key) = if org {
+            let (row, key, _, _) = org_channel_tests::org_channel(&state, false).await;
+            (row, key)
+        } else {
+            Box::pin(channel(&state, "gateway")).await
+        };
         row.platform = "lark".into();
         row.owner_sender_ids = vec!["human".into()];
         row.gateway_channel_id = Some("cmaeg1.ch.test".into());
@@ -54,6 +62,7 @@ impl Fixture {
             .unwrap();
         let mut bot = bot_doc("lark", "Thread helper");
         bot.insert("_id", &row.channel_bot_id);
+        bot.insert("user_id", row.bot_owner_id.as_deref().unwrap_or(OWNER));
         bot.insert("platform_bot_id", "ou_bot");
         bot.insert(
             "bot_token_encrypted",
@@ -85,7 +94,7 @@ impl Fixture {
         // default whose identity matches the source, rather than two defaults.
         assert_eq!(state.db.collection::<bson::Document>("channel_conversations").replace_one(
             doc! {"_id": &row.route_id},
-            doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,"platform":"lark","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,"default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}
+            doc! {"_id":&row.route_id,"user_id":row.bot_owner_id.as_deref().unwrap_or(OWNER),"channel_bot_id":&row.channel_bot_id,"platform":"lark","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,"default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}
         ).await.unwrap().matched_count, 1);
         state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":"follow-flag","org_user_id":bson::Bson::Null,"flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
         let gateway = MockServer::start().await;
@@ -184,7 +193,7 @@ impl Fixture {
         let source = crate::services::channel_relay_service::inbound_metadata(
             &self.row.channel_bot_id,
             self.row.route_id.as_deref().unwrap(),
-            OWNER,
+            self.row.bot_owner_id.as_deref().unwrap_or(OWNER),
             "lark",
             &inbound,
             &self.row.route_api_key_id,
@@ -1315,7 +1324,7 @@ async fn supplemental_followed_reply_preserves_thread_callback_variants_and_part
                     // CommonMark callback routes support Telegram only.
                     assert_eq!(status,StatusCode::BAD_REQUEST);
                     assert!(String::from_utf8_lossy(&bytes).contains("CommonMark relay formatting is supported for Telegram"));
-                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),1);
+                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),0);
                     assert_eq!(f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count(),usize::from(notice));
                     assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
                     f.state.db.drop().await.unwrap();
@@ -1337,4 +1346,1383 @@ async fn supplemental_followed_reply_preserves_thread_callback_variants_and_part
             }
         }
     }).await;
+}
+
+/// Exercise the public relay endpoint, including token dispatch and the adapter.
+pub(super) async fn post_thread_answer(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &str,
+    headers: &HeaderMap,
+) -> Response {
+    post_thread_body(
+        state,
+        row,
+        source,
+        headers,
+        json!({"text":"Answer in the original thread","attachments":[],"metadata":null}),
+        false,
+    )
+    .await
+}
+async fn post_thread_body(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &str,
+    headers: &HeaderMap,
+    reply: Value,
+    ordinary_endpoint: bool,
+) -> Response {
+    use tower::ServiceExt;
+    let adapter = thread_follow::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&row.channel_bot_id)
+        .cloned()
+        .unwrap();
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), adapter);
+    let app = Router::new()
+        .route(
+            "/api/v1/channel-relay/reply",
+            post(crate::handlers::channel_relay::async_reply),
+        )
+        .route(
+            "/api/v1/channel-relay/thread-reply",
+            post(crate::handlers::channel_relay::async_thread_reply),
+        )
+        .with_state(state.clone());
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(if ordinary_endpoint {
+            "/api/v1/channel-relay/reply"
+        } else {
+            "/api/v1/channel-relay/thread-reply"
+        })
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"message_id":source,"thread_reply":true,
+        "reply":reply})
+            .to_string(),
+        ))
+        .unwrap();
+    request.headers_mut().extend(headers.clone());
+    Box::pin(app.oneshot(request)).await.unwrap()
+}
+
+pub(super) fn thread_reply_headers(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &str,
+) -> (HeaderMap, String) {
+    let token = crate::crypto::jwt::generate_relay_reply_token(
+        &state.jwt_keys,
+        &state.config,
+        &row.route_api_key_id,
+        row.route_id.as_deref().unwrap(),
+        source,
+        "lark",
+    )
+    .unwrap();
+    let claims =
+        crate::crypto::jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, &token)
+            .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    (headers, claims.jti)
+}
+
+async fn org_member_group_dm_group(linking_admin: bool) {
+    use crate::services::org_channel_service as org;
+    let f = Box::pin(Fixture::with_org(
+        &format!("org_group_dm_group_{linking_admin}"),
+        true,
+    ))
+    .await;
+    assert!(!f.row.org_specialist.as_ref().unwrap().guests.enabled);
+    let actor = if linking_admin {
+        OWNER.to_owned()
+    } else {
+        let actor = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection("org_memberships")
+            .insert_one(crate::test_utils::test_membership(
+                f.row.bot_owner_id.as_deref().unwrap(),
+                &actor,
+                crate::models::org_membership::OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+        actor
+    };
+    let challenge = org::links::issue(&f.state.db, &actor, &f.row)
+        .await
+        .unwrap();
+    assert!(
+        org::links::receive(
+            &f.state.db,
+            &f.row,
+            "human",
+            challenge["code"].as_str().unwrap(),
+            None
+        )
+        .await
+        .unwrap()
+    );
+    org::links::confirm(
+        &f.state.db,
+        &actor,
+        &f.row,
+        challenge["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let parent = chats::record_chat(
+        &f.state,
+        &f.row,
+        &chats::group_partition("oc_chat", None),
+        &chats::ChatFacts {
+            kind: "group",
+            chat_id: "oc_chat".into(),
+            thread_id: None,
+            owner: true,
+            title: Some("QA group".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    f.state.db.collection::<bson::Document>(THREADS).update_one(doc! {"_id":&parent.id},
+        doc! {"$set":{"members":"everyone","reply_mode":"mention","owner_seen":true,"threads":"follow"}}).await.unwrap();
+    enable_relay_response_recovery(&f.state).await;
+    Mock::given(path("/channel-capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "relay_authoring":{"response_recovery_providers":["nyxbot"]}})))
+        .mount(&f.gateway)
+        .await;
+    Mock::given(path("/events/cmaeg1.ev.sealed-reference/reply-target")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "reply_target_ref":"cmaeg1.rt.recovery","expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()}))).mount(&f.gateway).await;
+    Mock::given(method("POST")).and(path("/open-apis/im/v1/messages/om_root/reply"))
+        .and(body_partial_json(json!({"reply_in_thread":true})))
+        .respond_with(|_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":format!("om_answer_{}",Uuid::new_v4().simple())}})))
+        .expect(3).mount(&f.platform).await;
+    Mock::given(method("POST"))
+        .and(path("/events/cmaeg1.ev.sealed-reference/replies"))
+        .and(body_partial_json(json!({"thread_reply":true})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&f.gateway)
+        .await;
+    let mut private_conversation = None;
+    let mut group_conversation = None;
+    for phase in 0..3 {
+        if phase == 1 {
+            let partition = "conv_00000000000000000000000000002455";
+            ensure_partition(&f.state, &f.key, partition).await;
+            let id = Uuid::new_v4().to_string();
+            let mut body = event("DM between group mentions", "human", &id);
+            body["conversation"] = json!(partition);
+            body["event_context"]["conversation_id"] = json!(partition);
+            body["event_context"]["activity"]["conversation"] =
+                json!({"id":"oc_private","kind":"private"});
+            body["event_context"]["activity"]["source"] =
+                json!({"type":"nyxid_relay","platform":"lark","route_id":f.row.route_id});
+            body["metadata"] = json!({"cmaeg.channel":&sha256_hex("cmaeg1.ch.test")[..16],"cmaeg.event":id,
+                "cmaeg.partition":"0123456789abcdef","cmaeg.actor":"human"});
+            let response = Box::pin(respond(&f.state, &f.key, &body, &id)).await;
+            assert!(response.headers().contains_key("x-cma-response-id"));
+            assert!(body_text(response).await.contains("Here is your answer"));
+            let event = f
+                .state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(doc! {"event_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            private_conversation = event.conversation_id;
+            assert_ne!(private_conversation, group_conversation);
+            continue;
+        }
+        let (body, id) = f
+            .input("Group mention", ThreadAddress::Mention, false, true)
+            .await;
+        let response = Box::pin(respond(&f.state, &f.key, &body, &id)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("x-cma-response-id"));
+        let text = body_text(response).await;
+        assert!(
+            text.contains("Here is your answer") && text.contains("\"thread_reply\":true"),
+            "{text}"
+        );
+        let event = f
+            .state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(event.turn_id.is_some());
+        assert_eq!(event.conversation_id, event.resolved_conversation_id);
+        let conversation = f
+            .state
+            .db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id":&event.conversation_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.user_id, actor);
+        assert!(!conversation.guest_turn);
+        assert!(
+            !conversation
+                .channel
+                .as_ref()
+                .unwrap()
+                .org_execution
+                .as_ref()
+                .unwrap()
+                .guest
+        );
+        group_conversation = event.conversation_id.clone();
+        assert_ne!(group_conversation, private_conversation);
+        let child = f.children().await.remove(0);
+        assert_ne!(child.conversation_id, event.conversation_id);
+        assert_ne!(child.follow.context_status.as_deref(), Some("pending"));
+        let listed = thread_controls::list(&f.state, OWNER, &f.row.id, None, &Default::default())
+            .await
+            .unwrap();
+        if linking_admin {
+            assert_eq!(listed["threads"][0]["conversation_id"], conversation.id);
+        } else {
+            assert!(
+                listed["threads"][0]["conversation_id"].is_null(),
+                "another member's lane is private"
+            );
+        }
+        let chats = serde_json::to_value(
+            chats::list_chats(&f.state, OWNER, Some(&f.row.id))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            chats
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["follow_readiness"] == "ready"
+                    && c["follow_guidance"]
+                        != "Thread follow is unavailable on this gateway version.")
+        );
+        let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+        if phase == 0 {
+            f.state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .update_one(
+                    doc! {"_id":&event.id},
+                    doc! {"$set":{"resolved_thread_id":"wrong-child"}},
+                )
+                .await
+                .unwrap();
+            let refused = Box::pin(post_thread_answer(&f.state, &f.row, &id, &headers)).await;
+            assert!(!refused.status().is_success());
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("reply_token_uses")
+                    .count_documents(doc! {"_id":&jti})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                bot.diagnostics
+                    .last_outbound_error
+                    .as_ref()
+                    .unwrap()
+                    .thread_reason
+                    .as_deref(),
+                Some("thread_target_rejected")
+            );
+            let health = crate::services::channel_bot_health::recommend(
+                &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true),
+            );
+            assert_eq!(health.action, "none");
+            assert_eq!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":&id,"event_data.reason":"thread_target_rejected"}).await.unwrap(),1);
+            f.state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .update_one(
+                    doc! {"_id":&event.id},
+                    doc! {"$set":{"resolved_thread_id":&child.id}},
+                )
+                .await
+                .unwrap();
+        } else {
+            // Old-admitter snapshot: the new reader must use committed admission without repairing the row.
+            f.state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .update_one(
+                    doc! {"_id":&event.id},
+                    doc! {"$set":{"resolved_conversation_id":&child.conversation_id}},
+                )
+                .await
+                .unwrap();
+            assert!(
+                gateway_threads::send(
+                    &f.state,
+                    &f.row,
+                    conversation.channel.as_ref().unwrap(),
+                    "wrong-conversation",
+                    "Delayed answer"
+                )
+                .await
+                .is_err()
+            );
+            let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                bot.diagnostics
+                    .last_outbound_error
+                    .unwrap()
+                    .thread_reason
+                    .as_deref(),
+                Some("thread_target_rejected")
+            );
+            assert_eq!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":&id,"event_data.reason":"thread_target_rejected"}).await.unwrap(),1);
+            gateway_threads::send(
+                &f.state,
+                &f.row,
+                conversation.channel.as_ref().unwrap(),
+                &conversation.id,
+                "Delayed answer",
+            )
+            .await
+            .unwrap();
+        }
+        if phase == 2 {
+            // Main's supplemental path must also accept the committed lane on
+            // pre-upgrade events, without consuming the final reply capability.
+            Box::pin(deliver_to_for(
+                &f.state,
+                &conversation,
+                conversation.channel.as_ref().unwrap(),
+                "Supplemental result",
+                None,
+                supplemental::Purpose::TeamResult,
+            ))
+            .await;
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {
+                        "event_type":"nyxbot_channel_supplemental_delivery",
+                        "event_data.conversation_id":&conversation.id,
+                        "event_data.channel_event_id":&event.id,
+                        "event_data.outcome":"confirmed",
+                        "event_data.egress":"local_relay",
+                    })
+                    .await
+                    .unwrap(),
+                1
+            );
+            let mut wrong_source = conversation.channel.as_ref().unwrap().clone();
+            wrong_source.thread.as_mut().unwrap().source_message_id = Uuid::new_v4().to_string();
+            Box::pin(deliver_to_for(
+                &f.state,
+                &conversation,
+                &wrong_source,
+                "Refused source",
+                None,
+                supplemental::Purpose::TeamResult,
+            ))
+            .await;
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {
+                        "event_type":"nyxbot_channel_supplemental_delivery",
+                        "event_data.conversation_id":&conversation.id,
+                        "event_data.outcome":"skipped",
+                        "event_data.reason":"authority_refused",
+                    })
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("reply_token_uses")
+                    .count_documents(doc! {"_id":&jti})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        let posted = Box::pin(post_thread_answer(&f.state, &f.row, &id, &headers)).await;
+        assert_eq!(
+            posted.status(),
+            StatusCode::OK,
+            "{}",
+            body_text(posted).await
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("reply_token_uses")
+                .count_documents(doc! {"_id":&jti})
+                .await
+                .unwrap(),
+            1
+        );
+        let before_replay = reply_state(&f, &id).await;
+        let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+            .await
+            .unwrap();
+        assert!(bot.diagnostics.last_outbound_error.is_none());
+        assert_eq!(
+            crate::services::channel_bot_health::recommend(
+                &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
+            )
+            .action,
+            "gateway"
+        );
+        let reused = Box::pin(post_thread_answer(&f.state, &f.row, &id, &headers)).await;
+        assert_eq!(reused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(reply_state(&f, &id).await, before_replay);
+        let posts: Vec<_> = f
+            .platform
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path() == "/open-apis/im/v1/messages/om_root/reply")
+            .collect();
+        assert_eq!(posts.len(), if phase == 0 { 1 } else { 3 });
+        assert!(
+            posts
+                .iter()
+                .all(|r| r.body_json::<Value>().unwrap()["reply_in_thread"] == true)
+        );
+        let after = f
+            .state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&event.id})
+            .await
+            .unwrap()
+            .unwrap();
+        if phase == 2 {
+            assert_eq!(
+                after.resolved_conversation_id, child.conversation_id,
+                "compatibility must not edit the old event"
+            );
+        }
+    }
+    assert_eq!(f.calls.lock().await.len(), 3);
+    f.platform.verify().await;
+    f.gateway.verify().await;
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&f.row.channel_bot_id);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn qa_linking_org_admin_followed_group_then_dm_then_group_delivers_each_group_reply() {
+    Box::pin(org_member_group_dm_group(true)).await;
+}
+#[tokio::test]
+async fn qa_non_linking_org_member_followed_group_then_dm_then_group_delivers_each_group_reply() {
+    Box::pin(org_member_group_dm_group(false)).await;
+}
+
+#[tokio::test]
+async fn gateway_thread_reply_concurrent_token_dispatches_once_and_unknown_effect_keeps_token() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_token_dispatch")).await;
+        Mock::given(method("POST")).and(path("/open-apis/im/v1/messages/om_root/reply"))
+            // An unusable platform response has an unknown effect; no second POST is safe.
+            .respond_with(ResponseTemplate::new(200).set_body_string("unconfirmed"))
+            .expect(1).mount(&f.platform).await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+        let (a,b) = tokio::join!(post_thread_answer(&f.state,&f.row,&id,&headers),post_thread_answer(&f.state,&f.row,&id,&headers));
+        assert!(!a.status().is_success());assert!(!b.status().is_success());
+        assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc! {"_id":jti}).await.unwrap(),1);
+        let before_replay = reply_state(&f, &id).await;
+        assert_eq!(post_thread_answer(&f.state,&f.row,&id,&headers).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(reply_state(&f, &id).await, before_replay);
+        let receipts: Vec<bson::Document> = f.state.db.collection("channel_reply_deliveries")
+            .find(doc!{"inbound_message_id":&id}).await.unwrap().try_collect().await.unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].get_array("parts").unwrap()[0].as_document().unwrap().get_str("status"), Ok("uncertain"));
+        let bot=channel_bot_service::get_bot(&f.state.db,&f.row.channel_bot_id).await.unwrap();
+        assert_eq!(bot.diagnostics.last_outbound_error.unwrap().thread_reason.as_deref(),Some("thread_reply_failed"));
+        assert_eq!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":&id}).await.unwrap(),1);
+        f.platform.verify().await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn gateway_thread_reply_revoked_route_records_health_without_consuming_token() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_revoked_route")).await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        f.state
+            .db
+            .collection::<bson::Document>("channel_conversations")
+            .update_one(
+                doc! {"_id":&f.row.route_id},
+                doc! {"$set":{"is_active":false}},
+            )
+            .await
+            .unwrap();
+        let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+        assert!(
+            !post_thread_answer(&f.state, &f.row, &id, &headers)
+                .await
+                .status()
+                .is_success()
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("reply_token_uses")
+                .count_documents(doc! {"_id":jti})
+                .await
+                .unwrap(),
+            0
+        );
+        let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            bot.diagnostics
+                .last_outbound_error
+                .unwrap()
+                .thread_reason
+                .as_deref(),
+            Some("thread_target_rejected")
+        );
+        assert!(
+            f.platform
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| !r.url.path().ends_with("/reply"))
+        );
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+// Snapshot all delivery and owner-visible effects; a token replay may change none.
+async fn reply_state(f: &Fixture, source: &str) -> bson::Document {
+    let bot = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.row.channel_bot_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let receipts: Vec<bson::Document> = f
+        .state
+        .db
+        .collection("channel_reply_deliveries")
+        .find(doc! {"inbound_message_id":source})
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let audits: Vec<bson::Document> = f
+        .state
+        .db
+        .collection(crate::models::audit_log::COLLECTION_NAME)
+        .find(
+            doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":source},
+        )
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    doc! {"diagnostics":bot.get("diagnostics").cloned().unwrap_or(bson::Bson::Null),"receipts":receipts,"audits":audits}
+}
+
+#[tokio::test]
+async fn gateway_thread_reply_concurrent_success_and_replay_leave_health_and_receipt_unchanged() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_token_success")).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages/om_root/reply"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(150))
+                    .set_body_json(json!({"code":0,"data":{"message_id":"om_sent"}})),
+            )
+            .expect(1)
+            .mount(&f.platform)
+            .await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let (headers, _) = thread_reply_headers(&f.state, &f.row, &id);
+        let (a, b) = tokio::join!(
+            post_thread_answer(&f.state, &f.row, &id, &headers),
+            post_thread_answer(&f.state, &f.row, &id, &headers)
+        );
+        assert!(
+            (a.status() == StatusCode::OK && b.status() == StatusCode::UNAUTHORIZED)
+                || (b.status() == StatusCode::OK && a.status() == StatusCode::UNAUTHORIZED)
+        );
+        let before = reply_state(&f, &id).await;
+        assert_eq!(before.get_array("receipts").unwrap().len(), 1);
+        assert!(
+            before.get_array("receipts").unwrap()[0]
+                .as_document()
+                .unwrap()
+                .get_bool("complete")
+                .unwrap()
+        );
+        assert!(before.get_array("audits").unwrap().is_empty());
+        assert!(matches!(
+            before
+                .get_document("diagnostics")
+                .unwrap()
+                .get("last_outbound_error"),
+            Some(bson::Bson::Null)
+        ));
+        assert_eq!(
+            post_thread_answer(&f.state, &f.row, &id, &headers)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(reply_state(&f, &id).await, before);
+        f.platform.verify().await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+async fn delayed_source_identity(newer_message: bool) {
+    let f = Box::pin(Fixture::new("delayed_source_identity")).await;
+    Mock::given(method("POST"))
+        .and(path("/events/cmaeg1.ev.sealed-reference/replies"))
+        .and(body_partial_json(json!({"text":"delayed"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .expect(1)
+        .mount(&f.gateway)
+        .await;
+    let (body, id) = f.input("first", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&body, &id).await.contains("Here is your answer"));
+    let event = f
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"event_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut origin = event.delivery.unwrap().origin;
+    let conversation = event.conversation_id.unwrap();
+    if newer_message {
+        let (body, next) = f.input("newer", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &next).await.contains("Here is your answer"));
+        let next = f
+            .state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":next})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.conversation_id.as_deref(), Some(conversation.as_str()));
+        assert_ne!(
+            next.delivery
+                .unwrap()
+                .origin
+                .thread
+                .unwrap()
+                .source_message_id,
+            id
+        );
+    } else {
+        // Seed the retained ingress at its pre-admission boundary, then use the
+        // real queue admission and committed-source projection.
+        f.state.db.collection::<bson::Document>(EVENTS).update_one(doc!{"_id":&event.id},
+            doc!{"$set":{"status":"running","turn_id":bson::Bson::Null,"delivery.state":"waiting"}}).await.unwrap();
+        let mut work = crate::services::assistant_team_service::bound_event(
+            "message",
+            "queued question".into(),
+            None,
+            None,
+        );
+        work.source_event_ids = vec![event.id.clone()];
+        work.reply_to = vec![origin.clone()];
+        assert!(
+            crate::services::channel_turn_delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                &conversation,
+                work,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        let mut tx = f.state.db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        origin = crate::services::channel_turn_delivery::queued_origin_in_session(
+            &f.state.db,
+            OWNER,
+            &conversation,
+            &event.id,
+            &mut tx,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tx.commit_transaction().await.unwrap();
+        assert!(origin.thread.as_ref().unwrap().queued);
+        origin.native_event_id = Some("queue-bookkeeping".into());
+    }
+    gateway_threads::send(&f.state, &f.row, &origin, &conversation, "delayed")
+        .await
+        .unwrap();
+    // A completed gateway refusal keeps main's NotFound error and adds only
+    // bounded diagnostic evidence. No retry or delivery-state mutation occurs.
+    for status in [429, 503] {
+        let text = format!("temporary {status}");
+        Mock::given(method("POST"))
+            .and(path("/events/cmaeg1.ev.sealed-reference/replies"))
+            .and(body_partial_json(json!({"text":text})))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(json!({"error":"unavailable"})),
+            )
+            .expect(1)
+            .mount(&f.gateway)
+            .await;
+        let before = f
+            .state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&event.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let error = gateway_threads::send(&f.state, &f.row, &origin, &conversation, &text)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+        let after = f
+            .state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&event.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_document(&before).unwrap(),
+            bson::to_document(&after).unwrap()
+        );
+        let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            bot.diagnostics
+                .last_outbound_error
+                .unwrap()
+                .thread_reason
+                .as_deref(),
+            Some("thread_delayed_reply_failed")
+        );
+    }
+    // Expiry has its own closed, non-actionable recommendation.
+    f.state.db.collection::<bson::Document>(EVENTS).update_one(doc!{"_id":&event.id},
+        doc!{"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(30))}}).await.unwrap();
+    assert!(
+        gateway_threads::send(&f.state, &f.row, &origin, &conversation, "expired")
+            .await
+            .is_err()
+    );
+    let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        bot.diagnostics
+            .last_outbound_error
+            .as_ref()
+            .unwrap()
+            .thread_reason
+            .as_deref(),
+        Some("thread_reply_reference_expired")
+    );
+    assert_eq!(
+        crate::services::channel_bot_health::recommend(
+            &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
+        )
+        .action,
+        "none"
+    );
+    f.gateway.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+#[tokio::test]
+async fn delayed_thread_update_accepts_queued_origin_without_retargeting() {
+    Box::pin(delayed_source_identity(false)).await;
+}
+#[tokio::test]
+async fn delayed_thread_update_keeps_original_source_after_newer_message() {
+    Box::pin(delayed_source_identity(true)).await;
+}
+
+#[tokio::test]
+async fn thread_health_records_closed_failures_once_excludes_transients_and_clears_on_success() {
+    use crate::services::channel_thread_service::gateway::{
+        ReplyError, ReplyFailure, record_failure,
+    };
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_health_classes")).await;
+        let (notices, mut received) = tokio::sync::mpsc::unbounded_channel();
+        crate::services::channel_bot_health::TEST_NOTICES
+            .lock()
+            .unwrap()
+            .insert(f.row.channel_bot_id.clone(), notices);
+        let before = reply_state(&f, "source").await;
+        for error in [
+            AppError::Unauthorized("Reply token already used".into()),
+            AppError::Forbidden("invalid caller".into()),
+            AppError::Internal("database/transport unavailable".into()),
+            AppError::DatabaseError(mongodb::error::Error::custom("unavailable")),
+            AppError::RateLimited,
+            AppError::BillingProviderUnavailable("temporary".into()),
+            AppError::ChannelPlatformError("provider (HTTP 503)".into()),
+            AppError::ChannelPlatformError("provider (HTTP 429)".into()),
+        ] {
+            let failure = ReplyError::from(error);
+            assert!(matches!(
+                failure.class,
+                ReplyFailure::Authorization | ReplyFailure::Transient
+            ));
+            record_failure(
+                &f.state.db,
+                &f.row.channel_bot_id,
+                OWNER,
+                "source",
+                failure.class,
+                &failure.error,
+            )
+            .await;
+        }
+
+        assert_eq!(reply_state(&f, "source").await, before);
+        record_failure(
+            &f.state.db,
+            &f.row.channel_bot_id,
+            OWNER,
+            "source",
+            ReplyFailure::Target,
+            &AppError::Conflict("thread_target_unavailable".into()),
+        )
+        .await;
+        assert_eq!(
+            reply_state(&f, "source")
+                .await
+                .get_array("audits")
+                .unwrap()
+                .len(),
+            1
+        );
+        let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::services::channel_bot_health::recommend(
+                &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
+            )
+            .action,
+            "none"
+        );
+        channel_bot_service::record_outbound_outcome(&f.state.db, &f.row.channel_bot_id, None)
+            .await;
+        let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+            .await
+            .unwrap();
+        assert!(bot.diagnostics.last_outbound_error.is_none());
+        assert_eq!(
+            crate::services::channel_bot_health::recommend(
+                &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
+            )
+            .action,
+            "gateway"
+        );
+        assert!(
+            received.try_recv().is_err(),
+            "outbound diagnostics do not transition bot status or notify_failure"
+        );
+        crate::services::channel_bot_health::TEST_NOTICES
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn org_thread_projection_excludes_guest_other_actor_destroyed_and_superseded_lanes() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::with_org("org_projection_bounds", true)).await;
+        let challenge =
+            crate::services::org_channel_service::links::issue(&f.state.db, OWNER, &f.row)
+                .await
+                .unwrap();
+        assert!(
+            crate::services::org_channel_service::links::receive(
+                &f.state.db,
+                &f.row,
+                "human",
+                challenge["code"].as_str().unwrap(),
+                None
+            )
+            .await
+            .unwrap()
+        );
+        crate::services::org_channel_service::links::confirm(
+            &f.state.db,
+            OWNER,
+            &f.row,
+            challenge["id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let (body, id) = f
+            .input("mention", ThreadAddress::Mention, false, true)
+            .await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let event = f
+            .state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        let conversation = event.conversation_id.unwrap();
+        let children = f.children().await;
+        let channels = std::slice::from_ref(&f.row);
+        assert_eq!(
+            follow::actor_conversations(&f.state.db, OWNER, &children, channels)
+                .await
+                .unwrap()
+                .get(&children[0].id),
+            Some(&conversation)
+        );
+        assert!(
+            follow::actor_conversations(&f.state.db, "different-viewer", &children, channels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A member lane's contents must still satisfy the non-guest identity.
+        f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&conversation},
+                doc! {"$set":{"guest_turn":true}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            follow::actor_conversations(&f.state.db, OWNER, &children, channels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&conversation},
+                doc! {"$set":{"guest_turn":false}},
+            )
+            .await
+            .unwrap();
+        let mut changed_channel = f.row.clone();
+        changed_channel.follow_binding_generation += 1;
+        assert!(
+            follow::actor_conversations(
+                &f.state.db,
+                OWNER,
+                &children,
+                std::slice::from_ref(&changed_channel)
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let mut newer = children.clone();
+        newer[0].follow.binding_generation += 1;
+        assert!(
+            follow::actor_conversations(&f.state.db, OWNER, &newer, channels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let agent = children[0].follow.bound_agent_id.as_ref().unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":agent},
+                doc! {"$set":{"destroyed_at":bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            follow::actor_conversations(&f.state.db, OWNER, &children, channels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            follow::actor_conversations(&f.state.db, OWNER, &[], channels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn body_thread_reply_lark_card_consumes_before_platform_dispatch() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_body_card")).await;
+        let (body, id) = f.input("first", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let posted = Arc::new(tokio::sync::Notify::new());
+        let observed = posted.clone();
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages/om_root/reply"))
+            .and(body_partial_json(
+                json!({"reply_in_thread":true,"msg_type":"interactive"}),
+            ))
+            .respond_with(move |_: &wiremock::Request| {
+                observed.notify_one();
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(100))
+                    .set_body_json(json!({"code":0,"data":{"message_id":"om_card"}}))
+            })
+            .expect(1)
+            .mount(&f.platform)
+            .await;
+        let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+        let card = json!({"text":null,"attachments":[],"metadata":{"card":{"elements":[]}}});
+        let mut request = Box::pin(post_thread_body(&f.state, &f.row, &id, &headers, card.clone(), true));
+        tokio::select! {
+            response = &mut request => panic!("request ended before adapter POST: {}",response.status()),
+            _ = posted.notified() => {}
+        }
+        assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{"_id":&jti}).await.unwrap(),1);
+        let response = request.await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            body_text(response).await
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("reply_token_uses")
+                .count_documents(doc! {"_id":jti})
+                .await
+                .unwrap(),
+            1
+        );
+        let before = reply_state(&f, &id).await;
+        assert_eq!(
+            post_thread_body(&f.state, &f.row, &id, &headers, card, true)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(reply_state(&f, &id).await, before);
+        f.platform.verify().await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+async fn inbound_lookup_preserves_legacy_fallback(org: bool) {
+    for (status, timeout, usable_body) in [
+        (403, false, false),
+        (500, false, false),
+        (200, true, false),
+        (403, false, true),
+        (200, false, true),
+    ] {
+        let f = Box::pin(Fixture::with_org(
+            &format!("inbound_lookup_{org}_{status}_{timeout}_{usable_body}"),
+            org,
+        ))
+        .await;
+        if org {
+            use crate::services::org_channel_service::links;
+            let challenge = links::issue(&f.state.db, OWNER, &f.row).await.unwrap();
+            assert!(
+                links::receive(
+                    &f.state.db,
+                    &f.row,
+                    "human",
+                    challenge["code"].as_str().unwrap(),
+                    None
+                )
+                .await
+                .unwrap()
+            );
+            links::confirm(
+                &f.state.db,
+                OWNER,
+                &f.row,
+                challenge["id"].as_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        let (mut body, id) = f
+            .input(
+                "thread lookup fallback",
+                ThreadAddress::Mention,
+                false,
+                true,
+            )
+            .await;
+        body["event_context"]["activity"]["thread"]
+            .as_object_mut()
+            .unwrap()
+            .remove("root_id");
+        let native = body["event_context"]["activity"]["thread"]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let response_body = if usable_body {
+            json!({"code":0,"data":{"items":[{"message_id":native,"chat_id":"oc_chat","root_id":"om_root","thread_id":"omt_thread"}]}})
+        } else {
+            json!({"code":999,"msg":"message history unavailable"})
+        };
+        let mut response = ResponseTemplate::new(status).set_body_json(response_body);
+        if timeout {
+            response = response.set_delay(Duration::from_secs(10));
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("/open-apis/im/v1/messages/{native}")))
+            .respond_with(response)
+            .mount(&f.platform)
+            .await;
+        let answer = f.send(&body, &id).await;
+        assert!(answer.contains("Here is your answer"), "{answer}");
+        // Main's bounded_response rejects non-success status before JSON is
+        // parsed, even if the body would otherwise identify a valid thread.
+        let resolved = status == 200 && usable_body && !timeout;
+        assert_eq!(answer.contains("\"thread_reply\":true"), resolved);
+        assert_eq!(f.children().await.len(), usize::from(resolved));
+        assert_eq!(f.calls.lock().await.len(), 1);
+        assert!(
+            f.platform
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path().ends_with(&native))
+        );
+        if !resolved {
+            // The same inconclusive lookup on the reply-only path preserves the
+            // capability and cannot invent a closed authority rejection.
+            let before = reply_state(&f, &id).await;
+            let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+            let response = post_thread_answer(&f.state, &f.row, &id, &headers).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(reply_state(&f, &id).await, before);
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("reply_token_uses")
+                    .count_documents(doc! {"_id":jti})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn personal_inbound_thread_lookup_refusal_timeout_and_http_body_keep_main_fallback() {
+    Box::pin(inbound_lookup_preserves_legacy_fallback(false)).await;
+}
+
+#[tokio::test]
+async fn org_inbound_thread_lookup_refusal_timeout_and_http_body_keep_main_fallback() {
+    Box::pin(inbound_lookup_preserves_legacy_fallback(true)).await;
+}
+
+#[tokio::test]
+async fn thread_send_platform_429_and_500_preserve_outbound_reason_and_add_one_thread_audit() {
+    Box::pin(async {
+        for (status, reason) in [(429, "rate_limited"), (500, "provider_unavailable")] {
+            let f = Box::pin(Fixture::new(&format!("thread_send_status_{status}"))).await;
+            Mock::given(method("POST")).and(path("/open-apis/im/v1/images"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({"message":format!("refused (HTTP {status})")})))
+                .expect(1).mount(&f.platform).await;
+            let (body, id) = f.input("answer with image", ThreadAddress::Mention, false, true).await;
+            assert!(f.send(&body, &id).await.contains("Here is your answer"));
+            let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+            let reply = json!({"text":null,"metadata":null,"attachments":[{"kind":"image","source":{"type":"base64","data":"aW1hZ2U="}}]});
+            assert!(!post_thread_body(&f.state, &f.row, &id, &headers, reply, false).await.status().is_success());
+            let bot = channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id).await.unwrap();
+            let error = bot.diagnostics.last_outbound_error.unwrap();
+            assert_eq!(error.reason.as_deref(), Some(reason));
+            assert_eq!(error.thread_reason.as_deref(), Some("thread_reply_failed"));
+            let before = reply_state(&f, &id).await;
+            assert_eq!(before.get_array("audits").unwrap().len(), 1);
+            assert_eq!(before.get_array("receipts").unwrap().len(), 1);
+            assert_eq!(post_thread_answer(&f.state, &f.row, &id, &headers).await.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(reply_state(&f, &id).await, before);
+            assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{"_id":jti}).await.unwrap(), 1);
+            f.platform.verify().await;
+            crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().remove(&f.row.channel_bot_id);
+            f.state.db.drop().await.unwrap();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn malformed_thread_reply_preserves_main_errors_token_and_health() {
+    Box::pin(async {
+        let f = Box::pin(Fixture::new("thread_component_errors")).await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let (headers, jti) = thread_reply_headers(&f.state, &f.row, &id);
+        let before = reply_state(&f, &id).await;
+        let full_text = "x"
+            .repeat(crate::services::channel_text::TextLimit::for_platform("lark").budget() * 64);
+        for (text, attachments, code) in [
+            (String::new(), json!([]), 1008),
+            (
+                full_text.clone(),
+                json!([{
+                    "kind":"image", "source":{"type":"base64","data":"aW1hZ2U="}
+                }]),
+                10011,
+            ),
+            (
+                full_text,
+                json!([{
+                    "kind":"image", "source":{"type":"base64","data":"aW1hZ2U="},
+                    "caption":"one more text part"
+                }]),
+                10011,
+            ),
+        ] {
+            let response = post_thread_body(
+                &f.state,
+                &f.row,
+                &id,
+                &headers,
+                json!({"text":text,"attachments":attachments,"metadata":null}),
+                false,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let error: Value = serde_json::from_str(&body_text(response).await).unwrap();
+            assert_eq!(error["error_code"], code);
+            if code == 10011 {
+                assert_eq!(error["error"], "channel_conversation_not_reachable");
+            }
+            assert_eq!(reply_state(&f, &id).await, before);
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("reply_token_uses")
+                    .count_documents(doc! {"_id":&jti})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert!(
+            !f.platform
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    request.url.path().ends_with("/reply")
+                        || request.url.path().ends_with("/images")
+                })
+        );
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&f.row.channel_bot_id);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
 }

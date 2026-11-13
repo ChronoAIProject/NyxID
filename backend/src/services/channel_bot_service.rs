@@ -1860,14 +1860,27 @@ pub async fn record_outbound_outcome(
     bot_id: &str,
     error: Option<&crate::errors::AppError>,
 ) {
+    record_outbound_outcome_with_reason(db, bot_id, error, None).await;
+}
+
+pub(crate) async fn record_outbound_outcome_with_reason(
+    db: &mongodb::Database,
+    bot_id: &str,
+    error: Option<&crate::errors::AppError>,
+    thread_failure: Option<super::channel_thread_service::gateway::ReplyFailure>,
+) {
     let update = match error {
-        Some(error) => doc! { "$set": {
-            "diagnostics.last_outbound_error": {
+        Some(error) => {
+            let mut failure = doc! {
                 "code": error.error_code().to_string(),
                 "reason": super::channel_bot_health::failure_code(error),
                 "at": mongodb::bson::DateTime::now(),
-            },
-        } },
+            };
+            if let Some(reason) = thread_failure.and_then(|class| class.reason()) {
+                failure.insert("thread_reason", reason);
+            }
+            doc! { "$set": { "diagnostics.last_outbound_error": failure } }
+        }
         None => doc! { "$set": {
             "diagnostics.last_outbound_at": mongodb::bson::DateTime::now(),
             "diagnostics.last_outbound_error": mongodb::bson::Bson::Null,
