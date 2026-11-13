@@ -10,6 +10,7 @@ import * as emailLogin from "./emailLogin";
 import * as publicAuthConfig from "./publicAuthConfig";
 import * as socialCallback from "./socialCallback";
 import { loadTestModule } from "../../lib/api/apiUrlTestHarness";
+import { spacing } from "../../theme/designTokens";
 
 type Element = { type: unknown; props: Record<string, any> };
 type LoginInput = ReturnType<typeof emailLogin.passwordLoginInput>;
@@ -52,12 +53,14 @@ function setup({
   emailEnabled = true,
   getFrontendUrl = () => "https://nyxid.example",
   beforeMount = () => {},
+  platform = "ios",
 }: {
   state?: "ready" | "loading" | "error";
   providers?: PublicAuthConfig["socialProviders"];
   emailEnabled?: boolean;
   getFrontendUrl?: () => string;
   beforeMount?: () => void;
+  platform?: "ios" | "android";
 } = {}) {
   const config: PublicAuthConfig = {
     emailAuthEnabled: emailEnabled,
@@ -76,6 +79,7 @@ function setup({
   let currentConfig = config;
   let configRefetches = 0;
   const appStateListeners: Array<(state: string) => void> = [];
+  let keyboardVisible = false;
   const colors = new Proxy(
     { dangerTone: { bg: "#fee", border: "#f00" } },
     { get: (target, key) => Reflect.get(target, key) ?? "#111" },
@@ -125,7 +129,8 @@ function setup({
           "KeyboardAvoidingView",
         ].map((name) => [name, name]),
       ),
-      Platform: { OS: "ios" },
+      Platform: { OS: platform },
+      Keyboard: { metrics: () => keyboardVisible ? { screenY: 500 } : undefined },
       StyleSheet: { create: (styles: unknown) => styles },
       AppState: {
         currentState: "active",
@@ -259,6 +264,8 @@ function setup({
     registrationUrls,
     waitlistUrls,
     navigations,
+    showKeyboard: () => { keyboardVisible = true; },
+    hideKeyboard: () => { keyboardVisible = false; },
     configRefetches: () => configRefetches,
     setLogin: (handler: typeof login) => {
       login = handler;
@@ -280,6 +287,247 @@ function setup({
     },
   };
 }
+
+for (const platform of ["ios", "android"] as const) {
+  test(`email form keeps its actions scrollable with native keyboard handling (${platform})`, async (t) => {
+    const screen = setup({
+      platform,
+      providers: ["google", "github", "apple"],
+    });
+    t.after(screen.harness.unmount);
+    const scroller = elements(screen.harness.value()).find(
+      (element) => element.type === "ScrollView",
+    );
+    assert.ok(scroller);
+    assert.equal(
+      scroller.props.automaticallyAdjustKeyboardInsets,
+      platform === "ios",
+    );
+    assert.equal(
+      scroller.props.keyboardDismissMode,
+      platform === "ios" ? "interactive" : "on-drag",
+    );
+    assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
+    assert.ok(
+      elements(scroller).includes(screen.submit()),
+      "submit remains inside the keyboard-adjusted scroll content",
+    );
+    assert.equal(
+      elements(screen.harness.value()).some(
+        (element) => element.type === "KeyboardAvoidingView",
+      ),
+      false,
+      "keyboard space is reserved only once",
+    );
+
+    const scrolls: unknown[] = [];
+    scroller.props.ref.current = {
+      getNativeScrollRef: () => ({
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(0, 120, 390, 700),
+      }),
+      scrollTo: (position: unknown) => scrolls.push(plain(position)),
+    };
+    const inputGeometry = (label: string, top: number) => {
+      screen.input(label).props.ref.current = {
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(40, top, 300, 28),
+      };
+    };
+    inputGeometry("Email", 200);
+    inputGeometry("Password", 480);
+    screen.input("Email").props.onFocus();
+    assert.equal(
+      scrolls.length,
+      0,
+      "initial keyboard animation is owned by the native scroll view",
+    );
+    screen.showKeyboard();
+    scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 350 } } });
+    screen.input("Password").props.onFocus();
+    screen.input("Email").props.onFocus();
+    assert.deepEqual(
+      scrolls,
+      platform === "ios"
+        ? [{ y: 350 + 480 + 28 + spacing.xl - 500, animated: true }]
+        : [],
+      "measure real window coordinates so native header and safe-area offsets are respected; leave an already-visible field in place",
+    );
+    inputGeometry("Email", 110);
+    screen.input("Email").props.onFocus();
+    if (platform === "ios")
+      assert.deepEqual(
+        scrolls.at(-1),
+        { y: 350 + 110 - 120 - spacing.xl, animated: true },
+        "a field above the visible viewport also becomes reachable",
+      );
+
+    screen.setLogin(async () => {
+      throw new Error("Invalid email or password");
+    });
+    screen.change("Email", "reviewer@example.test");
+    screen.change("Password", "wrong-password");
+    screen.submit().props.onPress();
+    await screen.harness.settle();
+    const nextScroller = elements(screen.harness.value()).find(
+      (element) => element.type === "ScrollView",
+    );
+    assert.ok(nextScroller);
+    assert.match(textContent(nextScroller), /Invalid email or password/);
+    assert.ok(elements(nextScroller).includes(screen.submit()));
+  });
+}
+
+test("focus reveal waits for a mounted native scroll viewport", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let mounted = false;
+  let inputMeasurements = 0;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () =>
+      mounted
+        ? {
+            measureInWindow: (callback: (...args: number[]) => void) =>
+              callback(0, 120, 390, 700),
+          }
+        : null,
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) => {
+      inputMeasurements++;
+      callback(40, 480, 300, 28);
+    },
+  };
+  screen.showKeyboard();
+  assert.doesNotThrow(() => screen.input("Password").props.onFocus());
+  assert.equal(inputMeasurements, 0);
+  assert.deepEqual(scrolls, []);
+
+  mounted = true;
+  screen.input("Password").props.onFocus();
+  assert.equal(inputMeasurements, 1);
+  assert.deepEqual(scrolls, [
+    { y: 480 + 28 + spacing.xl - 500, animated: true },
+  ]);
+});
+
+test("MFA focus is revealed while the software keyboard is already open", async (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  screen.setLogin(async () => {
+    throw new MfaChallengeError("test-mfa-token");
+  });
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  const scrolls: unknown[] = [];
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Authenticator code").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 490, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Authenticator code").props.onFocus();
+  assert.deepEqual(scrolls, [
+    { y: 490 + 28 + spacing.xl - 500, animated: true },
+  ]);
+});
+
+test("late field measurements do not scroll after focus changes or the keyboard closes", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  let emailMeasurement: ((...args: number[]) => void) | undefined;
+  screen.input("Email").props.ref.current = {
+    measureInWindow: (callback: typeof emailMeasurement) => {
+      emailMeasurement = callback;
+    },
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 480, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Email").props.onFocus();
+  screen.input("Password").props.onFocus();
+  assert.equal(scrolls.length, 1);
+  assert.ok(emailMeasurement);
+  emailMeasurement(40, 600, 300, 28);
+  assert.equal(
+    scrolls.length,
+    1,
+    "ignore the old field after a newer field has focused",
+  );
+  screen.input("Email").props.onFocus();
+  screen.hideKeyboard();
+  emailMeasurement(40, 600, 300, 28);
+  assert.equal(
+    scrolls.length,
+    1,
+    "keyboard dismissal invalidates a pending reveal",
+  );
+});
+
+test("a native scroll between field and viewport measurements invalidates the old geometry", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let viewportMeasurement: ((...args: number[]) => void) | undefined;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: typeof viewportMeasurement) => {
+        viewportMeasurement = callback;
+      },
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Email").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 800, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Email").props.onFocus();
+  assert.ok(viewportMeasurement);
+  scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 600 } } });
+  viewportMeasurement(0, 120, 390, 700);
+  assert.deepEqual(
+    scrolls,
+    [],
+    "native keyboard adjustment already moved the field; stale screen coordinates must not add a second scroll",
+  );
+});
 
 for (const emailEnabled of [false, true]) {
   test(`email login adopts the session when registration is ${emailEnabled ? "enabled" : "disabled"}`, async (t) => {

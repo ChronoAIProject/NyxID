@@ -251,5 +251,7 @@
   "Your device's language": "设备语言",
   "Your name": "您的姓名",
   "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您保存的声音（{{voice}}）已不可用。请选择声音以继续。",
-  "{{name}}, {{count}} pending": "{{name}}，{{count}} 项待处理"
+  "{{name}}, {{count}} pending": "{{name}}，{{count}} 项待处理",
+  "Unable to open link": "无法打开链接",
+  "Try again, or open the link outside NyxID.": "请重试，或在 NyxID 之外打开此链接。"
 }
