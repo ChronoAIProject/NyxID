@@ -476,6 +476,13 @@ async fn clear_key_bindings(
         Some(s) => expire.session(s).await?,
         None => expire.await?,
     };
+    super::assistant_notification_service::resolve_cards(
+        db,
+        super::assistant_notification_service::CardScope::ApiKey(key_id),
+        "superseded",
+        session.as_deref_mut(),
+    )
+    .await?;
     let conversation_collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     let update = conversation_collection.update_many(
         doc! {"user_id": user_id, "credential_api_key_id": key_id},

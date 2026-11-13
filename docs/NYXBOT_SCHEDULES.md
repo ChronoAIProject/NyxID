@@ -191,6 +191,23 @@ sends, but can still terminate a new notification lease as interrupted; upgrade
 and drain all scheduler workers to obtain the new retry/status guarantees.
 There is no automatic replay or backfill of terminal historical failures.
 
+### Notifications feed and scheduled digests
+
+The default-off `assistant:notifications` flag adds a separate per-person
+[Notifications feed](chat/12-notifications.md). A terminal run contributes one
+result or actionable problem row, using the saved run and delivery states;
+auto-pause notices retain their existing identities. Feed push preferences
+start off for every kind. A run already delivering to `notification` suppresses
+the feed's push so the owner receives one result push. The feed sends only
+through FCM/APNs; Telegram and channel bots remain automation `chat`
+destinations.
+
+An owner can schedule NyxBot to prepare a morning digest using the read-only
+`nyxid__list_notifications` tool. NyxBot trigger turns may call it with a time
+window, kinds, unread-only selector and at most 50 results. Tool reads do not
+mark entries seen. Upgrade all API replicas and scheduler workers before
+enabling the flag; old servers reject the additive notification settings.
+
 ### S4. Exactly-once runs, safe across replicas
 
 - **The worker.** A leased, fenced scheduler worker per replica claims due

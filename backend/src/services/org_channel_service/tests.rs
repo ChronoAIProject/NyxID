@@ -2207,5 +2207,34 @@ async fn org_access_2283_enabled_guest_does_not_revoke_transport_admin() {
 #[path = "guest_settings_tests.rs"]
 mod guest_settings;
 
+#[tokio::test]
+async fn notifications_are_purged_by_exact_org_channel_actor_and_thread() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let f = Fixture::new("notifications_org_channel_purge").await;
+    let db = &f.org.state.db;
+    let removed = seed(db, &f.org.member, doc! {"channel_id":&f.channel.id}).await;
+    let remaining = seed(db, &f.org.admin, doc! {"channel_id":&f.channel.id}).await;
+    let thread = seed(db, &f.org.admin, doc! {"conversation_id":"exact-thread"}).await;
+    let context = (db.clone(), f.channel.id.clone(), f.org.member.clone());
+    crate::services::transaction_service::run_db_only(db, &context, |tx, (db, channel, actor)| {
+        Box::pin(async move { lifecycle::retire_in_session(db, tx, channel, Some(actor)).await })
+    })
+    .await
+    .unwrap();
+    probe(db, &removed, false).await;
+    probe(db, &remaining, true).await;
+    let context = db.clone();
+    crate::services::transaction_service::run_db_only(db, &context, |tx, db| {
+        Box::pin(async move { lifecycle::delete_conversation(db, tx, "exact-thread").await })
+    })
+    .await
+    .unwrap();
+    probe(db, &thread, false).await;
+    probe(db, &remaining, true).await;
+    db.drop().await.unwrap();
+}
+
 #[path = "grants_cutover_tests.rs"]
 mod grants_cutover;

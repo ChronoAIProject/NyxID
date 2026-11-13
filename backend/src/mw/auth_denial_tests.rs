@@ -414,3 +414,380 @@ fn denial_guidance_verified_first_party_guard_matches_early_guard() {
         assert_eq!(body.details.unwrap()["credential_type"], kind);
     }
 }
+
+#[tokio::test]
+async fn notification_routes_are_first_party_human_only_and_require_both_flags() {
+    use crate::services::feature_flag_service as flags;
+    let db =
+        crate::test_utils::connect_transaction_test_database("notifications_auth_matrix").await;
+    crate::services::assistant_notification_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4();
+    let owner = actor.to_string();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &owner,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let human = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &actor,
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(state);
+    let root = "/api/v1/assistant/nyxagent/notifications";
+    for enabled in [false, true] {
+        flags::set_platform_override(
+            &db,
+            flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+            &flags::FlagTarget::User(owner.clone()),
+            enabled,
+            &owner,
+        )
+        .await
+        .unwrap();
+        for (method, suffix) in [("GET", ""), ("GET", "/summary"), ("POST", "/read")] {
+            let uri = format!("{root}{suffix}");
+            let body = if method == "POST" {
+                json!({"ids":[Uuid::new_v4().to_string()]}).to_string()
+            } else {
+                String::new()
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&uri)
+                        .header("authorization", format!("Bearer {human}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if enabled {
+                assert!(
+                    response.status().is_success(),
+                    "{method} {uri}: {}",
+                    response.status()
+                );
+                if method == "GET" {
+                    let value = json_body(response).await;
+                    if suffix.is_empty() {
+                        assert_eq!(value["items"], json!([]));
+                    } else {
+                        assert_eq!(value["unread_count"], 0);
+                    }
+                }
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+                let value = json_body(response).await;
+                assert_eq!(value["error"], "not_found");
+                assert_eq!(value["message"], "Not found: Assistant route not found.");
+            }
+            for (kind, claims) in [
+                ("relay", json!({"relay":true})),
+                ("service_account", json!({"sa":true})),
+                (
+                    "delegated",
+                    json!({"delegated":true,"scope":"account:read"}),
+                ),
+                ("oauth_client", json!({"client_id":"third-party-client"})),
+            ] {
+                let token = format!(
+                    "header.{}.signature",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+                );
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "{kind} {method} {uri}"
+                );
+                assert_eq!(
+                    json_body(response).await["details"]["credential_type"],
+                    kind
+                );
+            }
+            for token in [
+                "nyxid_ag_ordinary-key",
+                "nyxid_sk_conversation-key",
+                "nyx_conversation-key",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+                assert_eq!(
+                    json_body(response).await["details"]["credential_type"],
+                    "api_key"
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&uri)
+                        .header("x-api-key", "nyxid_ag_header-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(
+                delegated_read_denied_path(&uri),
+                "delegated account:read must not admit {uri}"
+            );
+        }
+    }
+    flags::set_platform_override(
+        &db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::User(owner.clone()),
+        false,
+        &owner,
+    )
+    .await
+    .unwrap();
+    for suffix in ["", "/summary"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{root}{suffix}"))
+                    .header("authorization", format!("Bearer {human}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notification_routes_preserve_settings_and_audit_only_explicit_mark_all() {
+    use crate::services::feature_flag_service as flags;
+    use mongodb::bson::{self, DateTime, Document};
+
+    let db = crate::test_utils::connect_transaction_test_database("notifications_http_state").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4();
+    let owner = actor.to_string();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &owner,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &db,
+        flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+        &flags::FlagTarget::User(owner.clone()),
+        true,
+        &owner,
+    )
+    .await
+    .unwrap();
+    let token = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &actor,
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(state);
+    let request = |method: &str, path: &str, body: Value| {
+        Request::builder()
+            .method(method)
+            .uri(format!("/api/v1/assistant/nyxagent/{path}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(if method == "GET" {
+                String::new()
+            } else {
+                body.to_string()
+            }))
+            .unwrap()
+    };
+    let off = json!({"push": {
+        "automation_result": false, "automation_problem": false, "needs_decision": false,
+        "agent_update": false, "chat_update": false, "group_mention": false,
+    }});
+    let response = app
+        .clone()
+        .oneshot(request("GET", "settings", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["notifications"], off);
+    let chosen = json!({"push": {
+        "automation_result": true, "automation_problem": false, "needs_decision": true,
+        "agent_update": false, "chat_update": true, "group_mention": false,
+    }});
+    for body in [
+        json!({"notifications": chosen}),
+        json!({"timezone": "Asia/Singapore"}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("PUT", "settings", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["notifications"], chosen);
+    }
+    let settings = db.collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME);
+    assert_eq!(
+        settings
+            .find_one(doc! {"_id": &owner})
+            .await
+            .unwrap()
+            .unwrap()["notifications"],
+        bson::to_bson(&chosen).unwrap()
+    );
+    // A pre-rollout document has no notifications field and still reads all switches off.
+    settings
+        .update_one(doc! {"_id": &owner}, doc! {"$unset": {"notifications": ""}})
+        .await
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(request("GET", "settings", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["notifications"], off);
+
+    let before = chrono::Utc::now() - chrono::Duration::hours(1);
+    let old = DateTime::from_chrono(before - chrono::Duration::seconds(1));
+    let newer = DateTime::from_chrono(before + chrono::Duration::seconds(1));
+    let conversation = Uuid::new_v4().to_string();
+    let ids: Vec<String> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
+    let notifications = db.collection::<Document>("assistant_notifications");
+    notifications
+        .insert_many([
+            doc! {"_id": &ids[0], "user_id": &owner, "unread": true, "updated_at": old},
+            doc! {"_id": &ids[1], "user_id": &owner, "unread": true, "updated_at": old,
+                  "source": {"type": "channel_chat", "id": &conversation, "conversation_id": &conversation}},
+            doc! {"_id": &ids[2], "user_id": &owner, "unread": true, "updated_at": old},
+            doc! {"_id": &ids[3], "user_id": &owner, "unread": true, "updated_at": newer},
+            doc! {"_id": &ids[4], "user_id": Uuid::new_v4().to_string(), "unread": true, "updated_at": old},
+        ])
+        .await
+        .unwrap();
+    let audit = db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME);
+    let read_event = doc! {"user_id": &owner, "event_type": "assistant_notifications_read"};
+    for body in [
+        json!({"ids": [&ids[0], &ids[4]]}),
+        json!({"source": {"type": "conversation", "id": conversation}}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("POST", "notifications/read", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["updated"], 1);
+        assert_eq!(audit.count_documents(read_event.clone()).await.unwrap(), 0);
+    }
+    for body in [
+        json!({"ids": [], "all": true, "before": before.to_rfc3339()}),
+        json!({"all": true}),
+        json!({"all": false, "before": before.to_rfc3339()}),
+        json!({"ids": [&ids[2]], "before": before.to_rfc3339()}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("POST", "notifications/read", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(audit.count_documents(read_event.clone()).await.unwrap(), 0);
+    let response = app
+        .oneshot(request(
+            "POST",
+            "notifications/read",
+            json!({"all": true, "before": before.to_rfc3339()}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["updated"], 1);
+    assert_eq!(audit.count_documents(read_event.clone()).await.unwrap(), 1);
+    let event = audit.find_one(read_event).await.unwrap().unwrap();
+    assert_eq!(
+        event.get_document("event_data").unwrap(),
+        &doc! {"count": 1_i64, "scope": "all"}
+    );
+    for id in &ids[..3] {
+        assert!(
+            !notifications
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_bool("unread")
+                .unwrap()
+        );
+    }
+    for id in &ids[3..] {
+        assert!(
+            notifications
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_bool("unread")
+                .unwrap()
+        );
+    }
+    db.drop().await.unwrap();
+}

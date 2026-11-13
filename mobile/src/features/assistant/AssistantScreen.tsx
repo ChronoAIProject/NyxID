@@ -23,6 +23,12 @@ import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { assistantDraftKey, assistantDraftStore } from "./assistantDraftStore";
 import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceChatList } from "../../components/workspace/WorkspaceChatList";
+import { NotificationBell } from "../notifications/NotificationBell";
+import {
+  useNotificationIndicator,
+  useNotificationRuntime,
+  useVisibleThreadRead,
+} from "../notifications/useNotifications";
 import {
   ChatHeaderFrame,
   ChatIdentity,
@@ -775,6 +781,19 @@ export function AssistantScreen({
     );
   }
 
+  const notificationRuntime = useNotificationRuntime();
+  const bell = useNotificationIndicator(notificationRuntime.active);
+  useVisibleThreadRead(
+    assistant.conversationId
+      ? { type: "conversation", id: assistant.conversationId }
+      : undefined,
+    bell.enabled,
+    notificationRuntime.active,
+  );
+  function openNotifications() {
+    afterPickerDismissal(() => navigation.push("Notifications"));
+  }
+
   function openChatOptions() {
     if (!voiceThread || voiceThread !== assistant.conversationId)
       return openDetails();
@@ -798,12 +817,28 @@ export function AssistantScreen({
       { text: "Cancel", style: "cancel" },
     ]);
   }
-  const headerHandlers = useRef({ newChat, openDetails: openChatOptions });
-  headerHandlers.current = { newChat, openDetails: openChatOptions };
+  const headerHandlers = useRef({
+    newChat,
+    openDetails: openChatOptions,
+    openNotifications,
+  });
+  headerHandlers.current = {
+    newChat,
+    openDetails: openChatOptions,
+    openNotifications,
+  };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const actions = () => (
       <WorkspaceHeaderVisibility>
         <View style={styles.headerActions}>
+          {bell.enabled ? (
+            <NotificationBell
+              unread={bell.unread}
+              needsDecision={bell.needsDecision}
+              disabled={headerDisabled}
+              onPress={() => headerHandlers.current.openNotifications()}
+            />
+          ) : null}
           <IconButton
             label="New chat"
             disabled={newChatDisabled}
@@ -860,6 +895,9 @@ export function AssistantScreen({
     colors.textSecondary,
     headerDisabled,
     newChatDisabled,
+    bell.enabled,
+    bell.unread,
+    bell.needsDecision,
   ]);
 
   useWorkspaceBack({

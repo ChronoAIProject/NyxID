@@ -911,6 +911,13 @@ pub async fn retire_work_in_session(
         .session(&mut *session)
         .await?;
     db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).update_many(doc! {"user_id": owner, "automation_work.run_id": id, "status": {"$in": ["pending", "allowed"]}}, doc! {"$set": {"status": "expired"}}).session(&mut *session).await?;
+    crate::services::assistant_notification_service::resolve_cards_in_session(
+        db,
+        session,
+        crate::services::assistant_notification_service::CardScope::Run(id),
+        "superseded",
+    )
+    .await?;
     db.collection::<Document>(crate::models::async_service_operation::COLLECTION_NAME).update_many(doc! {"user_id": owner, "delivery.automation_work.run_id": id, "state": {"$in": ["submitting", "waiting", "ready", "queued"]}}, doc! {"$unset": {"secret_context_versions.result_encrypted": ""}, "$set": {"state": "cancelling", "reason": reason, "result_encrypted": null, "lease_id": null, "lease_until": null, "poll_at": date(Utc::now())}}).session(&mut *session).await?;
     Ok(())
 }

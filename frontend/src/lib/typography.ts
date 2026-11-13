@@ -12,6 +12,7 @@ export const TEXT_STYLES = {
   secondary: "type-secondary",
   meta: "type-meta",
   groupLabel: "type-group-label",
+  countBadge: "type-count-badge",
   fieldLabel: "type-field-label",
   avatarInitials: "type-avatar-initials",
   avatarInitialsLarge: "type-avatar-initials-large",

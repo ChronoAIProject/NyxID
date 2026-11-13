@@ -37,6 +37,7 @@ transient interactions, rather than workspace destinations.
 | Content / Agents, AgentCreate, AgentDetail, AgentProfileEdit, GroupEditor            | Agents, crews and their guarded editors; each agent profile value is edited on its own page.                                              |
 | Content / AgentSkills, SkillDetail, SkillVersions, SkillHistory, AuthoredSkillReview | Read-only skill files/history, exact version pinning and owner publication decisions.                                                      |
 | Content / Activity, ActivityDetail, ActiveGrants                                     | Incoming actionable approvals, date-grouped history, detail and the existing grants view. Canonical approval links still address Activity. |
+| Content / Notifications                                                              | The owner's durable NyxBot notification feed (`assistant:notifications` flag): filters All, Needs you, Automations and Chats, cursor paging (a page the server filtered empty but gave a cursor is followed automatically, one hop per distinct cursor and at most five, then Load more is offered; the final empty copy appears only once the server is exhausted), mark all read with the server `as_of` fence; a row opens its thread, crew or automation and is marked read. Canonical `/assistant?panel=notifications` and `/assistant/notifications` address it. |
 | Content / WorkspaceSearch, WorkspaceRecents                                          | Grouped local search and cursor-paged See all, with chat-title search and per-agent filtering.                                             |
 | Sheet / AccountSettings, AccountSecurity, UsageCredits                               | Settings, account/security, display, notifications and usage/credits.                                                                      |
 | Sheet / DeviceLogin, AgentKeyLogin                                                   | QR, terminal and Agent Key sign-in flows with existing write guards.                                                                       |
@@ -56,8 +57,26 @@ retains its media presentation.
 
 The sidebar header contains the NyxID logo and circular Search control. Quick
 actions (Scan QR code and Terminal login code) precede Workspace. Workspace
-contains Automations, Machines, Plugins, Activity with its live pending count,
-and Create new agent. There are no disabled coming-soon destinations. Agents
+contains Notifications with its unread count (only while both the
+`assistant:notifications` and `assistant:nyxagent-engine` flags are on; the
+count turns amber while a decision waits), Automations, Machines, Plugins,
+Activity with its live pending count, and Create new agent. Private chats also
+show the same bell in their header. Thread, crew, channel-bot and Recents rows
+carry the unread counts the one notification summary attributes to them.
+Opening a thread or crew marks its notifications read once it has stayed in
+front for 1.5 seconds. A notification row follows the server's canonical
+link first (`/assistant?c=<thread|crew>`, `?card=` focuses a decision,
+`?agent=<id>&details=<section>` opens the agent's details, where an
+organization bot's public transcript lives, `/assistant/automations` the
+list) and falls back to its own references; links on other origins open
+nothing. The same parser serves `?g=<crew>`, `?agent=` chats and
+`?panel=notifications` above them. All push taps use the single account-bound
+queue in `useNotificationNavigation`, including cold starts and the foreground
+toast's Open action. NyxBot taps carry their `notification_id` through that queue;
+after a supported canonical destination is dispatched, the feed controller marks
+that row read. Authentication, navigation readiness and guards can defer the tap.
+A newer tap or supported direct link supersedes it; leaving its account drops it.
+An Activity fallback for an unknown destination does not mark a feed row read. There are no disabled coming-soon destinations. Agents
 (personal, then organization), Crews and plain-text Recents follow. The pinned
 Chat pill opens NyxBot Home; the gear opens Settings. A measured bottom spacer
 keeps the last row above the bar at maximum scroll. A fade hides rows passing

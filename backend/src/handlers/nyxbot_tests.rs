@@ -29,6 +29,9 @@ mod routing_tests;
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 
+#[path = "nyxbot_notification_cleanup_tests.rs"]
+mod notification_cleanup_tests;
+
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
@@ -311,6 +314,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: None,
         gateway_source: None,
@@ -570,11 +574,35 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
             .iter()
             .any(|refusal| refusal["field"] == "model")
     );
+    let bound_epoch = load_channel(&state, OWNER, &row.id)
+        .await
+        .unwrap()
+        .notification_epoch;
+    assert_eq!(bound_epoch, row.notification_epoch);
     // Re-binding the same ID is idempotent; another ID conflicts.
     let again = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1").await;
     assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .notification_epoch,
+        bound_epoch
+    );
     let conflict = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_2").await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let same_channel = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":&row.id},
+    )
+    .await;
+    let retained = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":Uuid::new_v4().to_string()},
+    )
+    .await;
     let deleted = delete_binding(
         State(state.clone()),
         Path("bnd_1".into()),
@@ -585,6 +613,8 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert_eq!(saved.binding_id.as_deref(), Some("bnd_1"));
     assert_eq!(saved.status, "active");
+    // Unbinding keeps the link and purges nothing, so the notification epoch is unchanged.
+    assert_eq!(saved.notification_epoch, bound_epoch);
     assert!(
         key_service::validate_api_key(&state.db, &agent_key)
             .await
@@ -634,6 +664,8 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
         StatusCode::OK
     );
     assert!(!format!("{saved:?}").contains(&agent_key));
+    crate::test_utils::assert_notification_probe(&state.db, &same_channel, true).await;
+    crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;
     server.abort();
 }
 
@@ -3423,6 +3455,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            notification_epoch: 0,
             execution_policy_revision: 0,
             org_specialist: None,
             gateway_source: None,
@@ -7463,4 +7496,25 @@ async fn onboarding_2318_human_patch_reports_the_final_linked_agent() {
     );
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[test]
+fn provider_conversation_delete_keeps_its_status_vocabulary() {
+    // A binding that changed after the handler's own check answers like that
+    // check (bare 404), never with a new 409.
+    assert_eq!(
+        conversation_delete_response(Ok(())).status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Conflict("Channel binding changed".into())))
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Internal("unavailable".into()))).status(),
+        AppError::Internal("unavailable".into())
+            .into_response()
+            .status()
+    );
 }

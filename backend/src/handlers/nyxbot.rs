@@ -772,6 +772,7 @@ async fn connect_inner(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: org_binding.clone(),
         gateway_source: None,
@@ -4817,61 +4818,24 @@ pub async fn delete_conversation(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if row.gateway_source.is_some() {
-        let db = state.db.clone();
-        let channel = row.id.clone();
-        let partition = conversation_id.clone();
-        let result: AppResult<()> = async {
-            let mut session = db.client().start_session().await?;
-            session
-                .start_transaction()
-                .and_run2(async move |session| {
-                    if let Some(thread) = db
-                        .collection::<NyxbotThread>(THREADS)
-                        .find_one_and_delete(doc! {"channel_id":&channel,"partition":&partition})
-                        .session(&mut *session)
-                        .await?
-                    {
-                        db.collection::<bson::Document>(
-                            crate::models::execution_permission_channel::COLLECTION_NAME,
-                        )
-                        .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
-                        .session(&mut *session)
-                        .await?;
-                    }
-                    db.collection::<bson::Document>(
-                        crate::models::nyxbot_gateway_response::COLLECTION_NAME,
-                    )
-                    .delete_many(doc! {"channel_id":&channel,"partition":&partition})
-                    .session(&mut *session)
-                    .await?;
-                    Ok(())
-                })
-                .await?;
-            Ok(())
-        }
-        .await;
-        return match result {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(e) => e.into_response(),
-        };
+    conversation_delete_response(
+        crate::services::nyxbot_chat_settings_service::remove_thread(
+            &state.db,
+            &row,
+            &conversation_id,
+        )
+        .await,
+    )
+}
+
+/// Keeps the provider contract: a binding that changed after the check above
+/// answers exactly like the check itself (bare 404), never a new 409.
+fn conversation_delete_response(result: AppResult<()>) -> Response {
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(AppError::Conflict(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => error.into_response(),
     }
-    // The NyxBot chat itself stays in the owner's history.
-    if let Ok(Some(thread)) = state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .find_one_and_delete(doc! {"channel_id": &row.id, "partition": &conversation_id})
-        .await
-    {
-        let _ = state
-            .db
-            .collection::<bson::Document>(
-                crate::models::execution_permission_channel::COLLECTION_NAME,
-            )
-            .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
-            .await;
-    }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn get_event_context(

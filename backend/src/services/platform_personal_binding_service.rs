@@ -533,6 +533,12 @@ pub async fn revoke_binding_in_session(
         enqueue_stop_in_session(db, session, &captured).await?;
     }
     db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).update_one(doc! {"_id":&current.id,"generation":current.generation,"state":"active"},doc! {"$set":{"state":"revoked","revocation_reason":bson::to_bson(&reason).map_err(|_|conflict())?,"revoked_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?;
+    super::assistant_notification_service::purge(
+        db,
+        doc! {super::assistant_notification_service::fields::SOURCE_PLATFORM_BINDING_ID: &current.id},
+        Some(&mut *session),
+    )
+    .await?;
     cancel_sender_proofs_in_session(db, session, &current, except_intent).await?;
     Ok(true)
 }

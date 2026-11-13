@@ -31,6 +31,8 @@ export type WorkspaceParamList = {
   Plugins: { tab?: "connectors" | "skills"; agentId?: string } | undefined;
   Agents: { tab?: "agents" | "groups" } | undefined;
   Activity: { challengeId?: string } | undefined;
+  /** The owner's durable notification feed (bell); hidden while the flag is off. */
+  Notifications: undefined;
   AccountSettings:
     | { section?: "display" | "privacy" | "notifications" }
     | undefined;
@@ -174,6 +176,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "Services",
   "Machines",
   "Activity",
+  "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",
   "AgentCreate",

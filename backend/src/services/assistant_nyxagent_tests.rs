@@ -1343,6 +1343,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             report_to: None,
             with_nyxbot: false,
             trigger_continuation: false,
+            notifications_enabled: Some(false),
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
@@ -7909,4 +7910,125 @@ fn connect_guidance_gives_link_and_existing_facts_immediately_for_both_roles() {
             assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
         }
     }
+}
+
+#[tokio::test]
+async fn notification_write_failure_rolls_back_settlement_and_retry_commits_both_once() {
+    use crate::services::{
+        assistant_notification_service as feed, assistant_team_service as team,
+        feature_flag_service as flags,
+    };
+    let db = connect_transaction_test_database("notification_settle_rollback").await;
+    ensure_indexes(&db).await.unwrap();
+    feed::ensure_indexes(&db).await.unwrap();
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &db,
+        flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &owner,
+    )
+    .await
+    .unwrap();
+    let state = test_app_state(db.clone());
+    let agent = team::ensure_nyxbot(&db, &owner).await.unwrap();
+    let home = team::home_thread(&db, &state.encryption_keys, &agent)
+        .await
+        .unwrap();
+    push_events(
+        &db,
+        &owner,
+        &home.id,
+        vec![team::event(
+            "task_finished",
+            "Background work finished".into(),
+            None,
+        )],
+    )
+    .await
+    .unwrap();
+    let mut start = TurnStart::from(&request(Some(&home.id), ""));
+    start.origin = TurnOrigin::Event;
+    let row = begin_turn(&db, &owner, &start, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().notifications_enabled,
+        Some(true)
+    );
+    let credential =
+        credentials::load_for_conversation(&db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let message_id = Uuid::new_v4().to_string();
+    let result = TurnResult {
+        text: "Saved background reply".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    let notifications = crate::models::assistant_notification::COLLECTION_NAME;
+    db.run_command(doc! {"collMod":notifications, "validator":{"test_only_accept":{"$exists":true}}, "validationLevel":"strict", "validationAction":"error"}).await.unwrap();
+    assert!(
+        finish_turn(&db, &row, &credential.api_key_id, &message_id, &result)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {"_id":&message_id})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(notifications)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    db.run_command(doc! {"collMod":notifications, "validator":{}})
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        finish_turn(&db, &row, &credential.api_key_id, &message_id, &result)
+            .await
+            .unwrap();
+    }
+    assert!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {"_id":&message_id})
+            .await
+            .unwrap(),
+        1
+    );
+    let saved = db
+        .collection::<bson::Document>(notifications)
+        .find_one(doc! {"user_id":&owner})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.get_i64("count").unwrap(), 1);
+    db.drop().await.unwrap();
 }

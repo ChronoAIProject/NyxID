@@ -166,6 +166,7 @@ function ConversationRow({
   onSelect,
   onRequestDelete,
   onRequestRename,
+  unread = false,
 }: {
   readonly conversation: Conversation;
   readonly active: boolean;
@@ -173,6 +174,8 @@ function ConversationRow({
   readonly onSelect: () => void;
   readonly onRequestDelete: () => void;
   readonly onRequestRename?: () => void;
+  /** The thread has unread notifications. */
+  readonly unread?: boolean;
 }) {
   useUiTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -197,7 +200,7 @@ function ConversationRow({
       <button
         type="button"
         onClick={onSelect}
-        aria-label={shownTitle}
+        aria-label={unread ? translateUi("{{title}}, unread", { title: shownTitle }) : shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
           "w-full overflow-hidden px-2 py-1 text-left transition-colors",
@@ -216,6 +219,9 @@ function ConversationRow({
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
           {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-12 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
+          {unread ? (
+            <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+          ) : null}
         </span>
         {showDraft && (
           <span
@@ -293,6 +299,8 @@ export interface SidebarAgents {
   /** The NyxBot home is open. */
   readonly homeActive?: boolean;
   readonly onHome?: () => void;
+  /** Threads (including channel chats) with unread notifications. */
+  readonly unreadThreadIds?: ReadonlySet<string>;
 }
 
 /** Group chats: the user plus several agents. */
@@ -302,6 +310,8 @@ export interface SidebarGroups {
   readonly loading?: boolean;
   readonly onSelectGroup: (groupId: string) => void;
   readonly onNewGroup: () => void;
+  /** Crews with unread notifications; collaboration groups keep their own badge. */
+  readonly unreadGroupIds?: ReadonlySet<string>;
 }
 
 function agentAccessibleName(agent: AssistantAgent): string {
@@ -330,10 +340,12 @@ function ChannelThreadsGroup({
   group,
   activeThreadId,
   renderThread,
+  unreadThreadIds,
 }: {
   readonly group: ChannelThreadGroup;
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
+  readonly unreadThreadIds?: ReadonlySet<string>;
 }) {
   useUiTranslation();
   const holdsActive = group.threads.some((thread) => thread.id === activeThreadId);
@@ -344,6 +356,7 @@ function ChannelThreadsGroup({
   const open =
     pinned && (pinned.active === activeThreadId || !holdsActive) ? pinned.open : holdsActive;
   const running = group.threads.some((thread) => thread.active_turn);
+  const unread = group.threads.some((thread) => unreadThreadIds?.has(thread.id));
   const visible = group.threads.filter(
     (thread, index) => index < shown || thread.id === activeThreadId,
   );
@@ -355,7 +368,12 @@ function ChannelThreadsGroup({
       <button
         type="button"
         aria-expanded={open}
-        aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", { label: group.label, platform, count, status: running ? translateUi(", working") : "" })}
+        aria-label={translateUi("{{label}} on {{platform}}, {{count}} chats{{status}}", {
+          label: group.label,
+          platform,
+          count,
+          status: `${running ? translateUi(", working") : ""}${unread ? translateUi(", unread") : ""}`,
+        })}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
         className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
@@ -370,6 +388,8 @@ function ChannelThreadsGroup({
         </span>
         {running ? (
           <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+        ) : unread && !open ? (
+          <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
         ) : null}
         <span className="shrink-0 tabular-nums text-13">{count}</span>
       </button>
@@ -602,6 +622,7 @@ function AgentRow({
               group={group}
               activeThreadId={activeThreadId}
               renderThread={renderThread}
+              unreadThreadIds={model.unreadThreadIds}
             />
           ))}
           {canChat ? (
@@ -779,6 +800,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
             {groups.map((group) => {
               const working = group.working_agent_ids.length;
               const selected = group.id === model.selectedGroupId;
+              const unread = !group.collaboration && (model.unreadGroupIds?.has(group.id) ?? false);
               return (
                 <button
                   key={group.id}
@@ -787,7 +809,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                   aria-current={selected ? "page" : undefined}
                   aria-label={translateUi("{{value1}}, group with {{value2}}{{value3}}", { value1: group.name, value2: group.members
                     .map((member) => agentTitle(member))
-                    .join(", "), value3: working ? `, ${String(working)} working` : "" })}
+                    .join(", "), value3: `${working ? translateUi(", {{value}} working", { value: working }) : ""}${unread ? translateUi(", unread") : ""}` })}
                   className={cn(
                     "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors",
                     selected
@@ -797,6 +819,9 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={3} ring="ring-sidebar group-hover:ring-sidebar-hover" />
                   <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                  {unread ? (
+                    <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+                  ) : null}
                   <GroupUnread group={group} />
                   {working ? (
                     <span
@@ -921,6 +946,7 @@ export function AssistantSidebar({
         onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
           ? () => setRenameTarget(conversation)
           : undefined}
+        unread={agents?.unreadThreadIds?.has(conversation.id) ?? false}
       />
     );
   }
@@ -1342,16 +1368,20 @@ function SidebarRail({
           {groups?.groups.length ? <div className="h-2 shrink-0" aria-hidden="true" /> : null}
           {groups?.groups.map((group) => {
             const selected = group.id === groups.selectedGroupId;
+            const unread = !group.collaboration && (groups.unreadGroupIds?.has(group.id) ?? false);
             return (
               <RailItem key={group.id} label={group.name}>
                 <button
                   type="button"
-                  aria-label={translateUi("{{value1}}, group", { value1: group.name })}
+                  aria-label={translateUi("{{value1}}, group{{status}}", { value1: group.name, status: unread ? translateUi(", unread") : "" })}
                   aria-current={selected ? "page" : undefined}
                   onClick={() => groups.onSelectGroup(group.id)}
                   className={linkClass(selected)}
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={2} ring="ring-sidebar" />
+                  {unread ? (
+                    <span aria-hidden="true" data-unread-marker="" className="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-primary" />
+                  ) : null}
                   <GroupUnread group={group} compact />
                 </button>
               </RailItem>
