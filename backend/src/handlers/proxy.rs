@@ -16514,8 +16514,8 @@ mod nyxbot_readiness_tests {
         let f = crate::services::org_agent_tests::Fixture::new("nyxbot_model_call_readiness").await;
         let db = f.state.db.clone();
         let owner = f.admin.clone();
-        // Mirror prod: readiness-gated flags are globally on while the fleet
-        // readiness roster was never declared (security_replicas empty of this process).
+        // Readiness-gated flags are globally on while the executing process
+        // has no live security_replicas observation.
         for flag in [
             "assistant:live-turn-gate",
             "assistant:operation-scopes",

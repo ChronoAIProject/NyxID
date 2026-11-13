@@ -1304,11 +1304,9 @@ async fn nyxbot_unsupported_or_unanchored_images_record_refusals_without_loading
         if unsupported {
             f.channel.platform = "openclaw".into();
         }
-        f.state
-            .db
-            .run_command(doc! {"profile":2,"slowms":0})
-            .await
-            .unwrap();
+        // Level 2 captures every operation in this database without changing
+        // the server-wide slow-query threshold for unrelated parallel tests.
+        f.state.db.run_command(doc! {"profile":2}).await.unwrap();
         let thread = thread(&f).await;
         let report = images::send_turn_images(
             &f.state,

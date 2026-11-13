@@ -793,10 +793,9 @@ channel through the existing read/delete and native-drain fences. Initial
 default-only routing, a successful direct reply, or `pending_discovery` alone
 never acknowledges the requested native policy.
 
-Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
-its first clean, drained activation. Native selection uses serving readiness:
-recorded activation tolerates supported roster overlaps, while an unsupported
-or undrained live generation still refuses selection. A persisted `preparing`
+Native selection uses recorded `nyxbot:native-gateway-v1` support from every live
+generation. Activation converges automatically; roster/drain declarations are
+advisory. An unsupported live generation still refuses selection. A persisted `preparing`
 phase permits binding setup but refuses
 provider execution with CMA's exact pre-admission `429` JSON refusal
 `{"error":{"type":"invalid_request_error","code":"conversation_not_ready"}}`
@@ -895,7 +894,8 @@ Lark and Feishu owner images, files and rich posts can reach NyxBot through the
 gateway when the per-person `assistant:channel-media` flag is enabled (default
 off), including org-owned bots whose linking person remains an org admin. This
 requires CMA at least `a570be21` with `CMAEG_MEDIA_ENABLED=true`. Upgrade all
-NyxID replicas and drain old workers before enabling it. Admission does no
+NyxID replicas to compatible media readers before enabling it; readiness-gated
+paths converge automatically without roster/drain declarations. Admission does no
 downloads, preserving CMA's default 30-second provider header budget
 (`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`). NyxID ingests the media at run start using
 its own stored source selectors and live authority, never gateway-supplied
@@ -1476,10 +1476,10 @@ Telegram has no explicit stop-typing API; its last indicator expires naturally.
 
 Reader rollout is fenced by the existing security-readiness mechanism's
 `nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
-relay events through the legacy path until the capability has clean activation
-and serving readiness. Recorded active capabilities tolerate roster warnings
-while every live generation supports them, including native transport selection. This uses the existing roster and drain configuration, with
-no new environment variables. The separately negotiated Lark/Feishu followed
+relay events through the legacy path until the capability is durably activated
+and serving-ready. Recorded capabilities tolerate all roster/drain advisories
+while every live generation supports them, including native selection. No
+readiness environment configuration is required. The separately negotiated Lark/Feishu followed
 thread path retains its existing stream/late-send routing contract so its
 resolved `thread_reply` choice cannot change after the first durable frame.
 

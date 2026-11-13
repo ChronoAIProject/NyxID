@@ -369,16 +369,16 @@ pub async fn create(
     model_id: &str,
     input: NewTariff,
 ) -> AppResult<ModelTariff> {
-    security_readiness_service::require_activation(db, READINESS).await?;
+    security_readiness_service::require_serving(db, READINESS).await?;
     if super::super::platform_model_execution::certification::image_contract(&input.contract) {
-        security_readiness_service::require_activation(
+        security_readiness_service::require_serving(
             db,
             super::super::platform_model_execution::images::READINESS,
         )
         .await?;
     }
     if super::super::platform_model_execution::certification::family_contract(&input.contract) {
-        security_readiness_service::require_activation(
+        security_readiness_service::require_serving(
             db,
             super::super::platform_model_execution::certification::READINESS,
         )

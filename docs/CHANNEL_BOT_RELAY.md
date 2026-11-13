@@ -796,10 +796,10 @@ promotes a `pending_webhook` bot to `active`, fenced by the current bot identity
 credentials, owner and ingress lease. Authenticated native Discord provider
 admission also activates a pending bot under its current source/key/binding.
 Neither path claims an Interactions webhook was registered. No additional
-environment variable is needed. Deploy with ingress off. Activation uses the
-existing security rollout readiness roster and drain assertion: all serving
-replicas must advertise `channel:discord-gateway`, since old transport writers
-do not wait for socket shutdown before remote setup. Then enable a test owner.
+environment variable is needed. Deploy with ingress off. Activation requires recorded observed support for
+`channel:discord-gateway`: all live replicas must advertise it, since old transport
+writers do not wait for socket shutdown before remote setup. No roster/drain
+assertion is required; support converges automatically before enabling a test owner.
 Acquisition and renewal use serving readiness: recorded active capabilities
 continue through supported roster overlaps; hard readiness loss stops local ingress.
 Interaction-only bots require no change while the ingress flag stays off.
@@ -1097,7 +1097,8 @@ outcome; an expired winner never becomes a lost-message resend recommendation.
 Gateway support requires CMA ≥ `a570be21`, `CMAEG_MEDIA_ENABLED=true`, and NyxID
 responding within `CMAEG_PROVIDER_REQUEST_TIMEOUT_MS` (default 30 seconds).
 Downloads happen after admission in the run, outside that header budget. Upgrade
-all replicas and drain old workers before enabling the default-off flag. See
+all replicas to compatible media readers before enabling the default-off flag;
+readiness-gated paths need no roster/drain declaration. See
 [inbound channel media](chat/10-uploads.md#inbound-channel-media) for immutable
 bind receipts, Stop/orphan cleanup, the 192 MiB shared byte budget, file/step
 limits and the admin rollback drain.

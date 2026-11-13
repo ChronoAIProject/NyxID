@@ -8136,27 +8136,42 @@ Returns a map keyed by security capability. Each report includes `ready`,
 `platform_policy_required`, `catalog_missing_policy`, and
 `catalog_explicit_empty_policy`. Catalog counts apply to the platform-policy
 capability. Missing, duplicate, stale, unsupported or differently configured
-serving processes block activation (`ready` keeps its strict meaning).
-Additive `activated` / `active_since` show durable prior clean readiness;
+serving processes block strict rollout readiness (`ready` keeps its meaning).
+Additive `activated` / `active_since` show durable capability activation;
 `serving_ready`, `serving_with_roster_warnings`, `roster_warnings` and
 `serving_blockers` explain continued serving separately. An activated capability
 may serve with roster warnings only while every live generation supports it and
-all hard checks pass. New activation remains strict. Refused gates return
+all hard checks pass. Durable activation is required even on a clean roster.
+First recording is immediate on a legacy clean assessment, otherwise automatic
+after 90 seconds without hard blockers, including absent/mismatched rosters and
+false drain declarations. Serving, publication and flag enables use this same gate. Refused gates return
 `503 security_readiness_unavailable` (code `12900`); ordinary flag reads retain
 their resolved boolean. The map includes `automation:coordinator-completion-v2`
 even when optional automation enrollment is disabled.
 
 | Additive field | JSON type | Nullable | Meaning |
 | --- | --- | --- | --- |
-| `activated` | boolean | No | Durable evidence of a prior clean assessment exists. |
+| `activated` | boolean | No | Durable activation evidence exists (clean assessment or completed observation settle window). |
 | `active_since` | RFC 3339 UTC string | Yes | First recorded activation time, or null when not recorded. |
-| `serving_ready` | boolean | No | Current traffic may serve, including recorded activation with only roster warnings. |
+| `activation_pending_seconds` | nonnegative integer | Yes | Replica-local advisory seconds remaining in the first-activation window. Null when this replica has no pending window, evidence exists, or its current assessment is hard-blocked. Zero awaits the next successful heartbeat recording; it never grants serving authority. |
+| `serving_ready` | boolean | No | Durable activation exists and current observations pass all hard checks. |
 | `serving_with_roster_warnings` | boolean | No | Serving is permitted despite one or more roster warnings. |
-| `roster_warnings` | array of strings | No | Sorted tolerable roster blocker strings, also present when hard checks refuse serving. |
-| `serving_blockers` | array of strings | No | Sorted hard serving blockers; includes `capability_not_activated` when strict readiness fails without evidence. |
+| `roster_warnings` | array of strings | No | Sorted advisory roster and drain strings, including old_replicas_not_declared_drained; also shown during hard refusals. |
+| `serving_blockers` | array of strings | No | Sorted hard serving blockers; includes `capability_not_activated` whenever evidence is absent. |
+
+`security_capability_activated` is a system audit event, emitted once for each
+recording pass that actually inserts one or more capabilities. Its non-null payload
+fields are `capabilities` (sorted string array), `roster_clean` (boolean),
+`roster_warnings` (string array), `live_generations` (integer), and
+`expected_replicas` (string array). It uses the chained audit append path;
+bounded best-effort audit failure does not fail heartbeat publication or activation.
+`security_readiness_serving_with_roster_warnings` reports declared roster/drain
+mismatches at most once per distinct advisory set per 24 hours cluster-wide; it
+is suppressed when no roster or positive drain assertion exists. The per-flag
+cannot-serve event retains its existing minute throttle.
 
 This endpoint requires admin/operator access and is separate from public
-`/health`. Roster/drain declarations are operational prerequisites; the
+`/health`. Roster/drain declarations are optional diagnostics; the
 `approval:required-web-v1` report is diagnostic and does not fence old serving
 replicas. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for
 configuration, stored-policy boundaries and sticky platform cutover/recovery.
