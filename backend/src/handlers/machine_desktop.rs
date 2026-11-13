@@ -980,7 +980,14 @@ pub async fn request_control(
         node.name
     );
     let conversation = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
-    super::nyxbot::deliver_update(state, &conversation, &message, None).await;
+    super::nyxbot::deliver_update_for(
+        state,
+        &conversation,
+        &message,
+        None,
+        super::nyxbot::supplemental::Purpose::MachineDesktopNotice,
+    )
+    .await;
     let _ = crate::services::notification_service::machine_control_requested(
         state,
         &chat.user_id,

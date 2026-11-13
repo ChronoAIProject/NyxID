@@ -945,3 +945,36 @@ async fn org_channel_signed_relay_uses_verified_actor_and_deduplicates() {
 
 #[path = "nyxbot_org_access_tests.rs"]
 mod access_tests;
+
+#[tokio::test]
+async fn supplemental_org_specialist_uses_org_route_and_admitted_member() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path_regex};
+    Box::pin(async {
+        let (state,_,server)=setup("supplemental_org_specialist").await;
+        let (channel,key,agent,org_id)=org_channel(&state,false).await;
+        put_binding(State(state.clone()),Path("bnd_turns".into()),bearer(&key),Json(binding_body(&key,OWNER))).await;
+        ensure_org_partition(&state,&key).await;
+        let challenge=org::links::issue(&state.db,OWNER,&channel).await.unwrap();
+        org::links::receive(&state.db,&channel,"7",challenge["code"].as_str().unwrap(),None).await.unwrap();
+        org::links::confirm(&state.db,OWNER,&channel,challenge["id"].as_str().unwrap()).await.unwrap();
+        state.db.collection::<bson::Document>("channel_messages").insert_one(doc!{"_id":"org-source","conversation_id":&channel.route_id,"user_id":&org_id,"channel_bot_id":&channel.channel_bot_id,"direction":"inbound","platform":"telegram","platform_conversation_id":"chat-1","platform_message_id":"42","sender_platform_id":"7","agent_api_key_id":&channel.route_api_key_id,"content_type":"text","created_at":bson::DateTime::now()}).await.unwrap();
+        assert!(body_text(Box::pin(respond(&state,&key,&event("request","7","org-source"),"org-source")).await).await.contains("Here is your answer"));
+        let event=state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc!{"channel_id":&channel.id,"event_id":"org-source"}).await.unwrap().unwrap();
+        let mut conversation=engine::get(&state.db,OWNER,event.conversation_id.as_deref().unwrap()).await.unwrap();
+        let origin=event.delivery.as_ref().unwrap().origin.clone();
+        assert_eq!(origin.org_execution.as_ref().unwrap().actor_id,OWNER);
+        assert_eq!(conversation.agent_id.as_deref(),Some(agent.id.as_str()));
+        conversation.active_turn=Some(bson::from_document(doc!{"turn_id":&event.turn_id,"origin":"channel","asked_from":bson::to_bson(&origin).unwrap(),"channel_event_id":&event.id,"started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
+        let cipher=state.encryption_keys.encrypt(b"test-token").await.unwrap();
+        state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&channel.channel_bot_id},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
+        let platform=MockServer::start().await;
+        Mock::given(path_regex("/bot.*/sendMessage")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}}))).mount(&platform).await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().insert(channel.channel_bot_id.clone(),Arc::new(crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&platform.uri())));
+        deliver_to_for(&state,&conversation,&origin,"notice",None,supplemental::Purpose::MachineDesktopNotice).await;
+        assert_eq!(platform.received_requests().await.unwrap().len(),1);
+        state.db.collection::<bson::Document>("org_memberships").update_one(doc!{"org_user_id":&org_id,"member_user_id":OWNER},doc!{"$set":{"revoked_at":bson::DateTime::now()}}).await.unwrap();
+        deliver_to_for(&state,&conversation,&origin,"revoked",None,supplemental::Purpose::MachineDesktopNotice).await;
+        assert_eq!(platform.received_requests().await.unwrap().len(),1);
+        server.abort();state.db.drop().await.unwrap();
+    }).await;
+}

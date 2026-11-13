@@ -13,12 +13,25 @@ use crate::{
 };
 use bson::doc;
 
+tokio::task_local! {
+    static SUPPLEMENTAL: ();
+}
+
+/// A failed supplemental send says nothing about delivery of the saved answer.
+/// Keep its ordinary receipts, but do not append an answer-failure transcript event.
+pub async fn supplemental<F: std::future::Future>(send: F) -> F::Output {
+    SUPPLEMENTAL.scope((), send).await
+}
+
 pub async fn failed(
     db: &mongodb::Database,
     receipt: &str,
     bot: &str,
     inbound: &str,
 ) -> AppResult<()> {
+    if SUPPLEMENTAL.try_with(|_| ()).is_ok() {
+        return Ok(());
+    }
     let Some(event) = db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {
         "$or":[{"relay_message_id": inbound},{"event_id":inbound}],
         "delivery.guest":false, "conversation_id":{"$type":"string"}, "turn_id":{"$type":"string"},

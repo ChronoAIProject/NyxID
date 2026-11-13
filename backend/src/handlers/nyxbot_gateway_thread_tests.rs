@@ -33,7 +33,7 @@ impl Drop for Fixture {
 impl Fixture {
     async fn new(name: &str) -> Self {
         let (state, calls, model) = setup(name).await;
-        let (mut row, key) = channel(&state, "gateway").await;
+        let (mut row, key) = Box::pin(channel(&state, "gateway")).await;
         row.platform = "lark".into();
         row.owner_sender_ids = vec!["human".into()];
         row.gateway_channel_id = Some("cmaeg1.ch.test".into());
@@ -124,17 +124,17 @@ impl Fixture {
             ),
         );
         assert_eq!(
-            put_binding(
+            Box::pin(put_binding(
                 State(state.clone()),
                 Path("bnd_chats".into()),
                 bearer(&key),
                 Json(binding_body(&key, OWNER))
-            )
+            ))
             .await
             .status(),
             StatusCode::OK
         );
-        ensure_partition(&state, &key, PARTITION).await;
+        Box::pin(ensure_partition(&state, &key, PARTITION)).await;
         Self {
             state,
             row,
@@ -731,7 +731,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 if body["msg_type"]=="image" {seen.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}else{assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst),2);}
                 assert!(!body.to_string().contains("private label"));
                 ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":format!("om_sent_{}",Uuid::new_v4().simple())}}))
-            }).expect(if gateway{2}else{3}).mount(&f.platform).await;
+            }).expect(3).mount(&f.platform).await;
         let seen = count.clone();
         Mock::given(path("/events/cmaeg1.ev.sealed-reference/replies"))
             .respond_with(move |r: &wiremock::Request| {
@@ -741,7 +741,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 assert_eq!(body["text"], "event result");
                 ResponseTemplate::new(200).set_body_json(json!({"ok":true}))
             })
-            .expect(u64::from(gateway))
+            .expect(0)
             .mount(&f.gateway)
             .await;
         deliver_to(
@@ -1280,4 +1280,61 @@ async fn channel_media_gateway_follow_post_text_flags_guest_and_unaddressed_firs
             drop(calls);
         }
     }
+}
+
+#[tokio::test]
+async fn supplemental_followed_reply_preserves_thread_callback_variants_and_parts() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    Box::pin(async {
+        for commonmark in [false,true] {
+            let mut baseline = None;
+            for notice in [false,true] {
+                let f=Box::pin(Fixture::new("supplemental_follow_callback")).await;
+                let (body,id)=Box::pin(f.input("start",ThreadAddress::Mention,false,true)).await;
+                f.state.db.collection::<bson::Document>(MESSAGES).update_one(doc!{"_id":&id},doc!{"$set":{"thread_context":bson::to_bson(&body["event_context"]["activity"]["thread"]).unwrap()}}).await.unwrap();
+                assert!(Box::pin(f.send(&body,&id)).await.contains("Here is your answer"));
+                let child=f.children().await.remove(0);
+                let row=engine::get(&f.state.db,OWNER,child.conversation_id.as_deref().unwrap()).await.unwrap();
+                let counter=std::sync::atomic::AtomicUsize::new(1);
+                Mock::given(path("/open-apis/im/v1/messages/om_root/reply")).respond_with(move |_:&wiremock::Request|ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":format!("om_part_{}",counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst))}}))).mount(&f.platform).await;
+                let token=crate::crypto::jwt::generate_relay_reply_token(&f.state.jwt_keys,&f.state.config,&f.row.route_api_key_id,f.row.route_id.as_deref().unwrap(),&id,"lark").unwrap();
+                let adapter=thread_follow::TEST_ADAPTERS.lock().unwrap().get(&f.row.channel_bot_id).cloned().unwrap();
+                crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().insert(f.row.channel_bot_id.clone(),adapter);
+                if notice {
+                    deliver_to_for(&f.state,&row,row.channel.as_ref().unwrap(),"supplemental result",None,supplemental::Purpose::TeamResult).await;
+                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),0);
+                }
+                let endpoint=if commonmark {"/thread-reply/commonmark"} else {"/thread-reply"};
+                let route=if commonmark {axum::routing::post(crate::handlers::channel_relay_request::commonmark_thread_reply)}else{axum::routing::post(crate::handlers::channel_relay_request::thread_reply)};
+                let response=axum::Router::new().route(endpoint,route).with_state(f.state.clone()).oneshot(Request::builder().method("POST").uri(endpoint).header("authorization",format!("Bearer {token}")).header("content-type","application/json").body(Body::from(json!({"message_id":id,"reply":{"text":"中文 English မြန်မာစာ\n".repeat(8000)}}).to_string())).unwrap()).await.unwrap();
+                let status=response.status();
+                let bytes=axum::body::to_bytes(response.into_body(),8192).await.unwrap();
+                if commonmark {
+                    // Current gateway thread negotiation supports Lark/Feishu;
+                    // CommonMark callback routes support Telegram only.
+                    assert_eq!(status,StatusCode::BAD_REQUEST);
+                    assert!(String::from_utf8_lossy(&bytes).contains("CommonMark relay formatting is supported for Telegram"));
+                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),1);
+                    assert_eq!(f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count(),usize::from(notice));
+                    assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
+                    f.state.db.drop().await.unwrap();
+                    continue;
+                }
+                assert_eq!(status,StatusCode::OK,"{}",String::from_utf8_lossy(&bytes));
+                let reply:Value=serde_json::from_slice(&bytes).unwrap();
+                let requests:Vec<Value>=f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).map(|r|serde_json::from_slice(&r.body).unwrap()).collect();
+                assert!(requests.len()>2);
+                assert!(requests.iter().all(|b|b["reply_in_thread"]==true));
+                let final_requests=requests[usize::from(notice)..].to_vec();
+                if let Some(baseline)=&baseline {assert_eq!(baseline,&final_requests);}else{baseline=Some(final_requests.clone());}
+                let receipts:Vec<bson::Document>=f.state.db.collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME).find(doc!{"inbound_message_id":&id}).await.unwrap().try_collect().await.unwrap();
+                let receipt=receipts.iter().find(|r|r.get_array("parts").unwrap().iter().any(|p|p.as_document().unwrap().get_str("outbound_message_id").ok()==reply["message_id"].as_str())).unwrap();
+                assert!(receipt.get_bool("complete").unwrap());
+                assert_eq!(receipt.get_array("parts").unwrap().len(),final_requests.len());
+                assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
+                f.state.db.drop().await.unwrap();
+            }
+        }
+    }).await;
 }

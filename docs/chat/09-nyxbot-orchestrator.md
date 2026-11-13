@@ -691,6 +691,51 @@ operator review and deployment boundary.
 
 ### Channel turn delivery after the provider stream closes
 
+Checking and capacity notices, machine-control notices, team updates,
+followed-thread results and permission-result occurrences are supplemental text.
+On gateway channels backed by NyxID's relay they use the local route-key reply
+adapter. This leaves the gateway's automatic final/failure, provider stream,
+recovery snapshot/replay and NyxID's primary late sender unchanged. CMA treats
+confirmed event replies as answers and suppresses its automatic final; its
+routed unknown-tool barrier also blocks reply targets. See the
+[CMA contract boundary](../CHANNEL_EVENT_GATEWAY.md#nyxbot-provider-late-replies-and-cma-contract-boundary)
+for the pinned source evidence.
+
+Source-bound text uses its admitted event's retained `relay_message_id` and live
+source authority. Unbound genuine chat results first validate the chat's
+`last_relay_message_id`. If the pointer or retained row is absent, they may use
+`event_ref_relay_message_id`, written atomically with the reference and expiry.
+Its optional binding digest detects old writers that replace either reference
+or expiry without replacing the anchor. Old/missing/stale pairs cannot supply a
+fallback. An authority mismatch never falls back. Progress uses no fallback;
+missing sources skip, while permission occurrences finish refused. All anchor
+choices preserve bot owner, route key, platform, chat/topic/root and guest
+checks. Retained-message validation uses the existing primary-key index; no
+recent-event discovery query is added.
+
+The generic gateway reference still expires 29 minutes after its last refresh;
+a retained chat pointer does not extend that eligibility. After expiry, generic
+supplemental results remain in the transcript but their text is not sent.
+Followed results retain the original event's 29-minute window; permission
+occurrences retain their existing event/target gates. Direct and relay-era
+`direct_reply` paths are unchanged. Failed local supplemental text keeps its
+receipts and audit without adding a primary-answer failure event to the web
+transcript. The existing live-turn notice claim selects
+one attempt across replicas; an already claimed local notice completing just
+after the final cannot suppress or duplicate it.
+
+Native progress is not sent. Genuine independent native team/followed/permission
+results retain today's event reply behavior. While the same event's primary
+answer is pending, those sends can still suppress that answer on confirmation
+or leave both uncertain under the gateway's routed unknown-tool barrier. This
+needs the gateway's non-answer-send contract. Metadata-only
+`nyxbot_channel_supplemental_delivery` audits include those `gateway_event`
+results as well as local sends/skips, their closed purpose/outcome/reason and
+anchor (`event_source`, `chat_pointer`, `chat_reference_event`, `thread_binding`,
+`none`), plus turn/event/conversation IDs. No text, inbound references, tokens
+or binding digests are recorded. No owner action is needed; drain old replicas
+to finish replacing the old supplemental egress.
+
 Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.
 Per-destination MongoDB image claims are taken inside the existing text claim for
@@ -725,7 +770,7 @@ The provider stream owns a `waiting` delivery until it atomically claims
 separate 15-second, bounded sweep makes the same transition after 570 seconds
 from provider admission; it does not block the live-change or team workers.
 At that deadline NyxID completes the gateway response without text and leaves
-the eventual answer pending. NyxAgent keeps working. NyxID emits no queue
+the eventual answer pending. NyxAgent keeps working. Detaching emits no additional queue
 acknowledgement or continuing-work notice. Successful empty or whitespace-only
 answers atomically settle as `silent`; they produce no “Done” message. Image-only
 answers still deliver their images, and failed-image notes remain visible.

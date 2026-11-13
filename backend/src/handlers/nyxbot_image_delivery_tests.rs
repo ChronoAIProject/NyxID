@@ -11,8 +11,8 @@ use crate::services::assistant_acknowledgement_service as acks;
 use crate::services::channel_platform::PlatformAdapter;
 use wiremock::matchers::body_string_contains;
 
-async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
-    let mut f = fixture(&format!("nyxbot_images_{platform}_{transport}")).await;
+pub(super) async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
+    let mut f = Box::pin(fixture(&format!("nyxbot_images_{platform}_{transport}"))).await;
     crate::services::channel_text_delivery::ensure_indexes(&f.state.db)
         .await
         .unwrap();
@@ -3822,3 +3822,6 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
 
 #[path = "nyxbot_delegated_image_tests.rs"]
 mod delegated_image_tests;
+
+#[path = "nyxbot_supplemental_tests.rs"]
+mod supplemental_tests;

@@ -1885,6 +1885,16 @@ pub async fn update_reply(
     if is_device_reply_forbidden(&context.outbound.platform, &context.conversation.platform) {
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
+    #[cfg(test)]
+    let override_adapter = TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&context.bot.id)
+        .cloned();
+    #[cfg(test)]
+    if let Some(adapter) = override_adapter {
+        return edit_resolved_reply(&state, &headers, context, body, adapter.as_ref()).await;
+    }
     let adapter = resolve_adapter(&context.bot.platform, &state.token_exchange_cache)?;
     edit_resolved_reply(&state, &headers, context, body, adapter.as_ref()).await
 }

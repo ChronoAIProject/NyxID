@@ -723,6 +723,24 @@ pub(super) fn send_update<'a>(
     })
 }
 
+pub(super) async fn send_supplemental(
+    state: &AppState,
+    row: &NyxbotChannel,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+) -> AppResult<&'static str> {
+    Box::pin(send_update_impl(
+        state,
+        row,
+        origin,
+        conversation,
+        text,
+        None,
+    ))
+    .await
+}
+
 /// An independently claimed permission result has its own stable occurrence.
 pub(super) async fn send_occurrence(
     state: &AppState,

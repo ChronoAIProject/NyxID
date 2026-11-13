@@ -977,6 +977,53 @@ Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
   delivery. NyxID therefore irrevocably marks a streamed answer before emission
   and never guesses that a disconnect means those bytes were not delivered.
 
+Supplemental NyxBot text on gateway channels with a `nyxid_relay` source uses
+NyxID's local route-key reply adapter. Checking/capacity notices, machine-control
+notices, team updates, followed-thread results and permission-result occurrences
+must not mark the gateway event replied. Verified against CMA
+`112b09c6b3dc25838cf1519b6ed26d0effe67ed0`, `tools/state.rs` (`replyToEvent`),
+`delivery/step.rs` and `turns/routed/replay_projection.rs`: a confirmed tool
+reply suppresses automatic final/failure delivery. The routed tool journal also
+blocks later tool sends after an unknown outcome, including reply targets.
+Local supplemental sends never enter that journal. Their outcome cannot change
+NyxID's provider stream, recovery payload or primary late-delivery claim. A
+failed supplemental text send retains its normal per-part receipts and audit,
+but does not append a primary-answer delivery-failure notice to the transcript.
+The local call scopes this distinction without storing new delivery state.
+
+Source-bound sends validate the admitted event's retained relay inbound.
+Unbound genuine chat results validate `last_relay_message_id`; only an absent
+pointer or deleted retained row permits the paired `event_ref_relay_message_id`
+fallback. A mismatching row refuses without fallback. The thread reference,
+expiry and optional relay anchor are written atomically; a digest binding to
+both reference ciphertext and expiry detects stale pairs from old writers.
+Old rows simply have no fallback until another inbound. No extra
+event-discovery lookup or index is needed; the retained anchor uses its
+existing `_id` lookup. Progress never uses that fallback. All sends retain live
+owner/guest, organization, route-key, bot, chat/topic/root authority checks.
+
+Eligibility windows are unchanged: generic gateway supplemental text needs a
+live thread reference (29 minutes after its last refresh); followed replies
+need their original event younger than 29 minutes. Permission occurrences keep
+their existing original-event or sealed-target window. Missing or expired
+sources do not redirect replies. A missing permission source finishes refused;
+other supplemental text is skipped while the transcript remains available.
+Direct and relay-era replies, images and multipart receipts retain their prior
+paths. Primary final and durable late replies retain their original barriers.
+
+Native-source progress is suppressed. Genuine independent native team results,
+followed results and permission occurrences retain their existing event replies
+and <29-minute original-event window. If the original primary final/failure is
+still pending, a confirmed independent result can suppress it; an unknown routed
+result may lose both and block later tool sends. This remaining native case
+needs a gateway non-answer send contract that changes neither tool marker nor
+unknown-tool barrier. NyxID does not defer these results for a day or retry
+uncertain sends. `nyxbot_channel_supplemental_delivery` records purpose, egress,
+outcome, closed skip reason, anchor class and turn/event/conversation IDs,
+including retained native `gateway_event` sends. No content or references enter
+the audit. Old replicas still use the old egress until drained; paired fields
+are optional and ignored by old readers. No setting or reconnection is required.
+
 **Precise CMA follow-up request (no CMA code changed here):** pass the remaining
 absolute ingress turn deadline in the provider request, and expose a durable,
 provider-authenticated delivery receipt keyed by the provider response/turn ID
@@ -1365,6 +1412,11 @@ use the existing per-image ledger before the final recovery text is persisted,
 so replay does not resend confirmed or uncertain media. Relay recovery preserves
 complete multipart answer text instead of applying the native 32,000-character
 cap; the encrypted replay document remains bounded below MongoDB’s document limit.
+
+Supplemental relay-source text takes the local adapter path described above,
+so recovery GETs and replay see the same answer bytes as turns without a notice.
+A notice never claims, detaches or fences recovery. No supplemental attempt adds
+reads to an otherwise unchanged primary stream or recovery read.
 
 A recovery GET atomically claims final delivery for CMA. Until then, the live
 POST stream and the existing asynchronous late sender retain their shared
