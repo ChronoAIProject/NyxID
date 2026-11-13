@@ -2,7 +2,8 @@
 
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses
-PR #2428 at `df20e4869` and its PR merge commit.
+PR #2428 at `df20e4869`, its PR merge commit and the cold comparison at
+`c40a5d95c`.
 Local compiler measurements used stable Rust 1.98.1, an 18-core/128 GiB Apple
 Silicon Mac and four Cargo jobs. This is a shared machine. These observations
 are not Linux runner benchmarks or confidence intervals. Peak RSS below is
@@ -12,6 +13,29 @@ are not Linux runner benchmarks or confidence intervals. Peak RSS below is
 
 These are observed standard-runner results, not projections. Read them with
 `gh run view <run> --json jobs` and `gh run view <run> --job <job> --log`.
+
+The shipped configuration uses non-incremental backend archives and the
+existing disk swap reserve, with no compressed-swap setup. Cold run
+**43344390346** at `c40a5d95c` measured:
+
+| Backend archive build phase | Final non-incremental cold, 43344390346 | Earlier incremental cold, 43310342885 |
+| --- | ---: | ---: |
+| Ordinary | **1,797 s wall / 1,419 s CPU** | 2,279 s wall / 1,476 s CPU |
+| Instrumented | **1,742 s wall / 1,433 s CPU** | 3,440 s wall / 2,058 s CPU |
+
+These are compilation/archive timings, not full test execution. The observed
+wall reductions are 21% and 49%; different revisions and runner variance mean
+they are not an isolated incremental-policy A/B test. All three cold comparison
+runs compiled dependencies from scratch in **both** backend archive lanes:
+main had no matching `v0-rust-backend-build` or `v0-rust-coverage-backend-build`
+entry yet. The logs show `No cache found.` for ordinary/coverage at lines
+4280/10379 (43344390346), 7358/719 (43344395848), and 11035/13459 (43344400769).
+The ordinary and instrumented exit lines in 43344390346 are 5819 and 11942,
+reporting 1796.91 s and 1741.62 s respectively. CPU is user plus system time.
+The [rejected comparison](#rejected-compressed-swap-comparison) records all modes.
+
+Earlier results, before the final archive policy:
+
 PR CI **43310337142** passed in about 79 minutes cold. CodeQL was
 **43310337099**, Release Build Cache **43310337092**, and the two manual warm
 runs were **43310342885** (cold) and **43323188823** (same commit). These
@@ -50,6 +74,67 @@ branch entries. Consequently CLI tests, AWS-only and permissions missed in the
 second run, and CLI coverage fell back to main. Those are not warm benchmarks.
 Release Build Cache executed packaging only for Linux arm64; three exact hits
 skipped it. The revised PR conditions require all four builds to execute.
+
+### Cold graph publication evidence
+
+The three complete logs were read with `gh run view <run> --log`. In every
+run all seven graph lanes logged `after-restore total: 0 bytes` after a cache
+miss, then crate/session inventories and positive `after-build total` values.
+All 21 saves logged `after-prune total`, `pruned 0 bytes`, a complete
+`Sent N of N (100.0%)` upload and `Cache saved with key: v1-rust-graph-…`.
+There were no disk-guard restore skips, refused saves or failed cache uploads
+in any lane. Zero pruning is expected for these first-generation graphs.
+Every retained crate had exactly one finalized session after pruning: 47 in
+Clippy, seven per KMS lane, 34 in CLI test, 25 in CLI coverage and 16 in permissions.
+This proves cold graph creation and publication, not restored-graph reuse.
+
+Line numbers below refer to the unfiltered output of each `gh run view <run>
+--log` command (use `| nl -ba` to inspect them). The five groups are restore
+total / build total(s) / prune total / complete upload / saved-key confirmation.
+The `pruned 0 bytes` line immediately follows each prune total. Logical bytes
+include the helper's conservative entry overhead; upload bytes are compressed.
+
+| Run | Lane | Log lines: restore / build / prune / upload / saved key | Pruned graph bytes | Uploaded bytes |
+| --- | --- | --- | ---: | ---: |
+| 43344390346 | Clippy | 7749 / 7983 / 8231 / 8263 / 8264 | 6,864,754,611 | 2,103,050,670 |
+| 43344390346 | GCP | 2096 / 2236 / 2324 / 2355 / 2356 | 5,224,659,525 | 1,413,020,988 |
+| 43344390346 | AWS | 3223 / 3366 / 3454 / 3486 / 3487 | 5,218,497,896 | 1,411,760,343 |
+| 43344390346 | AWS + GCP | 17060 / 17197 / 17285 / 17317 / 17318 | 5,226,889,936 | 1,415,543,237 |
+| 43344390346 | CLI test | 770 / 925,1027 / 1203 / 1232 / 1233 | 2,634,966,188 | 840,454,607 |
+| 43344390346 | CLI coverage | 13626 / 16027 / 16167 / 16195 / 16196 | 1,840,773,785 | 574,402,124 |
+| 43344390346 | Permissions | 6617 / 6689,6751 / 6855 / 6884 / 6885 | 187,993,557 | 69,206,063 |
+| 43344395848 | Clippy | 14720 / 14962 / 15210 / 15243 / 15244 | 6,864,754,609 | 2,103,803,770 |
+| 43344395848 | GCP | 11149 / 11291 / 11379 / 11410 / 11411 | 5,224,659,516 | 1,413,622,478 |
+| 43344395848 | AWS | 12277 / 12411 / 12499 / 12530 / 12531 | 5,218,497,930 | 1,411,430,998 |
+| 43344395848 | AWS + GCP | 17100 / 17240 / 17328 / 17360 / 17361 | 5,226,889,880 | 1,415,123,467 |
+| 43344395848 | CLI test | 9822 / 9977,10079 / 10255 / 10284 / 10285 | 2,634,966,341 | 840,385,571 |
+| 43344395848 | CLI coverage | 3996 / 6396 / 6536 / 6565 / 6566 | 1,840,773,871 | 574,614,448 |
+| 43344395848 | Permissions | 15967 / 16039,16101 / 16205 / 16232 / 16233 | 187,993,577 | 69,062,042 |
+| 43344400769 | Clippy | 9718 / 9961 / 10209 / 10241 / 10242 | 6,864,754,605 | 2,103,308,174 |
+| 43344400769 | GCP | 17099 / 17239 / 17327 / 17359 / 17360 | 5,224,659,481 | 1,414,467,052 |
+| 43344400769 | AWS | 6296 / 6434 / 6522 / 6554 / 6555 | 5,218,497,957 | 1,411,594,642 |
+| 43344400769 | AWS + GCP | 15974 / 16113 / 16201 / 16232 / 16233 | 5,226,889,905 | 1,413,870,139 |
+| 43344400769 | CLI test | 7402 / 7557,7658 / 7834 / 7863 / 7864 | 2,634,966,134 | 840,373,820 |
+| 43344400769 | CLI coverage | 1537 / 3937 / 4077 / 4105 / 4106 | 1,840,773,331 | 574,623,281 |
+| 43344400769 | Permissions | 8587 / 8659,8721 / 8825 / 8853 / 8854 | 187,993,552 | 69,201,938 |
+
+For a backend graph lane, GCP's disk guard logged these exact values (the
+remaining budget fields are identical across the three lines):
+
+| Run | Log line | `free` bytes | `required` bytes | `restore` |
+| --- | ---: | ---: | ---: | --- |
+| 43344390346 | 2049 | 111151489024 | 95565119488 | True |
+| 43344395848 | 11102 | 111151472640 | 95565119488 | True |
+| 43344400769 | 17052 | 111125942272 | 95565119488 | True |
+
+Each guard continues: `graph<=16 GiB, download<=17 GiB, added swap=39730544640,
+build growth=24 GiB, test archive=4 GiB, floor=8 GiB`. All seven guards per run
+returned `restore=True`. The archive jobs request no graph and therefore have
+no incremental admission line. Their empty restore inventories in these old
+logs predate round seven; the final action skips that diagnostic entirely.
+The largest graph was 6.39 GiB logical and 1.96 GiB compressed, below the 16 GiB
+save cap. Warm extraction, pruning of prior sessions and reuse remain checks
+for the next two branch dispatches.
 
 ## Why the hosted gates were slow
 
@@ -191,7 +276,7 @@ image, checkout, tools and extracted dependencies together to occupy at most
 about **56 GiB** (145 minus 89). Their separate sizes vary with runner images;
 there is no measured fixed image-baseline claim.
 
-The first completed job available from the swap experiment was permissions,
+The first completed job available from the cold comparison was permissions,
 run **43344390346**, job **131620090266**. Its old unconditional cleanup took
 **47.65 s** between the `df` samples at `01:22:30.8348853Z` and
 `01:23:18.4840545Z` on 2026-11-13. Available space rose from **86G to 107G**
@@ -432,38 +517,6 @@ and repeat. Finally apply the files listed by
 Compare directory names and each finalized session's logical size at each step.
 These commands compile archives; they do not execute MongoDB tests. Remove
 `$study` after recording results. They never change the current source tree.
-
-### Compressed-swap experiment
-
-`NYXID_SWAP_MODE` selects `zswap` or `off`; manual **CI Cache Warm** exposes
-`swap-mode` alongside `zswap-pool-percent` (default `20`). The latter maps to
-`NYXID_ZSWAP_POOL_PERCENT`, accepts integers 1–100, and leaves settings unchanged
-with an explicit log on invalid input. The candidate is zstd with a maximum
-compressed pool of 20% of RAM (about 3.2 GiB on a 16 GiB runner); 50% is 8 GiB. This is an
-experiment, not a measured winner. Archive warm jobs now compile without
-incremental, so compare off/20/50 against each other to isolate zswap; comparing
-against run 43310342885 also includes the incremental-policy change. The serial compiler leaves CPU capacity
-available, so compression is worth testing against the observed disk wait.
-Swappiness and page-cluster remain at runner defaults, and their effective
-values are logged. No Rust flags or cache identities depend on this choice.
-
-[Kernel zswap documentation](https://docs.kernel.org/admin-guide/mm/zswap.html)
-describes the compressed cache in front of backing swap, dynamic pool growth
-and eviction to that backing device. It preserves the mandatory 40 GiB disk
-swap capacity. [zram](https://docs.kernel.org/admin-guide/blockdev/zram.html)
-would need a separate device and writeback policy to preserve that property;
-it is not used. Documentation does not establish which compressor/pool size
-wins for this compiler workload, so compare cold `off`, `zswap`/20 and
-`zswap`/50 dispatches on separate scratch branches with identical source.
-
-Missing sysfs, rejected writes or counter access never fail the job. Failed
-configuration attempts restore prior values where possible and explicitly
-log incomplete rollback. Effective parameters and compressed-pool counters
-are printed before and after the build. On hosted machines only, debugfs is
-mounted if necessary and permitted; unavailable counters are explicitly null.
-The existing swap reserve remains mandatory in either mode. Once hosted
-measurements choose a winner, remove the experiment selector in that reviewed
-change; this document makes no claim that zswap has reduced elapsed time yet.
 
 ## Plain Cargo freshness and coverage archives
 
@@ -719,6 +772,26 @@ a CI speed fix. Debug and CGU comparisons used the same command with
 `--config 'profile.release.package.nyxid.codegen-units=256'` respectively.
 Release measurements used `cargo build --locked --release -p nyxid
 --bin nyxid-server --features gcp-kms --timings`, four jobs and `-Dwarnings`.
+
+### Rejected compressed-swap comparison
+
+One cold run per mode at identical `c40a5d95c`; seconds below are wall / CPU
+where both were recorded. Archive dependencies were cold in all three runs.
+
+| Phase | Off, 43344390346 | zswap 20%, 43344395848 | zswap 50%, 43344400769 |
+| --- | ---: | ---: | ---: |
+| backend-build | 1,797 / 1,419 | 2,067 / 2,013 | 2,350 / 2,735 |
+| coverage-build | 1,742 / 1,433 | 2,682 / 2,059 | 2,331 / 2,310 |
+| clippy | 1,218 / 785 | 1,448 / 1,286 | 1,490 / 1,450 |
+| features-gcp-kms | 870 | 920 | 856 |
+| features-aws-kms | 960 | 670 | 795 |
+| features-aws-and-gcp-kms | 761 | 868 | 817 |
+| backend-image-inputs | 228 | 289 | 341 |
+
+Runner variance remains, but both compression settings slowed all three
+memory-bound phases: 15–54% more wall time and 42–93% more CPU. Rejected;
+the experiment helper, tests, workflow inputs, environment settings and stats
+hook were deleted. The existing 40 GiB disk swap guarantee remains.
 
 ## Backend image input validation
 
@@ -1198,7 +1271,7 @@ sentinel name. Formatting and `git diff --check` passed. Clippy was not repeated
 the only Rust change is the fallback expression and its comment, and the
 fixtures compile both actual build scripts with stable 1.98.1 and `-Dwarnings`.
 
-Rounds five through seven change only CI helpers, actions, workflows and documents;
+Rounds five through eight change only CI helpers, actions, workflows and documents;
 no Rust source or build script changes. The round-six verification
 results and replay above supersede the discarded wrapper experiment. The
 full MongoDB suites are not rerun locally; the new PR CI run must execute
@@ -1221,7 +1294,7 @@ remain the applicable evidence. No Docker resources were started this round. The
 including source snapshots, compiler targets, archives, downloaded tools and
 Python environment, was removed after recording these results. `target/`
 then measured 4 KiB and no owned benchmark processes remained. The engineer
-subsequently committed those edits as `c40a5d95c` before the swap experiment.
+subsequently committed those edits as `c40a5d95c` before the cold comparison.
 
 Round seven passed **217 CI helper tests** (25.576 s), **41 script helper tests**
 (34.385 s) and **8 dependency-recipe tests** (0.306 s), with no skips, using
@@ -1235,6 +1308,16 @@ Clippy and backend suites were not repeated. The helper suites still compile
 their real Cargo/build-script/coverage fixtures. No Docker resources were
 started. The 83 MiB tool/environment scratch directory and downloaded job log
 were removed; `target/` returned to 4 KiB and no verification processes remain.
+
+Round eight passed **210 CI helper tests** (25.461 s), **41 script helper tests**
+(34.570 s) and **8 dependency-recipe tests** (0.312 s), with no skips. The seven
+removed tests belonged to the deleted experiment. Actionlint **1.7.12**, all
+four reusable-workflow permission checks and `git diff --check` passed. No
+Rust source or build script changed; full-workspace Clippy and backend suites
+were not repeated. The pinned Cargo/build-script/coverage fixtures still ran.
+The 92 MiB scratch directory containing verification tools and downloaded
+logs was removed; `target/` returned to 4 KiB. No Docker resources were started
+and no owned verification processes remain.
 
 Reproduce the real-workspace checks from the repository root:
 
@@ -1328,7 +1411,7 @@ the document does not depend on the deleted logs.
 | `.github/actions/ci-rust-cache/action.yml`, `.github/actions/ci-rust-incremental-save/action.yml` | One save/restore key and path contract, explicit manual-ref save policy, manifest fallback. |
 | `.github/workflows/ci-cache-warm.yml`, `.github/scripts/test_ci_cache_warm.py` | Matching producers, resource measurements, owned swap release before saves, contract regression checks. |
 | `.github/scripts/cache_budget.py`, `.github/scripts/test_cache_budget.py`, `.github/workflows/cache-maintenance.yml`, `docs/ci/ACTIONS_CACHE_BUDGET.md` | Preserve ref-scoped Rust caches for 48 hours and until a restorable main replacement exists, including cache versions and prefixes. |
-| `.github/scripts/prepare-backend-runner.sh`, `backend_disk.py`, `compressed_swap.py` and tests | Restore admission budgets, delayed swap allocation, owned reserve release and optional measured zswap experiment. |
+| `.github/scripts/prepare-backend-runner.sh`, `backend_disk.py` and tests | Restore admission budgets, delayed swap allocation, owned reserve release and optional SDK reclamation. |
 | `.github/scripts/incremental_cache.py`, `retry_incremental.py` and tests | Native session inventory, graph pruning, bounded archives and build/restore size diagnostics. |
 | `backend/build.rs`, `cli/build.rs`, `scripts/test_git_build_scripts.py` | Plain Cargo freshness, real per-worktree Git watches and SDK-sensitive macOS linker paths. |
 | `.github/workflows/backend-tests.yml`, `.github/scripts/test_coverage_archive_cache.py` | Non-incremental archive policy, isolated counters/current objects, coverage equivalence across compilation modes. |
@@ -1353,16 +1436,17 @@ conclusions. A green warm job alone does not prove a cache was saved.
 
 ### Before merge
 
-1. After committing/pushing the round-seven changes, dispatch **CI Cache Warm**
-   on the PR branch with `swap-mode=zswap`, `zswap-pool-percent=20`. Verify
-   seven graph saves, `after-prune` sizes at most 16 GiB, and one finalized
-   session per retained crate. The two archive jobs must log `enabled=0`,
-   skip graph restore/save and still compile full archives. Check `df` before
-   dependencies in reserve jobs, after graph restore in graph lanes, after
-   swap allocation and after reserve release; graph lanes also check disk
-   before extraction. Confirm SDK cleanup is skipped in permissions and CLI
-   jobs and restored-graph inventory is skipped in archive/image-input jobs.
-   Require zswap effective settings/counters or an explicit unavailable result.
+1. After committing/pushing the round-eight changes, dispatch **CI Cache Warm**
+   on the PR branch; it has no experiment inputs. Verify seven graph saves,
+   `after-prune` sizes at most 16 GiB, and one finalized session per retained
+   crate. The two archive jobs must log `enabled=0`, skip graph restore/save
+   and still compile full archives. Check `df` before dependencies in reserve
+   jobs, after graph restore in graph lanes, after swap allocation and after
+   reserve release; graph lanes also check disk before extraction. Confirm SDK
+   cleanup is skipped in permissions and CLI jobs and restored-graph inventory
+   is skipped in archive/image-input jobs. The cold scratch runs already prove
+   bounded publication; this run validates the final branch and the round-seven
+   conditional steps.
 2. Dispatch **CI Cache Warm** again at the same commit. The seven graph lanes
    must hit and pass extraction admission; a safe restore skip does not prove
    reuse. Inspect inventories for obsolete crates/sessions. Archive jobs stay
@@ -1374,29 +1458,18 @@ conclusions. A green warm job alone does not prove a cache was saved.
    their cross-commit reuse. Record the ordinary and coverage archive costs
    under the new non-incremental policy. They deliberately do not read main's
    or the branch's old archive graphs.
-4. For the compressed-swap comparison, create three scratch branches at the
-   same revision and dependency-cache state. Dispatch **CI Cache Warm** in
-   parallel with (`swap-mode=off`), (`swap-mode=zswap`, `zswap-pool-percent=20`),
-   and (`swap-mode=zswap`, `zswap-pool-percent=50`). The per-ref concurrency
-   allows all three. The engineer dispatched runs **43344390346** (off),
-   **43344395848** (20%) and **43344400769** (50%) from `c40a5d95c`;
-   their build results are not evaluated in this round. The two archive jobs
-   must log `enabled=0` and skip graph restoration; no archive-graph cache
-   deletion is needed under the final policy. Compare build-phase wall/CPU/RSS/swap and pool statistics
-   across these three runs. Run 43310342885 is the previous incremental-policy
-   baseline, so a difference from it cannot be attributed to zswap alone.
-   Keep the measured winner and remove the experiment inputs in the ensuing
-   reviewed change. The workflow itself never deletes remote caches.
-5. The new PR **CI** run must keep all ordinary/instrumented shards, inventory
+4. The new PR **CI** run must keep all ordinary/instrumented shards, inventory
    verification, 73% line gate, base/head comparison, linked KMS builds and
-   image proofs green. The previous PR run already passed; the miss policy, pruning
-   and restore order need their own hosted validation. Require a cache miss or
-   skipped restore to log `enabled=0` in every PR lane. **Release Build Cache**
+   image proofs green. The previous PR run already passed; the final PR policy
+   still needs a hosted run. Cold pruning/save and disk admission are verified
+   below the hosted timing table; restored-graph extraction and reuse remain
+   unverified. Require a graph miss or skipped restore to log `enabled=0` in
+   every PR cache consumer. **Release Build Cache**
    must execute **Install dist**, **Install dependencies** and **Build artifacts**
    for all four targets even on exact cache hits, with PR saves disabled.
    No manual release-cache dispatch is needed: this workflow edit triggers the
    PR matrix. A manual dispatch can still skip exact hits by design.
-6. CodeQL Rust's 28.3-minute PR and 65.9-minute full-scope branch results
+5. CodeQL Rust's 28.3-minute PR and 65.9-minute full-scope branch results
    are established (runs 43310337099 and 43323193873); no repeat dispatch is
    required. Still confirm a non-Rust-only PR omits Rust without a pending
    code-scanning check. The generated list remains inspectable in the scope artifact.
@@ -1442,6 +1515,6 @@ Do not use **Publish Images** as a pre-merge dry run: it really publishes.
    branch build proves compilation/packaging; it does not prove tag-triggered
    publication permissions or artifact delivery.
 
-The engineer committed df20e4869 and c40a5d95c, opened PR #2428 and triggered
-the hosted runs above. Round-seven edits are left uncommitted on c40a5d95c;
-the agent did not push, dispatch workflows or delete remote caches.
+The engineer committed df20e4869, c40a5d95c and 4b38ed193, opened PR #2428 and
+triggered the hosted runs above. Round-eight edits are left uncommitted on
+4b38ed193; the agent did not push, dispatch workflows or delete remote caches.

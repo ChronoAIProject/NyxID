@@ -23,8 +23,6 @@ elif (($# != 0)); then
   exit 1
 fi
 
-python3 "$(dirname "${BASH_SOURCE[0]}")/compressed_swap.py" configure || echo 'Optional compressed swap setup unavailable; continuing.'
-
 # A measured backend test compile used 2.4 GiB of the runner's 3 GiB swap;
 # by October 2026 a single nyxid rustc exhausted 16 GiB RAM plus 8 GiB swap,
 # and later that month the test-binary compile peaked at 29.7-31.5 GiB of

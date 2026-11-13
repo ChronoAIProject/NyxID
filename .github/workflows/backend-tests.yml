@@ -15,8 +15,6 @@ permissions:
   contents: read
 
 env:
-  NYXID_SWAP_MODE: zswap
-  NYXID_ZSWAP_POOL_PERCENT: '20'
   # The execution matrix below must contain exactly SHARD_COUNT shards.
   SHARD_COUNT: 8
   CARGO_TERM_COLOR: always

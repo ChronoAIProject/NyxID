@@ -35,16 +35,6 @@ on:
       - '.github/scripts/**'
       - '.github/workflows/**'
   workflow_dispatch:
-    inputs:
-      swap-mode:
-        description: Cold-build experiment; disk swap capacity stays at 40 GiB.
-        type: choice
-        options: [zswap, 'off']
-        default: zswap
-      zswap-pool-percent:
-        description: Maximum compressed pool as a percentage of RAM (1–100); used only with zswap.
-        type: string
-        default: '20'
 
 concurrency:
   group: ci-cache-warm-${{ github.ref }}
@@ -54,8 +44,6 @@ permissions:
   contents: read
 
 env:
-  NYXID_SWAP_MODE: ${{ inputs.swap-mode || 'zswap' }}
-  NYXID_ZSWAP_POOL_PERCENT: ${{ inputs.zswap-pool-percent || '20' }}
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   CARGO_PROFILE_DEV_DEBUG: line-tables-only

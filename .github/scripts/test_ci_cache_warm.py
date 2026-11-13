@@ -294,17 +294,6 @@ class CacheWarmTests(unittest.TestCase):
         self.assertIn('incremental_cache.py prune', self.save['runs']['steps'][0]['run'])
         self.assertIn('backend_disk.py before-save', self.save['runs']['steps'][0]['run'])
 
-    def test_swap_experiment_preserves_capacity_and_is_selectable(self):
-        choice = self.warm['on']['workflow_dispatch']['inputs']['swap-mode']
-        self.assertEqual(choice['options'], ['zswap', 'off'])
-        self.assertEqual(self.warm['env']['NYXID_SWAP_MODE'], "${{ inputs.swap-mode || 'zswap' }}")
-        pool = self.warm['on']['workflow_dispatch']['inputs']['zswap-pool-percent']
-        self.assertEqual(pool['default'], '20')
-        self.assertEqual(self.warm['env']['NYXID_ZSWAP_POOL_PERCENT'], "${{ inputs.zswap-pool-percent || '20' }}")
-        for workflow in (self.ci, self.backend):
-            self.assertEqual(workflow['env']['NYXID_SWAP_MODE'], 'zswap')
-            self.assertEqual(workflow['env']['NYXID_ZSWAP_POOL_PERCENT'], '20')
-
     def test_readers_compile_without_incremental_on_miss_or_skipped_restore(self):
         step = next(s for s in self.action['runs']['steps'] if s.get('name') == 'Select incremental compilation policy')
         self.assertEqual(step['env'], {

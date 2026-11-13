@@ -50,7 +50,6 @@ sudo() {
         return subprocess.run(
             ["bash", str(SCRIPT), *args], env={**os.environ, "BASH_ENV": str(self.harness),
                 "RUNNER_TEMP": str(self.root), "TEST_DISK_KIB": str(disk),
-                "NYXID_SWAP_MODE": "unchanged",
                 "TEST_FAIL": fail, "TEST_RESULT_KIB": str(result)},
             capture_output=True, text=True, timeout=10,
         )
