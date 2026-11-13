@@ -3795,7 +3795,11 @@ async fn service_failure_handle(
 ) -> Option<crate::services::invocation_diagnostic_service::IssuedHandle> {
     use crate::services::invocation_diagnostic_service as diagnostics;
     if !state.config.invocation_diagnostics_enabled
-        || !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref())
+        || !diagnostics::can_probe(
+            &auth.auth_method,
+            Some(crate::models::api_key::ApiKeyPurpose::General),
+            auth.acting_client_id.as_deref(),
+        )
         || auth.sender_constrained
     {
         return None;
@@ -3824,7 +3828,10 @@ async fn service_failure_handle(
             auth.acting_client_id
                 .as_deref()
                 .or(auth.oauth_client_id.as_deref()),
-        ),
+        )
+        // MCP authentication rejects every non-General API-key purpose before
+        // constructing this execution context.
+        .with_api_key_purpose(crate::models::api_key::ApiKeyPurpose::General),
         user_service_id,
     )
     .await

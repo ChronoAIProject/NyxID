@@ -173,12 +173,13 @@ When enabled and configured, downstream 5xx responses and eligible transport or
 broker failures from REST proxy, provider LLM, LLM gateway and MCP service-tool
 calls can carry a short-lived opaque diagnostic handle. Downstream 4xx
 responses, including authentication, validation, missing-resource and throttling
-responses, do not qualify. Only ordinary, unconstrained access-token callers
-receive handles. Agent Keys, NyxBot conversation keys, sessions, service
-accounts, delegated and relay callers receive no handle, make no diagnostic
-database write and add no MCP diagnostic content. Agent Key probing remains
-deferred to #2241. The original request does not run a probe. It returns its
-original status and body after one bounded MongoDB insert, preserving
+responses, do not qualify. Ordinary, unconstrained access-token callers and
+eligible `ApiKeyPurpose::General` Agent Keys, including live NyxBot conversation
+keys, can receive handles. Scheduled, permission-bound, `PublicNyxbot`,
+`SharedEntryTransport`, session, service-account, delegated and relay callers
+receive no handle, make no diagnostic database write and add no MCP diagnostic
+content. The original request does not run a probe. It returns its original
+status and body after one bounded MongoDB insert, preserving
 application headers and appending `Cache-Control: no-store` without replacing
 downstream cache directives; if handle issuance cannot finish within 250ms, the
 original error is returned without a handle. Local input, scope, approval,
@@ -248,12 +249,12 @@ they receive no new handle, and redemption of an existing handle returns
 token. An eligible `ApiKeyPurpose::General` Agent Key,
 including a live bot/conversation key, can run the same exact-service check with
 its current Agent Key authority and returns `observation: agent` when evidence
-is attributable. Scheduled, permission-bound, `PublicNyxbot`,
-`SharedEntryTransport`, session, relay, delegated and service-account identities
-complete with `observation: unknown` and `outcome: non_delegable`. No path falls
-back to an owner, operator or system monitoring key. There is no cached status
-fallback because the shared latest-status result is not bound to the current
-caller.
+is attributable. Unsupported API-key purposes and other non-delegable identities
+do not receive new handles. If a previously eligible identity becomes
+non-delegable before redemption, the existing handle completes with
+`observation: unknown` and `outcome: non_delegable`. No path falls back to an
+owner, operator or system monitoring key. There is no cached status fallback
+because the shared latest-status result is not bound to the current caller.
 
 Redemption atomically claims `pending` work before any probe. Concurrent
 redemptions cannot start a second probe; a completed result is retry-readable

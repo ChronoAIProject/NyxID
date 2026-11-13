@@ -116,7 +116,11 @@ impl HttpInvocation {
             .clone();
         let Some(id) = id else { return result };
         // chrono-probe callbacks must not create recursive diagnostics.
-        if !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref()) {
+        if !diagnostics::can_probe(
+            &auth.auth_method,
+            Some(auth.api_key_purpose),
+            auth.acting_client_id.as_deref(),
+        ) {
             return result;
         }
         let actor_id = auth.user_id.to_string();
@@ -131,7 +135,8 @@ impl HttpInvocation {
                 auth.acting_client_id
                     .as_deref()
                     .or(auth.oauth_client_id.as_deref()),
-            ),
+            )
+            .with_api_key_purpose(auth.api_key_purpose),
             &id,
         )
         .await

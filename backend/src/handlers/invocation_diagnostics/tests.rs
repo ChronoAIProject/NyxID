@@ -105,7 +105,8 @@ async fn proxy_only_agent_key_reaches_redemption_and_returns_agent_evidence() {
             Some(&key.id),
             None,
             None,
-        ),
+        )
+        .with_api_key_purpose(crate::models::api_key::ApiKeyPurpose::General),
         &id,
     )
     .await

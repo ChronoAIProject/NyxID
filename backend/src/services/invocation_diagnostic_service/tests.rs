@@ -121,6 +121,30 @@ fn local_denials_and_cancellation_do_not_probe() {
     assert!(!same_origin("http://other:8080", "http://probe:8080"));
 }
 
+#[test]
+fn only_access_tokens_and_general_agent_keys_can_probe() {
+    assert!(can_probe(&AuthMethod::AccessToken, None, None));
+    assert!(can_probe(
+        &AuthMethod::ApiKey,
+        Some(ApiKeyPurpose::General),
+        None
+    ));
+    for purpose in [
+        None,
+        Some(ApiKeyPurpose::ScheduledInvocation),
+        Some(ApiKeyPurpose::PermissionBound),
+        Some(ApiKeyPurpose::PublicNyxbot),
+        Some(ApiKeyPurpose::SharedEntryTransport),
+    ] {
+        assert!(!can_probe(&AuthMethod::ApiKey, purpose, None));
+    }
+    assert!(!can_probe(
+        &AuthMethod::AccessToken,
+        None,
+        Some("chrono-probe")
+    ));
+}
+
 use crate::{
     AppState,
     models::api_key::ApiKeyPurpose,
@@ -629,7 +653,8 @@ async fn general_agent_key_preserves_child_binding_and_returns_agent_evidence() 
             Some(&key_id),
             Some(&child_id),
             None,
-        ),
+        )
+        .with_api_key_purpose(ApiKeyPurpose::General),
         &id,
     )
     .await
@@ -1335,6 +1360,25 @@ async fn invocation_diagnostic_issuance_guards_do_not_touch_unavailable_database
                 &config,
                 IssueIdentity::new("actor", &method, None, None, None),
                 "service"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+    for purpose in [
+        ApiKeyPurpose::ScheduledInvocation,
+        ApiKeyPurpose::PermissionBound,
+        ApiKeyPurpose::PublicNyxbot,
+        ApiKeyPurpose::SharedEntryTransport,
+    ] {
+        assert!(
+            issue(
+                &db,
+                &config,
+                IssueIdentity::new("actor", &AuthMethod::ApiKey, Some("key"), None, None,)
+                    .with_api_key_purpose(purpose),
+                "service",
             )
             .await
             .unwrap()

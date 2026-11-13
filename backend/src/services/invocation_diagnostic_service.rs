@@ -19,6 +19,7 @@ use crate::{
     config::AppConfig,
     errors::{AppError, AppResult},
     models::{
+        api_key::ApiKeyPurpose,
         invocation_diagnostic::{COLLECTION_NAME, InvocationDiagnostic, InvocationDiagnosticState},
         service_concurrency::ServiceConcurrencyPolicy,
         user_endpoint::UserEndpoint,
@@ -189,9 +190,15 @@ fn auth_method_name(method: &AuthMethod) -> &'static str {
     }
 }
 
-pub(crate) fn can_probe(method: &AuthMethod, client_id: Option<&str>) -> bool {
-    matches!(method, AuthMethod::AccessToken | AuthMethod::ApiKey)
-        && client_id != Some("chrono-probe")
+pub(crate) fn can_probe(
+    method: &AuthMethod,
+    api_key_purpose: Option<ApiKeyPurpose>,
+    client_id: Option<&str>,
+) -> bool {
+    matches!(
+        (method, api_key_purpose),
+        (AuthMethod::AccessToken, _) | (AuthMethod::ApiKey, Some(ApiKeyPurpose::General))
+    ) && client_id != Some("chrono-probe")
 }
 
 pub(crate) struct IssueIdentity<'a> {
@@ -200,6 +207,7 @@ pub(crate) struct IssueIdentity<'a> {
     api_key_id: Option<&'a str>,
     api_key_credential_id: Option<&'a str>,
     client_id: Option<&'a str>,
+    api_key_purpose: Option<ApiKeyPurpose>,
 }
 
 impl<'a> IssueIdentity<'a> {
@@ -216,7 +224,13 @@ impl<'a> IssueIdentity<'a> {
             api_key_id,
             api_key_credential_id,
             client_id,
+            api_key_purpose: None,
         }
+    }
+
+    pub(crate) fn with_api_key_purpose(mut self, purpose: ApiKeyPurpose) -> Self {
+        self.api_key_purpose = Some(purpose);
+        self
     }
 }
 
@@ -229,7 +243,11 @@ pub(crate) async fn issue(
     // Configuration is captured at startup. Off/non-delegable requests must
     // return before even reserving a throttle slot or issuing a MongoDB command.
     if !config.invocation_diagnostics_enabled
-        || !can_probe(identity.auth_method, identity.client_id)
+        || !can_probe(
+            identity.auth_method,
+            identity.api_key_purpose,
+            identity.client_id,
+        )
     {
         return Ok(None);
     }
