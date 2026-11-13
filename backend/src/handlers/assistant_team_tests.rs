@@ -1965,6 +1965,236 @@ async fn event_budget_used(state: &AppState) -> i64 {
         .unwrap_or(0)
 }
 
+static WAKE_BARRIERS: std::sync::LazyLock<Mutex<BTreeMap<String, Arc<tokio::sync::Barrier>>>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+pub(super) async fn wait_for_wake_barrier(db: &mongodb::Database) {
+    let barrier = WAKE_BARRIERS.lock().await.get(db.name()).cloned();
+    if let Some(barrier) = barrier {
+        tokio::time::timeout(Duration::from_secs(20), barrier.wait())
+            .await
+            .expect("both wakes reached admission");
+    }
+}
+
+async fn wait_for_team_slots(state: &AppState, expected: u64) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let count = state
+                .db
+                .collection::<bson::Document>(crate::models::coordination::SLOT_COLLECTION_NAME)
+                .count_documents(doc! {"namespace":"assistant_team",
+                "expires_at":{"$gt":bson::DateTime::now()}})
+                .await
+                .unwrap();
+            if count == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("team pool releases the losing/finished admission");
+}
+
+#[tokio::test]
+async fn concurrent_queued_wakes_spend_only_the_winning_turn_budget() {
+    Box::pin(async {
+        let (state, calls, server) = setup("concurrent_queued_wakes").await;
+        let second_replica = test_app_state(state.db.clone());
+        let home = nyxbot_home(&state, OWNER).await.unwrap();
+        engine::push_events(
+            &state.db,
+            OWNER,
+            &home.id,
+            vec![team::event("message", "Queued work".into(), None)],
+        )
+        .await
+        .unwrap();
+        WAKE_BARRIERS.lock().await.insert(
+            state.db.name().to_owned(),
+            Arc::new(tokio::sync::Barrier::new(2)),
+        );
+        let pause = crate::test_utils::install_admission_pause(&state.db);
+        let finished = tokio::sync::Notify::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                Box::pin(async {
+                    wake(&state, OWNER, &home.id).await;
+                    finished.notify_one();
+                }),
+                Box::pin(async {
+                    wake(&second_replica, OWNER, &home.id).await;
+                    finished.notify_one();
+                }),
+                async {
+                    pause.entered.notified().await;
+                    // The winner is still fenced and has not contacted the model.
+                    // Only the losing wake can finish before we release it.
+                    finished.notified().await;
+                    assert!(calls.lock().await.is_empty());
+                    let live = engine::get(&state.db, OWNER, &home.id).await.unwrap();
+                    assert!(live.active_turn.is_some());
+                    assert_eq!(live.event_streak, 1);
+                    wait_for_team_slots(&state, 1).await;
+                    pause.resume.notify_one();
+                },
+            );
+        })
+        .await
+        .expect("one wake loses while the committed winner is paused");
+        WAKE_BARRIERS.lock().await.remove(state.db.name());
+        let row = idle_row(&state, &home.id).await;
+        let messages = transcript(&state, &home.id).await;
+        let debits = event_budget_used(&state).await;
+        let turns = calls.lock().await.len();
+        wait_for_team_slots(&state, 0).await;
+        server.abort();
+        state.db.drop().await.unwrap();
+        assert_eq!(turns, 1, "exactly one upstream turn started");
+        assert_eq!(messages.iter().filter(|m| m.role == "event").count(), 1);
+        assert!(row.pending_events.is_empty());
+        assert_eq!(
+            row.event_streak, 1,
+            "the losing wake leaves the streak clean"
+        );
+        assert_eq!(debits, 1, "only the wake that started a turn spends budget");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn exhausted_event_budget_preserves_queue_until_the_next_window() {
+    Box::pin(async {
+        use crate::services::coordination_service::RateWindowStore;
+        let (state, calls, server) = setup("exhausted_event_budget").await;
+        let home = nyxbot_home(&state, OWNER).await.unwrap();
+        let events = vec![
+            team::event("message", "First".into(), None),
+            team::event("message", "Second".into(), None),
+        ];
+        engine::push_events(&state.db, OWNER, &home.id, events.clone()).await.unwrap();
+        for _ in 0..team::EVENT_TURNS_PER_HOUR {
+            assert!(RateWindowStore::admit(&state.db, "assistant_event_turns", OWNER,
+                team::EVENT_TURNS_PER_HOUR, Duration::from_secs(3600)).await.unwrap().allowed);
+        }
+        let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = commands.clone();
+        let monitor = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "exhausted_event_monitor",
+            mongodb::event::EventHandler::callback(move |event| {
+                if let mongodb::event::command::CommandEvent::Started(event) = event {
+                    sink.lock().unwrap().push(event.command);
+                }
+            }),
+        ).await;
+        let monitored_db = monitor.client().database(state.db.name());
+        let state = AppState {
+            direct_chat_limiter: test_app_state(monitored_db.clone()).direct_chat_limiter,
+            db: monitored_db,
+            ..state
+        };
+        commands.lock().unwrap().clear();
+        for _ in 0..2 {
+            wake(&state, OWNER, &home.id).await;
+        }
+        let observed = commands.lock().unwrap().clone();
+        assert!(!observed.iter().any(|c| c.get_bool("startTransaction") == Ok(true)),
+            "an exhausted event window must not open an admission transaction");
+        assert!(!observed.iter().any(|c| c.values().any(|v|
+            v.as_str() == Some(crate::models::coordination::SLOT_COLLECTION_NAME))),
+            "an exhausted event window must not acquire a pool slot");
+        monitor.drop().await.unwrap();
+        let row = engine::get(&state.db, OWNER, &home.id).await.unwrap();
+        assert!(row.active_turn.is_none());
+        assert_eq!(row.event_streak, 0);
+        assert_eq!(row.pending_events.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            events.iter().map(|e| &e.id).collect::<Vec<_>>());
+        assert_eq!(row.message_count, home.message_count);
+        assert!(calls.lock().await.is_empty());
+        assert_eq!(event_budget_used(&state).await, team::EVENT_TURNS_PER_HOUR as i64);
+        wait_for_team_slots(&state, 0).await;
+        state.db.collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .update_one(doc! {"namespace":"assistant_event_turns"}, doc! {"$set":{
+                "window_start":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::hours(1)),
+            }}).await.unwrap();
+        wake(&state, OWNER, &home.id).await;
+        let row = idle_row(&state, &home.id).await;
+        assert_eq!(calls.lock().await.len(), 1);
+        assert!(row.pending_events.is_empty());
+        assert_eq!(row.event_streak, 1);
+        assert_eq!(event_budget_used(&state).await, 1);
+        let messages = transcript(&state, &home.id).await;
+        let input = messages.iter().find(|m| m.role == "event").unwrap();
+        assert!(input.text.find("First").unwrap() < input.text.find("Second").unwrap());
+        server.abort();
+        state.db.drop().await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn concurrent_distinct_threads_share_the_event_budget() {
+    Box::pin(async {
+        use crate::services::coordination_service::RateWindowStore;
+        for used in [0, team::EVENT_TURNS_PER_HOUR - 1] {
+            let (state, calls, server) = setup("distinct_thread_event_budget").await;
+            let first = user_turn(&state, None, None, "First thread").await;
+            let second = user_turn(&state, None, None, "Second thread").await;
+            calls.lock().await.clear();
+            for row in [&first, &second] {
+                engine::push_events(
+                    &state.db,
+                    OWNER,
+                    &row.id,
+                    vec![team::event("message", "Queued work".into(), None)],
+                )
+                .await
+                .unwrap();
+            }
+            for _ in 0..used {
+                assert!(
+                    RateWindowStore::admit(
+                        &state.db,
+                        "assistant_event_turns",
+                        OWNER,
+                        team::EVENT_TURNS_PER_HOUR,
+                        Duration::from_secs(3600)
+                    )
+                    .await
+                    .unwrap()
+                    .allowed
+                );
+            }
+            WAKE_BARRIERS.lock().await.insert(
+                state.db.name().to_owned(),
+                Arc::new(tokio::sync::Barrier::new(2)),
+            );
+            tokio::join!(
+                Box::pin(wake(&state, OWNER, &first.id)),
+                Box::pin(wake(&state, OWNER, &second.id))
+            );
+            WAKE_BARRIERS.lock().await.remove(state.db.name());
+            let first = idle_row(&state, &first.id).await;
+            let second = idle_row(&state, &second.id).await;
+            let expected = if used == 0 { 2 } else { 1 };
+            assert_eq!(
+                first.pending_events.len() + second.pending_events.len(),
+                2 - expected
+            );
+            assert_eq!(calls.lock().await.len(), expected);
+            assert_eq!(first.event_streak + second.event_streak, expected as i32);
+            assert_eq!(
+                event_budget_used(&state).await,
+                (used + expected as u64) as i64
+            );
+            wait_for_team_slots(&state, 0).await;
+            server.abort();
+            state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     let (state, calls, server) = setup("team_grant_keys").await;
