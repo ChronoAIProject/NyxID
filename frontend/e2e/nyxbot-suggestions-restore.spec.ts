@@ -21,7 +21,41 @@ async function tabTo(page: Page, target: Locator) {
   await expect(target).toBeFocused();
 }
 
-async function stubHome(page: Page) {
+async function startFocusWatch(page: Page) {
+  await page.evaluate(() => {
+    const state = { bodyFrames: 0, frame: 0 };
+    Object.assign(window, { suggestionsFocusWatch: state });
+    const sample = () => {
+      if (document.activeElement === document.body) state.bodyFrames++;
+      state.frame = requestAnimationFrame(sample);
+    };
+    sample();
+  });
+}
+
+async function stopFocusWatch(page: Page) {
+  expect(await page.evaluate(() => {
+    const { suggestionsFocusWatch: state } = window as unknown as {
+      suggestionsFocusWatch: { bodyFrames: number; frame: number };
+    };
+    cancelAnimationFrame(state.frame);
+    return state.bodyFrames;
+  })).toBe(0);
+}
+
+async function expectPendingFocus(page: Page, control: Locator, writes: string[], count: number) {
+  await expect(control).toHaveAttribute("aria-disabled", "true");
+  await expect(control).toBeFocused();
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await expect(control).toBeFocused();
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+  await expect.poll(() => writes.length).toBe(count);
+}
+
+async function stubHome(page: Page, { initiallyHidden = false, failShowOnce = false } = {}) {
   // Test mode installs an in-memory assistant transport even without ?mock=1.
   // Keep these checks on the real HTTP client and page.route boundary instead.
   await page.addInitScript(() => {
@@ -32,7 +66,7 @@ async function stubHome(page: Page) {
   });
   const unexpected: string[] = [];
   const writes: string[] = [];
-  let hidden = false;
+  let hidden = initiallyHidden;
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
     const fixtures: Record<string, unknown> = {
@@ -61,13 +95,18 @@ async function stubHome(page: Page) {
     unexpected.push(`${route.request().method()} ${path}`);
     return route.fulfill({ status: 500, json: { message: "Unconfigured fixture request blocked locally" } });
   });
-  await page.route(`**${root}**`, route => {
+  await page.route(`**${root}**`, async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "POST") {
       expect([`${root}/suggestions/hide`, `${root}/suggestions/show`]).toContain(path);
-      hidden = path.endsWith("/hide");
       writes.push(path);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      if (failShowOnce && path.endsWith("/show")) {
+        failShowOnce = false;
+        return route.fulfill({ status: 500, json: { message: "Could not show suggestions" } });
+      }
+      hidden = path.endsWith("/hide");
     } else expect(request.method()).toBe("GET");
     return route.fulfill({ json: {
       show_intro: false, suggestions_hidden: hidden, intro_version: 1,
@@ -100,26 +139,38 @@ for (const width of [1440, 390])
         const editor = page.locator("[data-composer-textbox]");
         await editor.fill("Keep this draft 保留草稿");
         await tabTo(page, hide);
+        await startFocusWatch(page);
         await page.keyboard.press("Enter");
         const undo = page.getByRole("button", { name: labels.undo, exact: true });
+        await expectPendingFocus(page, undo, fixture.writes, 1);
+        await expect(undo).toHaveAttribute("aria-disabled", "false");
         await expect(undo).toBeFocused();
         await expect(undo).toBeEnabled();
         await page.screenshot({ path: testInfo.outputPath(`hidden-undo-${width}-${theme}-${language}.png`) });
         await page.keyboard.press("Enter");
+        await expectPendingFocus(page, hide, fixture.writes, 2);
+        await expect(hide).toHaveAttribute("aria-disabled", "false");
         await expect(page.getByText("Research a topic", { exact: true })).toBeVisible();
         await expect(hide).toBeFocused();
         await expect(editor).toHaveText("Keep this draft 保留草稿");
         await page.keyboard.press("Enter");
+        await expectPendingFocus(page, undo, fixture.writes, 3);
+        await expect(undo).toHaveAttribute("aria-disabled", "false");
         await expect(undo).toBeFocused();
+        await stopFocusWatch(page);
         await page.reload({ waitUntil: "domcontentloaded" });
         const show = page.getByRole("button", { name: labels.show, exact: true });
         await expect(show).toBeVisible();
         await expect(page.getByText(labels.hidden, { exact: true })).toBeVisible();
         await page.screenshot({ path: testInfo.outputPath(`hidden-reload-${width}-${theme}-${language}.png`) });
         await tabTo(page, show);
+        await startFocusWatch(page);
         await page.keyboard.press("Enter");
+        await expectPendingFocus(page, hide, fixture.writes, 4);
+        await expect(hide).toHaveAttribute("aria-disabled", "false");
         await expect(page.getByText("Research a topic", { exact: true })).toBeVisible();
         await expect(hide).toBeFocused();
+        await stopFocusWatch(page);
         await page.screenshot({ path: testInfo.outputPath(`restored-${width}-${theme}-${language}.png`) });
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
         expect(fixture.writes).toEqual([`${root}/suggestions/hide`, `${root}/suggestions/show`, `${root}/suggestions/hide`, `${root}/suggestions/show`]);
@@ -127,3 +178,37 @@ for (const width of [1440, 390])
         expect(errors).toEqual([]);
       });
     }
+
+test("failed Show keeps focus and retries once (390, dark, en)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.setItem("nyxid.language", "en");
+    localStorage.setItem("nyxid.theme", JSON.stringify({ version: 2, state: { mode: "dark", motion: "reduce" } }));
+  });
+  const fixture = await stubHome(page, { initiallyHidden: true, failShowOnce: true });
+  await page.goto("/assistant", { waitUntil: "domcontentloaded" });
+  const show = page.getByRole("button", { name: "Show suggestions", exact: true });
+  const hide = page.getByRole("button", { name: "Hide", exact: true });
+  await tabTo(page, show);
+  await startFocusWatch(page);
+  await page.keyboard.press("Enter");
+  await expectPendingFocus(page, hide, fixture.writes, 1);
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await expect(retry).toBeVisible();
+  await expect(show).toBeFocused();
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+  await expect(show).toHaveAttribute("aria-disabled", "false");
+  await expect(page.getByRole("status")).toBeEmpty();
+  expect(fixture.writes).toEqual([`${root}/suggestions/show`]);
+  await tabTo(page, retry);
+  await page.keyboard.press("Enter");
+  await expectPendingFocus(page, hide, fixture.writes, 2);
+  await expect(hide).toHaveAttribute("aria-disabled", "false");
+  await expect(hide).toBeFocused();
+  await expect(page.getByText("Research a topic", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("Suggestions shown.");
+  await expect(retry).toHaveCount(0);
+  await stopFocusWatch(page);
+  expect(fixture.writes).toEqual([`${root}/suggestions/show`, `${root}/suggestions/show`]);
+  expect(fixture.unexpected).toEqual([]);
+});

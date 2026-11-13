@@ -41,8 +41,9 @@ a replay starts at the questions. It then has three parts:
    hidden.** row and **Undo**. After a reload, the row says **Suggestions are
    hidden.** and offers **Show suggestions**. Both restore the cards directly,
    preserving the answers, intro version, memory note and composer draft.
-   Focus follows the visibility control, changes are announced politely, and
-   pending controls are disabled. Failed requests restore server state and
+   Focus moves to the counterpart visibility control even while pending, and
+   changes are announced politely. Pending controls stay focusable but ignore
+   activation. Failed requests restore server state and
    offer an inline retry. No restore row appears without recommendations.
    Mobile still restores through replaying the intro. Cards have no individual
    dismiss. On web, **Show me around** starts a

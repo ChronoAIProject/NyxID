@@ -80,6 +80,43 @@ function home(props: Partial<HomeProps> = {}) {
   return { base, wrapper, ...render(<Harness />, { wrapper }) };
 }
 
+function pendingHome(initialHidden: boolean) {
+  const { base, rerender } = home();
+  function PendingHome({ settled = false, failed = false, serverHidden }: { settled?: boolean; failed?: boolean; serverHidden?: boolean }) {
+    const [requestedHidden, setRequestedHidden] = useState<boolean>();
+    return <NyxBotHome {...base}
+      suggestionsHidden={serverHidden ?? (failed ? initialHidden : requestedHidden ?? initialHidden)}
+      suggestionsPending={requestedHidden !== undefined && !settled}
+      suggestionsError={failed ? initialHidden ? "show" : "hide" : undefined}
+      onHideNextSteps={() => { base.onHideNextSteps?.(); setRequestedHidden(true); }}
+      onShowNextSteps={() => { base.onShowNextSteps?.(); setRequestedHidden(false); }} />;
+  }
+  rerender(<PendingHome />);
+  return {
+    base,
+    settle: (failed = false) => rerender(<PendingHome settled failed={failed} />),
+    refetch: (hidden: boolean, failed = true) => rerender(<PendingHome settled failed={failed} serverHidden={hidden} />),
+  };
+}
+
+async function repeatPendingActivation(button: HTMLElement) {
+  const user = userEvent.setup();
+  button.focus();
+  expect(button).toHaveAttribute("aria-disabled", "true");
+  expect(button).not.toBeDisabled();
+  for (let repeat = 0; repeat < 2; repeat++) {
+    await user.click(button);
+    expect(button).toHaveFocus();
+    expect(document.activeElement).not.toBe(document.body);
+    await user.keyboard("{Enter}");
+    expect(button).toHaveFocus();
+    expect(document.activeElement).not.toBe(document.body);
+    await user.keyboard(" ");
+    expect(button).toHaveFocus();
+    expect(document.activeElement).not.toBe(document.body);
+  }
+}
+
 it("offers Show suggestions when Home loads with hidden recommendations", async () => {
   const { base } = home({ suggestionsHidden: true });
   expect(screen.getByText("Suggestions are hidden.")).toBeVisible();
@@ -93,6 +130,58 @@ it("offers Show suggestions when Home loads with hidden recommendations", async 
 it.each([false, true])("does not announce initial suggestion visibility (hidden: %s)", (hidden) => {
   home({ suggestionsHidden: hidden });
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
+});
+
+it.each([false, true])("transfers focused visibility controls without scrolling on a background flip (initially hidden: %s)", (hidden) => {
+  const { base, rerender } = home();
+  rerender(<NyxBotHome {...base} suggestionsHidden={hidden} />);
+  screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" }).focus();
+  const focus = vi.spyOn(HTMLElement.prototype, "focus");
+  try {
+    rerender(<NyxBotHome {...base} suggestionsHidden={!hidden} />);
+    expect(screen.getByRole("button", { name: hidden ? "Hide" : "Show suggestions" })).toHaveFocus();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(base.onHideNextSteps).not.toHaveBeenCalled();
+    expect(base.onShowNextSteps).not.toHaveBeenCalled();
+  } finally {
+    focus.mockRestore();
+  }
+});
+
+it("leaves focus elsewhere and forgets a visibility control after focus moves away", () => {
+  const { base, rerender } = home();
+  rerender(<NyxBotHome {...base} suggestionsHidden />);
+  screen.getByRole("button", { name: "Show suggestions" }).focus();
+  const elsewhere = screen.getByRole("button", { name: "New agent" });
+  elsewhere.focus();
+  rerender(<NyxBotHome {...base} suggestionsHidden={false} />);
+  expect(elsewhere).toHaveFocus();
+  elsewhere.blur();
+  expect(document.activeElement).toBe(document.body);
+  rerender(<NyxBotHome {...base} suggestionsHidden />);
+  expect(document.activeElement).toBe(document.body);
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+});
+
+it.each([false, true])("clears stale success announcements without announcing background flips (initially hidden: %s)", async (hidden) => {
+  const { base, rerender } = home();
+  rerender(<NyxBotHome {...base} suggestionsHidden={hidden} />);
+  await userEvent.click(screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" }));
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  rerender(<NyxBotHome {...base} suggestionsHidden={!hidden} />);
+  const announcement = hidden ? "Suggestions shown." : "Suggestions hidden.";
+  expect(screen.getByRole("status")).toHaveTextContent(announcement);
+  expect(screen.getByRole("button", { name: hidden ? "Hide" : "Undo" })).toHaveFocus();
+  rerender(<NyxBotHome {...base} suggestionsHidden={hidden} />);
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" })).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+  rerender(<NyxBotHome {...base} suggestionsHidden={!hidden} />);
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(hidden ? base.onShowNextSteps : base.onHideNextSteps).toHaveBeenCalledOnce();
+  expect(hidden ? base.onHideNextSteps : base.onShowNextSteps).not.toHaveBeenCalled();
 });
 
 it("replaces Hide with a focused Undo, announces the change and restores with the keyboard", async () => {
@@ -112,28 +201,72 @@ it("replaces Hide with a focused Undo, announces the change and restores with th
   await waitFor(() => expect(screen.getByRole("button", { name: "Hide" })).toHaveFocus());
 });
 
-it("disables the restore control while a visibility request is pending", async () => {
-  const { base } = home({ suggestionsHidden: true, suggestionsPending: true });
-  const button = screen.getByRole("button", { name: "Show suggestions" });
-  expect(button).toBeDisabled();
-  await userEvent.click(button);
+it.each([
+  { name: "Hide", hidden: false },
+  { name: "Show suggestions", hidden: true },
+  { name: "Retry", hidden: false, error: "hide" as const },
+  { name: "Retry", hidden: true, error: "show" as const },
+])("ignores pending click, Enter and Space on $name (error: $error)", async ({ name, hidden, error }) => {
+  const { base } = home({ suggestionsHidden: hidden, suggestionsPending: true, suggestionsError: error });
+  await repeatPendingActivation(screen.getByRole("button", { name }));
+  expect(base.onHideNextSteps).not.toHaveBeenCalled();
   expect(base.onShowNextSteps).not.toHaveBeenCalled();
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" })).toBeVisible();
 });
 
-it("focuses Undo after Hide finishes, keeping focus in the row while disabled", async () => {
-  const { base, rerender } = home();
-  function PendingHome({ pending }: { pending: boolean }) {
-    const [hidden, setHidden] = useState(false);
-    return <NyxBotHome {...base} suggestionsHidden={hidden} suggestionsPending={hidden && pending}
-      onHideNextSteps={() => setHidden(true)} />;
-  }
-  rerender(<PendingHome pending />);
-  await userEvent.click(screen.getByRole("button", { name: "Hide" }));
-  const undo = screen.getByRole("button", { name: "Undo" });
-  expect(undo).toBeDisabled();
-  expect(undo.parentElement).toHaveFocus();
-  rerender(<PendingHome pending={false} />);
-  await waitFor(() => expect(undo).toHaveFocus());
+it.each([false, true])("keeps the counterpart focused throughout a pending request (initially hidden: %s)", async (hidden) => {
+  const user = userEvent.setup();
+  const { base, settle } = pendingHome(hidden);
+  screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" }).focus();
+  await user.keyboard("{Enter}");
+  const counterpart = screen.getByRole("button", { name: hidden ? "Hide" : "Undo" });
+  expect(counterpart).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+  await repeatPendingActivation(counterpart);
+  expect(hidden ? base.onShowNextSteps : base.onHideNextSteps).toHaveBeenCalledOnce();
+  expect(hidden ? base.onHideNextSteps : base.onShowNextSteps).not.toHaveBeenCalled();
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  settle();
+  expect(counterpart).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+  expect(counterpart).toHaveAttribute("aria-disabled", "false");
+  expect(screen.getByRole("status")).toHaveTextContent(hidden ? "Suggestions shown." : "Suggestions hidden.");
+});
+
+it.each([false, true])("returns focus to the original control after rollback (initially hidden: %s)", async (hidden) => {
+  const user = userEvent.setup();
+  const { base, settle } = pendingHome(hidden);
+  screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" }).focus();
+  await user.keyboard("{Enter}");
+  const counterpart = screen.getByRole("button", { name: hidden ? "Hide" : "Undo" });
+  expect(counterpart).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+  await repeatPendingActivation(counterpart);
+  settle(true);
+  const original = screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" });
+  expect(original).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+  expect(original).toHaveAttribute("aria-disabled", "false");
+  expect(screen.getByRole("button", { name: "Retry" })).toBeVisible();
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(hidden ? base.onShowNextSteps : base.onHideNextSteps).toHaveBeenCalledOnce();
+  expect(hidden ? base.onHideNextSteps : base.onShowNextSteps).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("keeps focus through rollback followed by a server refetch flip (initially hidden: %s)", async (hidden) => {
+  const { base, settle, refetch } = pendingHome(hidden);
+  await userEvent.click(screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" }));
+  settle(true);
+  expect(screen.getByRole("button", { name: hidden ? "Show suggestions" : "Hide" })).toHaveFocus();
+  refetch(!hidden);
+  expect(screen.getByRole("button", { name: hidden ? "Hide" : "Undo" })).toHaveFocus();
+  expect(document.activeElement).not.toBe(document.body);
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  refetch(!hidden, false);
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(hidden ? base.onShowNextSteps : base.onHideNextSteps).toHaveBeenCalledOnce();
+  expect(hidden ? base.onHideNextSteps : base.onShowNextSteps).not.toHaveBeenCalled();
 });
 
 it("announces a restore only after the request succeeds", async () => {

@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MessageSquare, NotebookPen, Plus } from "lucide-react";
 import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
@@ -20,7 +20,7 @@ import type { NextStep } from "@/schemas/assistant-onboarding";
 import { NextStepCards } from "./onboarding/next-step-cards";
 
 const MEMORY_PREVIEW = 3;
-const SUGGESTION_FOCUS_CLASS = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-input-focus focus-visible:outline-offset-2";
+const SUGGESTION_FOCUS_CLASS = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-input-focus focus-visible:outline-offset-2 aria-disabled:cursor-not-allowed aria-disabled:opacity-35";
 
 
 function Section({
@@ -394,33 +394,61 @@ export function NyxBotHome({
   useUiTranslation();
   const [now] = useState(() => new Date());
   const [hiddenThisSession, setHiddenThisSession] = useState(false);
-  const [restoreRequested, setRestoreRequested] = useState(false);
+  const [suggestionNotice, setSuggestionNotice] = useState<{
+    pending: boolean;
+    requestedHidden: boolean | null;
+    announcedHidden: boolean | null;
+  }>({ pending: suggestionsPending, requestedHidden: null, announcedHidden: null });
+  const requestSucceeded = suggestionNotice.requestedHidden !== null
+    && !suggestionsPending && !suggestionsError
+    && suggestionNotice.requestedHidden === suggestionsHidden;
+  const announcementStale = suggestionNotice.requestedHidden === null && !suggestionsPending
+    && suggestionNotice.announcedHidden !== null
+    && suggestionNotice.announcedHidden !== suggestionsHidden;
+  if (suggestionNotice.pending !== suggestionsPending || requestSucceeded || announcementStale) {
+    setSuggestionNotice({
+      pending: suggestionsPending,
+      requestedHidden: suggestionsPending ? suggestionNotice.requestedHidden : null,
+      announcedHidden: requestSucceeded ? suggestionNotice.requestedHidden : announcementStale ? null : suggestionNotice.announcedHidden,
+    });
+  }
   const restoreButton = useRef<HTMLButtonElement>(null);
   const hideButton = useRef<HTMLButtonElement>(null);
-  const restoreRow = useRef<HTMLDivElement>(null);
+  const focusedVisibilityControl = useRef<HTMLButtonElement | null>(null);
   const focusSuggestions = useRef(false);
+  useEffect(() => {
+    const rememberFocus = () => {
+      const active = document.activeElement;
+      focusedVisibilityControl.current = active === restoreButton.current
+        ? restoreButton.current
+        : active === hideButton.current ? hideButton.current : null;
+    };
+    document.addEventListener("focusin", rememberFocus);
+    return () => document.removeEventListener("focusin", rememberFocus);
+  }, []);
   const hideSuggestions = () => {
+    if (suggestionsPending) return;
     setHiddenThisSession(true);
-    setRestoreRequested(false);
+    setSuggestionNotice({ pending: false, requestedHidden: true, announcedHidden: null });
     focusSuggestions.current = true;
     onHideNextSteps?.();
   };
   const showSuggestions = () => {
-    setRestoreRequested(true);
+    if (suggestionsPending) return;
+    setSuggestionNotice({ pending: false, requestedHidden: false, announcedHidden: null });
     focusSuggestions.current = true;
     onShowNextSteps?.();
   };
-  useEffect(() => {
-    if (!focusSuggestions.current) return;
-    // Keep focus in the replacement row while its native button is disabled.
-    if (suggestionsPending) {
-      if (suggestionsHidden) restoreRow.current?.focus();
-      return;
-    }
+  useLayoutEffect(() => {
+    const previous = focusedVisibilityControl.current;
+    const lostControlFocus = previous && !previous.isConnected
+      && (!document.activeElement || document.activeElement === document.body);
+    if (!focusSuggestions.current && !lostControlFocus) return;
     const target = suggestionsHidden ? restoreButton.current : hideButton.current;
     if (target) {
-      target.focus();
-      focusSuggestions.current = false;
+      if (focusSuggestions.current) target.focus();
+      else target.focus({ preventScroll: true });
+      focusSuggestions.current = suggestionsPending;
     }
   }, [suggestionsHidden, suggestionsPending]);
   const firstName = userName?.trim().split(/\s+/)[0];
@@ -450,17 +478,17 @@ export function NyxBotHome({
 
         <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           {nextSteps?.length && !suggestionsPending && !suggestionsError
-            ? suggestionsHidden
-              ? hiddenThisSession ? translateUi("Suggestions hidden.") : null
-              : restoreRequested ? translateUi("Suggestions shown.") : null
+            ? suggestionNotice.announcedHidden === null
+              ? null
+              : suggestionNotice.announcedHidden ? translateUi("Suggestions hidden.") : translateUi("Suggestions shown.")
             : null}
         </div>
         {nextSteps?.length && suggestionsHidden && onShowNextSteps ? (
-          <div ref={restoreRow} tabIndex={-1} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground outline-none">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
             <p className="type-secondary">
               {hiddenThisSession ? translateUi("Suggestions hidden.") : translateUi("Suggestions are hidden.")}
             </p>
-            <Button ref={restoreButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} disabled={suggestionsPending} onClick={showSuggestions}>
+            <Button ref={restoreButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={showSuggestions}>
               {hiddenThisSession ? translateUi("Undo") : translateUi("Show suggestions")}
             </Button>
           </div>
@@ -474,7 +502,7 @@ export function NyxBotHome({
                   <Button size="sm" variant="ghost" onClick={onReplayIntro}>{translateUi("Replay intro")}</Button>
                 ) : null}
                 {onHideNextSteps ? (
-                  <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
+                  <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
                 ) : null}
               </div>
             }
@@ -489,7 +517,7 @@ export function NyxBotHome({
         {nextSteps?.length && suggestionsError ? (
           <div role="alert" className="flex flex-wrap items-center gap-2 type-secondary text-destructive">
             <p>{suggestionsError === "hide" ? translateUi("Couldn't hide suggestions. Try again.") : translateUi("Couldn't show suggestions. Try again.")}</p>
-            <Button size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} disabled={suggestionsPending} onClick={suggestionsError === "hide" ? hideSuggestions : showSuggestions}>
+            <Button size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={suggestionsError === "hide" ? hideSuggestions : showSuggestions}>
               {translateUi("Retry")}
             </Button>
           </div>
