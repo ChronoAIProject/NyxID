@@ -194,6 +194,7 @@ function ConversationRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const optionsTrigger = useRef<HTMLButtonElement>(null);
   const rowList = useRef<HTMLElement | null>(null);
+  const pinAction = useRef(false);
   const draft = useAssistantDraftStore((state) =>
     ownerUserId && state.ownerUserId === ownerUserId
       ? (state.drafts[`conv:${conversation.id}`]?.text ?? "")
@@ -252,7 +253,10 @@ function ConversationRow({
         )}
       </button>
       <DropdownMenu open={menuOpen} onOpenChange={(open) => {
-        if (open) rowList.current = optionsTrigger.current?.closest("nav") ?? null;
+        if (open) {
+          rowList.current = optionsTrigger.current?.closest("nav") ?? null;
+          pinAction.current = false;
+        }
         setMenuOpen(open);
       }}>
         <DropdownMenuTrigger asChild>
@@ -280,6 +284,8 @@ function ConversationRow({
           align="end"
           className="min-w-[160px]"
           onCloseAutoFocus={(event) => {
+            if (!pinAction.current) return;
+            pinAction.current = false;
             // Reordering may remount a row. Search the same sidebar instance:
             // the hidden desktop sidebar also stays mounted beside the mobile drawer.
             const channelKey = conversation.channel
@@ -294,7 +300,10 @@ function ConversationRow({
           }}
         >
           {onTogglePin ? (
-            <DropdownMenuItem onSelect={onTogglePin}>
+            <DropdownMenuItem onSelect={() => {
+              pinAction.current = true;
+              onTogglePin();
+            }}>
               {pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
               {pinned ? translateUi("Unpin chat") : translateUi("Pin chat")}
             </DropdownMenuItem>
@@ -405,6 +414,14 @@ function ChannelThreadsGroup({
   const visible = pinnedConversationsFirst(group.threads, pinnedIds).filter(
     (thread, index) => index < shown || thread.id === activeThreadId,
   );
+  const parentGroups = new Map<string, Conversation[]>();
+  for (const thread of visible) {
+    const parentChatId = thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id;
+    const key = JSON.stringify([pinnedIds.has(thread.id), parentChatId]);
+    const siblings = parentGroups.get(key);
+    if (siblings) siblings.push(thread);
+    else parentGroups.set(key, [thread]);
+  }
   const hidden = group.threads.length - visible.length;
   const platform = channelPlatformName(group.platform);
   const count = group.threads.length;
@@ -442,10 +459,9 @@ function ChannelThreadsGroup({
       {open ? (
         // The guide line runs down from the chevron's centre.
         <div className="ml-3.5 space-y-px border-l border-border/60 pl-1">
-          {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
-            const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
+          {Array.from(parentGroups, ([key, children]) => {
             const followed = children.some((thread) => thread.channel?.thread_id);
-            return <div key={chatId}>
+            return <div key={key}>
               {followed ? <p className="px-3 pt-1 text-13 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? translateUi("Channel chat")}</p> : null}
               <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
             </div>;
@@ -1281,7 +1297,7 @@ function RenameChatInline({
   });
   const [error, setError] = useState<string>();
   return (
-        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label={translateUi("Rename chat")} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
+        <form data-keep-drawer-open="" className="space-y-2 rounded-lg border border-hairline p-2" aria-label={translateUi("Rename chat")} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
           try {
             await onRename(conversation.id, title);
             onClose();

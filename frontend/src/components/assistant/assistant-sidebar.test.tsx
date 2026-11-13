@@ -587,7 +587,7 @@ describe("NyxBot agents in the sidebar", () => {
 
   function renderAgents(
     model: Partial<SidebarAgents> = {},
-    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups; rail?: boolean } = {},
+    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups; rail?: boolean; onRename?: (id: string, title: string) => Promise<void> } = {},
   ) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
     const handlers = {
@@ -607,6 +607,7 @@ describe("NyxBot agents in the sidebar", () => {
           onNewChat={vi.fn()}
           onSelect={onSelect}
           onDelete={vi.fn()}
+          onRename={options.onRename}
           agents={{
             agents,
             selectedAgentId: "agent-nyxbot",
@@ -621,6 +622,61 @@ describe("NyxBot agents in the sidebar", () => {
     );
     return { ...handlers, onSelect, queryClient };
   }
+
+  it.each(["pointer", "keyboard"])("keeps the channel Rename input focused after closing its menu with %s", async (interaction) => {
+    const user = userEvent.setup();
+    const row: Conversation = {
+      ...thread,
+      channel: { platform: "telegram", channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: "engineering", parent_title: "Engineering group", thread_id: "1" },
+    };
+    const onRename = vi.fn().mockResolvedValue(undefined);
+    const { onSelect } = renderAgents({ threads: [row] }, { onRename });
+    const header = screen.getByRole("button", { name: "Topics bot on Telegram, 1 chat" });
+    const options = screen.getByRole("button", { name: `Options for ${row.title}` });
+    if (interaction === "keyboard") {
+      options.focus();
+      await user.keyboard("{Enter}{ArrowDown}{Enter}");
+    } else {
+      await user.click(options);
+      await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    }
+    const input = within(screen.getByRole("form", { name: "Rename chat" })).getByRole("textbox");
+    await waitFor(() => expect(input).toHaveFocus());
+    await user.keyboard("{End} renamed");
+    expect(input).toHaveValue(`${row.title} renamed`);
+    expect(header).not.toHaveFocus();
+    expect(onSelect).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onRename).toHaveBeenCalledExactlyOnceWith(row.id, `${row.title} renamed`));
+  });
+
+  it("keeps multiple pinned topics across two parent chats ahead of ordinary siblings", async () => {
+    const user = userEvent.setup();
+    const rows = ["Engineering", "Support"].flatMap((parent) => Array.from({ length: 4 }, (_, index) => ({
+      ...thread, id: `nyxa-${parent}-${index}`, title: `${parent} topic ${index}`,
+      channel: { platform: "telegram", channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: parent, parent_title: `${parent} group`, thread_id: String(index) },
+    })));
+    for (const row of rows.filter((_, index) => index % 4 >= 2)) {
+      useAssistantPinsStore.getState().toggle(USER.id, row.id);
+    }
+    renderAgents({ threads: rows });
+    const header = screen.getByRole("button", { name: "Topics bot on Telegram, 8 chats" });
+    await user.click(header);
+    const group = within(header.parentElement!);
+    const orderedTitles = () => group.getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label"))
+      .filter((label) => label?.startsWith("Options for "));
+    const pins = ["Engineering topic 2", "Engineering topic 3", "Support topic 2", "Support topic 3"];
+    expect(orderedTitles()).toEqual([...pins, "Engineering topic 0"].map((title) => `Options for ${title}`));
+    expect(group.getAllByLabelText("Pinned chat")).toHaveLength(4);
+    for (const title of pins) {
+      const parentGroup = group.getByRole("button", { name: title }).closest(".border-l")!.parentElement!;
+      expect(within(parentGroup).getByText(`${title.split(" ")[0]} group`)).toBeVisible();
+    }
+    await user.click(group.getByRole("button", { name: "Show 3 more" }));
+    expect(orderedTitles()).toEqual([...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1"]
+      .map((title) => `Options for ${title}`));
+  });
 
   it("keeps channel pins inside their bot without changing bot order, counts or expansion", async () => {
     const user = userEvent.setup();
@@ -709,7 +765,8 @@ describe("NyxBot agents in the sidebar", () => {
     renderAgents({ threads: rows });
     const header = screen.getByRole("button", { name: "Topics bot on Telegram, 7 chats" });
     await user.click(header);
-    expect(screen.getByText("Engineering group")).toBeVisible();
+    expect(screen.getAllByText("Engineering group")).toHaveLength(2);
+    for (const label of screen.getAllByText("Engineering group")) expect(label).toBeVisible();
     const group = within(header.parentElement!);
     expect(group.getAllByRole("button")[1]).toHaveAccessibleName("Topic 6");
     expect(group.queryByRole("button", { name: "Topic 4" })).not.toBeInTheDocument();

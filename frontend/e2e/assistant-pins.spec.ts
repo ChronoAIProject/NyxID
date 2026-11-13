@@ -30,7 +30,89 @@ async function expectOrder(page: Page, expected: string[]) {
   )).filter((title) => titles.includes(title))).toEqual(expected);
 }
 
+async function expectTopicOrder(group: Locator, titles: string[]) {
+  await expect.poll(() => group.locator("[data-conversation-options]").evaluateAll(
+    (buttons) => buttons.map((button) => button.getAttribute("aria-label")),
+  )).toEqual(titles.map((title) => `Options for ${title}`));
+}
+
+async function seedParentChatTopics(page: Page) {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await page.evaluate(() => {
+    const key = "nyxagent-http-fixture-v4";
+    const state = JSON.parse(sessionStorage.getItem(key)!);
+    const source = state.rows.find(([, row]: [string, { history: { conversation: { channel: unknown } } }]) => row.history.conversation.channel);
+    const topics = ["Engineering", "Support"].flatMap((parent, parentIndex) => Array.from({ length: 4 }, (_, index) => {
+      const row = structuredClone(source[1]);
+      const id = `nyxa-${String(parentIndex + 3)}${String(index).padStart(31, "0")}`;
+      row.history.conversation = {
+        ...row.history.conversation, id, title: `${parent} topic ${index}`,
+        last_message_at: `2026-11-${String(12 - parentIndex)}T00:0${3 - index}:00.000Z`,
+        channel: { ...row.history.conversation.channel, channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: parent, parent_title: `${parent} group`, thread_id: String(index) },
+      };
+      return [id, row];
+    }));
+    state.rows = [...state.rows.filter(([id]: [string]) => id !== source[0]), ...topics];
+    sessionStorage.setItem(key, JSON.stringify(state));
+  });
+  await page.reload();
+  const nav = await showChats(page);
+  const header = nav.getByRole("button", { name: "Topics bot on Telegram, 8 chats", exact: true });
+  await header.click();
+  return { header, group: header.locator("..") };
+}
+
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`channel Rename keeps keyboard focus in the title input at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const { header, group } = await seedParentChatTopics(page);
+    const selectedUrl = page.url();
+    const options = group.getByRole("button", { name: "Options for Engineering topic 0", exact: true });
+    await options.focus();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "Rename", exact: true })).toBeFocused();
+    await page.keyboard.press("Enter");
+    const form = group.getByRole("form", { name: "Rename chat", exact: true });
+    const input = form.getByRole("textbox", { name: "Title", exact: true });
+    await expect(input).toBeFocused();
+    await expect(header).not.toBeFocused();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" renamed");
+    await expect(input).toHaveValue("Engineering topic 0 renamed");
+    await form.getByRole("button", { name: "Save", exact: true }).click();
+    await showChats(page);
+    if (await header.getAttribute("aria-expanded") === "false") await header.click();
+    await expect(group.getByRole("button", { name: "Options for Engineering topic 0 renamed", exact: true })).toBeVisible();
+    await expect(page).toHaveURL(selectedUrl);
+  });
+
+  test(`multiple pins across two parent chats precede ordinary topics at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    let { group } = await seedParentChatTopics(page);
+    await group.getByRole("button", { name: "Show 3 more" }).click();
+    const pins = ["Engineering topic 2", "Engineering topic 3", "Support topic 2", "Support topic 3"];
+    for (const title of pins) await togglePin(page, title);
+    await expectTopicOrder(group, [
+      ...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1",
+    ]);
+    await page.reload();
+    const nav = await showChats(page);
+    const header = nav.getByRole("button", { name: "Topics bot on Telegram, 8 chats", exact: true });
+    await header.click();
+    group = header.locator("..");
+    await expectTopicOrder(group, [...pins, "Engineering topic 0"]);
+    for (const title of pins) {
+      const parentGroup = group.getByRole("button", { name: title, exact: true }).locator("../../..");
+      await expect(parentGroup.getByText(`${title.split(" ")[0]} group`, { exact: true })).toBeVisible();
+    }
+    await expect(group.getByRole("img", { name: "Pinned chat", exact: true })).toHaveCount(4);
+    await group.getByRole("button", { name: "Show 3 more" }).click();
+    await expectTopicOrder(group, [
+      ...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1",
+    ]);
+  });
+
   test(`pins survive reload and Chat re-entry at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await openAssistant(page, { faults: { nyxagentEnabled: true } });
