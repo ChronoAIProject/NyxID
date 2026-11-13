@@ -83,12 +83,12 @@ pub(super) async fn prepare(
             &state.db,
             &channel.user_id,
         )
-        && crate::services::security_readiness_service::report(
+        && crate::services::security_readiness_service::serving_report(
             &state.db,
             crate::services::execution_permission_channel::READINESS,
         )
         .await?
-        .ready
+        .serving_ready
         && crate::services::execution_permission_enrollment::live_enabled(
             &state.db,
             &channel.user_id,
@@ -238,7 +238,7 @@ fn provider_stream_inner(
                             tokio::spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
                             tokio::spawn(async move { process(&wake_state, &wake_event).await; });
@@ -268,7 +268,7 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {

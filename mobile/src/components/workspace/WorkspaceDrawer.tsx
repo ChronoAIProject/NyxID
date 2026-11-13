@@ -7,6 +7,7 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import {
+  Bell,
   CalendarClock,
   Monitor,
   Plug,
@@ -28,6 +29,8 @@ import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { subscribeToApprovalRefreshSignals } from "../../lib/notifications/approvalRefreshSignal";
+import { notificationBellLabel } from "../../features/notifications/notificationPresentation";
+import { useNotificationIndicator } from "../../features/notifications/useNotifications";
 import { WorkspaceChatList } from "./WorkspaceChatList";
 import { WorkspaceRecents } from "./WorkspaceRecents";
 import { sidebarBottomSpace, SIDEBAR_BAR_GAP } from "./workspaceSidebarModel";
@@ -39,6 +42,7 @@ export type WorkspaceRoute =
   | "Automations"
   | "Machines"
   | "Activity"
+  | "Notifications"
   | "Services"
   | "Plugins"
   | "Agents"
@@ -107,6 +111,7 @@ export function WorkspaceDrawer({
     });
   }, [active, epoch, pending.refetch]);
   const count = pending.data?.total;
+  const notifications = useNotificationIndicator(active);
   return (
     <SafeAreaView
       edges={["top", "left", "right"]}
@@ -135,6 +140,7 @@ export function WorkspaceDrawer({
         key={epoch}
         visible={visible}
         current={currentChat}
+        unread={notifications.markers}
         onSelect={onOpenChat}
         onCreateAgent={onCreateAgent}
         onCreateGroup={onCreateGroup}
@@ -196,6 +202,53 @@ export function WorkspaceDrawer({
             >
               {t("Workspace")}
             </Text>
+            {notifications.enabled ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={notificationBellLabel(
+                  notifications.unread,
+                  notifications.needsDecision,
+                )}
+                accessibilityState={{ selected: currentRoute === "Notifications" }}
+                onPress={() => onNavigate("Notifications")}
+                style={({ pressed }) => [
+                  styles.row,
+                  {
+                    backgroundColor:
+                      currentRoute === "Notifications" || pressed
+                        ? colors.navActive
+                        : "transparent",
+                  },
+                ]}
+              >
+                <Bell size={20} color={colors.textSecondary} />
+                <Text
+                  numberOfLines={1}
+                  style={[styles.rowText, { color: colors.textPrimary }]}
+                >
+                  Notifications
+                </Text>
+                {notifications.badge ? (
+                  <Text
+                    testID="sidebar-notifications-count"
+                    style={[
+                      styles.count,
+                      notifications.needsDecision
+                        ? {
+                            color: colors.warningTone.text,
+                            backgroundColor: colors.warningTone.bg,
+                          }
+                        : {
+                            color: colors.textPrimary,
+                            backgroundColor: colors.navActive,
+                          },
+                    ]}
+                  >
+                    {notifications.badge}
+                  </Text>
+                ) : null}
+              </Pressable>
+            ) : null}
             {destinations.map((item) => {
               const route = item.route;
               const selected = route === currentRoute;
@@ -254,6 +307,7 @@ export function WorkspaceDrawer({
         scrollFooter={
           <WorkspaceRecents
             visible={visible}
+            unread={notifications.markers}
             onSelect={onOpenChat}
             onSeeAll={() => onBrowse("WorkspaceRecents")}
           />

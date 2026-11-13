@@ -636,9 +636,11 @@ pub(crate) async fn retire_connection(
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok(Vec::new());}
             let ids=retire_in_session(&state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
-            db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
+            db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
             super::channel_thread_follow_service::suspend_in_session(&db,&current.user_id,&current.id,error.as_deref().unwrap_or("disconnected"),session).await?;
+            db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+                .delete_many(doc! {"source.channel_id":&current.id}).session(&mut *session).await?;
             db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME).delete_many(
                 doc!{"task.channel_source.channel_id":&current.id}).session(&mut *session).await?;
             for key in [Some(current.route_api_key_id.as_str()),current.pending_route_api_key_id.as_deref()].into_iter().flatten() {

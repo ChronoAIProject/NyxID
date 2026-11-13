@@ -403,6 +403,57 @@ connection, credential generation and published contracts at every send. Errors
 identify the outbound service slug and connection label so the owner can fix
 that principal's scopes and Base access. Provider error prose is not exposed.
 
+Managed child requests use the trusted catalog dependency paths. User OAuth
+catalogs (`api-lark`, `api-feishu`) have `/open-apis` in their base URL; bot
+catalogs (`api-lark-bot`, `api-feishu-bot`) normally have it in provider operation
+paths. Two legacy logical contracts (fields-list and media-upload) retain their
+prefix-less stored paths for scope/approval compatibility. A typed, compiled
+SYSTEM-catalog routing capability adds `/open-apis` only at HTTP dispatch, after
+checking both logical and wire destination policies. Instance/remote specs and
+the generic proxy cannot obtain it. Connection suffixes such as
+`api-lark-bot-3` do not select routing rules.
+Tenant token exchange uses the same connection credential and cached-token
+injection as an ordinary tool call. A PDF bound to an earlier owner message in
+the same conversation remains eligible during a later live turn and uploads as
+`bitable_file`; images upload as `bitable_image`. Original bytes, size and SHA
+are checked, and source-message completeness is still enforced.
+
+Both attachment tools record one `mcp_tool_call` result for success or failure.
+Activity `failure.reason` and result audit `reason_code` use closed codes;
+`provider_code` contains only an observed numeric Lark code and
+`response_status` only an observed HTTP status. Their `service_request` records
+carry the same composite outcome: `not_sent`, `provider_refused`, `succeeded`,
+or `uncertain`. For a composite, `not_sent` means the record-create was not sent;
+a field read or a staging upload may already have happened. `uncertain` never
+authorizes a resend. A successful ledger replay has no new provider status.
+Other service events retain their existing fields and meanings.
+
+Common reasons are `eligibility:<reason>` (the existing attachment eligibility
+codes), `field_read_transport`, `field_read_provider_error`,
+`field_read_invalid_response`, `field_missing`, `field_not_attachment`,
+`field_value_invalid`, `attachment_unreadable`, `attachment_incomplete_set`,
+`attachment_integrity`, `attachment_size`, `credential_preparation`,
+`upload_transport`, `upload_provider_error`, `upload_invalid_response`,
+`authority_changed`, `create_provider_error`, `create_uncertain`,
+`ledger:<state>`, `ledger_changed`, `timeout`, `database_unavailable`,
+`invalid_arguments`, `admission_refused`, and `internal`. Diagnostics never copy
+field names/values, filenames, file tokens, attachment bytes or provider prose.
+The model still receives the actionable tool error text.
+
+The bot repair leaves compiled/stored contracts, publication and operation
+generations unchanged. Existing specialist/key/guest scopes, exact approvals,
+shared consent and execution permissions need no migration or owner re-save.
+Old replicas retain the routing defect until upgraded, but there are no changed
+stored paths for their startup sync to revert. Complete the worker upgrade to
+get the repair everywhere. Existing ledger rows and the write-once barrier are
+unchanged; dispatching or uncertain creates are never resent.
+
+Typed ordinary `bitable_fields_list` calls also reject a 2xx non-JSON or missing
+numeric `code` response as `field_read_invalid_response`; a nonzero Lark code
+is `field_read_provider_error`. Their activity and result/service audits carry
+these metadata-only reasons. An HTTP 200 alone does not establish API success.
+Generic proxy response semantics remain unchanged.
+
 The attachment map and each array must be nonempty, with at most ten distinct
 attachment IDs and 50 MiB total (20 MiB per file). Every declared photo from a
 channel message must exist and be included. Repeated content is refused even

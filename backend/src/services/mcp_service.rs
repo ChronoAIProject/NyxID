@@ -1384,6 +1384,63 @@ async fn load_user_tools_with_grants(
             .await?
     };
 
+    // This management view must not expose private legacy master/no-auth
+    // services just because they are auto-connected candidates. Reuse the same
+    // live consent check as provisioning and master-credential authorization.
+    // Executable discovery does not acquire any new reads here.
+    let private_app_ids: Vec<&str> = if options.authorization_targets.is_some() {
+        connected_services
+            .iter()
+            .chain(&auto_services)
+            .filter(|service| {
+                !service.requires_user_credential
+                    && service.platform_key.is_none()
+                    && service.visibility == "private"
+            })
+            .filter_map(|service| service.developer_app_ids.as_ref())
+            .flatten()
+            .map(String::as_str)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let private_consents = if private_app_ids.is_empty() {
+        HashSet::new()
+    } else {
+        super::unified_key_service::load_valid_app_consents(db, user_id, &private_app_ids).await?
+    };
+    let authorizable_platform = |service: &DownstreamService| {
+        if options.authorization_targets.is_none() {
+            return true;
+        }
+        if super::retired_service_service::is_retired(service) {
+            return false;
+        }
+        if service.requires_user_credential {
+            return true; // Its personal connection/credential is checked below.
+        }
+        if service.platform_key.is_some() {
+            return if super::platform_key_service::no_auth_platform_service(service) {
+                super::platform_key_service::no_auth_available_with_grants(service, user_id, grants)
+            } else {
+                super::platform_key_service::available_with_grants(
+                    service,
+                    service
+                        .provider_config_id
+                        .as_ref()
+                        .and_then(|id| options.providers.get(id)),
+                    user_id,
+                    grants,
+                )
+            };
+        }
+        service.visibility != "private"
+            || service
+                .developer_app_ids
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| private_consents.contains(id)))
+    };
+
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
@@ -1393,6 +1450,9 @@ async fn load_user_tools_with_grants(
             || crate::services::platform_key_service::model_only(svc)
             || crate::services::retired_service_service::is_retired(svc)
         {
+            continue;
+        }
+        if !authorizable_platform(svc) {
             continue;
         }
         let mut executable = true;
@@ -1416,6 +1476,9 @@ async fn load_user_tools_with_grants(
 
     for svc in &auto_services {
         if seen_ids.contains(&svc.id) || crate::services::platform_key_service::model_only(svc) {
+            continue;
+        }
+        if !authorizable_platform(svc) {
             continue;
         }
         if let Some(conn) = conn_map.get(svc.id.as_str())
@@ -1443,15 +1506,17 @@ async fn load_user_tools_with_grants(
     )
     .await?;
 
-    // Collect catalog IDs and slugs from *executable* user services for dedup
+    // Executable discovery deduplicates executable rows. Authorization retains
+    // an offline connection's identity too; a platform copy must not silently
+    // replace that configured credential when the grant editor saves its slug.
     let executable_catalog_ids: HashSet<&str> = all_user_services
         .iter()
-        .filter(|r| r.executable)
+        .filter(|r| options.authorization_targets.is_some() || r.executable)
         .filter_map(|r| r.service.catalog_service_id.as_deref())
         .collect();
     let executable_slugs: HashSet<&str> = all_user_services
         .iter()
-        .filter(|r| r.executable)
+        .filter(|r| options.authorization_targets.is_some() || r.executable)
         .map(|r| r.service.slug.as_str())
         .collect();
 
@@ -1674,6 +1739,14 @@ async fn load_user_tools_with_grants(
         }
         let retired_catalog =
             catalog_policy.is_some_and(crate::services::retired_service_service::is_retired);
+        if options.authorization_targets.is_some()
+            && (retired_catalog
+                || catalog_policy
+                    .is_some_and(|catalog| catalog.slug == super::assistant_nyxagent::SERVICE_SLUG)
+                || !endpoints_by_id.contains_key(us.endpoint_id.as_str()))
+        {
+            continue;
+        }
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
@@ -2491,7 +2564,15 @@ async fn load_callable_user_services(
         .authorization_targets
         .map(ServiceScope::Preferring)
         .unwrap_or(service_scope);
-    let winner_indices = select_slug_winner_indices(&candidates, preference_scope, user_id);
+    // Org grants address exact connection IDs; same-slug connections must all
+    // round-trip through the editor. Executable tool discovery still picks one.
+    let winner_indices = if options.authorization_targets.is_some()
+        && matches!(service_scope, ServiceScope::Organization { .. })
+    {
+        (0..candidates.len()).collect()
+    } else {
+        select_slug_winner_indices(&candidates, preference_scope, user_id)
+    };
     let shadowed_connections = candidates.len().saturating_sub(winner_indices.len());
     let mut selected: Vec<ResolvedUserService> = candidates
         .into_iter()
@@ -2988,7 +3069,9 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
-        "nyxid__task_status" | "nyxid__read_tool_result" => (true, false, false),
+        "nyxid__task_status" | "nyxid__list_notifications" | "nyxid__read_tool_result" => {
+            (true, false, false)
+        }
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
@@ -3039,6 +3122,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
         "nyxid__task_status" => "Read task execution status",
+        "nyxid__list_notifications" => "Read NyxBot notifications",
         "nyxid__read_tool_result" => "Read a retained tool result",
         "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
@@ -6661,6 +6745,18 @@ async fn execute_tool_resolved_inner(
             &billing_ctx.billing_request_id,
             billing_ctx.credential_class,
         );
+        let lark_fields = endpoint.name == super::lark_attachment_tool::FIELDS_OPERATION
+            && matches!(catalog_service_slug, Some("api-lark" | "api-feishu" | "api-lark-bot" | "api-feishu-bot"))
+            && !is_generic_proxy_endpoint
+            && service.durable_endpoint_metadata.get(&endpoint.endpoint_id)
+                .is_some_and(|metadata| metadata.catalog_contract && metadata.operation_generation > 0);
+        if lark_fields {
+            super::lark_attachment_tool::diagnostics::bind(&service.service_id);
+            super::lark_attachment_tool::diagnostics::enable();
+        }
+        if managed_base.is_some() || attachment_binding.is_some() || lark_fields {
+            request_audit.attachment_write();
+        }
         request_audit.assistant(assistant_chat.as_ref());
         request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
@@ -6745,6 +6841,7 @@ async fn execute_tool_resolved_inner(
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
                 Err(error)=>{
+                    super::lark_attachment_tool::diagnostics::error(&error);
                     billing.settle(&metered,mcp_platform_usage_for_path(&[],request_len,&target.service,&path,409),None,None).await?;
                     return Err(error);
                 }
@@ -7056,6 +7153,10 @@ async fn execute_tool_resolved_inner(
         });
         let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_attachment(
             egress_guard,db,service,endpoint,attachment_binding.as_ref());
+        if attachment_binding.is_some() {
+            super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::Uncertain);
+        }
+        let catalog_route = super::lark_attachment_tool::routing::for_call(db, &target, service, endpoint, &path).await?;
         let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
@@ -7075,18 +7176,30 @@ async fn execute_tool_resolved_inner(
             resource_proof.as_ref(),
             Some(&dispatch_admission),
             Some(&dispatch_caller),
+            catalog_route.as_ref(),
         )
         .await
         {
             Ok(response) => response,
             Err(proxy_service::ForwardRequestError::PreDispatchRejected(error)) => {
+                if attachment_binding.is_some() {
+                    super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::NotSent);
+                    super::lark_attachment_tool::diagnostics::error(&error);
+                }
                 billing
                     .reject_before_send(&metered, "assistant_authority_changed", false)
                     .await?;
                 return Err(error);
             }
-            Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+            Err(proxy_service::ForwardRequestError::Application(error)) => {
+                if attachment_binding.is_some() && matches!(target.auth_method.as_str(), "bearer" | "token_exchange") && target.execution_permission.is_none() && !super::credential_verification::checking() {
+                    super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::NotSent);
+                    return Err(super::lark_attachment_tool::diagnostics::Reason::CredentialPreparation.error(error));
+                }
+                return Err(error);
+            },
             Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
+                if attachment_binding.is_some() { super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, None, None); }
                 return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
                     error.into_app_error(),
                 ));
@@ -7094,6 +7207,10 @@ async fn execute_tool_resolved_inner(
             Err(proxy_service::ForwardRequestError::Transport(error))
                 if direct_transport_failure_is_pre_dispatch(&error) =>
             {
+                if attachment_binding.is_some() {
+                    super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, None, None);
+                    super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::NotSent);
+                }
                 if error.is_connect()
                     && let (Some(chat), Some(admission)) =
                         (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -7113,6 +7230,7 @@ async fn execute_tool_resolved_inner(
                 ));
             }
             Err(proxy_service::ForwardRequestError::Transport(error)) => {
+                if attachment_binding.is_some() { super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, None, None); }
                 tracing::error!(
                     timeout = error.is_timeout(),
                     body = error.is_body(),
@@ -7188,6 +7306,7 @@ async fn execute_tool_resolved_inner(
         let (mut response, raw_usage) = match read {
             Ok(read) => read,
             Err(error) => {
+                if attachment_binding.is_some() { super::lark_attachment_tool::diagnostics::failure(super::lark_attachment_tool::diagnostics::Reason::UploadTransport, Some(status), None); }
                 tracing::error!(
                     timeout = error.is_timeout(),
                     body = error.is_body(),
@@ -7214,6 +7333,12 @@ async fn execute_tool_resolved_inner(
             .await?;
 
         destination_audit.complete(status);
+        if lark_fields {
+            super::lark_attachment_tool::validate_field_response(status, &response.text)?;
+        }
+        if attachment_binding.is_some() && matches!(endpoint.attachment_input, Some(super::lark_attachment_tool::Projection::Stored(_))) {
+            super::lark_attachment_tool::validate_response(status, &response.text)?;
+        }
         request_audit.response(status).await;
         if (200..300).contains(&status)
             && let (Some(chat), Some(admission)) =
@@ -11202,6 +11327,19 @@ mod tests {
         assert_eq!(call_tool["destructiveHint"], true);
         let search = tool_annotations("nyx__search_tools", &[]).unwrap();
         assert_eq!(search["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn notification_digest_annotations_are_read_only_and_have_a_title() {
+        assert_eq!(
+            tool_annotations("nyxid__list_notifications", &[]).unwrap(),
+            serde_json::json!({
+                "title": "Read NyxBot notifications",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "openWorldHint": false,
+            })
+        );
     }
 
     #[test]

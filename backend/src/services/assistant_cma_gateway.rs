@@ -534,13 +534,14 @@ impl<'a> CatalogCmaGateway<'a> {
         Ok(())
     }
 
-    /// A fresh human recovery uses the saved request through the same connection
-    /// admission and final dispatch hooks as ordinary CMA execution.
+    /// Recovery uses the saved request through the same connection admission and
+    /// final dispatch hooks. Only the explicit management lane needs its flag.
     pub(super) async fn replay_creation(
         &self,
         keys: &crate::crypto::aes::EncryptionKeys,
         creation: &crate::models::assistant_cma_creation::AssistantCmaCreation,
         body: &[u8],
+        access: super::assistant_cma_admission::CreationRecoveryAccess,
     ) -> crate::errors::AppResult<()> {
         use super::service_dispatch_registry as registry;
         let owner_id = &creation.user_id;
@@ -614,7 +615,12 @@ impl<'a> CatalogCmaGateway<'a> {
         let request = request
             .build()
             .map_err(|_| CmaGatewayError::InvalidRequest)?;
-        super::assistant_cma_agent_service::require_enabled(&self.db, owner_id).await?;
+        if matches!(
+            access,
+            super::assistant_cma_admission::CreationRecoveryAccess::Management
+        ) {
+            super::assistant_cma_agent_service::require_enabled(&self.db, owner_id).await?;
+        }
         super::assistant_cma_admission::require_recovery_current(&self.db, creation).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let response = tokio::time::timeout_at(
@@ -1191,6 +1197,7 @@ impl<'a> CatalogCmaGateway<'a> {
                 None,
                 Some(admission),
                 Some(caller),
+                None,
             ));
         forwarding.await.map_err(|error| match error {
             proxy_service::ForwardRequestError::Transport(error) if error.is_timeout() => {

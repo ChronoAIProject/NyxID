@@ -97,3 +97,70 @@ test("approval default is one row with its value that opens an in-app menu", () 
   assert.ok(env.text("Per-service and organization policies still apply."));
   env.harness.unmount();
 });
+
+test("NyxBot push switches appear only with the flag, one per kind, and save the whole set", () => {
+  const off = setup(true, 1);
+  assert.equal(
+    off.all().some((node) => node.type === "Text" && node.props.children === "NYXBOT NOTIFICATIONS"),
+    false,
+  );
+  off.harness.unmount();
+  const env = setupSettingsScreen(
+    "./NotificationSettingsScreen.tsx",
+    "NotificationSettingsScreen",
+    {
+      connectedTelegram: false,
+      pushDevices: 1,
+      nyxbotNotifications: { enabled: true, push: { needs_decision: true } },
+    },
+  );
+  assert.ok(env.text("NYXBOT NOTIFICATIONS"));
+  const labels = [
+    "Automation results",
+    "Automation problems",
+    "Decisions needed",
+    "Agent updates",
+    "Chat updates",
+    "Group mentions",
+  ];
+  const switches = labels.map(
+    (label) => elements(env.row(label)).find((node) => node.type === "Switch")!,
+  );
+  assert.deepEqual(
+    switches.map((node) => node.props.value),
+    [false, false, true, false, false, false],
+  );
+  assert.ok(switches.every((node) => node.props.disabled === false));
+  switches[4]!.props.onValueChange(true);
+  switches[2]!.props.onValueChange(false);
+  assert.deepEqual(JSON.parse(JSON.stringify(env.pushPreferenceMutations)), [
+    {
+      automation_result: false,
+      automation_problem: false,
+      needs_decision: true,
+      agent_update: false,
+      chat_update: true,
+      group_mention: false,
+    },
+    {
+      automation_result: false,
+      automation_problem: false,
+      needs_decision: false,
+      agent_update: false,
+      chat_update: false,
+      group_mention: false,
+    },
+  ]);
+  assert.equal(env.mutations.length, 0, "delivery switches are untouched");
+  assert.ok(env.text("Pushed once when a new notification arrives; the feed in Notifications always keeps them."));
+  env.harness.unmount();
+  const loading = setupSettingsScreen(
+    "./NotificationSettingsScreen.tsx",
+    "NotificationSettingsScreen",
+    { pushDevices: 0, nyxbotNotifications: { enabled: true, pending: true } },
+  );
+  const pending = elements(loading.row("Chat updates")).find((node) => node.type === "Switch")!;
+  assert.equal(pending.props.disabled, true, "no save before the saved switches are known");
+  assert.ok(loading.text("Turn on push notifications above to receive these on this device; the feed in Notifications always keeps them."));
+  loading.harness.unmount();
+});

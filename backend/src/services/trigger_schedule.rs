@@ -676,6 +676,10 @@ async fn finish_update(
     let mut run = action.session(&mut *session).await?;
     if let Some(run) = &mut run {
         notification_delivery::notice_in_session(db, run, frontend, session).await?;
+        Box::pin(
+            super::assistant_notification_service::record_run_terminal_in_session(db, session, run),
+        )
+        .await?;
         Box::pin(record_terminal_in_session(
             db, session, run, reason, frontend,
         ))
@@ -1573,5 +1577,11 @@ async fn record_terminal_in_session(
         })
         .session(&mut *session)
         .await?;
+    Box::pin(
+        super::assistant_notification_service::record_run_paused_in_session(
+            db, session, &run, &notice_id, reason,
+        ),
+    )
+    .await?;
     Ok(())
 }

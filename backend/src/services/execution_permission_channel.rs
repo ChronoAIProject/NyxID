@@ -331,7 +331,7 @@ async fn validate_inner(
     {
         return Err(refused());
     }
-    super::security_readiness_service::require(db, READINESS).await?;
+    super::security_readiness_service::require_serving(db, READINESS).await?;
     let r = rows(
         db,
         tx,

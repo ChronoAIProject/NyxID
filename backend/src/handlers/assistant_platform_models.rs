@@ -124,7 +124,7 @@ pub(crate) async fn execute(
         });
     }
     if execution::images::contains_images(&value) {
-        crate::services::security_readiness_service::require(
+        crate::services::security_readiness_service::require_serving(
             &state.db,
             execution::images::READINESS,
         )

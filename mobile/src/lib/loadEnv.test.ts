@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { extractAuthDeviceUserCodeFromQr } from "../features/auth/deviceUserCode";
 
@@ -14,6 +17,7 @@ type ResolvedProfile = {
   universalLinkPathPrefix: string;
   iosBundleId: string;
   androidPackage: string;
+  androidGoogleServicesFile: string;
   iosBuildNumber: string;
   androidVersionCode: string;
 };
@@ -21,7 +25,10 @@ type ResolvedProfile = {
 type ResolveProfile = (
   appEnv: "dev" | "prod",
   env: Record<string, string>,
-  options?: { warnOnFrontendUrlFallback?: boolean }
+  options?: {
+    warnOnFrontendUrlFallback?: boolean;
+    validateAndroidGoogleServices?: boolean;
+  },
 ) => ResolvedProfile;
 
 const require = createRequire(import.meta.url);
@@ -29,13 +36,22 @@ const { resolveProfile } = require("../../scripts/lib/load-env.js") as {
   resolveProfile: ResolveProfile;
 };
 const { buildNativeLinks } = require("../../scripts/lib/native-links.js") as {
-  buildNativeLinks: (config: Pick<ResolvedProfile, "universalLinkHost" | "universalLinkPathPrefix"> & { apiBaseUrls: string[]; scheme: string }) => {
+  buildNativeLinks: (
+    config: Pick<
+      ResolvedProfile,
+      "universalLinkHost" | "universalLinkPathPrefix"
+    > & { apiBaseUrls: string[]; scheme: string },
+  ) => {
     associatedDomains: string[];
-    androidIntentFilters: { data: { scheme: string; host?: string; pathPrefix?: string }[] }[];
+    androidIntentFilters: {
+      data: { scheme: string; host?: string; pathPrefix?: string }[];
+    }[];
   };
 };
 
-function profileEnv(overrides: Record<string, string> = {}): Record<string, string> {
+function profileEnv(
+  overrides: Record<string, string> = {},
+): Record<string, string> {
   return {
     DEV_API_BASE_URL: "http://localhost:3001/api/v1",
     DEV_IOS_BUNDLE_ID: "dev.nyxid.test",
@@ -47,7 +63,8 @@ function profileEnv(overrides: Record<string, string> = {}): Record<string, stri
 function captureWarnings(run: () => void): string[] {
   const originalWarn = console.warn;
   const warnings: string[] = [];
-  console.warn = (...values: unknown[]) => warnings.push(values.map(String).join(" "));
+  console.warn = (...values: unknown[]) =>
+    warnings.push(values.map(String).join(" "));
   try {
     run();
   } finally {
@@ -61,7 +78,7 @@ test("does not warn when the frontend URL is configured explicitly", () => {
     const resolved = resolveProfile(
       "dev",
       profileEnv({ DEV_FRONTEND_URL: "http://localhost:3000" }),
-      { warnOnFrontendUrlFallback: true }
+      { warnOnFrontendUrlFallback: true },
     );
     assert.equal(resolved.frontendUrl, "http://localhost:3000");
   });
@@ -74,14 +91,20 @@ test("warns when the trusted frontend origin falls back to the legal URL", () =>
     const resolved = resolveProfile(
       "dev",
       profileEnv({ DEV_LEGAL_BASE_URL: "http://legal.localhost:3000" }),
-      { warnOnFrontendUrlFallback: true }
+      { warnOnFrontendUrlFallback: true },
     );
     assert.equal(resolved.frontendUrl, "http://legal.localhost:3000");
   });
 
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0] ?? "", /DEV_FRONTEND_URL is not explicitly configured/);
-  assert.match(warnings[0] ?? "", /moving legal documents cannot break QR scanning/);
+  assert.match(
+    warnings[0] ?? "",
+    /DEV_FRONTEND_URL is not explicitly configured/,
+  );
+  assert.match(
+    warnings[0] ?? "",
+    /moving legal documents cannot break QR scanning/,
+  );
 });
 
 test("warns loudly when no trusted frontend URL resolves", () => {
@@ -101,7 +124,7 @@ test("keeps non-build profile resolution quiet", () => {
   const warnings = captureWarnings(() => {
     const resolved = resolveProfile(
       "dev",
-      profileEnv({ DEV_LEGAL_BASE_URL: "http://legal.localhost:3000" })
+      profileEnv({ DEV_LEGAL_BASE_URL: "http://legal.localhost:3000" }),
     );
     assert.equal(resolved.frontendUrl, "http://legal.localhost:3000");
   });
@@ -109,7 +132,9 @@ test("keeps non-build profile resolution quiet", () => {
   assert.deepEqual(warnings, []);
 });
 
-function productionEnv(overrides: Record<string, string> = {}): Record<string, string> {
+function productionEnv(
+  overrides: Record<string, string> = {},
+): Record<string, string> {
   return profileEnv({
     PROD_API_BASE_URL: "https://nyx-api.chrono-ai.fun/api/v1",
     PROD_FRONTEND_URL: "https://nyx.chrono-ai.fun",
@@ -136,7 +161,10 @@ function nativeLinks(resolved: ResolvedProfile) {
 }
 
 test("embeds both production domain sets while keeping app identity", () => {
-  const resolved = resolveProfile("prod", productionEnv({ DEV_UNIVERSAL_LINK_PATH_PREFIX: "/dev-only" }));
+  const resolved = resolveProfile(
+    "prod",
+    productionEnv({ DEV_UNIVERSAL_LINK_PATH_PREFIX: "/dev-only" }),
+  );
   assert.equal(resolved.apiBaseUrl, "https://nyx-api.chrono-ai.fun/api/v1");
   assert.equal(resolved.frontendUrl, "https://nyx.chrono-ai.fun");
   assert.equal(resolved.legalBaseUrl, "https://nyx.chrono-ai.fun");
@@ -149,14 +177,83 @@ test("embeds both production domain sets while keeping app identity", () => {
   assert.equal(resolved.androidPackage, "fun.chronoai.nyxid");
   assert.equal(resolved.iosBuildNumber, "37");
   assert.equal(resolved.androidVersionCode, "37");
+  assert.equal(resolved.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("keeps Firebase configuration profile-local instead of falling back to production", () => {
+  const dev = resolveProfile("dev", profileEnv());
+  assert.equal(dev.androidGoogleServicesFile, "");
+
+  const prod = resolveProfile("prod", productionEnv());
+  assert.equal(prod.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("preserves the matching default Firebase file for an existing dev profile", () => {
+  const resolved = resolveProfile(
+    "dev",
+    profileEnv({ DEV_ANDROID_PACKAGE: "fun.chronoai.nyxid" }),
+  );
+  assert.equal(resolved.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("an explicit empty dev Firebase path disables FCM even when the default matches", () => {
+  const resolved = resolveProfile(
+    "dev",
+    profileEnv({
+      DEV_ANDROID_PACKAGE: "fun.chronoai.nyxid",
+      DEV_GOOGLE_SERVICES_FILE: "",
+    }),
+  );
+  assert.equal(resolved.androidGoogleServicesFile, "");
+});
+
+test("an empty production Firebase path preserves the existing FCM default", () => {
+  const resolved = resolveProfile(
+    "prod",
+    productionEnv({ PROD_GOOGLE_SERVICES_FILE: " " }),
+    { validateAndroidGoogleServices: true },
+  );
+  assert.equal(resolved.androidGoogleServicesFile, "./google-services.json");
+});
+
+test("rejects a Firebase file that does not contain the active Android package", () => {
+  assert.throws(
+    () =>
+      resolveProfile(
+        "dev",
+        profileEnv({ DEV_GOOGLE_SERVICES_FILE: "./google-services.json" }),
+        { validateAndroidGoogleServices: true },
+      ),
+    /does not contain a client for dev\.nyxid\.test/,
+  );
+});
+
+test("rejects a Firebase file with an invalid top-level JSON shape", () => {
+  const directory = mkdtempSync(join(tmpdir(), "nyxid-google-services-"));
+  const file = join(directory, "google-services.json");
+  writeFileSync(file, "null");
+  try {
+    assert.throws(
+      () =>
+        resolveProfile("dev", profileEnv({ DEV_GOOGLE_SERVICES_FILE: file }), {
+          validateAndroidGoogleServices: true,
+        }),
+      /does not contain a client for dev\.nyxid\.test/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("builds without new URLs keep a single domain set", () => {
-  const resolved = resolveProfile("prod", productionEnv({
-    PROD_NEW_API_BASE_URL: "",
-    PROD_NEW_FRONTEND_URL: "",
-    PROD_NEW_LEGAL_BASE_URL: "",
-  }));
+  const resolved = resolveProfile(
+    "prod",
+    productionEnv({
+      PROD_NEW_API_BASE_URL: "",
+      PROD_NEW_FRONTEND_URL: "",
+      PROD_NEW_LEGAL_BASE_URL: "",
+    }),
+  );
   assert.equal(resolved.newApiBaseUrl, "");
   assert.equal(resolved.newFrontendUrl, "");
   assert.equal(resolved.newLegalBaseUrl, "");
@@ -173,32 +270,51 @@ test("native config associates both API hosts and preserves OneLink and its path
     "applinks:api.nyxid.ai",
     "applinks:nyxid.onelink.me",
   ]);
-  assert.deepEqual(native.androidIntentFilters, [{
-    action: "VIEW",
-    autoVerify: true,
-    data: [{ scheme: "https", host: "nyxid.onelink.me", pathPrefix: "/REzJ" }],
-    category: ["BROWSABLE", "DEFAULT"],
-  }, {
-    action: "VIEW",
-    data: [{ scheme: "nyxid" }],
-    category: ["BROWSABLE", "DEFAULT"],
-  }]);
+  assert.deepEqual(native.androidIntentFilters, [
+    {
+      action: "VIEW",
+      autoVerify: true,
+      data: [
+        { scheme: "https", host: "nyxid.onelink.me", pathPrefix: "/REzJ" },
+      ],
+      category: ["BROWSABLE", "DEFAULT"],
+    },
+    {
+      action: "VIEW",
+      data: [{ scheme: "nyxid" }],
+      category: ["BROWSABLE", "DEFAULT"],
+    },
+  ]);
 });
 
 test("does not claim a frontend host when no universal-link host is configured", () => {
-  const native = nativeLinks(resolveProfile("prod", productionEnv({
-    PROD_UNIVERSAL_LINK_HOST: "",
-    PROD_UNIVERSAL_LINK_PATH_PREFIX: "",
-  })));
-  assert.deepEqual(native.associatedDomains, ["applinks:nyx-api.chrono-ai.fun", "applinks:api.nyxid.ai"]);
-  assert.deepEqual(native.androidIntentFilters, [{
-    action: "VIEW",
-    data: [{ scheme: "nyxid" }],
-    category: ["BROWSABLE", "DEFAULT"],
-  }]);
+  const native = nativeLinks(
+    resolveProfile(
+      "prod",
+      productionEnv({
+        PROD_UNIVERSAL_LINK_HOST: "",
+        PROD_UNIVERSAL_LINK_PATH_PREFIX: "",
+      }),
+    ),
+  );
+  assert.deepEqual(native.associatedDomains, [
+    "applinks:nyx-api.chrono-ai.fun",
+    "applinks:api.nyxid.ai",
+  ]);
+  assert.deepEqual(native.androidIntentFilters, [
+    {
+      action: "VIEW",
+      data: [{ scheme: "nyxid" }],
+      category: ["BROWSABLE", "DEFAULT"],
+    },
+  ]);
 });
 
-for (const variable of ["PROD_NEW_API_BASE_URL", "PROD_NEW_FRONTEND_URL", "PROD_NEW_LEGAL_BASE_URL"]) {
+for (const variable of [
+  "PROD_NEW_API_BASE_URL",
+  "PROD_NEW_FRONTEND_URL",
+  "PROD_NEW_LEGAL_BASE_URL",
+]) {
   test(`rejects a partial new URL set missing ${variable}`, () => {
     assert.throws(
       () => resolveProfile("prod", productionEnv({ [variable]: " " })),
@@ -207,10 +323,17 @@ for (const variable of ["PROD_NEW_API_BASE_URL", "PROD_NEW_FRONTEND_URL", "PROD_
   });
 }
 
-for (const url of ["not-a-url", "http://api.nyxid.ai/api/v1", "https://user:secret@api.nyxid.ai/api/v1", "https://api.nyxid.ai/api/v1?x=1", "https://api.nyxid.ai/api/v1#fragment"]) {
+for (const url of [
+  "not-a-url",
+  "http://api.nyxid.ai/api/v1",
+  "https://user:secret@api.nyxid.ai/api/v1",
+  "https://api.nyxid.ai/api/v1?x=1",
+  "https://api.nyxid.ai/api/v1#fragment",
+]) {
   test(`rejects invalid new production API URL ${url}`, () => {
     assert.throws(
-      () => resolveProfile("prod", productionEnv({ PROD_NEW_API_BASE_URL: url })),
+      () =>
+        resolveProfile("prod", productionEnv({ PROD_NEW_API_BASE_URL: url })),
       /PROD_NEW_API_BASE_URL must be/,
     );
   });
@@ -218,7 +341,10 @@ for (const url of ["not-a-url", "http://api.nyxid.ai/api/v1", "https://user:secr
 
 test("warns that the retired build flag is no longer read", () => {
   const warnings = captureWarnings(() => {
-    const resolved = resolveProfile("prod", productionEnv({ PROD_USE_NEW_DOMAINS: "true" }));
+    const resolved = resolveProfile(
+      "prod",
+      productionEnv({ PROD_USE_NEW_DOMAINS: "true" }),
+    );
     assert.equal(resolved.apiBaseUrl, "https://nyx-api.chrono-ai.fun/api/v1");
   });
   assert.equal(warnings.length, 1);
@@ -226,12 +352,15 @@ test("warns that the retired build flag is no longer read", () => {
 });
 
 test("dev builds never embed the production switch", () => {
-  const resolved = resolveProfile("dev", productionEnv({
-    DEV_FRONTEND_URL: "http://localhost:3000",
-    DEV_LEGAL_BASE_URL: "http://localhost:3000",
-    DEV_UNIVERSAL_LINK_HOST: "dev.example.com",
-    DEV_UNIVERSAL_LINK_PATH_PREFIX: "/dev",
-  }));
+  const resolved = resolveProfile(
+    "dev",
+    productionEnv({
+      DEV_FRONTEND_URL: "http://localhost:3000",
+      DEV_LEGAL_BASE_URL: "http://localhost:3000",
+      DEV_UNIVERSAL_LINK_HOST: "dev.example.com",
+      DEV_UNIVERSAL_LINK_PATH_PREFIX: "/dev",
+    }),
+  );
   assert.equal(resolved.apiBaseUrl, "http://localhost:3001/api/v1");
   assert.equal(resolved.frontendUrl, "http://localhost:3000");
   assert.equal(resolved.newApiBaseUrl, "");
@@ -253,8 +382,25 @@ test("QR trust accepts both embedded frontends and rejects others", () => {
     ],
     allowHttp: false,
   };
-  for (const origin of ["https://nyx.chrono-ai.fun", "https://nyxid.ai", "https://api.nyxid.ai", "https://nyx-api.chrono-ai.fun"]) {
-    assert.equal(extractAuthDeviceUserCodeFromQr(`${origin}/login/device?user_code=ABCD-EFGH`, policy), "ABCDEFGH");
+  for (const origin of [
+    "https://nyx.chrono-ai.fun",
+    "https://nyxid.ai",
+    "https://api.nyxid.ai",
+    "https://nyx-api.chrono-ai.fun",
+  ]) {
+    assert.equal(
+      extractAuthDeviceUserCodeFromQr(
+        `${origin}/login/device?user_code=ABCD-EFGH`,
+        policy,
+      ),
+      "ABCDEFGH",
+    );
   }
-  assert.equal(extractAuthDeviceUserCodeFromQr("https://untrusted.example/login/device?user_code=ABCD-EFGH", policy), null);
+  assert.equal(
+    extractAuthDeviceUserCodeFromQr(
+      "https://untrusted.example/login/device?user_code=ABCD-EFGH",
+      policy,
+    ),
+    null,
+  );
 });

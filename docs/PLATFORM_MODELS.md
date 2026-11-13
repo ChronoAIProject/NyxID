@@ -624,7 +624,10 @@ No page sends a provider probe or creates credentials.
 Public IDs and families cannot be edited. Contract/route/access writes include the
 model's `expected_revision`; tariff create/retire includes its current `revision`.
 A 409 preserves the form and requires explicit reload/discard; there is no blind
-retry. The enable switch remains unavailable while execution is not ready.
+retry. The admin editor's `execution_ready` projection remains strict activation
+readiness because it controls the enable switch. Already active execution can
+continue under roster warnings while that switch is unavailable; inspect
+`/api/v1/admin/security-readiness` for the separate serving state.
 Readiness is reported independently of lifecycle and rate sync. Admin responses
 return `execution_ready: false` and `blocking_reason: execution_fleet_not_ready`
 until the registry, billing and execution fleet gates pass; once ready, the
@@ -938,9 +941,11 @@ prices, with certified image bounds; it never returns route, credential, region,
 project or upstream model identifiers. The picker pages this list alongside
 legacy profiles. Inaccessible saved model selections project an empty `model`
 and additive `model_unavailable: true`, displayed as “Model unavailable”.
-Missing, stale or unknown readiness degrades discovery: entitled metadata and
+Missing, stale or unknown serving readiness degrades discovery: entitled metadata and
 prices remain readable, models are unavailable and image limits are omitted.
-The list does not probe NyxAgent when fleet readiness is absent. Execution still
+Recorded active capabilities retain discovery and execution under roster warnings
+when every live generation supports them; model/route/tariff authoring stays strict.
+The list does not probe NyxAgent when serving readiness is absent. Execution still
 enforces every readiness gate; database failures remain errors.
 
 Thread changes, specialist defaults and turn admissions use the same live

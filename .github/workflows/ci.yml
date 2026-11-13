@@ -774,6 +774,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:native-sync
       - run: pnpm test
+      - run: pnpm test:jest --runInBand
       - run: pnpm typecheck
 
   # ---------------------------------------------------------------------------

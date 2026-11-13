@@ -10,7 +10,7 @@ use mongodb::{Database, bson::doc};
 pub const READINESS: &str = "assistant:shared-agent-transports-v1";
 
 pub async fn require_ready(db: &Database) -> AppResult<()> {
-    super::security_readiness_service::require(db, READINESS).await
+    super::security_readiness_service::require_serving(db, READINESS).await
 }
 
 /// Opaque frames cannot prove a method/path/verb policy. Only an unrestricted

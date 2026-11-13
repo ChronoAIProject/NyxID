@@ -1585,6 +1585,12 @@ fn dispatch<'a>(
     delegation_approved: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "list_notifications" => Box::pin(async move {
+            Ok((
+                super::assistant_notifications::list_for_tool(state, &chat.user_id, args).await?,
+                false,
+            ))
+        }),
         "task_status" => Box::pin(async move {
             Ok((
                 crate::services::assistant_task_status::read(&state.db, chat, args).await?,
@@ -3364,6 +3370,149 @@ pub struct CreateAgentRequest {
     account_read: bool,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantServicesQuery {
+    org: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GrantServiceResponse {
+    id: String,
+    slug: String,
+    label: String,
+    executable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+}
+
+/// Metadata-only grant inventory, deliberately separate from key management
+/// and executable MCP discovery. Saving resolves this same live inventory.
+pub async fn grant_services(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<GrantServicesQuery>,
+) -> AppResult<Json<Value>> {
+    use crate::services::mcp_service::McpToolSource;
+    use bson::doc;
+    use futures::TryStreamExt;
+
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let owner = match query.org.as_deref() {
+        Some(org) => {
+            crate::services::org_agent_service::resolve_org(&state.db, &actor, org).await?
+        }
+        None => actor.clone(),
+    };
+    let access =
+        crate::services::org_agent_service::resolve_key_access(&state.db, &actor, Some(&owner))
+            .await?;
+    let scope = match access.as_deref() {
+        Some(access) => crate::services::mcp_service::ServiceScope::Organization { access },
+        None => crate::services::mcp_service::ServiceScope::Unrestricted,
+    };
+    // Preserve the old human /keys inventory's personal/restricted-org provisioning.
+    // Grant writers themselves remain read-only until the normal grant transaction.
+    crate::services::unified_key_service::auto_provision_no_auth_services(&state.db, &actor)
+        .await?;
+    let services =
+        team::grant_catalog(&state.db, &state.node_ws_manager, &actor, scope, &[]).await?;
+    // Presentation metadata only: one ID-bounded batch, only on this human GET.
+    // The canonical inventory already supplies the catalog identity; no lookup
+    // or new reads in grant writers / MCP / execution are needed.
+    let mut connection_ids = Vec::new();
+    let mut catalog_ids = std::collections::BTreeSet::new();
+    for service in &services {
+        match &service.source {
+            McpToolSource::UserManaged {
+                user_service_id,
+                catalog_service_id,
+                ..
+            } => {
+                connection_ids.push(user_service_id.clone());
+                catalog_ids.extend(catalog_service_id.iter().cloned());
+            }
+            McpToolSource::Platform {
+                downstream_service_id,
+            } => {
+                catalog_ids.insert(downstream_service_id.clone());
+            }
+            McpToolSource::Internal => {}
+        }
+    }
+    let mut connection_icons = BTreeMap::new();
+    let mut catalog_icons = BTreeMap::new();
+    if !services.is_empty() {
+        let metadata: Vec<bson::Document> = state.db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .aggregate(vec![
+                doc! {"$match": {"_id": {"$in": connection_ids}}},
+                doc! {"$project": {"_id": 1, "icon_url": 1, "kind": {"$literal": "connection"}}},
+                doc! {"$unionWith": {"coll": crate::models::downstream_service::COLLECTION_NAME,
+                    "pipeline": [
+                        {"$match": {"_id": {"$in": catalog_ids.into_iter().collect::<Vec<_>>()}}},
+                        {"$project": {"_id": 1, "slug": 1, "icon_url": 1, "kind": {"$literal": "catalog"}}}
+                    ]}},
+            ])
+            .await?
+            .try_collect()
+            .await?;
+        for row in metadata {
+            let Ok(id) = row.get_str("_id") else { continue };
+            let icon = row
+                .get_str("icon_url")
+                .ok()
+                .filter(|icon| !icon.is_empty())
+                .map(str::to_owned);
+            if row.get_str("kind") == Ok("connection") {
+                connection_icons.insert(id.to_owned(), icon);
+            } else {
+                catalog_icons.insert(
+                    id.to_owned(),
+                    (row.get_str("slug").ok().map(str::to_owned), icon),
+                );
+            }
+        }
+    }
+    let services: Vec<_> = services
+        .into_iter()
+        .map(|service| {
+            let (connection_id, catalog_id) = match &service.source {
+                McpToolSource::UserManaged {
+                    user_service_id,
+                    catalog_service_id,
+                    ..
+                } => (
+                    Some(user_service_id.as_str()),
+                    catalog_service_id.as_deref(),
+                ),
+                McpToolSource::Platform {
+                    downstream_service_id,
+                } => (None, Some(downstream_service_id.as_str())),
+                McpToolSource::Internal => (None, None),
+            };
+            let catalog = catalog_id.and_then(|id| catalog_icons.get(id));
+            let icon_url = connection_id
+                .and_then(|id| connection_icons.get(id))
+                .and_then(Clone::clone)
+                .or_else(|| catalog.and_then(|(_, icon)| icon.clone()));
+            GrantServiceResponse {
+                catalog_slug: catalog.and_then(|(slug, _)| slug.clone()),
+                icon_url,
+                id: service.service_id,
+                slug: service.service_slug,
+                label: service.service_name,
+                executable: service.executable,
+            }
+        })
+        .collect();
+    Ok(Json(json!({"services":services})))
+}
+
 /// The owner creates a specialist directly.
 pub async fn create_agent(
     State(state): State<AppState>,
@@ -3754,6 +3903,7 @@ pub struct SettingsResponse {
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
     specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
+    notifications: crate::models::assistant_settings::NotificationPreferences,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -3778,6 +3928,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
             specialist_access_requests: row.specialist_access_requests,
+            notifications: row.notifications,
         }
     }
 }
@@ -3812,6 +3963,8 @@ pub struct SettingsRequest {
     max_group_handoffs_per_hour: Option<i32>,
     #[serde(default)]
     specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
+    #[serde(default)]
+    notifications: Option<crate::models::assistant_settings::NotificationPreferences>,
 }
 
 pub async fn update_settings(
@@ -3843,6 +3996,7 @@ pub async fn update_settings(
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
             specialist_access_requests: body.specialist_access_requests,
+            notifications: body.notifications,
         },
     )
     .await?;
@@ -3955,6 +4109,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
@@ -4144,6 +4299,10 @@ pub(crate) async fn operation_owner_card(
     .await?;
     Ok((acks::refusal(&card), true))
 }
+
+#[cfg(test)]
+#[path = "assistant_grant_services_tests.rs"]
+mod grant_services_tests;
 
 #[cfg(test)]
 #[path = "assistant_team_tests.rs"]

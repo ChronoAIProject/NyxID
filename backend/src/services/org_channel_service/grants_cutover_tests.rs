@@ -48,6 +48,66 @@ async fn adopt(f: &Fixture) -> adoption::Adoption {
 }
 
 #[tokio::test]
+async fn activated_org_channel_link_enable_and_adopt_serve_overlap_and_reject_unsupported() {
+    use crate::services::security_readiness_service as readiness;
+    let mut f = Fixture::new("org_channel_roster_overlap").await;
+    f.wallet().await;
+    ready(&mut f).await;
+    let db = f.org.state.db.clone();
+    let sibling = readiness::overlapping_test_replica(&db).await;
+    let binding = link_target(&db, &f.org.admin, &f.bot, &f.agent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(binding.guests.follows_agent_grants);
+    f.guests(vec![]).await;
+    assert!(f.channel.org_specialist.as_ref().unwrap().guests.enabled);
+    assert_eq!(
+        adoption::preview(&db, &f.org.admin, &f.agent.id)
+            .await
+            .unwrap()["ready"],
+        true
+    );
+    let input = adopt(&f).await;
+    reload(&mut f).await;
+    assert!(
+        f.channel
+            .org_specialist
+            .as_ref()
+            .unwrap()
+            .guests
+            .follows_agent_grants
+    );
+    readiness::remove_test_replica_capability(&db, &sibling, GUEST_GRANTS_READINESS).await;
+    assert!(!guest_grants_ready(&db).await.unwrap());
+    assert!(matches!(
+        adoption::adopt(&db, &f.org.admin, &f.agent.id, input).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    readiness::remove_test_replica_capability(&db, &sibling, FLAG).await;
+    assert!(matches!(
+        link_target(&db, &f.org.admin, &f.bot, &f.agent).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(matches!(
+        management::update(
+            &db,
+            &f.org.admin,
+            &f.channel,
+            management::GuestSettings {
+                expected_revision: None,
+                enabled: true,
+                service_ids: None,
+                daily_credits: None,
+            }
+        )
+        .await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn cutover_keeps_partial_and_empty_lists_until_explicit_adoption_and_fences_old_work() {
     let mut f = Fixture::new("org_guest_cutover_lists").await;
     f.wallet().await;

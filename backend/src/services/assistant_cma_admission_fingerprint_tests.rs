@@ -185,7 +185,12 @@ async fn same_connection_retargeting_keeps_remote_resource_ids_independent() {
     assert_eq!(b.user_service_id, a.user_service_id);
     assert_ne!(b.execution_base_url, a.execution_base_url);
     assert_eq!(bson::to_document(&f.saved(&a.id).await).unwrap(), saved_a);
-    assert!(gateway_b.replay_creation(&f.keys, a, body).await.is_err());
+    assert!(
+        gateway_b
+            .replay_creation(&f.keys, a, body, CreationRecoveryAccess::Management)
+            .await
+            .is_err()
+    );
     assert_eq!(
         sandboxes::get_owned(&f.db, &f.owner, &a.sandbox_ref_id)
             .await
@@ -198,6 +203,10 @@ async fn same_connection_retargeting_keeps_remote_resource_ids_independent() {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_management(true).await
+    }
+
+    async fn with_management(management_enabled: bool) -> Self {
         let db = crate::test_utils::connect_transaction_test_database("cma_fingerprint").await;
         let server = MockServer::start().await;
         let catalog_server = MockServer::start().await;
@@ -265,15 +274,17 @@ impl Fixture {
         .unwrap()
         .target;
         crate::services::security_readiness_service::ready_test_replica(&db).await;
-        crate::services::feature_flag_service::set_platform_override(
-            &db,
-            crate::services::feature_flag_service::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
-            &crate::services::feature_flag_service::FlagTarget::User(owner.clone()),
-            true,
-            &owner,
-        )
-        .await
-        .unwrap();
+        if management_enabled {
+            crate::services::feature_flag_service::set_platform_override(
+                &db,
+                crate::services::feature_flag_service::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+                &crate::services::feature_flag_service::FlagTarget::User(owner.clone()),
+                true,
+                &owner,
+            )
+            .await
+            .unwrap();
+        }
         Self {
             db,
             server,
@@ -500,6 +511,7 @@ impl Fixture {
                 None,
                 Some(admission),
                 Some(&caller),
+                None,
             ));
         forwarding.await
     }
@@ -872,7 +884,8 @@ async fn connection_b_recovery_replays_original_bytes_and_key() {
 async fn legacy_records_are_isolated_without_guessing_a_connection() {
     let f = Fixture::new().await;
     let legacy = doc! {"_id":"legacy", "user_id":&f.owner,"cma_service_id":&f.catalog.id,
-    "source":"nyxbot","occupies_account_slot":true,"deployment_fingerprint":"old-fingerprint"};
+    "source":"nyxbot","occupies_account_slot":true,"deployment_fingerprint":"old-fingerprint",
+    "submission_state":"unknown","cma_sandbox_id":null,"generation":1_i64};
     f.db.collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .insert_one(legacy.clone())
         .await
@@ -896,6 +909,17 @@ async fn legacy_records_are_isolated_without_guessing_a_connection() {
             .await
             .is_err()
     );
+    assert!(matches!(
+        f.admit(
+            &f.target,
+            "/api/v1/sandboxes",
+            "new-intent-after-legacy",
+            br#"{"machine_included":false}"#,
+        )
+        .await,
+        Err(AppError::Conflict(ref message))
+            if message == "cma_sandbox_account_slot_occupied"
+    ));
     let saved =
         f.db.collection::<bson::Document>(COLLECTION_NAME)
             .find_one(doc! {"_id":"legacy"})
@@ -1478,6 +1502,7 @@ async fn common_body_auth_preserves_original_creation_and_injects_the_secret() {
         None,
         Some(&admission),
         Some(&caller),
+        None,
     )
     .await
     .unwrap();
@@ -2190,7 +2215,7 @@ async fn catalog_endpoint_repair_never_rebinds_retained_pre_move_creation() {
     );
     assert!(
         f.gateway()
-            .replay_creation(&f.keys, &row, body)
+            .replay_creation(&f.keys, &row, body, CreationRecoveryAccess::Management)
             .await
             .is_err()
     );

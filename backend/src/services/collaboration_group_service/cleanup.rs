@@ -123,6 +123,10 @@ async fn erase_thread(
             .session(&mut *session)
             .await?;
     }
+    db.collection::<bson::Document>(m::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.conversation_id":&row.id})
+        .session(&mut *session)
+        .await?;
     db.collection::<bson::Document>(m::assistant_checkpoint::COLLECTION_NAME)
         .delete_many(doc! {"_id":&row.id})
         .session(&mut *session)

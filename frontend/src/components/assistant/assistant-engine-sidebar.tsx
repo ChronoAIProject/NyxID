@@ -1,7 +1,7 @@
 import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
 import { GroupInviteDialog } from "./collaboration-group-controls";
 import { useConnectionDown } from "@/hooks/use-connection-down";
-import { useEffect, useState, useSyncExternalStore, type ComponentProps } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -13,6 +13,12 @@ import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { NewGroupDialog } from "@/components/assistant/nyxbot-group-forms";
 import { useFeature } from "@/hooks/use-feature-flag";
+import {
+  unreadSources,
+  useNotificationSourceRead,
+  useNotificationSummary,
+  useNotificationsEnabled,
+} from "@/hooks/use-assistant-notifications";
 import { useNyxAgentThreads } from "@/hooks/use-assistant-nyxagent";
 import { selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
@@ -63,6 +69,16 @@ export function AssistantEngineSidebar({
     () => nyxAgentTransport.getConversation(openThread)?.agent?.id,
   );
   const agents = useNyxBotAgents(nyxagentEnabled);
+  // Unread markers come from the notification summary; opening a thread or
+  // crew reports it read once the tab has shown it for a moment.
+  const notificationsEnabled = useNotificationsEnabled();
+  const notificationSummary = useNotificationSummary(notificationsEnabled);
+  const unread = useMemo(() => unreadSources(notificationSummary.data), [notificationSummary.data]);
+  useNotificationSourceRead({
+    conversationId: openThread,
+    groupId: openGroup,
+    enabled: notificationsEnabled,
+  });
   // An open group expands no agent; otherwise the open thread's agent, the
   // agent in the URL, or NyxBot.
   const selectedAgent = openGroup
@@ -138,6 +154,7 @@ export function AssistantEngineSidebar({
         canCreateOrgAgent: orgAgentsEnabled,
         homeActive: home,
         onHome: () => goTo({}),
+        unreadThreadIds: unread.conversationIds,
       }
     : undefined;
   const groupsModel: SidebarGroups | undefined = nyxagentEnabled
@@ -150,6 +167,7 @@ export function AssistantEngineSidebar({
         loading: groups.isPending,
         onSelectGroup: (groupId) => goTo({ g: groupId }),
         onNewGroup: () => setCreatingGroup(true),
+        unreadGroupIds: unread.groupIds,
       }
     : undefined;
   // Offline, the window's banner says it once; the lists refresh when the

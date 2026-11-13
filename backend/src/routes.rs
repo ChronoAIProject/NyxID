@@ -2833,6 +2833,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             patch(handlers::assistant_nyxagent::change_access_mode),
         )
         .route(
+            "/nyxagent/grant-services",
+            get(handlers::assistant_team::grant_services),
+        )
+        .route(
             "/nyxagent/agents",
             get(handlers::assistant_team::list_agents).post(handlers::assistant_team::create_agent),
         )
@@ -2979,6 +2983,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/settings",
             get(handlers::assistant_team::get_settings)
                 .put(handlers::assistant_team::update_settings),
+        )
+        .route(
+            "/nyxagent/notifications",
+            get(handlers::assistant_notifications::list),
+        )
+        .route(
+            "/nyxagent/notifications/summary",
+            get(handlers::assistant_notifications::summary),
+        )
+        .route(
+            "/nyxagent/notifications/read",
+            post(handlers::assistant_notifications::read),
         )
         .route(
             "/nyxagent/onboarding",

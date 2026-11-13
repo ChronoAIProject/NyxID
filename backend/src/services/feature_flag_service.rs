@@ -349,6 +349,13 @@ const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_NOTIFICATIONS_FLAG_KEY: &str = "assistant:notifications";
+const ASSISTANT_NOTIFICATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+    description: "NyxBot Notifications: the durable feed, bell, push preferences and the nyxid__list_notifications tool. Upgrade all replicas before enabling.",
+    default_enabled: false,
+};
+
 pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
 const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: MOBILE_MFA_FLAG_KEY,
@@ -486,6 +493,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
+    ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
@@ -548,6 +556,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
+    ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
@@ -1192,7 +1201,7 @@ pub(crate) fn reset_unready_flag_throttle() {
 
 /// Readiness gates admin activation; existing flag reads remain available.
 /// Throttle locally before diagnostic I/O, then share a one-minute emission
-/// window per flag across replicas so enabled unready flags remain visible.
+/// window per flag across replicas so enabled flags that cannot serve remain visible.
 async fn warn_if_flag_in_effect_unready(db: &mongodb::Database, user_id: &str, flag_key: &str) {
     let throttle_key = flag_key.to_owned();
     // Isolated test databases model independent deployments in one process.
@@ -1228,15 +1237,15 @@ async fn warn_if_flag_in_effect_unready(db: &mongodb::Database, user_id: &str, f
             return;
         }
     }
-    let report = match super::security_readiness_service::report(db, flag_key).await {
-        Ok(report) if !report.ready => report,
+    let report = match super::security_readiness_service::serving_report(db, flag_key).await {
+        Ok(report) if !report.serving_ready => report,
         Ok(_) => return,
         Err(error) => {
             tracing::debug!(flag_key, %error, "Flag readiness diagnostic unavailable");
             return;
         }
     };
-    tracing::warn!(flag_key, user_id, blockers = ?report.blockers, "Readiness-gated flag {flag_key} is enabled but the fleet roster is not ready (blockers: {:?})", report.blockers);
+    tracing::warn!(flag_key, user_id, activated = report.activated, blockers = ?report.blockers, serving_blockers = ?report.serving_blockers, "Readiness-gated flag is enabled but its capability cannot serve");
     let _ = super::audit_service::log_actor_event(
         db.clone(),
         &super::audit_service::AuditActor {
@@ -1251,6 +1260,12 @@ async fn warn_if_flag_in_effect_unready(db: &mongodb::Database, user_id: &str, f
             "flag_key": flag_key,
             "user_id": user_id,
             "blockers": report.blockers,
+            "ready": report.ready,
+            "serving_ready": report.serving_ready,
+            "serving_blockers": report.serving_blockers,
+            "roster_warnings": report.roster_warnings,
+            "activated": report.activated,
+            "active_since": report.active_since,
         })),
     )
     .await;
@@ -1518,7 +1533,7 @@ pub async fn set_platform_override(
     }
 
     if enabled {
-        super::security_readiness_service::require(db, flag_key).await?;
+        super::security_readiness_service::require_activation(db, flag_key).await?;
     }
     let now = bson::DateTime::from_chrono(Utc::now());
     let target_key = match target.key() {
@@ -1611,7 +1626,7 @@ pub async fn set_platform_org_override(
     }
     ensure_org_exists(db, org_user_id).await?;
     if enabled {
-        super::security_readiness_service::require(db, flag_key).await?;
+        super::security_readiness_service::require_activation(db, flag_key).await?;
     }
     upsert_override_row(
         db,
@@ -2074,7 +2089,8 @@ mod tests {
             std::time::Duration::from_secs(5),
         )
         .await;
-        readiness::ready_test_replica(&db).await;
+        let heartbeat = readiness::controlled_ready_test_replica(&db).await;
+        heartbeat.abort();
         let replicas =
             db.collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME);
         replicas.delete_many(doc! {}).await.unwrap();
@@ -2120,6 +2136,13 @@ mod tests {
         assert_eq!(events[0].user_id.as_deref(), Some(user.as_str()));
         assert_eq!(events[0].event_data.as_ref().unwrap()["flag_key"], flag);
         assert_eq!(events[0].event_data.as_ref().unwrap()["user_id"], user);
+        assert!(
+            events[0].event_data.as_ref().unwrap()["serving_blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker == "executing_process_not_observed")
+        );
         // A malformed fresh observation makes report() fail independently of
         // flag resolution. Diagnostic failures must still preserve the flag.
         replicas
@@ -2173,6 +2196,139 @@ mod tests {
             1
         );
         db.drop().await.unwrap();
+    }
+
+    async fn flag_serving_diagnostic_case(case: &str) {
+        use super::super::security_readiness_service as readiness;
+        use crate::models::{audit_log::AuditLog, security_capability_activation};
+        let db = connect_test_database(&format!("flag_serving_{case}"))
+            .await
+            .unwrap();
+        let heartbeat = readiness::controlled_ready_test_replica(&db).await;
+        heartbeat.abort();
+        let flag = ASSISTANT_LIVE_TURN_GATE_FLAG_KEY;
+        db.collection::<FeatureFlagOverride>(COLLECTION_NAME)
+            .insert_one(override_row(None, flag, FlagTargetKind::Global, None, true))
+            .await
+            .unwrap();
+        let sibling = readiness::overlapping_test_replica(&db).await;
+        match case {
+            "unsupported" => readiness::remove_test_replica_capability(&db, &sibling, flag).await,
+            "never_activated" => {
+                db.collection::<bson::Document>(security_capability_activation::COLLECTION_NAME)
+                    .delete_one(doc! {"record_kind": security_capability_activation::RECORD_KIND, "capability": flag})
+                    .await.unwrap();
+            }
+            "roster" => {}
+            _ => unreachable!(),
+        }
+        for _ in 0..8 {
+            assert!(personal_flag_enabled(&db, "reader", flag).await.unwrap());
+        }
+        let audits = db.collection::<AuditLog>(crate::models::audit_log::COLLECTION_NAME);
+        let roster_event = "security_readiness_serving_with_roster_warnings";
+        if case == "roster" {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while audits
+                    .count_documents(doc! {"event_type": roster_event})
+                    .await
+                    .unwrap()
+                    == 0
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                audits
+                    .count_documents(doc! {"event_type": roster_event})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                audits
+                    .count_documents(doc! {"event_type": UNREADY_FLAG_EVENT})
+                    .await
+                    .unwrap(),
+                0
+            );
+        } else {
+            let events: Vec<_> = audits
+                .find(doc! {"event_type": UNREADY_FLAG_EVENT})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(events.len(), 1);
+            let payload = events[0].event_data.as_ref().unwrap();
+            let blocker = if case == "unsupported" {
+                "unsupported_replica:test-backend"
+            } else {
+                "capability_not_activated"
+            };
+            assert!(
+                payload["serving_blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == blocker)
+            );
+            assert!(!payload["blockers"].as_array().unwrap().is_empty());
+            assert_eq!(
+                audits
+                    .count_documents(doc! {"event_type": roster_event})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enabled_flag_with_activated_overlap_emits_only_one_roster_diagnostic() {
+        flag_serving_diagnostic_case("roster").await;
+    }
+
+    #[tokio::test]
+    async fn enabled_flag_with_unsupported_replica_reports_serving_blockers() {
+        flag_serving_diagnostic_case("unsupported").await;
+    }
+
+    #[tokio::test]
+    async fn enabled_flag_without_activation_reports_capability_not_activated() {
+        flag_serving_diagnostic_case("never_activated").await;
+    }
+
+    #[tokio::test]
+    async fn healthy_flag_diagnostic_keeps_main_command_count_and_local_throttle() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::Arc;
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let captured = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                captured.lock().unwrap().push(event.command_name);
+            }
+        });
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "healthy_flag_diagnostic",
+            handler,
+        )
+        .await
+        .unwrap();
+        let heartbeat =
+            super::super::security_readiness_service::controlled_ready_test_replica(&db).await;
+        heartbeat.abort();
+        commands.lock().unwrap().clear();
+        warn_if_flag_in_effect_unready(&db, "reader", ASSISTANT_LIVE_TURN_GATE_FLAG_KEY).await;
+        // Main: one shared admission and the two readiness reads; no audit on ready.
+        assert_eq!(*commands.lock().unwrap(), ["findAndModify", "find", "find"]);
+        commands.lock().unwrap().clear();
+        warn_if_flag_in_effect_unready(&db, "reader", ASSISTANT_LIVE_TURN_GATE_FLAG_KEY).await;
+        assert!(commands.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -3182,6 +3338,7 @@ mod tests {
                 "permissions:execution-v1",
                 "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
+                "assistant:notifications",
                 "assistant:org-agents",
                 "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",

@@ -39,7 +39,7 @@ pub async fn select(
     bot: &ChannelBot,
 ) -> AppResult<Option<GatewaySource>> {
     if row.platform == "whatsapp" {
-        super::security_readiness_service::require(&state.db, READINESS).await?;
+        super::security_readiness_service::require_serving(&state.db, READINESS).await?;
         if bot.credential_source != "user" {
             return Err(AppError::ValidationError(
                 "dedicated_byo_app_required".into(),
@@ -91,7 +91,7 @@ pub async fn select(
     if row.platform != "discord" {
         return Ok(None);
     }
-    super::security_readiness_service::require(&state.db, READINESS).await?;
+    super::security_readiness_service::require_serving(&state.db, READINESS).await?;
     if !super::discord_gateway::transport::gateway_released(&state.db, &bot.id).await? {
         return Err(AppError::Conflict("gateway_native_draining".into()));
     }
