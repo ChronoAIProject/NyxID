@@ -122,6 +122,13 @@ export function setupSettingsScreen(
   );
   const pushPreferenceMutations: unknown[] = [];
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({
+        language,
+        t: (phrase: string, values?: TranslationValues) =>
+          translate(language, phrase, values),
+      }),
+    },
     "../notifications/useNotifications": {
       useNotificationsEnabled: () => nyxbotNotifications?.enabled ?? false,
       useNotificationPushPreferences: () => ({
@@ -144,13 +151,6 @@ export function setupSettingsScreen(
       }),
     },
     "./NyxBotPushSwitches": pushSwitches,
-    "../../i18n/LanguageProvider": {
-      useAppLanguage: () => ({
-        language,
-        t: (phrase: string, values?: TranslationValues) =>
-          translate(language, phrase, values),
-      }),
-    },
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
       ...Object.fromEntries(
