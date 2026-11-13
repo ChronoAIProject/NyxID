@@ -70,7 +70,7 @@ and pnpm version:
 | ----------------------------------------------------------------------- | -------------------------------------------- |
 | `pnpm install --frozen-lockfile`                                        | Passed; lockfile unchanged                   |
 | `pnpm test`                                                             | 2,496 passed; 0 failed, cancelled or skipped |
-| `pnpm test:jest --runInBand`                                            | 49 passed across 5 suites                     |
+| `pnpm test:jest --runInBand`                                            | 49 passed across 5 suites                    |
 | `pnpm typecheck`                                                        | Passed                                       |
 | `pnpm check:native-sync`                                                | Passed                                       |
 | Prettier 3.8.1 on the compatibility-fix JavaScript and TypeScript files | Passed                                       |
